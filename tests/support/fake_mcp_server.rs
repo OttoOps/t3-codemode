@@ -165,6 +165,7 @@ impl Fake {
                 {"type": "text", "text": "second item"},
             ]})),
             "number_text" => Ok(text("123")),
+            "pid" => Ok(json!({"structuredContent": {"pid": std::process::id()}, "content": []})),
             "flood" => {
                 let bytes = args["bytes"].as_u64().unwrap_or(0) as usize;
                 self.send(Value::String("x".repeat(bytes)));
@@ -181,8 +182,26 @@ impl Fake {
     }
 }
 
+fn fake_t3_cli(log: &str) -> ! {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap();
+    writeln!(f, "{}", args.join(" ")).unwrap();
+    match args.iter().take(3).map(String::as_str).collect::<Vec<_>>()[..] {
+        ["auth", "pairing", "create"] => {
+            println!("Pairing created");
+            println!("{}", json!({"credential": "PAIR-CODE"}));
+        }
+        ["auth", "session", "list"] => println!("{}", std::env::var("FAKE_T3_SESSIONS").unwrap_or_default()),
+        _ => {}
+    }
+    std::process::exit(0)
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
+    if let Ok(log) = std::env::var("FAKE_T3_LOG") {
+        fake_t3_cli(&log);
+    }
     if let Ok(msg) = std::env::var("FAKE_MCP_DIE_AT_START") {
         eprintln!("{msg}");
         std::process::exit(3);
