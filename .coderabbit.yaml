@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: en-US
+
+reviews:
+  profile: chill
+  auto_approvals:
+    enabled: true
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_pause_after_reviewed_commits: 0
+  high_level_summary_in_walkthrough: true
+  review_status: false
+  in_progress_fortune: false
+  poem: false
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+
+chat:
+  allow_non_org_members: false
+  art: false
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - .github/CONTRIBUTING.md
