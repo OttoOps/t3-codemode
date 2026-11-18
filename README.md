@@ -337,6 +337,13 @@ t3cm bench -n 1000 --tools tests/fixtures/t3-tools.json   # hidden: latency and 
 catalog comes live from `tools/list` (refreshed every 10 minutes, cached in the
 store for when T3 is down).
 
+## Contributing
+
+See the [contribution guide](.github/CONTRIBUTING.md): every commit carries a DCO
+signoff (`git commit -s`), and pull requests merge with rebase. Report
+vulnerabilities privately through the [security policy](.github/SECURITY.md).
+Participation follows the [Code of Conduct](.github/CODE_OF_CONDUCT.md).
+
 ## License
 
 MIT, see `LICENSE`.
