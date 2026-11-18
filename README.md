@@ -77,7 +77,7 @@ elsewhere), deep-merged over the built-in defaults. It sets:
 - `watcherIntervalSecs` (60), `cpuBudgetMs` (2000), `defaultTimeoutMs` (60000), `maxTimeoutMs` (600000), `maxHoldMinutes` (30)
 - `maxConcurrentRuns` (16): `execute` and `search` runs allowed at once; more wait up to `runQueueMs` (10000) for a slot, then fail with a retryable busy error. Each run can use up to 64 MB, so the default bounds sandbox memory at 1 GB, under the unit's `MemoryHigh`
 - `link`, `wake`, `bodyCap`, `replyCap`, `digestLines` and per-role `roles` policy for the workflow layer
-- `board`: `ticketModel` (`claude-opus-5-5`), `ticketEffort` (`high`), `askModel` (`claude-haiku-5-5`), `askEffort`, `instanceId` (`claudeAgent`), `runtimeMode` (`full-access`, for launches from the service, which has no thread to inherit a mode from), `askPollSecs`, `askTimeoutMinutes`, `feed` (50), `settleAfterHours` (24; `0` turns auto-settle off)
+- `board`: `ticketModel` (`claude-opus-5-5`), `ticketEffort` (`high`), `askModel` (`claude-haiku-5-5`), `askEffort`, `instanceId` (`claudeAgent`), `runtimeMode` (`full-access`, for launches from the service, which has no thread to inherit a mode from), `askPollSecs`, `askTimeoutMinutes`, `feed` (50), `settleAfterHours` (24; `0` turns auto-settle off), `openLinks` (`desktop`: thread links open in the running T3 Code desktop app, or in a new tab when it is not running; `tab`: always a new tab)
 
 State lives in SQLite at `$XDG_STATE_HOME/t3-codemode/store.db` (default
 `~/.local/state/t3-codemode/`; `--state-dir` or `T3CM_STATE_DIR` override). The
@@ -298,6 +298,7 @@ on a row and **Settle all done** do it by hand.
 | `POST /api/tickets/{thread}/settle`, `/restore` | Settle a done ticket, or bring a settled one back (400 if open, or not settled) |
 | `POST /api/asks/{id}/settle`, `/restore` | The same for a closed ask; `id` is `q<n>` |
 | `POST /api/settle-done` | Settle every done ticket and closed ask; returns `{tickets, asks}` counts |
+| `POST /api/open` `{link}` | Open a T3 thread link in the running desktop app; returns `{opened}`, and the page opens a new tab when it is `false` (400 for a link that is not a T3 thread) |
 
 Every board route requires `Host` to be `127.0.0.1:<port>` or `localhost:<port>`
 and refuses any other `Origin`; POSTs also need the `X-T3CM-CSRF` header.

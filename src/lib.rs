@@ -4,6 +4,7 @@ pub mod board;
 pub mod catalog;
 pub mod clock;
 pub mod config;
+pub mod desktop;
 pub mod fake;
 pub mod js;
 pub mod mcp;

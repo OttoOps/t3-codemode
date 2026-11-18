@@ -781,3 +781,76 @@ async fn typing_in_a_card_reply_survives_state_events() {
     assert_eq!(r["selection"], json!([1, 4, "backward"]), "{r}");
     assert_eq!(r["order"], json!(["a1", "a2"]), "{r}");
 }
+
+const THREAD_LINK: &str = "https://app.t3.codes/threads/env-1/mcp%3Alaunch%3Aabc123";
+const APP_LINK: &str = "t3code://threads/env-1/mcp%3Alaunch%3Aabc123";
+
+#[test]
+fn only_hosted_thread_links_map_to_the_desktop_scheme() {
+    use t3_codemode::desktop::app_link;
+    assert_eq!(app_link(THREAD_LINK).as_deref(), Some(APP_LINK));
+    for bad in [
+        "https://github.com/o/widgets/pull/81",
+        "http://app.t3.codes/threads/env-1/t1",
+        "https://app.t3.codes/threads/env-1",
+        "https://app.t3.codes/threads/env-1/t1/",
+        "https://app.t3.codes/threads/env-1/t1/extra",
+        "https://app.t3.codes/threads//t1",
+        "https://app.t3.codes/threads/env-1/t1?x=1",
+        "https://app.t3.codes/threads/env-1/t\"1",
+        "https://app.t3.codes.evil/threads/env-1/t1",
+    ] {
+        assert_eq!(app_link(bad), None, "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn a_thread_link_opens_in_the_running_desktop_app() {
+    let s = start(H::new()).await;
+    s.h.desktop.running.store(true, std::sync::atomic::Ordering::SeqCst);
+    let r = s.post("/api/open", json!({"link": THREAD_LINK}), Some(&s.csrf()), Some(&s.base)).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({"opened": true}));
+    assert_eq!(*s.h.desktop.opened.lock().unwrap(), [APP_LINK]);
+}
+
+#[tokio::test]
+async fn with_the_app_closed_the_page_is_told_to_open_a_tab() {
+    let s = start(H::new()).await;
+    let r = s.post("/api/open", json!({"link": THREAD_LINK}), Some(&s.csrf()), None).await;
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({"opened": false}));
+    assert!(s.h.desktop.opened.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_tab_setting_never_asks_the_desktop_app() {
+    let config = Config::from_value(json!({"board": {"openLinks": "tab"}})).unwrap();
+    let s = start(H::build(Vec::new(), config)).await;
+    s.h.desktop.running.store(true, std::sync::atomic::Ordering::SeqCst);
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(st["service"]["openLinks"], "tab");
+    let r = s.post("/api/open", json!({"link": THREAD_LINK}), Some(&s.csrf()), None).await;
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({"opened": false}));
+    assert!(s.h.desktop.opened.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_open_route_refuses_other_links_and_missing_csrf() {
+    let s = start(H::new()).await;
+    s.h.desktop.running.store(true, std::sync::atomic::Ordering::SeqCst);
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(st["service"]["openLinks"], "desktop");
+    let pr = s.post("/api/open", json!({"link": "https://github.com/o/widgets/pull/81"}), Some(&s.csrf()), None).await;
+    assert_eq!(pr.status(), 400);
+    assert_eq!(s.post("/api/open", json!({"link": THREAD_LINK}), None, None).await.status(), 403);
+    let foreign =
+        s.post("/api/open", json!({"link": THREAD_LINK}), Some(&s.csrf()), Some("https://evil.example")).await;
+    assert_eq!(foreign.status(), 403);
+    assert!(s.h.desktop.opened.lock().unwrap().is_empty());
+}
+
+#[test]
+fn open_links_accepts_only_desktop_or_tab() {
+    assert!(Config::from_value(json!({"board": {"openLinks": "window"}})).is_err());
+    assert_eq!(Config::default().board.open_links, t3_codemode::config::OpenLinks::Desktop);
+}

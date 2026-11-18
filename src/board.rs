@@ -975,6 +975,7 @@ impl Wf {
                 "t3": {"connected": t3.connected, "lastError": t3.last_error},
                 "tokenExpiresAt": t3.token_expires_at.as_deref().map(local_clock_date),
                 "watcher": {"lastPass": last.as_deref().map(local_clock), "alive": self.watcher_alive()},
+                "openLinks": self.config.board.open_links,
             },
         }))
     }

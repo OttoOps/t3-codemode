@@ -8,7 +8,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::board::{GitRemotes, Remotes};
 use crate::catalog::{Catalog, aliases};
 use crate::clock::{Clock, iso};
-use crate::config::Config;
+use crate::config::{Config, OpenLinks};
+use crate::desktop::{Desktop, WindowsDesktop, app_link};
 use crate::sandbox::{self, Host, Limits, NoHost, Run};
 use crate::store::Store;
 use crate::t3::{BoxFut, T3Client};
@@ -108,6 +109,7 @@ pub struct App {
     pub clock: Arc<dyn Clock>,
     pub wf: Arc<Wf>,
     pub upstreams: Arc<UpstreamManager>,
+    pub desktop: Arc<dyn Desktop>,
     pub csrf: String,
     built: RwLock<Built>,
     last_refresh: Mutex<Option<Instant>>,
@@ -179,8 +181,19 @@ impl App {
         clock: Arc<dyn Clock>,
         remotes: Arc<dyn Remotes>,
     ) -> Arc<App> {
+        App::with_host(config, store, t3, clock, remotes, Arc::new(WindowsDesktop))
+    }
+
+    pub fn with_host(
+        config: Config,
+        store: Arc<Store>,
+        t3: Arc<dyn T3Client>,
+        clock: Arc<dyn Clock>,
+        remotes: Arc<dyn Remotes>,
+        desktop: Arc<dyn Desktop>,
+    ) -> Arc<App> {
         let upstreams = Arc::new(UpstreamManager::new(config.upstreams.clone()));
-        App::build(config, store, t3, clock, remotes, upstreams)
+        App::assemble(config, store, t3, clock, remotes, upstreams, desktop)
     }
 
     pub fn build(
@@ -190,6 +203,18 @@ impl App {
         clock: Arc<dyn Clock>,
         remotes: Arc<dyn Remotes>,
         upstreams: Arc<UpstreamManager>,
+    ) -> Arc<App> {
+        App::assemble(config, store, t3, clock, remotes, upstreams, Arc::new(WindowsDesktop))
+    }
+
+    fn assemble(
+        config: Config,
+        store: Arc<Store>,
+        t3: Arc<dyn T3Client>,
+        clock: Arc<dyn Clock>,
+        remotes: Arc<dyn Remotes>,
+        upstreams: Arc<UpstreamManager>,
+        desktop: Arc<dyn Desktop>,
     ) -> Arc<App> {
         let config = Arc::new(config);
         let wf = Arc::new(Wf::new(store.clone(), t3.clone(), clock.clone(), config.clone(), remotes));
@@ -205,6 +230,7 @@ impl App {
             clock,
             wf,
             upstreams,
+            desktop,
             csrf: csrf_token(),
             built: RwLock::new(Built { catalog, t3_tools: Arc::new(cached), generation }),
             last_refresh: Mutex::new(None),
@@ -212,6 +238,12 @@ impl App {
             runs,
             queued: AtomicUsize::new(0),
         })
+    }
+
+    pub async fn open_link(&self, link: &str) -> anyhow::Result<Value> {
+        let url = app_link(link).ok_or_else(|| anyhow::anyhow!("not a T3 thread link: {link:?}"))?;
+        let opened = self.config.board.open_links == OpenLinks::Desktop && self.desktop.open(&url).await;
+        Ok(json!({"opened": opened}))
     }
 
     pub fn catalog(&self) -> Arc<Catalog> {
