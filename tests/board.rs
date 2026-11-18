@@ -1,0 +1,466 @@
+mod common;
+
+use std::time::Duration;
+
+use common::*;
+use serde_json::{Value, json};
+use t3_codemode::board::{BOARD, card_text, parse_issue, parse_remote, reply_options};
+use t3_codemode::fake::{project, thread};
+use t3_codemode::server;
+
+const GATE: &str = "PR #81 is green and reviewed.\n\
+**ACTION NEEDED:** reply \"merge\" to merge #81, or reply \"merge and deploy\" to ship it too, here: https://github.com/o/widgets/pull/81";
+
+async fn join_board(h: &H, who: &str, label: &str) {
+    h.wf(who, "join", json!({"parent": BOARD, "label": label, "role": "ticket"})).await;
+}
+
+fn cards(h: &H) -> Vec<Value> {
+    h.app.wf.cards().unwrap().into_iter().map(|c| serde_json::to_value(c).unwrap()).collect()
+}
+
+fn sent_to(h: &H, id: &str) -> Vec<Value> {
+    h.sent().into_iter().filter(|s| s["threadId"] == id).collect()
+}
+
+#[test]
+fn parsing_issues_remotes_and_options() {
+    let i = parse_issue("https://github.com/Acme/widgets/issues/41#issuecomment-1").unwrap();
+    assert_eq!((i.owner.as_str(), i.repo.as_str(), i.number), ("Acme", "widgets", 41));
+    assert_eq!(i.label(), "widgets#41");
+    assert_eq!(parse_issue("Acme/widgets#7").unwrap().number, 7);
+    assert_eq!(parse_issue("github.com/o/r/issues/3").unwrap().repo, "r");
+    assert!(parse_issue("https://gitlab.com/o/r/issues/3").is_none());
+    assert!(parse_issue("o/r#0").is_none());
+    for url in [
+        "git@github.com:Acme/WIDGETS.git",
+        "https://github.com/acme/widgets",
+        "https://x-access-token:abc@github.com/Acme/widgets.git",
+        "ssh://git@github.com:22/Acme/widgets.git",
+    ] {
+        let (o, r) = parse_remote(url).unwrap_or_else(|| panic!("{url}"));
+        assert!(o.eq_ignore_ascii_case("acme") && r.eq_ignore_ascii_case("widgets"), "{url}");
+    }
+    assert!(parse_remote("git@gitlab.com:o/r.git").is_none());
+    assert_eq!(reply_options(GATE), ["merge", "merge and deploy"]);
+    assert_eq!(reply_options("Reply 'yes' or reply \u{201c}no\u{201d}; prereply \"x\""), ["yes", "no"]);
+    assert!(card_text(GATE).starts_with("reply \"merge\" to merge #81"));
+    assert_eq!(card_text("\n  first line\nsecond"), "first line");
+}
+
+#[tokio::test]
+async fn a_gate_to_the_board_becomes_a_card_with_its_reply_buttons() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#41").await;
+    let r = h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": GATE})).await;
+    assert_eq!(r["delivery"], "board");
+    assert_eq!(r["card"], "a1");
+    let c = cards(&h);
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0]["id"], "a1");
+    assert_eq!(c[0]["kind"], "gate");
+    assert_eq!(c[0]["label"], "widgets#41");
+    assert_eq!(c[0]["ticket"], TICKET);
+    assert_eq!(c[0]["link"], "https://t3/mcp:ticket");
+    assert_eq!(c[0]["handle"], r["handle"]);
+    assert_eq!(c[0]["options"], json!(["merge", "merge and deploy"]));
+    assert!(c[0]["text"].as_str().unwrap().starts_with("reply \"merge\""));
+    assert!(h.sent().is_empty(), "nothing goes to T3: {:?}", h.sent());
+}
+
+#[tokio::test]
+async fn blockers_and_reports_become_cards_and_events_only_feed() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#41").await;
+    h.wf(TICKET, "send", json!({"kind": "blocker", "body": "Need an AWS SSO login"})).await;
+    h.wf(TICKET, "send", json!({"kind": "report", "body": "Worker 2 died twice"})).await;
+    let r = h.wf(TICKET, "send", json!({"kind": "event", "body": "PR 1/2 merged", "wake": true})).await;
+    assert_eq!(r["delivery"], "noted");
+    h.wf(TICKET, "send", json!({"kind": "note", "body": "starting PR 2/2"})).await;
+    let kinds: Vec<Value> = cards(&h).iter().map(|c| c["kind"].clone()).collect();
+    assert_eq!(kinds, [json!("blocker"), json!("report")]);
+    let feed = h.wf(TICKET, "feed", json!({})).await;
+    let heads: Vec<&str> = feed.as_array().unwrap().iter().map(|f| f["head"].as_str().unwrap()).collect();
+    assert_eq!(heads, ["starting PR 2/2", "PR 1/2 merged"]);
+    assert_eq!(feed[0]["label"], "widgets#41");
+    assert!(h.sent().is_empty());
+    assert!(h.app.store.outbox_all().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_handoff_resolves_the_tickets_cards_and_marks_it_done() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#41").await;
+    join_board(&h, WORKER, "widgets#42").await;
+    h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE})).await;
+    h.wf(TICKET, "send", json!({"kind": "blocker", "body": "stuck"})).await;
+    h.wf(WORKER, "send", json!({"kind": "blocker", "body": "other ticket"})).await;
+    let r = h.wf(TICKET, "send", json!({"kind": "handoff", "body": "merged and deployed"})).await;
+    assert_eq!(r["closed"], true);
+    let left = cards(&h);
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0]["label"], "widgets#42");
+    let tree = h.app.wf.tree().unwrap();
+    let t = tree.iter().find(|t| t["label"] == "widgets#41").unwrap();
+    assert_eq!((t["done"].clone(), t["status"].clone()), (json!(true), json!("done")));
+    assert!(h.sent().is_empty());
+}
+
+#[tokio::test]
+async fn an_ask_can_see_finished_tickets_and_resolved_cards() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#41").await;
+    h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE})).await;
+    h.wf(TICKET, "send", json!({"kind": "handoff", "body": "merged and deployed"})).await;
+    let open = result(
+        &h.exec(
+            "async () => ({ b: (await wf.board({ parent: 'board' })).children.length, c: (await wf.cards()).length })",
+        )
+        .await,
+    );
+    assert_eq!(open, json!({"b": 0, "c": 0}));
+    let all = result(
+        &h.exec(
+            "async () => ({ b: (await wf.board({ parent: 'board', all: true })).children.map(c => c.label), \
+             c: (await wf.cards({ all: true })).map(c => [c.id, c.kind, typeof c.resolved, c.resolution]) })",
+        )
+        .await,
+    );
+    assert_eq!(all["b"], json!(["widgets#41"]));
+    assert_eq!(all["c"][0][0], "a1");
+    assert_eq!(all["c"][0][1], "gate");
+    assert_eq!(all["c"][0][2], "string");
+    assert!(all["c"][0][3].is_string());
+    assert!(t3_codemode::board::ask_brief("q").contains("all: true"));
+}
+
+#[tokio::test]
+async fn clearing_the_gate_in_the_ticket_resolves_its_gate_card() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#41").await;
+    h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE})).await;
+    h.wf(TICKET, "send", json!({"kind": "blocker", "body": "also this"})).await;
+    h.wf(TICKET, "gate", json!({"clear": true})).await;
+    let left = cards(&h);
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0]["kind"], "blocker");
+}
+
+#[tokio::test]
+async fn a_newer_gate_supersedes_the_old_gate_card() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#41").await;
+    h.wf(TICKET, "send", json!({"kind": "gate", "body": "reply \"go\" to split"})).await;
+    let r = h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE})).await;
+    assert_eq!(r["card"], "a2");
+    let left = cards(&h);
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0]["id"], "a2");
+}
+
+#[tokio::test]
+async fn execute_can_list_answer_and_see_the_whole_board() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#41").await;
+    h.wf(TICKET, "openChild", json!({"role": "worker", "label": "#41 PR 1/2"})).await;
+    h.wf(WORKER, "join", json!({"parent": TICKET, "label": "#41 PR 1/2", "role": "worker"})).await;
+    h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE})).await;
+    let out = h.exec("async () => (await wf.cards()).map(c => c.id + ':' + c.options.join('|'))").await;
+    assert_eq!(result(&out), json!(["a1:merge|merge and deploy"]));
+    let b = result(&h.exec("async () => wf.board({ parent: 'board' })").await);
+    assert_eq!(b["children"][0]["label"], "widgets#41");
+    assert_eq!(b["children"][0]["workers"][0]["label"], "#41 PR 1/2");
+    assert_eq!(b["cards"], 1);
+    let r = result(&h.exec("async () => wf.answer('a1', 'merge')").await);
+    assert_eq!(r["delivery"], "sent");
+    assert_eq!(sent_to(&h, TICKET).len(), 1);
+    assert!(cards(&h).is_empty());
+}
+
+#[tokio::test]
+async fn launch_ticket_maps_the_repo_to_a_project_and_preregisters_the_link() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-docs", "/src/docs"), project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/docs", "git@github.com:Acme/docs.git");
+    h.remotes.set("/src/widgets", "https://github.com/acme/WIDGETS.git");
+    let out = h
+        .exec("async () => wf.launchTicket({ issue: 'https://github.com/Acme/widgets/issues/41', title: 'Fix the grader' })")
+        .await;
+    let r = result(&out);
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["label"], "widgets#41");
+    assert_eq!(r["projectId"], "p-widgets");
+    let l = &h.fake.launched()[0];
+    assert_eq!(l["projectId"], "p-widgets");
+    assert_eq!(l["title"], "widgets#41: Fix the grader");
+    assert!(l.get("workspaceStrategy").is_none());
+    assert_eq!(l["modelSelection"]["model"], "claude-opus-5-5");
+    assert_eq!(l["modelSelection"]["options"], json!([{"id": "effort", "value": "high"}]));
+    let msg = l["message"].as_str().unwrap();
+    assert!(msg.starts_with("Work https://github.com/Acme/widgets/issues/41 with the cbrip:t3-ticket skill."), "{msg}");
+    assert!(msg.contains(r#"wf.join({ parent: "board", label: "widgets#41", role: "ticket" })"#), "{msg}");
+    let pending = h.app.store.pending_all().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].parent, BOARD);
+    assert_eq!(pending[0].thread.as_deref(), Some("launch:1"));
+    let tree = h.app.wf.tree().unwrap();
+    assert_eq!(tree[0]["joined"], false);
+    assert_eq!(tree[0]["status"], "running");
+    let again = h.exec("async () => wf.launchTicket({ issue: 'Acme/widgets#41' })").await;
+    assert!(err_text(&again).contains("has not joined yet"), "{}", again.text);
+    h.wf("launch:1", "join", json!({"parent": BOARD, "label": "widgets#41", "role": "ticket"})).await;
+    assert!(h.app.store.pending_all().unwrap().is_empty());
+    assert_eq!(h.app.store.link_get("launch:1").unwrap().unwrap().params.down, 75);
+}
+
+#[tokio::test]
+async fn an_unmapped_repo_leaves_an_error_card() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-docs", "/src/docs")]);
+    h.remotes.set("/src/docs", "git@github.com:Acme/docs.git");
+    let out = h.exec("async () => wf.launchTicket({ issue: 'Acme/widgets#41' })").await;
+    assert!(err_text(&out).contains("no T3 project has github.com/Acme/widgets"), "{}", out.text);
+    let c = cards(&h);
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0]["kind"], "error");
+    assert_eq!(c[0]["ticket"], Value::Null);
+    assert!(h.fake.launched().is_empty());
+    assert!(h.app.store.pending_all().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_never_joined_board_ticket_becomes_a_card() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/widgets", "git@github.com:o/widgets.git");
+    h.app.wf.launch_ticket(serde_json::from_value(json!({"issue": "o/widgets#9"})).unwrap()).await.unwrap();
+    assert!(h.tick(70).await.is_empty());
+    assert!(h.tick(76).await.contains(&"report never-joined widgets#9".to_string()));
+    let c = cards(&h);
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0]["kind"], "report");
+    assert_eq!(c[0]["ticket"], "launch:1");
+    assert_eq!(c[0]["link"], "https://t3/launch:1");
+    assert!(c[0]["text"].as_str().unwrap().contains("never joined"));
+    assert!(sent_to(&h, BOARD).is_empty());
+}
+
+#[tokio::test]
+async fn watcher_escalations_about_board_children_are_cards_never_sends() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#41").await;
+    assert_eq!(h.tick(75).await, vec!["nudge widgets#41 (1/2)"]);
+    assert_eq!(h.tick(150).await, vec!["nudge widgets#41 (2/2)"]);
+    let out = h.tick(225).await;
+    assert!(out.iter().any(|a| a.starts_with("escalate widgets#41")), "{out:?}");
+    let c = cards(&h);
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0]["kind"], "escalate");
+    assert_eq!(c[0]["ticket"], TICKET);
+    h.fake.update(TICKET, json!({"status": "waiting", "pendingRequestCount": 1, "latestRunId": "run:2"}));
+    h.tick(400).await;
+    assert_eq!(cards(&h).len(), 2);
+    assert!(sent_to(&h, BOARD).is_empty());
+    assert!(h.sent().iter().all(|s| s["threadId"] == TICKET));
+}
+
+#[tokio::test]
+async fn an_ask_launches_a_scratch_thread_and_captures_its_answer() {
+    let h = H::new();
+    let a = h.app.wf.ask("Which tickets wait on me?").await.unwrap();
+    assert_eq!(a["id"], "q1");
+    let l = &h.fake.launched()[0];
+    assert_eq!(l["scratch"], true);
+    assert!(l.get("projectId").is_none());
+    assert_eq!(l["modelSelection"]["model"], "claude-haiku-5-5");
+    let msg = l["message"].as_str().unwrap();
+    assert!(msg.contains("Which tickets wait on me?") && msg.contains("mcp__t3cm__execute"), "{msg}");
+    assert!(h.app.wf.check_asks(None).await.unwrap(), "still running");
+    h.fake.update("launch:1", json!({"status": "completed"}));
+    h.fake.set_items(
+        "launch:1",
+        vec![
+            json!({"type": "user_message", "position": 0, "text": msg}),
+            json!({"type": "assistant_message", "position": 3, "text": "widgets#41 waits on a merge: a1."}),
+        ],
+    );
+    assert!(!h.app.wf.check_asks(None).await.unwrap());
+    let asks = h.app.wf.asks().unwrap();
+    assert_eq!(asks[0]["status"], "answered");
+    assert_eq!(asks[0]["answer"], "widgets#41 waits on a merge: a1.");
+    assert_eq!(asks[0]["archived"], true);
+    assert_eq!(h.fake.organized(), vec![json!({"threadId": "launch:1", "action": "archive"})]);
+    assert!(h.sent().is_empty());
+}
+
+struct Srv {
+    base: String,
+    http: reqwest::Client,
+    h: H,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for Srv {
+    fn drop(&mut self) {
+        if let Some(s) = self.stop.take() {
+            let _ = s.send(());
+        }
+    }
+}
+
+async fn start(h: H) -> Srv {
+    let (listener, addr) = server::bind(0).await.unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let app = h.app.clone();
+    tokio::spawn(async move {
+        server::serve(app, listener, async move {
+            let _ = rx.await;
+        })
+        .await
+        .unwrap();
+    });
+    Srv {
+        base: format!("http://{addr}"),
+        http: reqwest::Client::builder().no_proxy().build().unwrap(),
+        h,
+        stop: Some(tx),
+    }
+}
+
+impl Srv {
+    async fn post(&self, path: &str, body: Value, csrf: Option<&str>, origin: Option<&str>) -> reqwest::Response {
+        let mut req = self.http.post(format!("{}{path}", self.base)).json(&body);
+        if let Some(c) = csrf {
+            req = req.header("X-T3CM-CSRF", c);
+        }
+        if let Some(o) = origin {
+            req = req.header("Origin", o);
+        }
+        req.send().await.unwrap()
+    }
+
+    fn csrf(&self) -> String {
+        self.h.app.csrf.clone()
+    }
+}
+
+#[tokio::test]
+async fn the_answer_endpoint_sends_one_reply_and_resolves_the_card() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    s.h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE})).await;
+    let r = s.post("/api/cards/a1/answer", json!({"text": "merge and deploy"}), Some(&s.csrf()), Some(&s.base)).await;
+    assert_eq!(r.status(), 200);
+    let sent = sent_to(&s.h, TICKET);
+    assert_eq!(sent.len(), 1);
+    let msg = sent[0]["message"].as_str().unwrap();
+    assert!(msg.starts_with("[t3cm reply from=board msg="), "{msg}");
+    assert!(msg.contains("The user says \"merge and deploy\" about a1: reply \"merge\" to merge #81"), "{msg}");
+    assert!(cards(&s.h).is_empty());
+    let r = s.post("/api/cards/a1/answer", json!({"text": "again"}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 404);
+    assert_eq!(sent_to(&s.h, TICKET).len(), 1);
+}
+
+#[tokio::test]
+async fn posts_need_the_csrf_token_and_the_boards_own_origin() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    s.h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE})).await;
+    let body = json!({"text": "merge"});
+    assert_eq!(s.post("/api/cards/a1/answer", body.clone(), None, None).await.status(), 403);
+    assert_eq!(s.post("/api/cards/a1/answer", body.clone(), Some("nope"), None).await.status(), 403);
+    let foreign = s.post("/api/cards/a1/answer", body.clone(), Some(&s.csrf()), Some("https://evil.example")).await;
+    assert_eq!(foreign.status(), 403);
+    let other_port = s.post("/api/cards/a1/answer", body.clone(), Some(&s.csrf()), Some("http://127.0.0.1:1")).await;
+    assert_eq!(other_port.status(), 403);
+    assert_eq!(s.post("/api/launch", json!({"issues": ["o/r#1"]}), None, None).await.status(), 403);
+    assert_eq!(s.post("/api/ask", json!({"question": "x"}), Some("nope"), None).await.status(), 403);
+    let r = s.http.get(format!("{}/api/state", s.base)).header("Origin", "https://evil.example").send().await.unwrap();
+    assert_eq!(r.status(), 403);
+    let r = s.http.get(format!("{}/api/state", s.base)).header("Host", "evil.example:80").send().await.unwrap();
+    assert_eq!(r.status(), 403);
+    assert!(s.h.sent().is_empty());
+    assert_eq!(cards(&s.h).len(), 1);
+}
+
+#[tokio::test]
+async fn dismiss_resolves_without_messaging() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    s.h.wf(TICKET, "send", json!({"kind": "blocker", "body": "stuck"})).await;
+    let r = s.post("/api/cards/a1/dismiss", json!({}), Some(&s.csrf()), Some(&s.base)).await;
+    assert_eq!(r.status(), 200);
+    assert!(cards(&s.h).is_empty());
+    assert!(s.h.sent().is_empty());
+}
+
+#[tokio::test]
+async fn state_launch_and_message_endpoints() {
+    let s = start(H::new()).await;
+    s.h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    s.h.remotes.set("/src/widgets", "git@github.com:o/widgets.git");
+    let r =
+        s.post("/api/launch", json!({"issues": ["o/widgets#1", "o/other#2", "nonsense"]}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 200);
+    let res: Value = r.json().await.unwrap();
+    let ok: Vec<Value> = res["results"].as_array().unwrap().iter().map(|x| x["ok"].clone()).collect();
+    assert_eq!(ok, [json!(true), json!(false), json!(false)]);
+    assert_eq!(res["results"][1]["card"], "a1");
+    join_board(&s.h, TICKET, "widgets#41").await;
+    let sent = s.h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE})).await;
+    s.h.fake.put(thread("launch:1", "running", T0));
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(st["counts"]["cards"], 2);
+    assert_eq!(st["cards"][1]["options"], json!(["merge", "merge and deploy"]));
+    let labels: Vec<Value> = st["tree"].as_array().unwrap().iter().map(|t| t["label"].clone()).collect();
+    assert_eq!(labels, [json!("widgets#41"), json!("widgets#1")]);
+    assert_eq!(st["service"]["t3"]["connected"], true);
+    let handle = sent["handle"].as_str().unwrap();
+    let m: Value = s.http.get(format!("{}/api/msg/{handle}", s.base)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(m["body"], GATE);
+}
+
+#[tokio::test]
+async fn the_event_stream_pushes_state_when_a_card_appears() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    let mut r = s.http.get(format!("{}/api/events", s.base)).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(r.headers()["content-type"].to_str().unwrap().starts_with("text/event-stream"));
+    let first = tokio::time::timeout(Duration::from_secs(5), r.chunk()).await.unwrap().unwrap().unwrap();
+    let first = String::from_utf8_lossy(&first).to_string();
+    assert!(first.starts_with("event: state\ndata: {"), "{first}");
+    assert!(first.contains("\"cards\":[]"), "{first}");
+    s.h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE})).await;
+    let mut seen = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !seen.contains("\"id\":\"a1\"") {
+        let chunk =
+            tokio::time::timeout_at(deadline, r.chunk()).await.expect("a state event in time").unwrap().unwrap();
+        seen.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    assert!(seen.contains("event: state"), "{seen}");
+    assert!(seen.contains("merge and deploy"), "{seen}");
+}
+
+#[tokio::test]
+async fn the_page_embeds_the_token_and_loads_nothing_external() {
+    let s = start(H::new()).await;
+    let r = s.http.get(format!("{}/", s.base)).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(r.headers()["content-type"].to_str().unwrap().starts_with("text/html"));
+    assert!(r.headers()["content-security-policy"].to_str().unwrap().contains("default-src 'none'"));
+    let html = r.text().await.unwrap();
+    assert!(html.contains(&format!("const CSRF = \"{}\";", s.csrf())));
+    assert!(!html.contains("{{CSRF}}"));
+    let lower = html.to_lowercase();
+    for tag in ["<script", "<link", "<img", "<iframe", "@import", "url("] {
+        for (i, _) in lower.match_indices(tag) {
+            let end = lower[i..].find('>').map(|e| i + e).unwrap_or(lower.len());
+            let t = &lower[i..end];
+            assert!(!t.contains("http://") && !t.contains("https://") && !t.contains("src="), "external load: {t}");
+        }
+    }
+    assert!(!html.contains('\u{2014}'));
+}
