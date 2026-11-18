@@ -15,7 +15,8 @@ each new card while the tab is hidden.
 ## What the page shows
 
 - **Decision cards.** Gates, blockers, reports and the watcher's escalations
-  each become a card, with one button per `reply "X"` phrase in the body.
+  each become a card, with a button for each answer the message offers, as
+  [Reply buttons](#reply-buttons) describes.
   Answering a card sends the ticket one reply and resolves the card. A ticket
   that clears its gate, or sends a newer `gate` message, resolves its older
   gate cards, and its handoff resolves all of its open cards.
@@ -27,6 +28,31 @@ each new card while the tab is hidden.
   board, writes its answer onto the page, and then gets archived.
 
 A `handoff` or `closed` message marks a ticket done.
+
+## Reply buttons
+
+When a message has an `**ACTION NEEDED:**` line, its buttons come from that
+line alone, or from each such line when it has several. A quoted phrase
+elsewhere in the message never becomes a button. On an action line, each quoted
+answer after the first `reply`, `answer` or `say` becomes a button. The first
+line below gives two buttons and the second gives three:
+
+```text
+**ACTION NEEDED:** reply "merge and deploy" to merge #81, or "merge" alone, here: https://github.com/acme/widgets/pull/81
+**ACTION NEEDED:** reply how to track it: "advisory", "issue", or "nothing", here: https://github.com/acme/widgets/pull/37
+```
+
+Double quotes count whether they are straight or curly. Single quotes count
+only when they open after a space or punctuation mark and close before one or
+at the end of the line. That rule keeps the apostrophe in `user's` from
+starting or ending an answer.
+
+A message with no action line gets one button per `reply "X"` phrase anywhere
+in it.
+
+The board trims each answer and drops one that runs past 60 characters or onto
+a second line. Answers that differ only in case share one button, and a card
+shows at most 8.
 
 ## From a thread
 
