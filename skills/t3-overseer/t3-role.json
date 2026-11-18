@@ -1,0 +1,11 @@
+{
+  "role": "overseer",
+  "children": {
+    "ticket": {
+      "down": 75,
+      "stall": 480,
+      "wake": ["gate", "blocker", "handoff", "closed", "report", "escalate"],
+      "bodyCap": 600
+    }
+  }
+}

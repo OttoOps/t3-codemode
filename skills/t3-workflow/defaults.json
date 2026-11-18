@@ -1,0 +1,14 @@
+{
+  "v2": {
+    "protocol": 2,
+    "link": {
+      "down": 45,
+      "miss": 2,
+      "stall": 240
+    },
+    "poll": 2,
+    "wake": ["event", "gate", "blocker", "handoff", "closed", "report", "escalate", "reply"],
+    "bodyCap": 1500,
+    "digestLines": 6
+  }
+}

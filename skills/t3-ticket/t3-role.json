@@ -1,0 +1,6 @@
+{
+  "role": "ticket",
+  "children": {
+    "worker": {}
+  }
+}
