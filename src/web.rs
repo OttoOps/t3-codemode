@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
 use crate::app::App;
-use crate::board::LaunchArgs;
+use crate::board::{CardRef, LaunchArgs};
 
 pub const CSRF_HEADER: &str = "x-t3cm-csrf";
 const PAGE: &str = include_str!("board.html");
@@ -157,12 +157,16 @@ struct TextBody {
     text: String,
     #[serde(default)]
     at: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 struct AtBody {
     #[serde(default)]
     at: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
 }
 
 async fn answer(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>, raw: Bytes) -> Response {
@@ -173,7 +177,7 @@ async fn answer(State(web): State<Web>, headers: HeaderMap, Path(id): Path<Strin
         Ok(b) => b,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    match web.app.wf.answer_at(&id, &b.text, b.at.as_deref()).await {
+    match web.app.wf.answer_at(&id, &b.text, &CardRef { at: b.at.as_deref(), token: b.token.as_deref() }).await {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => failed(&web.app, e),
     }
@@ -191,7 +195,7 @@ async fn dismiss(State(web): State<Web>, headers: HeaderMap, Path(id): Path<Stri
             Err(e) => return error(StatusCode::BAD_REQUEST, e),
         }
     };
-    match web.app.wf.dismiss_at(&id, b.at.as_deref()).await {
+    match web.app.wf.dismiss_at(&id, &CardRef { at: b.at.as_deref(), token: b.token.as_deref() }).await {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => failed(&web.app, e),
     }

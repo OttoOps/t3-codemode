@@ -368,18 +368,33 @@ async fn card_actions_for_an_older_decision_with_the_same_id_do_nothing() {
     let s = start(H::new()).await;
     join_board(&s.h, TICKET, "widgets#41").await;
     s.h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE})).await;
-    let at = cards(&s.h)[0]["at"].as_str().unwrap().to_string();
-    let old = "2000-01-01T00:00:00Z";
-    let r = s.post("/api/cards/a1/answer", json!({"text": "merge", "at": old}), Some(&s.csrf()), None).await;
+    let old = cards(&s.h)[0].clone();
+    assert_eq!(old["id"], "a1");
+    let want = |c: &Value| json!({"at": c["at"], "token": c["token"]});
+    let r = s.post("/api/cards/a1/dismiss", want(&old), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 200);
+    for batch in [2..=19, 20..=36] {
+        let issues: Vec<String> = batch.map(|n| format!("o/nowhere#{n}")).collect();
+        assert_eq!(s.post("/api/launch", json!({"issues": issues}), Some(&s.csrf()), None).await.status(), 200);
+    }
+    assert_eq!(cards(&s.h).len(), 35);
+    s.h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE})).await;
+    let new = cards(&s.h).into_iter().find(|c| c["id"] == "a1").unwrap();
+    assert_eq!(new["at"], old["at"]);
+    assert_ne!(new["token"], old["token"]);
+    let mut stale = want(&old);
+    stale["text"] = json!("merge");
+    let r = s.post("/api/cards/a1/answer", stale, Some(&s.csrf()), None).await;
     assert_eq!(r.status(), 404);
-    let r = s.post("/api/cards/a1/dismiss", json!({"at": old}), Some(&s.csrf()), None).await;
+    let r = s.post("/api/cards/a1/dismiss", want(&old), Some(&s.csrf()), None).await;
     assert_eq!(r.status(), 404);
-    assert!(s.h.sent().is_empty());
-    assert_eq!(cards(&s.h).len(), 1);
-    let r = s.post("/api/cards/a1/answer", json!({"text": "merge", "at": at}), Some(&s.csrf()), None).await;
+    assert!(sent_to(&s.h, TICKET).is_empty());
+    assert!(cards(&s.h).iter().any(|c| c["id"] == "a1"));
+    let mut fresh = want(&new);
+    fresh["text"] = json!("merge");
+    let r = s.post("/api/cards/a1/answer", fresh, Some(&s.csrf()), None).await;
     assert_eq!(r.status(), 200);
     assert_eq!(sent_to(&s.h, TICKET).len(), 1);
-    assert!(cards(&s.h).is_empty());
 }
 
 #[tokio::test]
@@ -1085,7 +1100,11 @@ return { what, at0, at4999, sent, after: answers().length, back: !card("a2").que
     );
     assert_eq!(r["what"], "Sending \u{201c}merge\u{201d} to widgets#41", "{r}");
     assert_eq!((r["at0"].as_i64(), r["at4999"].as_i64()), (Some(0), Some(0)), "{r}");
-    assert_eq!(r["sent"], json!([["/api/cards/a1/answer", {"text": "merge", "at": st["cards"][0]["at"]}]]), "{r}");
+    assert_eq!(
+        r["sent"],
+        json!([["/api/cards/a1/answer", {"text": "merge", "at": st["cards"][0]["at"], "token": st["cards"][0]["token"]}]]),
+        "{r}"
+    );
     assert_eq!(r["after"], 1, "{r}");
     assert_eq!(r["back"], true, "{r}");
 }

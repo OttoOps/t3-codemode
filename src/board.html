@@ -939,7 +939,7 @@ function blocked(card) {
   return !connected || pending.has(card.dataset.id) || card.classList.contains("stale-item");
 }
 
-function inst(c) { return [c.at, c.ticket || "", c.handle || ""].join("|"); }
+function inst(c) { return [c.at, c.ticket || "", c.handle || "", c.token || ""].join("|"); }
 
 function resetCard(card) {
   card._loaded = null;
@@ -1049,7 +1049,7 @@ function paintSending(card) {
 function startSend(c, kind, text, raw) {
   if (pending.has(c.id)) return;
   const card = cardEl(c.id);
-  const p = { kind, text, raw: raw === undefined ? text : raw, label: c.label || c.id, inst: inst(c), at: c.at, sent: false };
+  const p = { kind, text, raw: raw === undefined ? text : raw, label: c.label || c.id, inst: inst(c), at: c.at, token: c.token, sent: false };
   p.timer = setTimeout(() => fire(c.id), SEND_DELAY);
   pending.set(c.id, p);
   if (card) {
@@ -1101,7 +1101,8 @@ async function fire(id) {
   }
   const path = "/api/cards/" + encodeURIComponent(id) + (p.kind === "dismiss" ? "/dismiss" : "/answer");
   try {
-    await post(path, p.kind === "dismiss" ? { at: p.at } : { text: p.text, at: p.at });
+    const want = { at: p.at, token: p.token };
+    await post(path, p.kind === "dismiss" ? want : { text: p.text, ...want });
     if (pending.get(id) !== p) return;
     const input = card && part(card, "input");
     if (!input || input.value === p.raw) {
