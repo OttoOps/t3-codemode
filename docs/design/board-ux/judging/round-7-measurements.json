@@ -650,7 +650,7 @@
    },
    "reconnected": true,
    "ask": {
-    "samples": 1102,
+    "samples": 1104,
     "maxMovePx": 0,
     "focusValueCaretKept": true
    },
@@ -660,7 +660,7 @@
     "focusValueCaretKept": true
    },
    "settled filter": {
-    "samples": 751,
+    "samples": 752,
     "maxMovePx": 0,
     "focusValueCaretKept": true
    }
@@ -670,7 +670,7 @@
     "same": true,
     "connected": true,
     "active": "A",
-    "samples": 1852,
+    "samples": 1851,
     "samplesLost": 0,
     "seen": []
    },
@@ -678,7 +678,7 @@
     "same": true,
     "connected": true,
     "active": "A",
-    "samples": 1500,
+    "samples": 1501,
     "samplesLost": 0,
     "seen": []
    },
@@ -694,7 +694,7 @@
     "same": true,
     "connected": true,
     "active": "BUTTON",
-    "samples": 1500,
+    "samples": 1501,
     "samplesLost": 0,
     "seen": []
    }
@@ -707,12 +707,12 @@
      "error": null
     },
     "removed": true,
-    "samples": 3005,
+    "samples": 3004,
     "samplesMoved": 0
    },
    "ticket Settle": {
     "reconnected": true,
-    "samples": 3357,
+    "samples": 3356,
     "samplesMoved": 0
    }
   }
@@ -765,13 +765,13 @@
   },
   "U11": {
    "during": {
-    "header": "Disconnected. Reconnecting; showing data from 12:45.",
+    "header": "Disconnected. Reconnecting; showing data from 13:09.",
     "stale": true,
     "optionsDisabled": true
    },
    "rectsSame": true,
    "after": {
-    "header": "T3 connected \u00b7 checked 12:45 MST",
+    "header": "T3 connected \u00b7 checked 13:09 MST",
     "stale": false
    },
    "rectsSameAfter": true
