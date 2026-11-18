@@ -1,5 +1,10 @@
 # Upstreams contract
 
+> This is the design record the upstreams feature was built from, and it has
+> not kept up with the code. Some rules here, such as where `http.url` accepts
+> references, differ from what the service does. [Upstreams](upstreams.md) and
+> the code are the current reference.
+
 t3-codemode becomes a Code Mode for any MCP servers. An **upstream** is another
 MCP server (stdio or Streamable HTTP) listed in `config.json`. Its tools join
 the catalog under the upstream's **namespace**: `search` finds them, `execute`
