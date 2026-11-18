@@ -1,0 +1,35 @@
+name: dco
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: DCO
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Every human-authored commit is signed off by its author
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          fail=0
+          for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            name=$(git log -1 --format=%an "$c")
+            email=$(git log -1 --format=%ae "$c")
+            case "$email" in *"[bot]@users.noreply.github.com") continue ;; esac
+            if git log -1 --format='%(trailers:key=Signed-off-by,valueonly)' "$c" | grep -qiF "<$email>"; then
+              echo "ok      $c $name"
+            else
+              echo "::error::$c by $name <$email> has no matching Signed-off-by. Run: git commit --amend --no-edit --signoff (see .github/CONTRIBUTING.md)"
+              fail=1
+            fi
+          done
+          exit $fail

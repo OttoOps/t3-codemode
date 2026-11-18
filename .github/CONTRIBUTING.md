@@ -55,7 +55,9 @@ before rewriting a shared contribution branch. Keep the original authors and
 their signoffs, and never sign for someone else. Published `main` history is
 not rewritten.
 
-**Before merge.** The DCO check must pass alongside CI. Commits made in
+**Before merge.** The DCO check must pass alongside CI. It checks that every
+commit in the PR has a `Signed-off-by` matching its author's email; bot commits
+are exempt. Commits made in
 GitHub's web editor require a signoff too.
 
 ## How changes land
