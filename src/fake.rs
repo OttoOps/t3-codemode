@@ -10,12 +10,15 @@ use crate::t3::{BoxFut, T3Client, T3Error};
 struct State {
     threads: BTreeMap<String, Value>,
     items: BTreeMap<String, Vec<Value>>,
+    prs: BTreeMap<String, Vec<Value>>,
     projects: Vec<Value>,
     launched: Vec<Value>,
     organized: Vec<Value>,
     sent: Vec<Value>,
     calls: Vec<String>,
     send_fails: bool,
+    prs_fail: bool,
+    read_fails: bool,
     organize_fails: bool,
     delay: Duration,
 }
@@ -64,6 +67,15 @@ pub fn project(id: &str, root: &str) -> Value {
            "createdAt": "2026-11-01T00:00:00Z", "updatedAt": "2026-11-01T00:00:00Z", "deletedAt": null})
 }
 
+pub fn pull_request(repository: &str, number: u64, state: &str) -> Value {
+    json!({
+        "host": "github.com", "repository": repository, "number": number,
+        "url": format!("https://github.com/{repository}/pull/{number}"), "source": "agent",
+        "watching": state == "open", "state": state, "title": format!("PR {number}"),
+        "headBranch": format!("fix/{number}"), "baseBranch": "main", "isDraft": false, "stack": null
+    })
+}
+
 pub fn thread(id: &str, status: &str, updated: &str) -> Value {
     json!({
         "threadId": id, "status": status, "updatedAt": updated, "link": format!("https://t3/{id}"),
@@ -106,6 +118,14 @@ impl FakeT3 {
         self.st().send_fails = fails;
     }
 
+    pub fn set_prs_fail(&self, fails: bool) {
+        self.st().prs_fail = fails;
+    }
+
+    pub fn set_read_fails(&self, fails: bool) {
+        self.st().read_fails = fails;
+    }
+
     pub fn set_organize_fails(&self, fails: bool) {
         self.st().organize_fails = fails;
     }
@@ -116,6 +136,10 @@ impl FakeT3 {
 
     pub fn set_items(&self, id: &str, items: Vec<Value>) {
         self.st().items.insert(id.into(), items);
+    }
+
+    pub fn set_prs(&self, id: &str, prs: Vec<Value>) {
+        self.st().prs.insert(id.into(), prs);
     }
 
     pub fn set_projects(&self, projects: Vec<Value>) {
@@ -143,10 +167,22 @@ impl FakeT3 {
         st.calls.push(tool.to_string());
         match tool {
             "t3_thread_read" => {
+                if st.read_fails {
+                    return Err(T3Error::Unavailable("T3 unreachable (fake)".into()));
+                }
                 let id = args["threadId"].as_str().unwrap_or_default();
                 let items = st.items.get(id).cloned().unwrap_or_default();
                 match st.threads.get(id) {
-                    Some(th) => Ok(json!({"thread": th, "items": items, "earlierPosition": null})),
+                    Some(th) => {
+                        let mut th = th.clone();
+                        if let Some(prs) = st.prs.get(id) {
+                            let open: Vec<&Value> = prs.iter().filter(|p| p["state"] == "open").collect();
+                            th["openPullRequestCount"] = json!(open.len());
+                            th["pullRequestCount"] = json!(prs.len());
+                            th["pullRequests"] = json!(open);
+                        }
+                        Ok(json!({"thread": th, "items": items, "earlierPosition": null}))
+                    }
                     None => Err(T3Error::Tool(format!("t3_thread_read: thread {id} not found"))),
                 }
             }
@@ -171,6 +207,23 @@ impl FakeT3 {
                     .cloned()
                     .collect();
                 Ok(json!({"threads": threads}))
+            }
+            "list_thread_pull_requests" => {
+                if st.prs_fail {
+                    return Err(T3Error::Unavailable("T3 unreachable (fake)".into()));
+                }
+                let id = args["threadId"].as_str().unwrap_or_default();
+                let wanted: Option<Vec<&str>> =
+                    args["states"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect());
+                let prs: Vec<Value> = st
+                    .prs
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|p| wanted.as_ref().is_none_or(|w| w.contains(&p["state"].as_str().unwrap_or(""))))
+                    .cloned()
+                    .collect();
+                Ok(json!({"pullRequests": prs, "chains": [], "nextCursor": null}))
             }
             "t3_project_list" => Ok(json!({"projects": st.projects, "nextCursor": null})),
             "t3_thread_launch" => {

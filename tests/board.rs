@@ -6,7 +6,7 @@ use common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::{BOARD, card_text, parse_issue, parse_remote, reply_options};
 use t3_codemode::config::Config;
-use t3_codemode::fake::{project, thread};
+use t3_codemode::fake::{project, pull_request, thread};
 use t3_codemode::server;
 
 const GATE: &str = "PR #81 is green and reviewed.\n\
@@ -1647,4 +1647,102 @@ return { during, after: { stale: document.body.classList.contains("stale"), head
     assert_eq!(r["during"]["sent"], 0, "{r}");
     assert_eq!(r["after"]["stale"], false, "{r}");
     assert!(r["after"]["header"].as_str().unwrap().starts_with("T3 connected"), "{r}");
+}
+
+fn worker_pr(h: &H) -> Value {
+    let tree = h.app.wf.tree().unwrap();
+    let t = tree.iter().find(|t| t["label"] == "widgets#41").unwrap();
+    t["workers"][0]["pr"].clone()
+}
+
+fn pr_lists(h: &H) -> usize {
+    h.fake.calls().iter().filter(|c| *c == "list_thread_pull_requests").count()
+}
+
+async fn ticket_with_worker(h: &H) {
+    join_board(h, TICKET, "widgets#41").await;
+    h.wf(WORKER, "join", json!({"parent": TICKET, "label": "#41 PR 1/2", "role": "worker"})).await;
+}
+
+#[tokio::test]
+async fn a_finished_workers_merged_pr_shows_on_the_board() {
+    let h = H::new();
+    ticket_with_worker(&h).await;
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 81, "open")]);
+    h.tick(1).await;
+    assert_eq!(worker_pr(&h)["state"], "open");
+    assert_eq!(pr_lists(&h), 0);
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 81, "merged")]);
+    h.wf(WORKER, "send", json!({"kind": "handoff", "body": "merged at abc123"})).await;
+    let pr = worker_pr(&h);
+    assert_eq!(
+        (pr["number"].clone(), pr["state"].clone(), pr["url"].clone()),
+        (json!(81), json!("merged"), json!("https://github.com/acme/widgets/pull/81"))
+    );
+    let tree = h.app.wf.tree().unwrap();
+    assert_eq!(tree[0]["workers"][0]["done"], true);
+    h.tick(2).await;
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(pr_lists(&h), 1);
+}
+
+#[tokio::test]
+async fn a_finished_workers_closed_pr_shows_after_a_restart() {
+    let mut h = H::new();
+    ticket_with_worker(&h).await;
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 82, "closed")]);
+    h.wf(WORKER, "send", json!({"kind": "closed", "body": "abandoned"})).await;
+    assert_eq!(worker_pr(&h)["state"], "closed");
+    h.reopen();
+    assert_eq!(worker_pr(&h), Value::Null);
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!((worker_pr(&h)["number"].clone(), worker_pr(&h)["state"].clone()), (json!(82), json!("closed")));
+}
+
+#[tokio::test]
+async fn a_reopened_pr_is_listed_again_when_it_closes() {
+    let h = H::new();
+    ticket_with_worker(&h).await;
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 83, "closed")]);
+    h.tick(3).await;
+    assert_eq!(worker_pr(&h)["state"], "closed");
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 83, "open")]);
+    h.tick(4).await;
+    assert_eq!(worker_pr(&h)["state"], "open");
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 83, "merged")]);
+    h.tick(5).await;
+    assert_eq!(worker_pr(&h)["state"], "merged");
+    assert_eq!(pr_lists(&h), 2);
+}
+
+#[tokio::test]
+async fn a_failed_pr_lookup_is_retried_on_the_next_board_tick() {
+    let h = H::new();
+    ticket_with_worker(&h).await;
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 84, "merged")]);
+    h.fake.set_prs_fail(true);
+    h.wf(WORKER, "send", json!({"kind": "handoff", "body": "merged at abc123"})).await;
+    assert_eq!(worker_pr(&h), Value::Null);
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(worker_pr(&h), Value::Null);
+    h.fake.set_prs_fail(false);
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(worker_pr(&h)["state"], "merged");
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(pr_lists(&h), 3);
+}
+
+#[tokio::test]
+async fn a_failed_read_at_handoff_is_retried_on_the_next_board_tick() {
+    let h = H::new();
+    ticket_with_worker(&h).await;
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 85, "open")]);
+    h.tick(1).await;
+    assert_eq!(worker_pr(&h)["state"], "open");
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 85, "merged")]);
+    h.fake.set_read_fails(true);
+    h.wf(WORKER, "send", json!({"kind": "handoff", "body": "merged at abc123"})).await;
+    h.fake.set_read_fails(false);
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(worker_pr(&h)["state"], "merged");
 }

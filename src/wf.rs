@@ -200,9 +200,12 @@ pub struct Wf {
     pub(crate) lock: tokio::sync::Mutex<()>,
     pub(crate) remotes: Arc<dyn Remotes>,
     pub(crate) live: Mutex<HashMap<String, Value>>,
+    pub(crate) closed_prs: Mutex<HashMap<String, ClosedPrs>>,
     pub(crate) changes: tokio::sync::broadcast::Sender<()>,
     pub(crate) asks_lock: tokio::sync::Mutex<()>,
 }
+
+type ClosedPrs = ((u64, u64), Value);
 
 type Consumed = Vec<(String, Vec<String>)>;
 
@@ -230,6 +233,7 @@ impl Wf {
             lock: tokio::sync::Mutex::new(()),
             remotes,
             live: Mutex::new(HashMap::new()),
+            closed_prs: Mutex::new(HashMap::new()),
             changes: tokio::sync::broadcast::channel(64).0,
             asks_lock: tokio::sync::Mutex::new(()),
         }
@@ -265,8 +269,9 @@ impl Wf {
     pub(crate) async fn read_thread(&self, id: &str) -> Result<Value, T3Error> {
         match self.t3.call("t3_thread_read", json!({"threadId": id, "limit": 1, "maxCharsPerItem": 1})).await {
             Ok(r) => {
-                self.note_live(id, &r["thread"]);
-                Ok(r["thread"].clone())
+                let th = self.with_closed_prs(id, r["thread"].clone()).await;
+                self.note_live(id, &th);
+                Ok(th)
             }
             Err(e) => {
                 if e.is_not_found() {
@@ -275,6 +280,31 @@ impl Wf {
                 Err(e)
             }
         }
+    }
+
+    async fn with_closed_prs(&self, id: &str, mut th: Value) -> Value {
+        let counts = th["pullRequestCount"].as_u64().zip(th["openPullRequestCount"].as_u64());
+        let Some(counts) = counts.filter(|(all, open)| all > open) else {
+            self.closed_prs.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+            return th;
+        };
+        let cached = self.closed_prs.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned();
+        let prs = match cached {
+            Some((at, prs)) if at == counts => prs,
+            _ => match self.t3.call("list_thread_pull_requests", json!({"threadId": id})).await {
+                Ok(r) if r["pullRequests"].is_array() => {
+                    let prs = r["pullRequests"].clone();
+                    self.closed_prs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.into(), (counts, prs.clone()));
+                    prs
+                }
+                _ => {
+                    th["pullRequestsStale"] = json!(true);
+                    return th;
+                }
+            },
+        };
+        th["pullRequests"] = prs;
+        th
     }
 
     pub async fn dispatch(&self, method: &str, caller: Option<&str>, args: Value) -> Result<Value> {
@@ -500,6 +530,12 @@ impl Wf {
             .ok_or_else(|| anyhow!("this thread has no parent link; it reports to the user directly"))?;
         if ln.closed {
             bail!("the link to your parent is closed; nothing to send on it");
+        }
+        if CLOSING.contains(&a.kind.as_str())
+            && let Err(e) = self.read_thread(me).await
+            && !e.is_not_found()
+        {
+            self.live.lock().unwrap_or_else(|e| e.into_inner()).remove(me);
         }
         let now = self.now();
         if a.kind == "gate" {
