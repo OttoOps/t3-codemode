@@ -163,3 +163,25 @@ code tests were needed.
 
 Discuss the code and its behavior respectfully. Be specific when reporting a
 problem or suggesting a change, and allow time for maintainer review.
+
+## AI review
+
+[CodeRabbit](https://www.coderabbit.ai/) reviews pull requests that are
+ready for review: when one opens ready or leaves draft, and again after each
+push. It does not review drafts. Merging into `main` needs one approving
+review from a reviewer with write access, and CodeRabbit's approval counts.
+It requests changes when it finds a blocking problem and approves once its
+threads are resolved and it has reviewed the latest commit. A push dismisses
+its earlier approval. It does not review the same commit twice, so to have
+it review a pull request again from scratch, a member of the OttoOps
+organization comments `@coderabbitai full review`.
+
+Changes to the CodeRabbit configuration and to `.github/`, which holds the
+CI workflows and `CODEOWNERS`, also need approval from a code owner listed
+in `.github/CODEOWNERS`. CodeRabbit's approval does not count for those
+paths.
+
+Repository admins are bypass actors on the `main` ruleset and can merge over
+a CodeRabbit change request. CodeRabbit's settings are in
+`.coderabbit.yaml`. Its inline comments are review conversations, so resolve
+each one, with a fix or a reply, before merge.
