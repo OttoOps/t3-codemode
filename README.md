@@ -37,9 +37,12 @@ every OS, the config, and the `t3cm` commands.
 
 ## Install the workflow skills
 
-The T3 workflow runs on five agent skills in [`skills/`](skills). They install
-apart from the service and work in Claude Code and Codex. Without `t3cm`, the
-`t3-workflow` skill's own script runs the whole protocol.
+The T3 workflow runs on five agent skills in [`skills/`](skills). They need
+T3 Code, whose `t3_thread_launch` tool starts the ticket and worker threads,
+and they load in its Claude Code and Codex threads. They install apart from
+the service. Their scripts need Linux, macOS or WSL, because `t3wf.py` uses
+`fcntl`, which native Windows lacks; the `t3cm` service itself also runs on
+Windows.
 
 | Skill | Say | What it does |
 |---|---|---|
@@ -103,7 +106,13 @@ folder, because a few read their neighbors' files by relative path:
   slot with no skill.
 
 `t3cm` is optional, and the setup skill offers to install it when it is
-missing.
+missing. Without it, the `t3-workflow` skill's own script runs the link
+protocol. Its watcher then runs only when a `t3wf` command does, so idle
+threads get no nudges until one runs. To put the watcher on a timer, run
+`python3 ~/.agents/skills/t3-workflow/scripts/t3wf.py daemon install` once,
+with the path to wherever you installed `t3-workflow`. It sets up a systemd
+user timer. macOS has no systemctl, so there a launchd agent that runs
+`t3wf.py tick` every 2 minutes does the same job.
 
 ## Contributing
 
