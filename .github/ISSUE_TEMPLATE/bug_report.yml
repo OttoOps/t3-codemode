@@ -6,13 +6,13 @@ body:
     attributes:
       value: |
         Report suspected vulnerabilities through
-        [private vulnerability reporting](https://github.com/potto007/t3-codemode/security/advisories/new),
-        not this public form. See the [security policy](https://github.com/potto007/t3-codemode/security/policy).
+        [private vulnerability reporting](https://github.com/OttoOps/t3-codemode/security/advisories/new),
+        not this public form. See the [security policy](https://github.com/OttoOps/t3-codemode/security/policy).
 
         Search existing issues first. Remove tokens, pairing codes,
         machine-specific absolute paths, and personal data from scripts and
         logs before posting them.
-        Participation follows the [Code of Conduct](https://github.com/potto007/t3-codemode/blob/main/.github/CODE_OF_CONDUCT.md).
+        Participation follows the [Code of Conduct](https://github.com/OttoOps/t3-codemode/blob/main/.github/CODE_OF_CONDUCT.md).
   - type: input
     id: version
     attributes:

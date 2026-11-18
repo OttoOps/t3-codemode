@@ -1,11 +1,11 @@
 blank_issues_enabled: true
 contact_links:
   - name: Report a security vulnerability
-    url: https://github.com/potto007/t3-codemode/security/advisories/new
+    url: https://github.com/OttoOps/t3-codemode/security/advisories/new
     about: Send suspected vulnerabilities privately; keep exploit details out of public issues.
   - name: Report a conduct concern
-    url: https://github.com/potto007/t3-codemode/blob/main/.github/CODE_OF_CONDUCT.md#reporting-and-enforcement
+    url: https://github.com/OttoOps/t3-codemode/blob/main/.github/CODE_OF_CONDUCT.md#reporting-and-enforcement
     about: Use the private contact listed in the Code of Conduct.
   - name: Contribution guide
-    url: https://github.com/potto007/t3-codemode/blob/main/.github/CONTRIBUTING.md
+    url: https://github.com/OttoOps/t3-codemode/blob/main/.github/CONTRIBUTING.md
     about: Development setup, checks, signoff, and the pull request workflow.

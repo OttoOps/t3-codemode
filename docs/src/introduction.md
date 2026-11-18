@@ -7,8 +7,8 @@ a sandbox. The tools of any other MCP server you configure join the same
 catalog under their own namespace.
 
 CI builds this site from the `docs/` directory of the
-[repository](https://github.com/potto007/t3-codemode) and redeploys it on every
-push to `main`. For now the [README](https://github.com/potto007/t3-codemode#readme)
+[repository](https://github.com/OttoOps/t3-codemode) and redeploys it on every
+push to `main`. For now the [README](https://github.com/OttoOps/t3-codemode#readme)
 covers install, config and the board. These pages are here today:
 
 - [API reference](api.md): the TypeScript declarations for `t3`, `tools`,
@@ -17,6 +17,6 @@ covers install, config and the board. These pages are here today:
   upstreams.
 
 To contribute, read the
-[contribution guide](https://github.com/potto007/t3-codemode/blob/main/.github/CONTRIBUTING.md).
+[contribution guide](https://github.com/OttoOps/t3-codemode/blob/main/.github/CONTRIBUTING.md).
 Report vulnerabilities through the
-[security policy](https://github.com/potto007/t3-codemode/blob/main/.github/SECURITY.md).
+[security policy](https://github.com/OttoOps/t3-codemode/blob/main/.github/SECURITY.md).

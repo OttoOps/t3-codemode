@@ -11,7 +11,7 @@ exist, this section will name the versions that receive security fixes.
 
 ## Report a vulnerability privately
 
-Use [GitHub private vulnerability reporting](https://github.com/potto007/t3-codemode/security/advisories/new).
+Use [GitHub private vulnerability reporting](https://github.com/OttoOps/t3-codemode/security/advisories/new).
 Do not open a public issue or pull request with exploit details or live
 credentials. The maintainer, `potto007`, reviews reports through the private
 advisory and may invite the people needed to investigate or fix the problem.
@@ -72,7 +72,7 @@ Out of scope here:
   deploying it otherwise is an operator decision.
 
 Ordinary bugs, usage questions, and feature requests belong in
-[GitHub Issues](https://github.com/potto007/t3-codemode/issues).
+[GitHub Issues](https://github.com/OttoOps/t3-codemode/issues).
 Conduct concerns follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Triage and disclosure

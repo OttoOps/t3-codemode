@@ -89,7 +89,7 @@ Test fixtures use made-up names such as `acme/widgets`.
 
 ## Find or propose work
 
-Search [existing issues](https://github.com/potto007/t3-codemode/issues)
+Search [existing issues](https://github.com/OttoOps/t3-codemode/issues)
 before opening one. Describe the problem you want to solve and how someone can
 reproduce it. Discuss the approach in an issue before implementing a
 substantial feature or a change to:
@@ -101,8 +101,8 @@ substantial feature or a change to:
 Small fixes and documentation changes can go straight to a pull request.
 
 Look for work in issues labeled
-[good first issue](https://github.com/potto007/t3-codemode/labels/good%20first%20issue)
-or [help wanted](https://github.com/potto007/t3-codemode/labels/help%20wanted).
+[good first issue](https://github.com/OttoOps/t3-codemode/labels/good%20first%20issue)
+or [help wanted](https://github.com/OttoOps/t3-codemode/labels/help%20wanted).
 Comment on an issue you plan to take so others can coordinate with you. New bug
 reports and feature requests start with `needs-triage`, and maintainers handle
 the triage labels.
@@ -117,7 +117,7 @@ runs the checks on all three.
 ```sh
 git clone https://github.com/YOUR_USERNAME/t3-codemode.git
 cd t3-codemode
-git remote add upstream https://github.com/potto007/t3-codemode.git
+git remote add upstream https://github.com/OttoOps/t3-codemode.git
 git switch -c fix/describe-the-change
 ```
 
@@ -153,7 +153,7 @@ code tests were needed.
    an issue, add its trailer with
    `git commit -s --trailer "Github-Issue:#123"`.
 2. Push your branch to your fork and open a PR against
-   `potto007/t3-codemode`'s `main` branch. Draft PRs are useful for work that
+   `OttoOps/t3-codemode`'s `main` branch. Draft PRs are useful for work that
    needs early feedback.
 3. Explain the change, link the issue, and list the checks you ran. Use
    `Closes #123` only when the PR fully addresses that issue.
