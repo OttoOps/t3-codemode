@@ -6,13 +6,13 @@ Judges: Claude Opus 5.5, GPT 6.2 Sol and Claude Sonnet 5.5, each with its own pa
 
 ## Gates
 
-The judges saw `edf2ff3`. Its measurement failed P2 on one negative margin in the phone card header (`margin-left: -12px`, also present in round 5). The final build, `8feee10` on this branch, replaces it with on-scale padding that renders the same phone stills apart from live data, and adds the fixes from code review: held worker changes, placeholder heights, a reply that loses its card, its handle or its connection during Undo, replies and dismissals the server checks against the decision they were made on, full messages bound to the handle that loaded them, and error Close returning focus. The table below is measured on that build with the harness as committed here.
+The judges saw `edf2ff3`. Its measurement failed P2 on one negative margin in the phone card header (`margin-left: -12px`, also present in round 5). The final build, `be148ee` on this branch, replaces it with on-scale padding that renders the same phone stills apart from live data, and adds the fixes from code review: held worker changes, placeholder heights, a reply that loses its card, its handle or its connection during Undo, replies and dismissals the server checks against the decision they were made on, full messages bound to the handle that loaded them, and error Close returning focus. The table below is measured on that build with the harness as committed here.
 
 | Gate | Result | Evidence |
 | --- | --- | --- |
 | U1 | pass | scrollHeight = innerHeight at 1440x900, 1280x800, 1024x768, seeded, and heavy with at least 30 open tickets and 26 decisions on the board at each size, counted by the same check |
 | U2 | pass | at 1440 and 1280 both inputs in view after scrolling every panel; at 1024 the selected input (Launch) in view, and one activation switches to Ask keeping both drafts; Tab presses: Launch 2, Ask 3; `l` and `/` focus them |
-| U3 | pass | a page script sampled every 20 ms for the whole of each case. Focused Launch, Ask, card reply, Settled filter: 0 px moved, value and caret kept in all 3359 samples, through a second-context answer and a stream cut; focused thread link, worker PR link, ask Settle, settled Restore stayed the same connected node in every sample for 30 s (at least 1500 each); hovered card option (answered from a second context and replaced by its same-height placeholder) and ticket Settle (through a stream cut) kept their position in every sample for 60 s (at least 3006 each) |
+| U3 | pass | a page script sampled every 20 ms for the whole of each case. Focused Launch, Ask, card reply, Settled filter: 0 px moved, value and caret kept in all 3358 samples, through a second-context answer and a stream cut; focused thread link, worker PR link, ask Settle, settled Restore stayed the same connected node in every sample for 30 s (at least 1500 each); hovered card option (answered from a second context and replaced by its same-height placeholder) and ticket Settle (through a stream cut) kept their position in every sample for 60 s (at least 3005 each) |
 | U4 | pass | first visible item unchanged after 60 s in Decisions, Tickets and Activity; header slots read cards: 2 new, tickets: 1 new, feed: 15 new; tab switch restored scrollTop 78 |
 | U5 | pass | 6 cards fully visible at 1440x900, median height 118 px |
 | U6 | pass | 12 open rows visible at 1440 (12 on the heavy board); same-field rows share one height at 1024 and 1440 |
@@ -20,13 +20,13 @@ The judges saw `edf2ff3`. Its measurement failed P2 on one negative margin in th
 | U8 | pass | all options styled alike; no request before 5 s, one after; Undo sent nothing; a digit only focused its option |
 | U9 | pass | skip links to all five targets; shortcuts inert inside fields and when turned off; `?` lists them; j, g t, g a move focus |
 | U10 | pass | no horizontal scroll at 768 and 390; one panel shown; no target under 44 px; nothing clipped at 195 px (200% zoom); emulated keyboard keeps field and submit in view; at a 250 px viewport the composer becomes a 250 px sheet; closing the keyboard restores panel decisions at scrollTop 200 |
-| U11 | pass | header during the cut: "Disconnected. Reconnecting; showing data from 13:37."; panels dimmed; reply controls aria-disabled; panes and composer moved 0 px |
+| U11 | pass | header during the cut: "Disconnected. Reconnecting; showing data from 13:51."; panels dimmed; reply controls aria-disabled; panes and composer moved 0 px |
 | P1 | pass | lowest status text light 6.37, dark 6.74; input border light 3.21, dark 4.32 |
 | P2 | pass | sizes ['16px', '13px', '14px', '12px'], weights ['600', '400', '500'], no off-scale spacing |
 | P3 | pass | accent on no status mark; amber only on needs-you items; running is neutral |
 | N1 | pass | no gradients, shadows or emoji |
 | N2 | pass | no Markdown; zone MST once; 44 truncated strings, all with full text in a tooltip or disclosure |
-| F2 | pass | `cargo test --release --locked` green on `8feee10`; tests/board.rs adds shell, held-arrival, placeholder, deferred-send, option, row, needs-you and stale-stream tests |
+| F2 | pass | `cargo test --release --locked` green on `be148ee`; tests/board.rs adds shell, held-arrival, placeholder, deferred-send, option, row, needs-you and stale-stream tests |
 | F1 | pass | launch of one good and one unknown issue shows both results; with notifications granted (Notifications on) and the tab hidden, a new decision raised 1 notification(s), 1 confirmed shown by the browser: atlas#518 gate (b3); the rest of the inventory is covered as described below |
 | F3 | pass | Ask error 1x (alert), completed Ask answer 1x (live), launch success 1x and failure 1x, card error 1x (alert), 0 announcements matching the sampled Activity patterns |
 | F4 | pass | every option, Send, Dismiss, Settle and Restore name carries its card id, ticket label or question |
