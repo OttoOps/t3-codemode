@@ -15,39 +15,104 @@ Beyond T3's tools, the sandbox carries:
   wakes and a watcher that nudges stalled threads,
 - a local web board that acts as the root overseer for ticket threads.
 
-Status: prototype. It builds and passes its tests on Linux, macOS and Windows.
-The installer and the service unit are Linux and systemd only for now.
+Status: prototype. It builds and passes its tests on Linux, macOS and Windows,
+and installs as a per-user service on each: a systemd user unit, a launchd
+agent, or a logon task.
 
 Documentation: https://ottoops.com/t3-codemode/
 
 ## Requirements
 
-- Linux with systemd user services, for `deploy/install.sh`. On macOS and
-  Windows, run `t3cm serve` yourself for now.
-- Rust 1.95 or newer (`oxc` is pinned to `=0.146.0` because later releases need a newer compiler)
+- Linux with systemd user services, macOS, or Windows (x86_64; Arm64 runs it
+  under emulation). On macOS, install from a GUI login: launchd loads the agent
+  into your login session, so over SSH alone use `--files-only` and run the
+  `launchctl bootstrap` command it prints once you log in.
+- `curl` and `tar` for `deploy/install.sh`; Windows PowerShell 5.1 or newer for
+  `deploy/install.ps1`
+- Rust 1.95 or newer, only to build from source (`oxc` is pinned to `=0.146.0`
+  because later releases need a newer compiler)
 - A running T3 Code server and its `t3` CLI
 - Claude Code, if you want the installer to register the MCP server for you
+- `gh`, signed in, if you want the installer to check build provenance
 
 ## Install
 
+The installers fetch the latest release from
+[Releases](https://github.com/OttoOps/t3-codemode/releases), check the archive
+against the release's `SHA256SUMS`, and, when `gh` is signed in, check its
+build provenance with `gh attestation verify`. Then they install the binary and
+a per-user service, start it, and register the MCP server with Claude Code.
+Nothing needs administrator rights.
+
+Linux and macOS:
+
 ```bash
-git clone https://github.com/OttoOps/t3-codemode
-cd t3-codemode
-deploy/install.sh              # build, install ~/.local/bin/t3cm, enable the user unit, register with Claude Code
-deploy/install.sh --uninstall  # reverse it (the store is kept)
+curl -fsSLO https://raw.githubusercontent.com/OttoOps/t3-codemode/main/deploy/install.sh
+bash install.sh                     # latest release
+bash install.sh --version v0.4.0    # a given release
+bash install.sh --uninstall         # reverse it (the store is kept)
 ```
 
-The unit (`deploy/t3-codemode.service`) runs `t3cm serve` on `127.0.0.1:47731`
-with `Restart=on-failure`, `LimitNOFILE=1048576`, `MemoryHigh=1G` and
-`MemoryMax=1536M`. The
-installer registers it with:
+Until the first `v*` release is published, the default install stops and says
+so. Build from a clone instead:
+
+```bash
+git clone https://github.com/OttoOps/t3-codemode && cd t3-codemode
+deploy/install.sh --from-source
+```
+
+Windows has no source install, so it waits for the first release.
+
+Windows, in PowerShell:
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/OttoOps/t3-codemode/main/deploy/install.ps1 -OutFile install.ps1 -UseBasicParsing
+powershell -ExecutionPolicy Bypass -File install.ps1              # latest release
+powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall   # reverse it (the store is kept)
+```
+
+The Windows installer does not add `t3cm` to `PATH`, so run it by its full path:
+`& "$env:LOCALAPPDATA\Programs\t3-codemode\t3cm.exe" status`.
+
+Other ways in:
+
+- `install.sh --archive t3cm-<version>-<target>.tar.gz --sums SHA256SUMS`
+  (`install.ps1 -Archive ... -Sums ...`) installs an archive you already
+  downloaded. It checks the checksum, not the provenance; run
+  `gh attestation verify <archive> -R OttoOps/t3-codemode` for that.
+- `deploy/install.sh --from-source`, from a clone, builds with cargo instead,
+  as the installer did before releases (Linux and macOS).
+- `--files-only` (`-FilesOnly`) installs or removes the files without touching
+  systemd, launchd or Task Scheduler.
+
+On Linux the installer picks the static musl build, which runs on any distro;
+`--target x86_64-unknown-linux-gnu` (or `aarch64-...`) picks the glibc one,
+which needs glibc 2.39 or newer. On a Mac it picks the Mac's own architecture,
+under Rosetta too.
+
+| OS | Binary | Service | Logs |
+|---|---|---|---|
+| Linux | `~/.local/bin/t3cm` | systemd user unit `t3-codemode` (`deploy/t3-codemode.service`) | `journalctl --user -u t3-codemode` |
+| macOS | `~/.local/bin/t3cm` | launchd agent `com.ottoops.t3-codemode` in `~/Library/LaunchAgents/` | `~/Library/Logs/t3-codemode/t3cm.log` |
+| Windows | `%LOCALAPPDATA%\Programs\t3-codemode\t3cm.exe` | scheduled task `t3-codemode`, at logon | `%LOCALAPPDATA%\t3-codemode\logs\t3cm.log` |
+
+Each runs `t3cm serve` on `127.0.0.1:47731` and restarts it when it fails. The
+systemd unit also sets `LimitNOFILE=1048576`, `MemoryHigh=1G` and
+`MemoryMax=1536M`. The launchd label is the reverse DNS of `ottoops.com`, the
+project's documentation domain, so it cannot collide with another vendor's
+agent. The Windows task runs as you, not elevated, starts at logon and from
+then on every five minutes, and does nothing while t3cm is still running, so a
+dead server comes back within five minutes. To stop it for good, run
+`Disable-ScheduledTask t3-codemode` and then `Stop-ScheduledTask t3-codemode`. On macOS and Windows, `t3cm serve --log-file` writes the log and rolls it
+to `t3cm.log.1` at start once it passes 10 MB; `RUST_LOG` sets the level
+everywhere.
+
+The installers register the server with:
 
 ```bash
 claude mcp add --transport http --scope user t3cm http://127.0.0.1:47731/mcp \
   --header 'X-T3-Thread: ${T3CODE_THREAD_ID}'
 ```
-
-Logs: `journalctl --user -u t3-codemode` (`RUST_LOG` sets the level).
 
 `/healthz` returns `version`, `uptimeSecs`, `t3` (connection and token expiry),
 `tools` (the T3 tool count), `watcher`, `store`, and `upstreams`: one object per
