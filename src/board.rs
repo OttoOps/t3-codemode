@@ -769,27 +769,22 @@ impl Wf {
         Ok(())
     }
 
-    async fn mirror_t3_settles(&self) -> Result<usize> {
+    async fn mirror_t3_settles(&self) -> Result<()> {
         let unsettled: Vec<Link> =
             self.store.children(BOARD, false)?.into_iter().filter(|l| l.closed && l.settled_at.is_none()).collect();
-        let mut mirrored = 0;
+        let mut changed = false;
         for ln in unsettled {
-            let since = match self.read_thread(&ln.child).await {
-                Ok(th) if th["settled"] == true => {
-                    th["settledAt"].as_str().or(th["updatedAt"].as_str()).map(String::from)
-                }
-                Ok(th) if th["archived"] == true => th["updatedAt"].as_str().map(String::from),
-                Ok(_) => continue,
-                Err(e) if e.is_not_found() => None,
-                Err(_) => continue,
+            let newer = |at: Option<&str>| match ln.restored_at.as_deref() {
+                None => true,
+                Some(r) => matches!((self.mins(at), self.mins(Some(r))), (Some(a), Some(b)) if a < b),
             };
-            let after_restore = match (ln.restored_at.as_deref(), since.as_deref()) {
-                (None, _) | (_, None) => true,
-                (Some(r), Some(s)) => {
-                    matches!((self.mins(Some(s)), self.mins(Some(r))), (Some(a), Some(b)) if a < b)
-                }
+            let mirror = match self.read_thread(&ln.child).await {
+                Ok(th) if th["settled"] == true => newer(th["settledAt"].as_str()),
+                Ok(th) if th["archived"] == true => ln.restored_at.is_none(),
+                Ok(_) => false,
+                Err(e) => e.is_not_found(),
             };
-            if !after_restore {
+            if !mirror {
                 continue;
             }
             let _g = self.lock.lock().await;
@@ -797,13 +792,13 @@ impl Wf {
             if fresh.settled_at.is_none() && fresh.restored_at == ln.restored_at {
                 fresh.settled_at = Some(self.now());
                 self.store.link_save(&fresh)?;
-                mirrored += 1;
+                changed = true;
             }
         }
-        if mirrored > 0 {
+        if changed {
             self.changed();
         }
-        Ok(mirrored)
+        Ok(())
     }
 
     fn board_ticket(&self, thread: &str) -> Result<Link> {

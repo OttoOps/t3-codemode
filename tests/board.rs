@@ -599,6 +599,20 @@ async fn a_restored_ticket_ignores_a_t3_settle_older_than_the_restore() {
 }
 
 #[tokio::test]
+async fn a_restored_ticket_stays_restored_while_its_thread_is_archived() {
+    let h = H::new();
+    done_ticket(&h, TICKET, "widgets#41").await;
+    h.fake.update(TICKET, json!({"archived": true}));
+    h.app.wf.board_tick().await.unwrap();
+    h.clock.advance_minutes(10);
+    h.app.wf.restore_ticket(TICKET).await.unwrap();
+    h.fake.update(TICKET, json!({"updatedAt": "2026-11-17T12:30:00.000Z"}));
+    h.clock.advance_minutes(30);
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(labels(&snapshot(&h)["tree"]), [json!("widgets#41")]);
+}
+
+#[tokio::test]
 async fn a_restored_ticket_is_not_settled_again_at_once() {
     let h = H::new();
     done_ticket(&h, TICKET, "widgets#41").await;
