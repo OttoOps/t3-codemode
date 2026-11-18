@@ -205,6 +205,8 @@ pub struct Wf {
     pub(crate) asks_lock: tokio::sync::Mutex<()>,
 }
 
+const MAX_PR_PAGES: usize = 20;
+
 type ClosedPrs = ((u64, u64), Value);
 
 type Consumed = Vec<(String, Vec<String>)>;
@@ -290,14 +292,17 @@ impl Wf {
         };
         let cached = self.closed_prs.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned();
         let prs = match cached {
-            Some((at, prs)) if at == counts => prs,
-            _ => match self.t3.call("list_thread_pull_requests", json!({"threadId": id})).await {
-                Ok(r) if r["pullRequests"].is_array() => {
-                    let prs = r["pullRequests"].clone();
+            Some((at, prs))
+                if at == counts && prs.as_array().is_some_and(|a| a.iter().all(|p| p["state"] != "closed")) =>
+            {
+                prs
+            }
+            _ => match self.list_prs(id).await {
+                Some(prs) => {
                     self.closed_prs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.into(), (counts, prs.clone()));
                     prs
                 }
-                _ => {
+                None => {
                     th["pullRequestsStale"] = json!(true);
                     return th;
                 }
@@ -305,6 +310,24 @@ impl Wf {
         };
         th["pullRequests"] = prs;
         th
+    }
+
+    async fn list_prs(&self, id: &str) -> Option<Value> {
+        let mut prs = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_PR_PAGES {
+            let mut args = json!({"threadId": id});
+            if let Some(c) = &cursor {
+                args["cursor"] = json!(c);
+            }
+            let r = self.t3.call("list_thread_pull_requests", args).await.ok()?;
+            prs.extend(r["pullRequests"].as_array()?.iter().cloned());
+            cursor = r["nextCursor"].as_str().filter(|c| !c.is_empty()).map(String::from);
+            if cursor.is_none() {
+                return Some(json!(prs));
+            }
+        }
+        None
     }
 
     pub async fn dispatch(&self, method: &str, caller: Option<&str>, args: Value) -> Result<Value> {
