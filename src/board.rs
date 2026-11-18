@@ -297,7 +297,7 @@ impl Wf {
     pub(crate) fn note_live(&self, id: &str, th: &Value) {
         let v = json!({
             "status": th["status"], "asks": count(&th["pendingRequestCount"]), "link": th["link"],
-            "pr": pr_of(th), "title": th["title"],
+            "pr": pr_of(th), "title": th["title"], "prStale": th["pullRequestsStale"] == true,
         });
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         if live.get(id) != Some(&v) {
@@ -796,6 +796,13 @@ impl Wf {
             self.store.pending_all()?.into_iter().filter(|p| p.parent == BOARD).filter_map(|p| p.thread).collect();
         for t in launched {
             let _ = self.read_thread(&t).await;
+        }
+        for ticket in self.store.children(BOARD, false)?.into_iter().filter(|t| t.settled_at.is_none()) {
+            for w in self.store.children(&ticket.child, false)? {
+                if w.closed && self.live_of(&w.child).is_none_or(|l| l["prStale"] == true) {
+                    let _ = self.read_thread(&w.child).await;
+                }
+            }
         }
         self.check_asks(None).await?;
         self.mirror_t3_settles().await?;
