@@ -444,21 +444,58 @@ function notifyNew(cards) {
   }
 }
 
+const cardSigs = new WeakMap();
+
+function focusInCard() {
+  const el = document.activeElement;
+  const card = el && el.closest ? el.closest(".card") : null;
+  if (!card) return null;
+  const typing = el.tagName === "INPUT";
+  return { el, id: card.dataset.id, sel: typing
+    ? [el.selectionStart, el.selectionEnd, el.selectionDirection] : null };
+}
+
+function syncCards(cardsEl, cards) {
+  if (!cards.length) {
+    cardsEl.replaceChildren(h("p", { class: "empty" }, "Nothing needs you. Gates, blockers and reports from ticket threads land here, with a button for each reply they offer."));
+    return;
+  }
+  const have = new Map();
+  for (const el of cardsEl.children) if (el.dataset.id) have.set(el.dataset.id, el);
+  const want = cards.map((c) => {
+    const sig = JSON.stringify(c);
+    const old = have.get(c.id);
+    if (old && cardSigs.get(old) === sig) return old;
+    const el = renderCard(c);
+    cardSigs.set(el, sig);
+    return el;
+  });
+  const keep = new Set(want);
+  for (const el of [...cardsEl.children]) if (!keep.has(el)) el.remove();
+  want.forEach((el, i) => {
+    const at = cardsEl.children[i] || null;
+    if (at !== el) cardsEl.insertBefore(el, at);
+  });
+}
+
+function restoreFocus(cardsEl, f) {
+  if (!f || document.activeElement === f.el) return;
+  const inp = cardsEl.querySelector('[data-id="' + CSS.escape(f.id) + '"] input');
+  if (!inp || inp.disabled) return;
+  inp.focus();
+  if (f.sel) inp.setSelectionRange(f.sel[0], f.sel[1], f.sel[2] || "none");
+}
+
 function render(s) {
   state = s;
   notifyNew(s.cards);
   firstState = false;
-  const active = document.activeElement;
-  const focusId = active && active.closest && active.closest(".card") ? active.closest(".card").dataset.id : null;
+  const focus = focusInCard();
   const cardsEl = document.getElementById("cards");
   const keep = new Set(s.cards.map((c) => c.id));
   for (const k of drafts.keys()) if (!keep.has(k)) drafts.delete(k);
-  cardsEl.replaceChildren(...(s.cards.length ? s.cards.map(renderCard)
-    : [h("p", { class: "empty" }, "Nothing needs you. Gates, blockers and reports from ticket threads land here, with a button for each reply they offer.")]));
-  if (focusId) {
-    const inp = cardsEl.querySelector('[data-id="' + CSS.escape(focusId) + '"] input');
-    if (inp && !inp.disabled) inp.focus();
-  }
+  syncCards(cardsEl, s.cards);
+  restoreFocus(cardsEl, focus);
   document.getElementById("n-cards").textContent = s.cards.length ? String(s.cards.length) : "";
   const open = s.tree.filter((t) => !t.done);
   document.getElementById("n-tix").textContent = s.tree.length ? open.length + " open" : "";

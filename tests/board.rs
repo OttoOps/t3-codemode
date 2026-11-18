@@ -714,3 +714,70 @@ async fn links_stored_before_settling_still_load() {
     assert_eq!(old, ln);
     assert_eq!((old.settled_at, old.restored_at), (None, None));
 }
+
+fn run_page(html: &str, scenario: &str) -> Value {
+    let open = html.find("<script>").unwrap() + "<script>".len();
+    let close = html.rfind("</script>").unwrap();
+    let src =
+        format!("{}\n{}\nJSON.stringify(({scenario})())", include_str!("support/board_dom.js"), &html[open..close]);
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        use rquickjs::CatchResultExt;
+        let out: String = ctx.eval(src).catch(&ctx).unwrap_or_else(|e| panic!("{e}"));
+        serde_json::from_str(&out).unwrap()
+    })
+}
+
+#[tokio::test]
+async fn typing_in_a_card_reply_survives_state_events() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    join_board(&s.h, WORKER, "widgets#42").await;
+    s.h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": GATE})).await;
+    s.h.wf(WORKER, "send", json!({"kind": "gate", "gate": "merge", "body": GATE})).await;
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    let ids: Vec<Value> = st["cards"].as_array().unwrap().iter().map(|c| c["id"].clone()).collect();
+    assert_eq!(ids, [json!("a1"), json!("a2")]);
+    let scenario = format!(
+        r#"() => {{
+  const base = {st};
+  const input = (id) => document.querySelector('#cards [data-id="' + id + '"] input');
+  const changed = (id, text) => ({{ ...base, cards: base.cards.map((c) => c.id === id ? {{ ...c, text }} : c) }});
+  emitState(base);
+  const first = input("a1");
+  first.focus();
+  typeKeys("hello");
+  first.setSelectionRange(2, 2);
+  emitState(base);
+  typeKeys("X");
+  emitState(changed("a2", "the other card changed"));
+  typeKeys("Y");
+  emitState({{ ...base, cards: [{{ ...base.cards[1], id: "a9" }}, ...base.cards] }});
+  typeKeys("Z");
+  const kept = input("a1") === first;
+  emitState(changed("a1", "this card changed"));
+  typeKeys("W");
+  const rebuilt = input("a1");
+  rebuilt.setSelectionRange(1, 4, "backward");
+  emitState(changed("a1", "this card changed again"));
+  const last = input("a1");
+  return {{
+    kept,
+    rebuilt: rebuilt !== first && last !== rebuilt,
+    value: last.value,
+    focused: document.activeElement === last,
+    selection: [last.selectionStart, last.selectionEnd, last.selectionDirection],
+    order: [...document.getElementById("cards").children].map((c) => c.dataset.id),
+  }};
+}}"#
+    );
+    let r = run_page(&html, &scenario);
+    assert_eq!(r["kept"], true, "{r}");
+    assert_eq!(r["rebuilt"], true, "{r}");
+    assert_eq!(r["value"], "heXYZWllo", "{r}");
+    assert_eq!(r["focused"], true, "{r}");
+    assert_eq!(r["selection"], json!([1, 4, "backward"]), "{r}");
+    assert_eq!(r["order"], json!(["a1", "a2"]), "{r}");
+}
