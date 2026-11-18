@@ -93,9 +93,59 @@ jobs:
       - name: The cross-built binary is x86_64
         if: matrix.target == 'x86_64-apple-darwin'
         run: test "$(lipo -archs "$BIN")" = x86_64
+      - name: macOS signing happens on tags
+        if: runner.os == 'macOS' && !startsWith(github.ref, 'refs/tags/v')
+        run: echo "::notice title=macOS signing skipped::$ARCHIVE holds an unsigned binary. The sign-macos job signs and notarizes the macOS builds on v* tags only, in the release environment."
+      - name: Package
+        env:
+          COPYFILE_DISABLE: "1"
+        run: |
+          mkdir -p "dist/$ARCHIVE"
+          cp "$BIN" README.md LICENSE "dist/$ARCHIVE/"
+          case "$TARGET" in
+            *-linux-*) cp deploy/t3-codemode.service "dist/$ARCHIVE/" ;;
+            *-apple-darwin) cp deploy/com.ottoops.t3-codemode.plist "dist/$ARCHIVE/" ;;
+            *-windows-*) cp deploy/install.ps1 "dist/$ARCHIVE/" ;;
+          esac
+          cd dist
+          case "$TARGET" in
+            *-windows-*) 7z a -tzip "$ARCHIVE.zip" "$ARCHIVE" ;;
+            *) tar -czf "$ARCHIVE.tar.gz" "$ARCHIVE" ;;
+          esac
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ (endsWith(matrix.target, '-apple-darwin') && startsWith(github.ref, 'refs/tags/v')) && 'unsigned-' || '' }}${{ env.ARCHIVE }}
+          path: dist/${{ env.ARCHIVE }}.*
+          if-no-files-found: error
+
+  sign-macos:
+    name: sign (${{ matrix.target }})
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, build]
+    environment: release
+    permissions: {}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-15
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.version.outputs.version }}
+      ARCHIVE: t3cm-${{ needs.version.outputs.version }}-${{ matrix.target }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: unsigned-${{ env.ARCHIVE }}
+          path: dist
+      - name: Unpack the archive
+        working-directory: dist
+        run: |
+          tar -xzf "$ARCHIVE.tar.gz"
+          rm "$ARCHIVE.tar.gz"
+          echo "BIN=$PWD/$ARCHIVE/t3cm" >> "$GITHUB_ENV"
+          echo "KEYCHAIN=$RUNNER_TEMP/signing.keychain-db" >> "$GITHUB_ENV"
       - name: Check for the macOS signing secrets
-        id: signing
-        if: runner.os == 'macOS'
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
@@ -103,28 +153,16 @@ jobs:
           APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
           DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
           DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
-          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
         run: |
           missing=()
           for name in APPLE_TEAM_ID APPSTORE_KEY_ID APPSTORE_ISSUER_ID APPSTORE_PRIVATE_KEY DEVELOPER_ID_P12 DEVELOPER_ID_P12_PASSWORD; do
             [ -n "${!name}" ] || missing+=("$name")
           done
-          if [ "${#missing[@]}" -eq 0 ]; then
-            echo "sign=true" >> "$GITHUB_OUTPUT"
-            echo "KEYCHAIN=$RUNNER_TEMP/signing.keychain-db" >> "$GITHUB_ENV"
-            echo "macOS signing secrets present: signing and notarizing $BIN"
-          elif [ "${#missing[@]}" -eq 6 ] && [ "$IS_TAG" != true ]; then
-            echo "sign=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=macOS signing skipped::No macOS signing secrets are visible to this run, so $ARCHIVE holds an unsigned binary. Codesigning and notarization are skipped."
-          elif [ "$IS_TAG" = true ]; then
-            echo "::error::a release must hold signed macOS binaries; missing secrets: ${missing[*]}"
-            exit 1
-          else
-            echo "::error::the macOS signing secrets are only partly set; missing: ${missing[*]}"
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "::error::a release must hold signed macOS binaries; the release environment is missing: ${missing[*]}"
             exit 1
           fi
       - name: Import the Developer ID identity into a temporary keychain
-        if: steps.signing.outputs.sign == 'true'
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
@@ -158,7 +196,6 @@ jobs:
           fi
           echo "IDENTITY=$identity" >> "$GITHUB_ENV"
       - name: Codesign with the hardened runtime
-        if: steps.signing.outputs.sign == 'true'
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
@@ -172,7 +209,6 @@ jobs:
           grep -qx "TeamIdentifier=$APPLE_TEAM_ID" <<< "$details"
           grep -Eq '^CodeDirectory .*flags=0x[0-9a-f]+\(runtime\)' <<< "$details"
       - name: Notarize
-        if: steps.signing.outputs.sign == 'true'
         env:
           APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
           APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
@@ -202,7 +238,6 @@ jobs:
           fi
           echo "Notarization $id: Accepted"
       - name: Gatekeeper accepts the notarized binary
-        if: steps.signing.outputs.sign == 'true'
         run: |
           for attempt in $(seq 10); do
             if spctl --assess --type open --context context:primary-signature --ignore-cache --no-cache \
@@ -217,7 +252,7 @@ jobs:
           done
           exit 1
       - name: A quarantined copy runs
-        if: steps.signing.outputs.sign == 'true' && matrix.target == 'aarch64-apple-darwin'
+        if: matrix.target == 'aarch64-apple-darwin'
         run: |
           copy="$RUNNER_TEMP/quarantined/t3cm"
           mkdir -p "$(dirname "$copy")"
@@ -226,37 +261,30 @@ jobs:
           got=$(perl -e 'alarm 60; exec @ARGV' "$copy" --version)
           test "$got" = "t3cm $VERSION"
       - name: Delete the temporary keychain
-        if: always() && steps.signing.outputs.sign == 'true'
+        if: always()
         run: |
           rm -f "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP"/AuthKey_*.p8
           if [ -e "$KEYCHAIN" ]; then
             security delete-keychain "$KEYCHAIN"
           fi
-      - name: Package
+      - name: Repackage the signed binary
+        working-directory: dist
         env:
           COPYFILE_DISABLE: "1"
-        run: |
-          mkdir -p "dist/$ARCHIVE"
-          cp "$BIN" README.md LICENSE "dist/$ARCHIVE/"
-          case "$TARGET" in
-            *-linux-*) cp deploy/t3-codemode.service "dist/$ARCHIVE/" ;;
-            *-apple-darwin) cp deploy/com.ottoops.t3-codemode.plist "dist/$ARCHIVE/" ;;
-            *-windows-*) cp deploy/install.ps1 "dist/$ARCHIVE/" ;;
-          esac
-          cd dist
-          case "$TARGET" in
-            *-windows-*) 7z a -tzip "$ARCHIVE.zip" "$ARCHIVE" ;;
-            *) tar -czf "$ARCHIVE.tar.gz" "$ARCHIVE" ;;
-          esac
+        run: tar -czf "$ARCHIVE.tar.gz" "$ARCHIVE"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARCHIVE }}
-          path: dist/${{ env.ARCHIVE }}.*
+          path: dist/${{ env.ARCHIVE }}.tar.gz
           if-no-files-found: error
 
   checksums:
     name: checksums
-    needs: build
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success'
+      && (needs.sign-macos.result == 'success'
+      || (needs.sign-macos.result == 'skipped' && !startsWith(github.ref, 'refs/tags/v'))) }}
+    needs: [build, sign-macos]
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -278,6 +306,7 @@ jobs:
 
   install:
     name: install (${{ matrix.os }})
+    if: ${{ !cancelled() && needs.checksums.result == 'success' }}
     needs: [version, checksums]
     permissions:
       contents: read
@@ -481,8 +510,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
+          pattern: t3cm-*
           path: dist
           merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: SHA256SUMS
+          path: dist
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
