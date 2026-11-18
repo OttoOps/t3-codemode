@@ -1,0 +1,55 @@
+name: Bug report
+description: Report unexpected behavior with a reproducible example.
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report suspected vulnerabilities through
+        [private vulnerability reporting](https://github.com/potto007/t3-codemode/security/advisories/new),
+        not this public form. See the [security policy](https://github.com/potto007/t3-codemode/security/policy).
+
+        Search existing issues first. Remove tokens, pairing codes,
+        machine-specific absolute paths, and personal data from scripts and
+        logs before posting them.
+        Participation follows the [Code of Conduct](https://github.com/potto007/t3-codemode/blob/main/.github/CODE_OF_CONDUCT.md).
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Which release tag or commit are you running? `t3cm status` prints the version.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include your OS, the T3 Code version, how you installed t3cm, the MCP client calling it (for example Claude Code), and any upstream MCP servers configured.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the smallest `execute` or `search` code, board action, or config that reproduces the problem. Use made-up names and content.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include the tool result or error text, the HTTP status, or the exit code.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: For example `journalctl --user -u t3-codemode`. Remove tokens, absolute paths that identify your machine, and any private thread content.
+      render: text
