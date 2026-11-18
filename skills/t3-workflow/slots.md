@@ -109,8 +109,11 @@ A slot names a skill by its bare name (`sol-loop`) or its full name
 5. `~/.codex/skills` (or `$CODEX_HOME/skills`);
 6. the Claude plugin cache, then the Codex plugin cache, as `plugin:name`.
 
-A full name matches only itself, so a recorded full name always wins. A bare
-name that matches several full names uses the first and lists the others. A
+A full name matches only itself, so a recorded full name always wins. A skill
+installed with no namespace has its bare name as its full name: `sol-loop`
+picks tstack's bare `sol-loop` even when `cbrip:sol-loop` is installed too.
+A bare name that matches only namespaced skills uses the first and lists the
+others. A
 skill whose frontmatter sets `disable-model-invocation` resolves as
 **inline**: read its `SKILL.md` at the printed path and apply it step by
 step, because the Skill tool refuses it.

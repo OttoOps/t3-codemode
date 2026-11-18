@@ -334,7 +334,10 @@ def bare(ref):
 
 
 class Resolver:
-    """Finds skills by bare name in any namespace: the session's listed skills first, then the install locations."""
+    """Finds skills by bare name in any namespace: the session's listed skills first, then the install locations.
+
+    An exact full name wins; a skill installed with no namespace has its bare name as its full name.
+    """
 
     def __init__(self, root, listed=()):
         self.root = root
@@ -362,12 +365,13 @@ class Resolver:
     def resolve(self, ref):
         cands = self.candidates(ref)
         names = list(dict.fromkeys(c["name"] for c in cands))
-        hit = [c for c in cands if c["name"] == ref] if ":" in ref else cands
+        exact = [c for c in cands if c["name"] == ref]
+        hit = exact or ([] if ":" in ref else cands)
         if not hit:
             return {"ref": ref, "status": "missing", "others": names}
         e = _entry(ref, hit[0])
         others = [n for n in names if n != e["name"]]
-        if others and ":" not in ref:
+        if others and not exact:
             e.update(status="ambiguous", others=others)
         else:
             e["status"] = "ok"

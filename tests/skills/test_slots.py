@@ -70,9 +70,23 @@ class Resolver(SlotsTestCase):
         r = json.loads(self.t3wf("resolve", "sol-loop", "--json").stdout)
         found = {c["name"]: c["path"] for c in r["candidates"]}
         self.assertEqual(found, {"sol-loop": str(bare_path), "cbrip:sol-loop": str(plugin_path)})
-        self.assertEqual(r["resolved"]["status"], "ambiguous")
+        self.assertEqual(r["resolved"]["status"], "ok")
         self.assertEqual(r["resolved"]["name"], "sol-loop")
-        self.assertEqual(r["resolved"]["others"], ["cbrip:sol-loop"])
+
+    def test_a_bare_name_pins_the_install_with_no_namespace(self):
+        root, _ = self.plugin_skill("cbrip", "sol-loop")
+        self.install_plugins(("cbrip", root))
+        bare_path = self.skill(self.env.home / ".agents" / "skills", "sol-loop")
+        r = json.loads(self.t3wf("resolve", "sol-loop", "--json", "--skills", "cbrip:sol-loop").stdout)
+        self.assertEqual([c["name"] for c in r["candidates"]], ["cbrip:sol-loop", "sol-loop"])
+        self.assertEqual((r["resolved"]["status"], r["resolved"]["path"]), ("ok", str(bare_path)))
+
+    def test_a_bare_name_that_only_matches_namespaces_is_ambiguous(self):
+        cbrip, cbrip_path = self.plugin_skill("cbrip", "sol-loop")
+        tools, _ = self.plugin_skill("tools", "sol-loop")
+        self.install_plugins(("cbrip", cbrip), ("tools", tools))
+        r = json.loads(self.t3wf("resolve", "sol-loop", "--json").stdout)["resolved"]
+        self.assertEqual((r["status"], r["path"], r["others"]), ("ambiguous", str(cbrip_path), ["tools:sol-loop"]))
 
     def test_a_recorded_full_name_wins(self):
         root, plugin_path = self.plugin_skill("cbrip", "sol-loop")
@@ -274,12 +288,13 @@ class Doctor(SlotsTestCase):
         self.assertIn("review: skill cbrip:sol-loop no longer resolves; installed: sol-loop", r.stdout)
 
     def test_an_ambiguous_bare_name_is_a_warning(self):
-        root, _ = self.plugin_skill("cbrip", "sol-loop")
-        self.install_plugins(("cbrip", root))
-        self.skill(self.env.home / ".agents" / "skills", "sol-loop")
+        cbrip, _ = self.plugin_skill("cbrip", "sol-loop")
+        tools, _ = self.plugin_skill("tools", "sol-loop")
+        self.install_plugins(("cbrip", cbrip), ("tools", tools))
         self.write_config({"review": "sol-loop"})
         r = self.t3wf("doctor", "--no-t3")
-        self.assertIn("warn: review: sol-loop matches sol-loop and cbrip:sol-loop; record the full name", r.stdout)
+        self.assertIn("warn: review: sol-loop matches cbrip:sol-loop and tools:sol-loop; record the full name",
+                      r.stdout)
 
     def test_models_are_checked_through_t3(self):
         self.caps(CLAUDE_CAPS)
