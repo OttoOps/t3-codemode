@@ -16,6 +16,7 @@ struct State {
     sent: Vec<Value>,
     calls: Vec<String>,
     send_fails: bool,
+    organize_fails: bool,
     delay: Duration,
 }
 
@@ -85,6 +86,10 @@ impl FakeT3 {
 
     pub fn set_send_fails(&self, fails: bool) {
         self.st().send_fails = fails;
+    }
+
+    pub fn set_organize_fails(&self, fails: bool) {
+        self.st().organize_fails = fails;
     }
 
     pub fn set_delay(&self, delay: Duration) {
@@ -160,6 +165,9 @@ impl FakeT3 {
                           "modelSelection": args["modelSelection"], "runId": format!("run:{id}:1"), "status": "running"}))
             }
             "t3_thread_organize" => {
+                if st.organize_fails {
+                    return Err(T3Error::Unavailable("T3 unreachable (fake)".into()));
+                }
                 st.organized.push(args.clone());
                 let id = args["threadId"].as_str().unwrap_or_default().to_string();
                 if args["action"] == "archive"
