@@ -8,7 +8,13 @@ Judges: Claude Opus 5.5, GPT 6.2 Sol and Claude Sonnet 5.5, each with its own pa
 
 | Gate | Result | Evidence |
 | --- | --- | --- |
-| U1 | pass | scrollHeight = innerHeight at 1440x900, 1280x800, 1024x768, seeded and heavy (30 open tickets) |
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:f9dd0207412cde4b9102a2d6543f9a99fc32addaf1bba88b309a8f922adaaf4a -->
+
+| U1 | incomplete | scrollHeight = innerHeight at 1440x900, 1280x800, 1024x768, seeded and at an observed load of 30 open tickets and 12 decisions; required heavy load of at least 15 decisions not run |
+
+<!-- /coderabbit-ai-generated:v1 -->
 | U2 | pass | at 1440 and 1280 both inputs in view after scrolling every panel; at 1024 the selected input (Launch) in view, and one activation switches to Ask keeping both drafts; Tab presses: Launch 2, Ask 3; `l` and `/` focus them |
 | U3 | not run | the churn board had not started when `stability.js` ran, so this round has no U3 measurement; the next round measures it |
 | U4 | pass | first visible item unchanged after 60 s in Decisions, Tickets and Activity; header slots read cards: 2 new, tickets: 1 new, feed: 15 new; tab switch restored scrollTop 78 |
@@ -17,7 +23,13 @@ Judges: Claude Opus 5.5, GPT 6.2 Sol and Claude Sonnet 5.5, each with its own pa
 | U7 | pass | card order ['blocker', 'gate', 'gate', 'gate', 'gate', 'gate', 'report']; row to card and card to row in one activation each |
 | U8 | pass | all options styled alike; no request before 5 s, one after; Undo sent nothing; a digit only focused its option |
 | U9 | pass | skip links to all five targets; shortcuts inert inside fields and when turned off; `?` lists them; j, g t, g a move focus |
-| U10 | pass | no horizontal scroll at 768 and 390; one panel shown; no target under 44 px; nothing clipped at 195 px (200% zoom); emulated keyboard keeps field and submit in view; a 250 px viewport switches the composer to sheet mode (height and restore on close not measured) |
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:0dede556ad9e07464708b16e6d9312cb3739af2c2ce59b3f19029d35e8e58e59 -->
+
+| U10 | incomplete | no horizontal scroll at 768 and 390; one panel shown; no target under 44 px; nothing clipped at 195 px (200% zoom); emulated keyboard keeps field and submit in view; a 250 px viewport switches the composer to sheet mode (panel and scroll restoration on close not measured; U10 remains incomplete) |
+
+<!-- /coderabbit-ai-generated:v1 -->
 | U11 | pass | header during the cut: "Disconnected. Reconnecting; showing data from 02:33."; panels dimmed; reply controls aria-disabled; panes and composer moved 0 px |
 | P1 | pass | lowest status text light 6.37, dark 6.74; input border light 3.21, dark 4.32 |
 | P2 | pass | sizes ['16px', '13px', '14px', '12px'], weights ['600', '400', '500'], no off-scale spacing |
@@ -25,10 +37,22 @@ Judges: Claude Opus 5.5, GPT 6.2 Sol and Claude Sonnet 5.5, each with its own pa
 | N1 | pass | no gradients, shadows or emoji |
 | N2 | pass | no Markdown; zone MST once; 44 truncated strings, all with full text in a tooltip or disclosure |
 | F2 | pass | `cargo test --release --locked` green; tests/board.rs adds shell, held-arrival, placeholder, deferred-send, option, row, needs-you and stale-stream tests |
-| F3 | pass | Ask error 1x (alert), launch result 1x (both issues failed, so a mixed result was not exercised), card error 1x (alert), 0 announcements matching the sampled Activity patterns |
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:92b02c2044de3273ad5ddbb1944c6c035f5c6572e0187136f9c5aaf8b5a2c8c8 -->
+
+| F3 | incomplete | Ask error 1x (alert), launch result 1x (both issues failed, so a mixed result was not exercised), card error 1x (alert), 0 announcements matching the sampled Activity patterns; completed Ask answer announcement exactly once in a live region not verified |
+
+<!-- /coderabbit-ai-generated:v1 -->
 | F4 | pass | every option, Send, Dismiss, Settle and Restore name carries its card id, ticket label or question |
 
-F1 is covered by the gate scripts and tests above (a launch whose issues both fail, a failing Ask, a card reply that errors, a disconnect, Settle and Restore) and the existing thread-link fallback tests. The scripts do not exercise the hidden-tab notification: it calls the same `Notification` code as before, and permission now comes from the header's Notify me control instead of the first click.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:23005b7c4fd98e2d5310e8f03028c5790b01cb549fe2bfc9e65347f34d8e11f5 -->
+
+F1 is incomplete. The gate scripts and tests cover a launch whose issues both fail, a failing Ask, a card reply that errors, a disconnect, Settle and Restore, plus existing thread-link fallback tests. The hidden-tab notification was not tested for this candidate and remains unverified.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 The heavy board reached 30 open tickets but held at 12 decisions: in this harness a newer gate from a ticket supersedes its older gate card, so the decision count plateaus below the rubric's 15. The 15-decision load was not measured in this round.
 

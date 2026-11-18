@@ -271,6 +271,10 @@ textarea { resize: none; display: block; }
 .srow.gone { height: 32px; border-bottom: 1px dashed var(--line); }
 
 #composer { display: flex; flex-direction: column; }
+@media (min-width: 1200px) and (max-height: 700px) {
+  #composer { max-height: calc(100dvh - 96px); overflow-y: auto; }
+  #composer .dock { flex-shrink: 0; }
+}
 .dock { display: flex; flex-direction: column; min-height: 0; }
 .mode { display: none; }
 .form { padding: 0 12px 12px; display: grid; gap: 8px; }
@@ -507,6 +511,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
     </div>
   </section>
   <section id="composer" aria-label="Launch and Ask" data-mode="launch">
+    <div class="err-strip" id="composer-err" hidden><span id="composer-err-text"></span><button class="btn quiet" type="button" id="composer-err-close">Close</button></div>
     <div class="dock" id="dock">
       <div id="out" aria-label="Launch results and answers">
         <ul id="launch-out" aria-label="Launch results"></ul>
@@ -786,7 +791,7 @@ function sync(list, items, o) {
   const held = [];
   const want = [];
   for (const it of items) {
-    const k = o.key(it);
+    const k = o.key(it, have);
     let el = have.get(k);
     if (el && el.classList.contains("gone")) {
       const fresh = o.make(it);
@@ -897,7 +902,7 @@ function makeCard(c) {
     h("span", { class: "what clip", "data-part": "what" }),
     h("button", { class: "btn", type: "button", "data-part": "undo", onclick: () => undo(card.dataset.id) }, "Undo"));
   const input = h("input", { type: "text", "data-part": "input", autocomplete: "off",
-    oninput: (e) => drafts.set(card.dataset.id, e.target.value),
+    oninput: (e) => drafts.set(card.dataset.id, { owner: cardInstance(card._card), value: e.target.value }),
     onkeydown: (e) => {
       if (e.key === "Escape" && !e.target.value) { e.preventDefault(); e.stopPropagation(); closeReply(card); }
     } });
@@ -923,7 +928,22 @@ function blocked(card) {
 
 function optionsSig(c) { return JSON.stringify([c.options, !!c.ticket]); }
 
+function cardInstance(c) { return JSON.stringify([c.id, c.at, c.ticket]); }
+
 function patchCard(card, c) {
+  const old = card._card;
+  if (old && cardInstance(old) !== cardInstance(c)) {
+    part(card, "input").value = "";
+    part(card, "reply").hidden = true;
+  }
+  if (!old || old.handle !== c.handle) {
+    card._loaded = false;
+    part(card, "full").hidden = true;
+    part(card, "full").firstChild.textContent = "Loading...";
+    part(card, "q").hidden = false;
+    setAttr(part(card, "fullbtn"), "aria-expanded", "false");
+    setText(part(card, "fullbtn"), "Full message");
+  }
   card._card = c;
   setAttr(card, "data-id", c.id);
   setAttr(card, "data-ticket", c.ticket || null);
@@ -978,8 +998,10 @@ function patchCard(card, c) {
   setAttr(input, "placeholder", c.ticket ? "Reply in your own words" : "This card has no ticket to answer");
   input.disabled = !c.ticket;
   const d = drafts.get(c.id);
-  if (d && input.value !== d) input.value = d;
-  if (d) part(card, "reply").hidden = false;
+  if (d && d.owner === cardInstance(c)) {
+    if (input.value !== d.value) input.value = d.value;
+    if (d.value) part(card, "reply").hidden = false;
+  }
   setAttr(part(card, "send"), "aria-label", "Send reply to " + cardLabel(c));
   paintSending(card);
 }
@@ -1114,9 +1136,17 @@ function toggleFull(card) {
   card._loaded = true;
   const pre = box.firstChild;
   pre.textContent = "Loading...";
-  fetch("/api/msg/" + encodeURIComponent(card._card.handle))
-    .then(async (r) => { const m = await r.json(); pre.textContent = r.ok ? m.body : (m.error || "not found"); })
-    .catch((e) => { pre.textContent = String(e.message || e); card._loaded = false; });
+  const handle = card._card.handle;
+  fetch("/api/msg/" + encodeURIComponent(handle))
+    .then(async (r) => {
+      const m = await r.json();
+      if (!card._card || card._card.handle !== handle) return;
+      pre.textContent = r.ok ? m.body : (m.error || "not found");
+    })
+    .catch((e) => {
+      if (!card._card || card._card.handle !== handle) return;
+      pre.textContent = String(e.message || e); card._loaded = false;
+    });
 }
 
 function goneCard(card) {
@@ -1328,7 +1358,7 @@ function syncTickets(tree, cards) {
   const po = panels.open, pd = panels.done;
   const lo = firstState || isLive(po);
   const heldOpen = sync($("open"), open, {
-    key: (t) => t.thread || "pending:" + t.label,
+    key: (t, have) => have.has("pending:" + t.label) ? "pending:" + t.label : t.thread || "pending:" + t.label,
     make: makeTicket,
     patch: (el, t) => patchTicket(el, t, { needs, live: lo, done: false }),
     gone: (el) => goneTicket(el, (l) => {
@@ -1454,6 +1484,7 @@ function makeSettled(it) {
 
 function patchSettled(el, it) {
   const r = part(el, "restore");
+  setAttr(r, "aria-disabled", r._busy ? "true" : null);
   if (it.kind === "t") {
     const t = it.t;
     const lab = part(el, "label");
@@ -1570,8 +1601,8 @@ let everConnected = false;
 function render(s) {
   state = s;
   notifyNew(s.cards);
-  const keep = new Set(s.cards.map((c) => c.id));
-  for (const k of drafts.keys()) if (!keep.has(k)) drafts.delete(k);
+  const keep = new Map(s.cards.map((c) => [c.id, cardInstance(c)]));
+  for (const [k, d] of drafts) if (keep.get(k) !== d.owner) drafts.delete(k);
   syncCards(s.cards);
   syncTickets(s.tree, s.cards);
   syncAsks(s.asks);
@@ -1626,14 +1657,17 @@ function connect() {
 const errStrip = () => $("act-err");
 async function act(btn, path) {
   if (btn.getAttribute("aria-disabled") === "true") return;
+  btn._busy = true;
   setAttr(btn, "aria-disabled", "true");
-  errStrip().hidden = true;
+  const errorId = btn.closest("#composer") ? "composer-err" : "act-err";
+  const error = $(errorId);
+  error.hidden = true;
   try { await post(path); }
   catch (e) {
-    setText($("act-err-text"), e.message);
-    errStrip().hidden = false;
+    setText($(errorId + "-text"), e.message);
+    error.hidden = false;
     announce(e.message, true);
-  } finally { setAttr(btn, "aria-disabled", null); }
+  } finally { btn._busy = false; setAttr(btn, "aria-disabled", null); }
 }
 
 function selectTab(tab, focus) {
@@ -1782,6 +1816,7 @@ document.addEventListener("keydown", (e) => {
     }
     return;
   }
+  if ($("keys").open) { gPending = false; return; }
   if (field || e.ctrlKey || e.metaKey || e.altKey) return;
   const list = listOf(t);
   if (list && itemOf(list, t) === t) {
@@ -1846,6 +1881,7 @@ function wire() {
     prefs.keys = e.target.checked;
     try { localStorage.setItem("t3board.keys", prefs.keys ? "on" : "off"); } catch (_) {}
   });
+  $("composer-err-close").addEventListener("click", () => { $("composer-err").hidden = true; });
   $("act-err-close").addEventListener("click", () => { errStrip().hidden = true; });
   $("settle-all").addEventListener("click", async (e) => {
     const b = e.currentTarget;

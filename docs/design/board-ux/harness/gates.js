@@ -196,7 +196,7 @@ async (page) => {
   r.U10.keyboard = await page.evaluate(() => {
     const f = document.getElementById("issues").getBoundingClientRect();
     const b = document.getElementById("launch-btn").getBoundingClientRect();
-    return { field: [Math.round(f.top), Math.round(f.bottom)], submit: [Math.round(b.top), Math.round(b.bottom)], within: f.bottom <= 460 && b.bottom <= 460 && f.top >= 0, cls: document.getElementById("app").className };
+    return { field: [Math.round(f.top), Math.round(f.bottom)], submit: [Math.round(b.top), Math.round(b.bottom)], within: f.width > 0 && f.height > 0 && b.width > 0 && b.height > 0 && f.top >= 0 && f.bottom <= 460 && b.top >= 0 && b.bottom <= 460, cls: document.getElementById("app").className };
   });
   await page.evaluate(() => {
     Object.defineProperty(window.visualViewport, "height", { configurable: true, get: () => 250 });
