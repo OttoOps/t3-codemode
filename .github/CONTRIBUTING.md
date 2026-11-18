@@ -110,7 +110,10 @@ the triage labels.
 ## Development setup
 
 **Requirements.** Use Linux, macOS or Windows, Git, and Rust 1.95 or newer. CI
-runs the checks on all three.
+runs the checks on all three. To change the installers or workflows, also
+install [ShellCheck](https://www.shellcheck.net/) and
+[actionlint](https://github.com/rhysd/actionlint); `deploy/install.ps1` must
+run on Windows PowerShell 5.1.
 
 **Get the code.** Fork the repository, clone your fork, and create a branch:
 
@@ -126,6 +129,24 @@ MCP servers, so you do not need T3 Code to work on most of the project. Only a
 live run of the service (`deploy/install.sh` or `cargo run -- serve`) needs a
 running T3 Code server.
 
+**Installer changes.** The release workflow's `install` job installs this run's
+own archives on Linux, macOS and Windows, starts the service, checks
+`t3cm status`, and uninstalls. It runs on pull requests that touch `deploy/`,
+the workflow or the Cargo files. To try `install.sh` locally without replacing
+your own install, run it in a clean environment with a scratch `HOME`, so it
+touches neither your binary, your unit or agent, your running service, nor
+your Claude Code config:
+
+```sh
+scratch=$(mktemp -d)
+archive=~/Downloads/t3cm-0.3.0-x86_64-unknown-linux-musl.tar.gz  # the archive you downloaded
+env -i HOME="$scratch" PATH=/usr/bin:/bin bash deploy/install.sh --files-only \
+  --archive "$archive" --sums "$(dirname "$archive")/SHA256SUMS"
+```
+
+`install.ps1` installs under `LOCALAPPDATA` and registers through `claude`, so
+on Windows try it in a throwaway VM or user account rather than your own.
+
 ## Make and check your change
 
 Keep a pull request focused on one change and match the surrounding style. For
@@ -139,6 +160,8 @@ Run the checks CI runs, from the repository root:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --release --locked
+shellcheck deploy/*.sh              # when you change an installer
+actionlint                          # when you change a workflow
 ```
 
 `cargo fmt` applies the formatting rather than just reporting it.

@@ -101,6 +101,8 @@ jobs:
           cp "$BIN" README.md LICENSE "dist/$ARCHIVE/"
           case "$TARGET" in
             *-linux-*) cp deploy/t3-codemode.service "dist/$ARCHIVE/" ;;
+            *-apple-darwin) cp deploy/com.ottoops.t3-codemode.plist "dist/$ARCHIVE/" ;;
+            *-windows-*) cp deploy/install.ps1 "dist/$ARCHIVE/" ;;
           esac
           cd dist
           case "$TARGET" in
@@ -134,6 +136,167 @@ jobs:
           name: SHA256SUMS
           path: dist/SHA256SUMS
           if-no-files-found: error
+
+  install:
+    name: install (${{ matrix.os }})
+    needs: [version, checksums]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, ext: tar.gz }
+          - { os: macos-15, target: aarch64-apple-darwin, ext: tar.gz }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, ext: zip }
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      ARCHIVE: t3cm-${{ needs.version.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
+      T3CM_RELEASES_URL: http://127.0.0.1:8765
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: t3cm-${{ needs.version.outputs.version }}-${{ matrix.target }}
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: SHA256SUMS
+          path: dist
+      - name: Serve the archives the way a GitHub Release does
+        shell: bash
+        run: |
+          mkdir -p "srv/download/v$VERSION"
+          cp dist/* "srv/download/v$VERSION/"
+      - name: Start a systemd user manager
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          runtime="/run/user/$(id -u)"
+          for _ in $(seq 30); do
+            [ -S "$runtime/bus" ] && break
+            sleep 1
+          done
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+
+      - name: Install the latest release (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: |
+          python3 .github/scripts/fake_releases.py 8765 srv "v$VERSION" &
+          trap 'kill $!' EXIT
+          for _ in $(seq 30); do
+            curl -fsSI -o /dev/null http://127.0.0.1:8765/latest && break
+            sleep 1
+          done
+          deploy/install.sh
+      - name: The installed binary runs
+        if: runner.os != 'Windows'
+        run: test "$("$HOME/.local/bin/t3cm" --version)" = "t3cm $VERSION"
+      - name: The downloaded install answers t3cm status
+        if: runner.os != 'Windows'
+        run: |
+          for _ in $(seq 30); do
+            if "$HOME/.local/bin/t3cm" status; then exit 0; fi
+            sleep 1
+          done
+          exit 1
+      - name: Reinstall from the local archive (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: deploy/install.sh --archive "dist/$ARCHIVE" --sums dist/SHA256SUMS
+      - name: The systemd unit verifies
+        if: runner.os == 'Linux'
+        run: systemd-analyze --user verify "$HOME/.config/systemd/user/t3-codemode.service"
+      - name: The launchd agent lints
+        if: runner.os == 'macOS'
+        run: |
+          plutil -lint "$HOME/Library/LaunchAgents/com.ottoops.t3-codemode.plist"
+          launchctl print "gui/$(id -u)/com.ottoops.t3-codemode" | grep -E 'state|program|path'
+      - name: The reinstalled service answers t3cm status
+        if: runner.os != 'Windows' && always()
+        run: |
+          for _ in $(seq 30); do
+            if "$HOME/.local/bin/t3cm" status; then exit 0; fi
+            sleep 1
+          done
+          case "$RUNNER_OS" in
+            Linux) systemctl --user status t3-codemode --no-pager || true; journalctl --user -u t3-codemode --no-pager || true ;;
+            macOS) cat "$HOME/Library/Logs/t3-codemode/"*.log || true ;;
+          esac
+          exit 1
+      - name: Uninstall (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: |
+          deploy/install.sh --uninstall
+          test ! -e "$HOME/.local/bin/t3cm"
+          test ! -e "$HOME/.config/systemd/user/t3-codemode.service"
+          test ! -e "$HOME/Library/LaunchAgents/com.ottoops.t3-codemode.plist"
+          sleep 2
+          if curl -fsS http://127.0.0.1:47731/healthz; then echo "::error::t3cm still serves after uninstall"; exit 1; fi
+
+      - name: Install the latest release (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $srv = Start-Process python -ArgumentList '.github/scripts/fake_releases.py', '8765', 'srv', "v$env:VERSION" -PassThru -WindowStyle Hidden
+          try {
+            for ($i = 0; $i -lt 30; $i++) {
+              try { Invoke-WebRequest http://127.0.0.1:8765/latest -Method Head -UseBasicParsing | Out-Null; break } catch { Start-Sleep -Seconds 1 }
+            }
+            & ./deploy/install.ps1
+          } finally {
+            Stop-Process -Id $srv.Id -Force
+          }
+      - name: The downloaded install answers t3cm status (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $exe = "$env:LOCALAPPDATA\Programs\t3-codemode\t3cm.exe"
+          for ($i = 0; $i -lt 30; $i++) {
+            & $exe status
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Start-Sleep -Seconds 1
+          }
+          exit 1
+      - name: Reinstall from the local archive (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: '& ./deploy/install.ps1 -Archive "dist/$env:ARCHIVE" -Sums dist/SHA256SUMS'
+      - name: The installed binary runs and the task is registered (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $exe = "$env:LOCALAPPDATA\Programs\t3-codemode\t3cm.exe"
+          $got = & $exe --version
+          if ($got -ne "t3cm $env:VERSION") { throw "t3cm --version printed '$got'" }
+          $task = Get-ScheduledTask -TaskName t3-codemode
+          $task.Actions[0] | Format-List Execute, Arguments
+          $task.Triggers[0].Repetition | Format-List Interval, Duration
+          $task.Settings | Format-List ExecutionTimeLimit, MultipleInstances, RestartCount
+          if ($task.Actions[0].Execute -ne $exe) { throw "the task runs $($task.Actions[0].Execute)" }
+          if ($task.Principal.RunLevel -ne 'Limited') { throw "the task runs elevated" }
+      - name: The reinstalled service answers t3cm status (Windows)
+        if: runner.os == 'Windows' && always()
+        shell: powershell
+        run: |
+          $exe = "$env:LOCALAPPDATA\Programs\t3-codemode\t3cm.exe"
+          for ($i = 0; $i -lt 30; $i++) {
+            & $exe status
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Start-Sleep -Seconds 1
+          }
+          Get-ScheduledTask -TaskName t3-codemode | Get-ScheduledTaskInfo | Format-List
+          Get-Content "$env:LOCALAPPDATA\t3-codemode\logs\t3cm.log" -ErrorAction SilentlyContinue
+          exit 1
+      - name: Uninstall (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          & ./deploy/install.ps1 -Uninstall
+          if (Test-Path "$env:LOCALAPPDATA\Programs\t3-codemode") { throw 'the install folder is still there' }
+          if (Get-ScheduledTask -TaskName t3-codemode -ErrorAction SilentlyContinue) { throw 'the task is still registered' }
 
   attest:
     name: attest
