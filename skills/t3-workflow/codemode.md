@@ -106,34 +106,46 @@ questions go through `wf.board()` and `wf.inbox()`, never `t3_thread_read`.
 
 `execute` fails to connect: fall back to `t3wf` as SKILL.md says, and tell
 the user once: **ACTION NEEDED:** start the code-mode service, here:
-`systemctl --user start t3-codemode`.
+`systemctl --user start t3-codemode` (macOS:
+`launchctl kickstart gui/$(id -u)/com.ottoops.t3-codemode`, or when the agent
+is not loaded,
+`launchctl enable gui/$(id -u)/com.ottoops.t3-codemode && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ottoops.t3-codemode.plist`;
+Windows:
+`Enable-ScheduledTask t3-codemode; Start-ScheduledTask t3-codemode`).
 
 ## Installing t3cm
 
 t3cm is optional. Without it, `t3wf` runs the whole protocol. Offer it at
 most once per session, and install only after the user says yes: it adds a
-systemd user service and a user-scope MCP server.
+per-user service (a systemd user unit, a launchd agent, or a Windows logon
+task) and a user-scope MCP server.
 
-1. **Platform.** It needs Linux with systemd user services. On macOS or
-   Windows, say builds for those are tracked in
-   [OttoOps/t3-codemode#2](https://github.com/OttoOps/t3-codemode/issues/2)
-   and stop.
-2. **Prebuilt release first.** If
-   `gh release view -R OttoOps/t3-codemode` lists an asset for this
-   platform, install it with the steps in that release's notes and skip to
-   step 4.
-3. **Otherwise build from source.**
+1. **Release first.** The installer downloads the latest release, checks it
+   against `SHA256SUMS`, installs `t3cm` and its service, and registers the
+   MCP server:
+   - Linux or macOS: fetch
+     https://raw.githubusercontent.com/OttoOps/t3-codemode/main/deploy/install.sh
+     and run `bash install.sh`.
+   - Windows: fetch `deploy/install.ps1` from the same place and run
+     `powershell -ExecutionPolicy Bypass -File install.ps1`.
+   - On macOS, run it from a GUI login. Over SSH alone, add `--files-only`
+     and have the user run the `launchctl` command it prints after logging in.
+   - To update later, run it again.
+2. **No release yet, or an unsupported machine** (the installer says so):
+   build from source on Linux or macOS.
    - Check `rustc --version` reports 1.95 or newer. If Rust is missing or
      older, ask the user to install or update it through rustup, and stop
      until they have.
    - Clone https://github.com/OttoOps/t3-codemode, or `git pull` in an
      existing checkout.
-   - Run `deploy/install.sh` there. It builds the binary, installs it to
-     `~/.local/bin/t3cm`, enables the `t3-codemode` user unit and registers
-     the MCP server. The build takes a few minutes, so run it in the
-     background.
-   - To update later, `git pull` and run `deploy/install.sh` again.
-4. **Verify.** `curl -s http://127.0.0.1:47731/healthz` must show
-   `"connected": true` under `t3`.
-5. **Tell the user** the MCP tools load at session start, so new threads use
+   - Run `deploy/install.sh --from-source` there. The build takes a few
+     minutes, so run it in the background.
+3. **Verify.** `curl -s http://127.0.0.1:47731/healthz` must show
+   `"connected": true` under `t3` (Windows:
+   `(Invoke-RestMethod http://127.0.0.1:47731/healthz).t3.connected` must be
+   `True`), and `claude mcp get t3cm` must show an HTTP entry for
+   `http://127.0.0.1:47731/mcp` with the `X-T3-Thread` header. When the
+   installer printed the `claude mcp add` command instead, run it first. When an
+   older `t3cm` entry points elsewhere, ask the user before replacing it.
+4. **Tell the user** the MCP tools load at session start, so new threads use
    t3cm and this one stays on `t3wf`. The board is at http://127.0.0.1:47731/.
