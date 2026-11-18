@@ -1,0 +1,48 @@
+[package]
+name = "t3-codemode"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Code Mode MCP server over T3 Code: search + execute, with memory and a thread-workflow layer"
+license = "MIT"
+repository = "https://github.com/potto007/t3-codemode"
+publish = false
+
+[[bin]]
+name = "t3cm"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+getrandom = "0.3"
+jiff = "0.2"
+oxc_allocator = "=0.146.0"
+oxc_ast = "=0.146.0"
+oxc_codegen = "=0.146.0"
+oxc_diagnostics = "=0.146.0"
+oxc_parser = "=0.146.0"
+oxc_semantic = "=0.146.0"
+oxc_span = "=0.146.0"
+oxc_transformer = "=0.146.0"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+rquickjs = { version = "0.14", features = ["futures", "parallel"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "io-std", "io-util", "net", "signal", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+
+[dev-dependencies]
+axum = { version = "0.8", default-features = false, features = ["form", "http1", "json", "tokio"] }
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 4
