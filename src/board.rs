@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::clock::local_clock;
+use crate::clock::{local_clock, parse_ts};
 use crate::store::{Link, Pending};
 use crate::t3::{BoxFut, truncate_chars};
 use crate::wf::{ACTIVE, ENDED_BADLY, WATCHER, Wf, capped, count, header};
@@ -776,7 +776,7 @@ impl Wf {
         for ln in unsettled {
             let newer = |at: Option<&str>| match ln.restored_at.as_deref() {
                 None => true,
-                Some(r) => matches!((self.mins(at), self.mins(Some(r))), (Some(a), Some(b)) if a < b),
+                Some(r) => matches!((at.and_then(parse_ts), parse_ts(r)), (Some(a), Some(b)) if a > b),
             };
             let mirror = match self.read_thread(&ln.child).await {
                 Ok(th) if th["settled"] == true => newer(th["settledAt"].as_str()),
@@ -789,7 +789,7 @@ impl Wf {
             }
             let _g = self.lock.lock().await;
             let Some(mut fresh) = self.store.link_get(&ln.child)? else { continue };
-            if fresh.settled_at.is_none() && fresh.restored_at == ln.restored_at {
+            if fresh.closed && fresh.settled_at.is_none() && fresh.restored_at == ln.restored_at {
                 fresh.settled_at = Some(self.now());
                 self.store.link_save(&fresh)?;
                 changed = true;
