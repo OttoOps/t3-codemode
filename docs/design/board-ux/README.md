@@ -15,6 +15,7 @@ the redesign against them and commits its blind-judging scores in
 | [`references/`](references/README.md) | Sixteen screenshots of comparable products, with source URLs, the basis for keeping each, and notes on what each does well. |
 | [`current/`](current/) | Captures of the current board (commit `7e29c9d`) under realistic load, plus `report.json` with the measurements the review cites. |
 | [`harness/`](harness/README.md) | The seeded demo board and the capture scripts, so every capture and measurement here can be rerun. |
+| [`judging/`](judging/README.md) | The blind-judging rounds for the redesign: each round's gates, judged scores with evidence, and letter key. |
 
 ## Method
 

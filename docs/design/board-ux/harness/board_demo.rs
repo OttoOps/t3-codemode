@@ -254,6 +254,7 @@ impl Demo {
         }
         let churn = std::env::var("BOARD_DEMO_CHURN").as_deref() == Ok("1");
         let mut late: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        let mut gated: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut n = 0usize;
         loop {
             tokio::time::sleep(Duration::from_secs(every)).await;
@@ -264,7 +265,11 @@ impl Demo {
                 self.app.wf.dispatch("send", Some(&t), json!({"kind": "note", "body": NOTES[n % NOTES.len()]})).await;
             if n.is_multiple_of(6) {
                 let (gate, body) = GATES[n / 6 % GATES.len()];
-                let t = id("ticket", 1 + (n * 3) % 14);
+                let t = match late.iter().find(|l| !gated.contains(*l)) {
+                    Some(l) => l.clone(),
+                    None => id("ticket", 1 + (n * 3) % 14),
+                };
+                gated.insert(t.clone());
                 let _ =
                     self.app.wf.dispatch("send", Some(&t), json!({"kind": "gate", "gate": gate, "body": body})).await;
             }
