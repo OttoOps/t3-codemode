@@ -1,7 +1,21 @@
 ---
 name: t3-workflow
-description: The link protocol under every T3 workflow thread - parent and child links watched by a machine-wide watcher, notes, wakes, gates, nudges, escalation, message handles and code mode, run through the t3wf script. Use when t3-overseer, t3-ticket or t3-worker says to, when a message opens with a [t3wf2 header, when a launch brief carries a "t3-workflow link" block, or when the user asks how the T3 workflow works, what its slots (reviewer, passes, delivery, models) are set to, or about installing t3cm. It is the base the role skills run on, not a role of its own.
+description: The T3 workflow for T3 Code, and the router to its skills - the link protocol under every workflow thread (links, notes, wakes, gates, nudges, code mode, the t3wf script), setting up its slots (reviewer, passes, delivery, models), installing t3cm, and the overseer, ticket and worker roles. Use when a role says to, when a message opens with a [t3wf2 header, when a launch brief carries a "t3-workflow link" block, or when the user asks how the T3 workflow works, to set it up or change its reviewer, passes, delivery or models, what those are set to, or about installing t3cm.
 ---
+
+## Which skill
+
+| The user or brief wants | Go to |
+|---|---|
+| to set up the workflow, or change its reviewer, passes, credential renewal, delivery or models | the `setup-t3-workflow` skill |
+| what the slots are set to now | `t3wf slots` ([Slots](#slots)) |
+| several issues worked in parallel | the `t3-overseer` skill |
+| one issue, or issues one after another | the `t3-ticket` skill |
+| a launch brief for one PR's worker | the `t3-worker` skill |
+| t3cm, or installing it | [codemode.md, Installing t3cm](codemode.md#installing-t3cm) |
+| how links, messages and gates work | the rest of this file |
+
+## The protocol
 
 Every thread in the T3 workflow is a **node** with at most one parent
 and any number of children. A parent and child pair is a **link**. One
@@ -93,6 +107,7 @@ acknowledging. Lines under "Notes since your last wake" are the digest.
 The roles' review, passes, credential renewal, delivery and models are
 **slots**, set per user and per repository. `t3wf slots` prints the
 effective settings and how to run each skill; `t3wf doctor` checks them.
+To set or change them, run the `setup-t3-workflow` skill.
 How a role acts on each line, including a skill that no longer resolves:
 [slots.md, Reading slots in a role](slots.md#reading-slots-in-a-role).
 Config file, `AGENTS.md` keys and skill search: [slots.md](slots.md).
