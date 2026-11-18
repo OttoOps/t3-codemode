@@ -37,7 +37,7 @@ Means across judges, each judge's score in brackets (Opus/GPT/Sonnet). Holds mea
 | No slop | 4.11 | 2.00 | yes |
 | Reference fit | 4.06 | 2.33 | yes |
 
-**Decision rule: not met (N3).**
+**Decision rule: not met (N3; no gates measured).**
 
 ## Evidence
 
