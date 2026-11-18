@@ -1746,3 +1746,35 @@ async fn a_failed_read_at_handoff_is_retried_on_the_next_board_tick() {
     h.app.wf.board_tick().await.unwrap();
     assert_eq!(worker_pr(&h)["state"], "merged");
 }
+
+#[tokio::test]
+async fn a_closed_pr_that_reopens_and_merges_between_reads_shows_merged() {
+    let h = H::new();
+    ticket_with_worker(&h).await;
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 86, "closed")]);
+    h.tick(1).await;
+    assert_eq!(worker_pr(&h)["state"], "closed");
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 86, "merged")]);
+    h.tick(2).await;
+    assert_eq!(worker_pr(&h)["state"], "merged");
+    h.tick(3).await;
+    assert_eq!(pr_lists(&h), 2);
+}
+
+#[tokio::test]
+async fn worker_prs_are_read_across_every_page() {
+    let h = H::new();
+    ticket_with_worker(&h).await;
+    h.fake.set_pr_page(2);
+    h.fake.set_prs(
+        WORKER,
+        vec![
+            pull_request("acme/widgets", 87, "merged"),
+            pull_request("acme/widgets", 88, "merged"),
+            pull_request("acme/widgets", 89, "merged"),
+        ],
+    );
+    h.tick(1).await;
+    assert_eq!((worker_pr(&h)["number"].clone(), worker_pr(&h)["state"].clone()), (json!(89), json!("merged")));
+    assert_eq!(pr_lists(&h), 2);
+}

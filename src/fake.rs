@@ -19,6 +19,7 @@ struct State {
     send_fails: bool,
     prs_fail: bool,
     read_fails: bool,
+    pr_page: usize,
     organize_fails: bool,
     delay: Duration,
 }
@@ -122,6 +123,10 @@ impl FakeT3 {
         self.st().prs_fail = fails;
     }
 
+    pub fn set_pr_page(&self, size: usize) {
+        self.st().pr_page = size;
+    }
+
     pub fn set_read_fails(&self, fails: bool) {
         self.st().read_fails = fails;
     }
@@ -223,7 +228,11 @@ impl FakeT3 {
                     .filter(|p| wanted.as_ref().is_none_or(|w| w.contains(&p["state"].as_str().unwrap_or(""))))
                     .cloned()
                     .collect();
-                Ok(json!({"pullRequests": prs, "chains": [], "nextCursor": null}))
+                let size = if st.pr_page == 0 { prs.len().max(1) } else { st.pr_page };
+                let start: usize = args["cursor"].as_str().and_then(|c| c.parse().ok()).unwrap_or(0);
+                let end = (start + size).min(prs.len());
+                let next = (end < prs.len()).then(|| end.to_string());
+                Ok(json!({"pullRequests": prs[start.min(end)..end], "chains": [], "nextCursor": next}))
             }
             "t3_project_list" => Ok(json!({"projects": st.projects, "nextCursor": null})),
             "t3_thread_launch" => {
