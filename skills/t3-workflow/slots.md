@@ -14,6 +14,44 @@ The role skills name capabilities, not skills. Each **slot** holds one, and
 A slot with no setting uses its default, so a machine with no config at all
 works.
 
+## Reading slots in a role
+
+A role reads its slots when it starts and again on every resume, because a
+skill can be installed or removed mid-ticket:
+
+```bash
+t3wf slots --skills '<every skill this session lists, comma separated>'
+```
+
+Run it through the `t3wf` script in code mode too: t3cm has no `wf` route
+for slots. Each line is one slot, `<slot>: <setting> [<source layer>]`; add
+`--json` for the same data as fields. Act on each skill entry by its form:
+
+| Entry | Do |
+|---|---|
+| `<name> (Skill tool)` | invoke `<name>` with the Skill tool |
+| `<name> (inline: read <path> and apply it)` | read that `SKILL.md` and apply it step by step, as if invoked; the Skill tool refuses it |
+| `SKIP <name>: no longer resolves` | **skip** it (below) |
+| `none` | the slot is off |
+
+A `PROBLEM:` on a line (a tag-deploy with no deploy skill, a model T3 does
+not offer) is a skip too, and that slot falls back to its default. A
+`config problem (ignored)` line is one note: the file or block it names is
+ignored, and the layers below it decide.
+
+**Skip** means carry on without that skill, and say so once per skill per
+run, in one note to the parent:
+`t3wf send --kind note --body 'slot <slot>: <name> skipped, <reason>'`. At
+the root, tell the user that line. A skipped slot never opens a gate,
+raises a blocker, or stops the ticket; `t3wf doctor` is where the user
+repairs it.
+
+**No config.** When the first line says `config: none (defaults)`, every
+slot runs on its default. The overseer and the ticket each tell the user
+once per run: "No T3 workflow config yet, so every slot uses its default.
+Run the `setup-t3-workflow` skill to pick a reviewer, passes, delivery and
+models." A ticket with a parent sends that line up as a note.
+
 ## Where settings live
 
 The repository's setting wins, slot by slot. `delivery` and `models` merge
@@ -81,7 +119,7 @@ step, because the Skill tool refuses it.
 
 | Command | Use |
 |---|---|
-| `t3wf slots [--skills <names>]` | at run time: each slot's effective setting, its source layer, and how to invoke its skill. A skill that no longer resolves prints as `SKIP <name>`: skip that slot, tell the parent in one note, and carry on. |
+| `t3wf slots [--skills <names>]` | at run time: each slot's effective setting, its source layer, and how to invoke its skill ([Reading slots in a role](#reading-slots-in-a-role)) |
 | `t3wf resolve <name>` | every installed skill a name matches, in search order |
 | `t3wf doctor` | every configured skill still resolves, models exist in T3, delivery is complete; exits 1 on a problem |
 | `t3wf check-config` | the config file's and the `AGENTS.md` block's shape, offline |

@@ -71,6 +71,9 @@ no ticket message lands in any model's context.
   with `wf.board({ parent: "board", all: true })`, `wf.cards({ all: true })`
   and `wf.feed()`, writes the answer onto the page, and is archived.
 
+Slots have no `wf` route: read them with the `t3wf slots` script, as
+[slots.md](slots.md#reading-slots-in-a-role) says, in code mode too.
+
 ## Per role
 
 **Ticket.** Join from the brief, send gates, blockers and the handoff to the

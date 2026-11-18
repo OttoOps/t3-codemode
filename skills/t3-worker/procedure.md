@@ -1,8 +1,6 @@
 ---
 name: t3-worker
-description: Procedure for a T3 Code worker thread that builds one pull request of a piece of work in its own worktree, follows it until it is delivered (merged, and deployed where the repo deploys), and hands off to the orchestrator thread. The worker thread follows this body inline through the t3-worker skill, and t3-ticket reads this frontmatter for the worker's model and effort. Not for dispatch as a subagent.
-effort: high
-model: claude-opus-5-5
+description: Procedure for a T3 Code worker thread that builds one pull request of a piece of work in its own worktree, follows it until it is delivered (merged, and deployed where the repo deploys), and hands off to the orchestrator thread. The worker thread follows this body inline through the t3-worker skill. Not for dispatch as a subagent.
 ---
 
 You are the worker thread for one pull request (PR) of a piece of work: a
@@ -28,12 +26,13 @@ every message to the orchestrator goes through `t3wf send`, and a message
 that opens with `[t3wf2` needs no command before you act on its body. The
 kinds this procedure sends: `event` (PR opened, ready to merge, updated),
 `note` (routine progress that needs nothing from the orchestrator: built,
-review started, checks green), `gate` (step 7), `blocker` (a stop: wrong
-checkout, wrong identity, a sol-loop dispute), and `handoff` (step 6).
+review started, checks green, a skipped slot), `gate` (step 7), `blocker` (a
+stop: wrong checkout, wrong identity), and `handoff` (step 6).
 
 `t3-workflow` asks each role for one thing. Yours is:
 
-- **Resume step:** re-read the step you were on. Once the PR is open,
+- **Resume step:** re-read the step you were on, and read the slots again
+  (step 1). Once the PR is open,
   `list_thread_pull_requests`: when this PR (or a follow-up PR) is no
   longer watched, call `watch_pull_request` on it again. Then check the
   PR's state (`gh pr view <number> --json state,headRefOid,statusCheckRollup`)
@@ -41,8 +40,8 @@ checkout, wrong identity, a sol-loop dispute), and `handoff` (step 6).
 
 When you wait on a person, send the gate: `t3wf send --kind gate --gate
 merge --body '<action line>'` when you send "ready to merge", `--gate
-review` when you send sol-loop findings for the user to decide, `--gate sso`
-(or the gate's name) for step 7. It opens the gate, so the watcher reads
+review` when you send review findings for the user to decide, and the
+gate's own name for step 7. It opens the gate, so the watcher reads
 your silence as a wait, not a stall. Clear it with `t3wf gate --clear` when
 the answer, "Merged", or "Delivered" arrives.
 
@@ -59,6 +58,12 @@ the default branch, send the orchestrator the status output and the line
 "worker bound to the main checkout, not building", then end the turn. The
 main checkout belongs to every thread; this PR's work belongs in its own
 worktree.
+
+Read the slots with `t3wf slots`, as
+[Reading slots in a role](../t3-workflow/slots.md#reading-slots-in-a-role)
+says. Three lines steer this procedure: `review` (the review in step 2),
+`passes` (Publishing, step 2) and `credentials` (step 7). Send the skip
+notes it calls for now.
 
 ## 2. Build
 
@@ -78,10 +83,9 @@ When the brief lists `Passes:`, they are part of the scope: after the
 build, invoke each pass's skill with the Skill tool, in the brief's order,
 each on the text the one before it left, and commit its fixes. The PR is
 done when the last pass comes back clean. The split's approval runs the
-passes, not what they gate: a `say` or scene wording change outside the
-veracity run's own fixes, an audio re-render, and any GPU use each go to
-the orchestrator as a human gate (step 7). Name each pass and its result in
-the PR description.
+passes, not what they gate: anything a pass leads to that the repo's rules
+reserve for a person, and any GPU use, goes to the orchestrator as a human
+gate (step 7). Name each pass and its result in the PR description.
 
 Before every commit and every push, check the identity git and `gh` will
 use:
@@ -100,25 +104,28 @@ user's account. When anything differs, stop: send the orchestrator the
 outputs and what was expected, then end the turn. Nothing is committed or
 pushed under the wrong identity.
 
-### Review with sol-loop
+### Independent review
 
 When the acceptance line holds and the done-checks pass, commit the PR's
-scope, then invoke the `sol-loop` skill with the Skill tool and follow
-it on this branch, before anything is pushed. Its base is
+scope, read the slots again, then run the `review` slot's skill on this
+branch, as its entry says, before anything is pushed. Its base is
 `git merge-base HEAD origin/main`, its intent is the PR's acceptance line,
-and its out-of-scope is the work the brief gives to later PRs. Every scoped
-change is committed, so the reviewer runs with `isolation: "worktree"`,
-and sol-loop removes each round's worktree once its verdict is recorded.
-Name any it could not remove in the "opened" message (step 3). Commit each
-fix the loop makes, with the identity check above.
+and its out-of-scope is the work the brief gives to later PRs. Follow it to
+its verdict. Name any review worktree it could not remove in the "opened"
+message (step 3). Commit each fix the review leads to, with the identity
+check above.
 
-- **Agreed:** go to step 3. The PR description carries the skill's
-  `Reviewed with sol-loop` line.
-- **Stuck** (a finding disputed after two replies, or the budget ends with
-  a blocker or should open), **or no route runs Sol:** send the
-  orchestrator the open findings, both sides in 2-3 lines each, or the
-  blocker. End the turn. The user decides, and the orchestrator relays the
-  answer. Push nothing until it comes.
+- **Agreed:** go to step 3. The PR description carries any line the
+  reviewer asks for, word for word.
+- **Stuck** (a finding disputed after two replies, or the review's budget
+  ends with a blocker open), **or the reviewer cannot run** (its model or
+  route is down): send the orchestrator the open findings, both sides in
+  2-3 lines each, or the blocker, as the `review` gate. End the turn. The
+  user decides, and the orchestrator relays the answer. Push nothing until
+  it comes.
+- **No reviewer** (`review: none`, or the reviewer skipped): go to step 3.
+  The PR description says no independent review ran, and why: none is
+  configured, or the configured reviewer no longer resolves.
 
 A follow-up PR (step 5) runs this review too. A push for a wake in step 4
 does not.
@@ -174,11 +181,13 @@ the turn.
 
 Each arrives as a `reply` on the link; act on its body:
 
-- **"Merged #<number> at <sha>. Hand off."** (delivery `merge`): step 6.
+- **"Merged #<number> at <sha>. Hand off."**: step 6, whatever the
+  brief's delivery. The orchestrator sends it for a `tag-deploy` PR when
+  the deploy was skipped.
 - **"Delivered: <tag> <pipeline URL>. Hand off."** (delivery
   `tag-deploy`): step 6.
 - **"Deploy failed: ..."**: step 5.
-- **A user decision** (a sol-loop dispute, a gate cleared): act on it from
+- **A user decision** (a review dispute, a gate cleared): act on it from
   the step that was waiting.
 
 ## 5. Deploy failed: follow-up PR
@@ -190,7 +199,7 @@ worktree:
 1. `git fetch origin`, then `git switch -c <brief branch>-fix origin/main`.
    When that name is taken (local branch, `git ls-remote --heads origin`,
    or `gh pr list --state all --head <name>`), add `-2`, `-3`.
-2. Steps 2 to 4 for the new PR, its sol-loop review included. Its
+2. Steps 2 to 4 for the new PR, its review included. Its
    acceptance line is "the deploy that failed succeeds". Its "opened"
    message names it as a follow-up of #<number>.
 
@@ -198,8 +207,7 @@ You own the change until the fix is delivered.
 
 ## 6. Delivered: hand off
 
-Run this only after the orchestrator's "Merged" (delivery `merge`) or
-"Delivered" (delivery `tag-deploy`) message.
+Run this only after the orchestrator's "Merged" or "Delivered" message.
 
 1. Push every branch this thread committed to: the brief's branch, a
    follow-up branch, and any other branch you made (other threads' branches
@@ -213,8 +221,9 @@ Run this only after the orchestrator's "Merged" (delivery `merge`) or
    next PR from the brief as its next-session focus. Send it; do not save
    it to `~/.claude/handoffs/`, because a saved handoff supersedes the
    project's live one, which belongs to the user. It states the delivery
-   result: the merge commit, and for `tag-deploy` the tag and the pipeline
-   URL, plus the URL of any follow-up PR.
+   result: the merge commit, and after "Delivered" the tag and the
+   pipeline URL (after "Merged" on a `tag-deploy` brief, that the deploy
+   was skipped), plus the URL of any follow-up PR.
 3. Send the block, verbatim and whole, to the orchestrator with `t3wf send
    --kind handoff --body -` through a quoted heredoc. It closes the link.
 4. `t3wf sweep`.
@@ -232,12 +241,16 @@ the exact command or link the user will use; it opens the gate. End the
 turn. The orchestrator
 tells the user and messages you once it clears; then `t3wf gate --clear`.
 
-**AWS SSO gate.** When an AWS call fails because the SSO session expired,
-follow the `aws-sso-login` skill: start `aws sso login` in the
-background yourself, then send the orchestrator the gate naming the profile
-and saying the sign-in tab is already open in the user's browser, so the
-user only has to approve it. The login's exit wakes you; resume from there
-without waiting for the orchestrator.
+**Credential renewal.** When a command fails and its output matches a
+pattern on the `credentials` slot's line (`/<pattern>/ -> <skill>`, a
+Python regular expression), run that renewal skill as its entry says, then
+run the failed command again, once. When the renewal needs the user (a
+sign-in to approve), send its gate naming what the user does; when the
+renewal's own exit wakes you, retry then, without waiting for the
+orchestrator. When the retry fails too, send a `blocker` carrying the
+command and its output. A failure no pattern matches, or one whose renewal
+skill is skipped, goes back to the step it came from, as it would with no
+renewal configured.
 
 ## Publishing
 
@@ -253,37 +266,28 @@ not included.
    skill with the Skill tool and follow it. Knowing the skill's sections is
    not running it. An earlier PR's description is never the format: it may
    have skipped this step too, and copying it passes the miss on.
-2. **Passes.** Run these on the whole text from step 1, in this order:
-   1. **Voice.** The voice skill of the person the text goes out under,
-      when one is installed. Invoke it with the Skill tool and follow all of
-      it, including any check script it ships. Fix every hard violation
-      before the next pass. A person with no voice skill gets no voice
-      pass; say so.
-   2. **unslop.** The skill sets `disable-model-invocation`, so the Skill
-      tool refuses it. Read `~/.claude/skills/unslop/SKILL.md` (or, when
-      that is missing, the repo's `.claude/skills/unslop/SKILL.md`) and
-      check the text against every numbered rule in it, one rule at a time.
-      Fix each violation. Where the format from step 1 requires something a
-      rule forbids (a parenthetical issue reference, a template heading),
-      keep the format and note the exception. When no copy exists, say the
-      pass did not run.
-   3. **The user's own passes.** Any further voice or editing pass the
-      user's global rules under `~/.claude/rules/` name, in the order they
-      give.
-
-   A pass scoped to part of the text, such as a skill call whose arguments
-   name only one section, does not cover the rest.
+2. **Passes.** Run the `passes` slot's skills on the whole text from
+   step 1, in the order the slot lists them, each on the text the one
+   before it left, each as its entry says: the Skill tool, or inline from
+   its `SKILL.md`. Follow all of each pass, including any check script it
+   ships, and apply every rule it sets, one rule at a time. Fix each
+   violation before the next pass. Where the format from step 1 requires
+   something a rule forbids (a parenthetical issue reference, a template
+   heading), keep the format and note the exception. A slot of `none` runs
+   no pass. A pass scoped to part of the text, such as a skill call whose
+   arguments name only one section, does not cover the rest.
 3. **Report.** Where you report the publish (for a PR, the "opened"
    message), add a `Publishing:` line: the format skill you invoked, the
    template you filled, or "no format set by the repo"; each pass you ran,
-   with its result; and each `unslop` rule you did not apply, with the
-   reason. Never say a pass ran if you skipped part of it.
+   with its result, or "passes: none configured"; each skipped pass; and
+   each rule a pass set that you did not apply, with the reason. Never say
+   a pass ran if you skipped part of it.
 
 Text you add or change after step 2, including a `gh pr edit --body-file`
 after the PR opens or an issue number inserted after the draft, goes through
 step 2 again, and the report covers it. A rewrite of the whole description
 starts again at step 1. A fixed-format line that a skill requires word for
-word, such as sol-loop's `Reviewed with sol-loop` line, keeps its wording.
+word, such as a reviewer's sign-off line, keeps its wording.
 
 This section is the single copy of the publishing rule. `t3-ticket` and
 `t3-worker` point here.

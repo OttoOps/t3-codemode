@@ -1,6 +1,6 @@
 ---
 name: t3-worker
-description: Worker side of t3-ticket - build one PR in this T3 thread's worktree, review it with sol-loop, follow it to merged and deployed, hand off to the orchestrator. Use only from a t3-ticket launch brief or when told to be an issue's PR worker. A user handing over an issue to work is t3-ticket.
+description: Worker side of t3-ticket - build one PR in this T3 thread's worktree, review it with the configured reviewer, follow it to merged and deployed, hand off to the orchestrator. Use only from a t3-ticket launch brief or when told to be an issue's PR worker. A user handing over an issue to work is t3-ticket.
 ---
 
 This role runs on the `t3-workflow` link protocol, as a child of the

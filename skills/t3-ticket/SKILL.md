@@ -62,7 +62,7 @@ For example:
 `**ACTION NEEDED:** reply "merge and deploy" to merge #81 and push content/v1.4.2, or review it first, here: https://github.com/acme/widgets/pull/81`
 
 - The verb phrase names what the user clicks, runs, or answers, in plain
-  words. This skill's own terms, such as "gate" and "seam", stay out of it.
+  words. This skill's own terms, such as "gate" and "slot", stay out of it.
 - The URL is bare text, with no markdown link label, and points at the
   thing to act on: the PR, or the run itself. When the action is a command,
   put the exact command in backticks after `here:`. When the action is a
@@ -75,7 +75,8 @@ For example:
 
 `t3-workflow` asks each role for one thing. This role's is:
 
-- **Resume step:** `t3wf board` for this work's worker threads, and
+- **Resume step:** read the slots again (step 1), `t3wf board` for this
+  work's worker threads, and
   re-show any action line the user has not acted on. While a deploy runs,
   check `list_scheduled_tasks` for its deploy watch; when it is missing,
   create it again as "The deploy watch" says, with the original
@@ -103,17 +104,21 @@ parent (an overseer), three more rules hold:
 3. `t3_worktree_status`: note the main workspace root and the repo
    (`gh repo view --json nameWithOwner,url`). Worktree removal and branch
    cleanup run there.
-4. Read the repo's `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `README.md`
-   (contributing and versioning), and `docs/agents/`. Settle the two seams
-   and the conventions below, from the repo's `## Agent workflow` section
-   when it has one, else by inference. Show every inferred value under the
-   split (step 2) so the user's approval confirms it.
+4. Read the slots with `t3wf slots` from the main workspace root, as
+   [Reading slots in a role](../t3-workflow/slots.md#reading-slots-in-a-role)
+   says, and send the skip and no-config lines it calls for. The `delivery`
+   line is the delivery (`merge`, or `tag-deploy` via a deploy skill) and
+   the `model worker` line the worker's model (step 3). A `tag-deploy`
+   whose deploy skill is skipped delivers by `merge`.
+5. Read the repo's `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `README.md`
+   (contributing and versioning), and `docs/agents/`. Settle the
+   conventions below, from the repo's `## Agent workflow` section when it
+   has one, else by inference. Show every inferred value under the split
+   (step 2), with the delivery, so the user's approval confirms it.
 
    | Setting | Values | Inferred when the repo does not say |
    |---|---|---|
    | Tracker | `github-issues`, `none` | `github-issues` when the user named an issue, else `none` |
-   | Delivery | `merge`, `tag-deploy` | `tag-deploy` when the repo documents a deploy started by pushing a tag, or has a `deploy` skill in `.claude/skills/`; else `merge` |
-   | Deploy skill | a skill name | the repo's `deploy` skill |
    | Merge method | `merge`, `squash`, `rebase` | what the repo documents (`gh pr merge --merge`), else the method its recent merged PRs show |
    | PR format | a skill or template | the `pr` skill when it is available, else `.github/pull_request_template.md`, else none |
    | Checks | commands | the test commands the repo documents |
@@ -136,25 +141,13 @@ with an issue, `<type>/<slug>` without, where `<type>` is the Conventional
 Commits type. Keep N small: a PR is a unit someone can review and revert
 alone.
 
-A veracity audit is long and token-heavy, so a PR gets one only for a
-substantive content change, when the `veracity` skill is available: a new
-training module, or new or changed factual claims in an existing one's
-narration, scenes, quiz or landing copy. A rewording that keeps every
-claim, a typo, timing, layout, styling or audio-only change gets none. The
-entry carries a `Passes:` line naming the change that earns it, with the
-passes in this order, because each reads the text the one before it
-leaves:
-
-1. `veracity`, `mode=unattended`, on the module.
-2. `narration-author` verify: `say` against `frames`, verbatim.
-3. `audio-pipeline`: STT verify of the cue WAVs against `say`, then caption
-   alignment.
-4. `scene-sync`: scene animations against narration frame timing.
-
-Passes 2 to 4 are the repo's own skills (`.claude/skills/`); list each one
-the repo has, and name any it lacks as skipped. Veracity fixes change `say`,
-`frames` and scene text, so without them audio, captions and animation
-drift from the corrected script.
+A PR's entry carries a `Passes:` line only when the repo's rules
+(`AGENTS.md`, `docs/agents/`) name passes for its kind of change, such as a
+content audit for changed factual claims. The line names the change that
+earns them and lists the passes in the order the rules give; name any skill
+the repo's rules call for that is not installed as skipped. These are this
+PR's own passes; the `passes` slot, which every worker runs on what it
+publishes, stays out of the line.
 
 Each branch name must be unused. T3 creates the worker's branch and fails
 the launch with `branch_already_exists` when the name is taken, and work
@@ -171,10 +164,10 @@ empty.
 Show the split under the action line "approve this PR split, or reply with
 changes", and wait for approval. Under the split, list the settings from
 step 1 (inferred ones marked), the delivery each PR gets (merge only, or
-merge then deploy with the tag family the repo's deploy skill would pick
-for its paths), each `Passes:` line (approval runs the passes, but a
-wording change, audio re-render or GPU use they lead to still comes back
-as a gate), and, with an issue, what approval also does to it: the
+merge then deploy with the tag family the `delivery` slot's deploy skill
+would pick for its paths), each `Passes:` line (approval runs the passes,
+but anything they lead to that the repo's rules reserve for a person, and
+any GPU use, still comes back as a gate), and, with an issue, what approval also does to it: the
 split posted as a comment, the issue assigned to the user when it has no
 assignee, and the in-progress label added when the repo has one. The
 approval is the user's confirmation of those writes. Then, with an issue:
@@ -198,23 +191,26 @@ For PR n:
    other work can take the name between the split and the launch. When it
    is taken now, give it the next free suffix and tell the user. Then fill
    in the launch brief below with the final name.
-2. Read the frontmatter of `procedure.md` (path above). Its `model` and
-   `effort` are the worker's; this skill holds no copy of them.
+2. Read the slots again (step 1). The `model worker` line is the
+   worker's model: `<model> effort <effort> on <provider>`, each part
+   present only when set, or `provider default`. A `PROBLEM:` on it is a
+   skip, and the worker gets the provider default.
 3. `t3wf open-child --role worker --label '<#n or slug> PR n/N'`. It prints
    the "t3-workflow link" block for the brief. The worker binds the link
    when it joins.
 4. Call `t3_thread_launch` with:
    - `title`: `<#n or slug> PR n/N: <PR title>`
-   - `modelSelection`: `instanceId` `claudeAgent`, `model` from the
-     frontmatter, and `options` carrying `effort` from the frontmatter, in
-     the shape `orchestrator_capabilities` reports for that model (today
-     `[{"id": "effort", "value": "<effort>"}]`).
+   - `modelSelection`: `instanceId` the line's provider (`claudeAgent`
+     when it names none), its `model`, and, when it names an effort,
+     `options` carrying it in the shape `orchestrator_capabilities`
+     reports for that model (today `[{"id": "effort", "value":
+     "<effort>"}]`). Leave `modelSelection` out for `provider default`.
    - `workspaceStrategy`: `{type: "worktree", baseRef: "main", branch:
      "<branch>", startFromOrigin: true}`
    - `message`: the filled brief.
 5. Read the worker's model and effort with `t3_thread_configure`, passing
    the `threadId` and no `modelSelection`. When they differ from the
-   frontmatter, call `t3_thread_configure` again with the `modelSelection`
+   slot's model, call `t3_thread_configure` again with the `modelSelection`
    from item 4 and tell the user.
 6. Tell the user the worker is running, by its `link`, verbatim, and end
    the turn.
@@ -266,11 +262,12 @@ When a worker reports a blocker, relay it to the user as an action line
 with the command or link the worker named. When the user reports it
 cleared, tell the worker, then end the turn.
 
-Before it opens a PR, the worker reviews it with `sol-loop`. When that
-review gets stuck, or no route runs Sol, the worker sends the open findings
-with both sides. Relay them under the action line "decide each open
-sol-loop finding: fix it, or ship as is", or for no Sol route, "open the PR
-without the sol-loop review, or fix the Sol route". Send the user's answer
+Before it opens a PR, the worker runs the `review` slot's reviewer. When
+that review gets stuck, or the reviewer cannot run, the worker sends the
+open findings with both sides. Relay them under the action line "decide
+each open review finding: fix it, or ship as is", or for a reviewer that
+cannot run, "open the PR without the independent review, or fix the
+reviewer's route". Send the user's answer
 to the worker, then end the turn.
 
 ### PR opened
@@ -312,7 +309,7 @@ Then send the gate:
 - Delivery `tag-deploy`: "reply \"merge and deploy\" to merge #<number>
   and push <family>/v<next version>, or \"merge\" alone, or review it
   first, here: <PR URL>". Take the family and the next version from the
-  repo's deploy skill (its rules for choosing the pipeline and the version,
+  deploy skill (its rules for choosing the pipeline and the version,
   applied to the PR's `files`), and say they are recomputed at deploy time.
 
 End the turn.
@@ -345,8 +342,8 @@ the merged state and continue from item 3.
 
 ### Deploy
 
-Invoke the repo's deploy skill with the Skill tool and follow it, with
-these overrides:
+Run the `delivery` slot's deploy skill as its entry says and follow it,
+with these overrides:
 
 - The user's "deploy" or "merge and deploy" reply in this thread is the
   skill's go-ahead. Show the family, version and SHA it chose; when they
@@ -366,21 +363,29 @@ these overrides:
    the worker's thread id, the exact status commands the deploy skill uses
    for this family, what success means (every terminal condition the skill
    names, such as pipeline `Succeeded` and the service roll `COMPLETED`),
-   and the flags "Auth gate sent: no. Slowed: no. Started: <UTC time>." End
+   the main workspace root, and the flags "Auth gate sent: no. Slowed:
+   no. Started: <UTC time>." End
    it with "Follow 'Each deploy-watch run' in the t3-ticket skill." A
    scheduled run must not look itself up in `list_scheduled_tasks`, so the
    prompt carries everything the next run needs.
 
 #### Each deploy-watch run
 
-- **Status command fails on credentials or the network** (an expired AWS
-  session, a DNS error): when the prompt says "Auth gate sent: no", send
-  the action line with the login command the repo documents (for an
-  expired AWS SSO session, the `aws sso login` command in step 3 of the
-  `aws-sso-login` skill, with the profile the status command uses)
-  and update the flag to the UTC time. Do not send it again while it keeps failing. End
-  the turn.
-- **Still running:** end the turn quietly. When it has run 2 hours since
+- **Status command fails:** read the `credentials` line fresh with `t3wf
+  slots --repo <main workspace root> --skills '<this session's skills>'`,
+  sending a skip note as
+  [Reading slots in a role](../t3-workflow/slots.md#reading-slots-in-a-role)
+  says. When the output matches a pattern on it and the prompt says "Auth
+  gate sent: no",
+  run that renewal skill as its entry says, then run the status command
+  again, once. When the renewal needs the user, the retry fails too, or
+  the failure is credentials or the network with no pattern (or a skipped
+  skill) to renew it, send the action line with the sign-in the renewal
+  skill or the repo documents, and update the flag to the UTC time. Once
+  the flag is set, renew and send nothing more while the failure lasts.
+  End the turn.
+- **Still running:** end the turn quietly, after setting "Auth gate sent"
+  back to "no" when it holds a time. When it has run 2 hours since
   "Started" and the prompt says "Slowed: no", tell the user once, set
   `everyMs` to 1800000, and update the flag.
 - **Succeeded:** delete the task with `delete_scheduled_task`, then send
@@ -415,7 +420,7 @@ the worker's link.
    `git -C <main workspace root> branch -D <branch>`. `-D` is safe because
    GitHub's merged state, checked in item 1, says the work landed; a squash
    merge would make `-d` refuse. Delete a branch only after its worktree is
-   gone. Then sweep the review clones sol-loop left behind. They sit on
+   gone. Then sweep the review clones the reviewer left behind. They sit on
    `t3/*` branches, so find them by thread, not branch name:
    `t3_thread_list` with `allProjects` and `includeSubagents` both `true`
    (page with `cursor`), keeping the threads whose `parentThreadId` is the
