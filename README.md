@@ -35,7 +35,8 @@ deploy/install.sh --uninstall  # reverse it (the store is kept)
 ```
 
 The unit (`deploy/t3-codemode.service`) runs `t3cm serve` on `127.0.0.1:47731`
-with `Restart=on-failure`, `LimitNOFILE=1048576` and `MemoryMax=512M`. The
+with `Restart=on-failure`, `LimitNOFILE=1048576`, `MemoryHigh=1G` and
+`MemoryMax=1536M`. The
 installer registers it with:
 
 ```bash
@@ -72,8 +73,9 @@ elsewhere), deep-merged over the built-in defaults. It sets:
 - `deny`: T3 tools scripts may not call (default `t3_project_delete`, `t3_environment_unlink`)
 - `upstreams`: other MCP servers to wrap (see Upstreams below)
 - `watcherIntervalSecs` (60), `cpuBudgetMs` (2000), `defaultTimeoutMs` (60000), `maxTimeoutMs` (600000), `maxHoldMinutes` (30)
+- `maxConcurrentRuns` (16): `execute` and `search` runs allowed at once; more wait up to `runQueueMs` (10000) for a slot, then fail with a retryable busy error. Each run can use up to 64 MB, so the default bounds sandbox memory at 1 GB, under the unit's `MemoryHigh`
 - `link`, `wake`, `bodyCap`, `replyCap`, `digestLines` and per-role `roles` policy for the workflow layer
-- `board`: `ticketModel` (`claude-opus-5-5`), `ticketEffort` (`high`), `askModel` (`claude-haiku-5-5`), `askEffort`, `instanceId` (`claudeAgent`), `runtimeMode` (`full-access`, for launches from the service, which has no thread to inherit a mode from), `askPollSecs`, `askTimeoutMinutes`, `feed` (50)
+- `board`: `ticketModel` (`claude-opus-5-5`), `ticketEffort` (`high`), `askModel` (`claude-haiku-5-5`), `askEffort`, `instanceId` (`claudeAgent`), `runtimeMode` (`full-access`, for launches from the service, which has no thread to inherit a mode from), `askPollSecs`, `askTimeoutMinutes`, `feed` (50), `settleAfterHours` (24; `0` turns auto-settle off)
 
 State lives in SQLite at `$XDG_STATE_HOME/t3-codemode/store.db` (default
 `~/.local/state/t3-codemode/`; `--state-dir` or `T3CM_STATE_DIR` override). The
@@ -272,16 +274,28 @@ box (a short-lived Haiku thread answers from the board). It is one embedded HTML
 file with no external requests, light and dark, and raises a browser
 notification for each new card while the tab is hidden.
 
+Finished tickets and answered asks are settled, never deleted. A ticket that
+has been done, or an ask that has been closed, for `board.settleAfterHours`
+leaves the main lists on the next watcher pass. A ticket is also moved off the
+thread list in T3 (`t3_thread_organize` with `settle`, best effort: a T3 error
+is logged and the board state still changes). The page's collapsed **Settled**
+section keeps them, with a filter and a **Restore** button on each one;
+restoring a ticket sends `unsettle` and restarts its settle clock. **Settle**
+on a row and **Settle all done** do it by hand.
+
 | Route | Does |
 |---|---|
 | `GET /` | The page, with a per-process CSRF token embedded |
-| `GET /api/state` | `{cards, tree, feed, asks, counts, service}` |
+| `GET /api/state` | `{cards, tree, feed, asks, settled, counts, service}` |
 | `GET /api/events` | SSE: a `state` event on every change |
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it |
 | `POST /api/cards/{id}/dismiss` | Resolve without messaging |
 | `POST /api/launch` `{issues: [...]}` | `wf.launchTicket` for each (at most 20) |
 | `POST /api/ask` `{question}` | Ask a scratch thread about the board |
+| `POST /api/tickets/{thread}/settle`, `/restore` | Settle a done ticket, or bring a settled one back (400 if open, or not settled) |
+| `POST /api/asks/{id}/settle`, `/restore` | The same for a closed ask; `id` is `q<n>` |
+| `POST /api/settle-done` | Settle every done ticket and closed ask; returns `{tickets, asks}` counts |
 
 Every board route requires `Host` to be `127.0.0.1:<port>` or `localhost:<port>`
 and refuses any other `Origin`; POSTs also need the `X-T3CM-CSRF` header.

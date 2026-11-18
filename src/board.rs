@@ -15,6 +15,7 @@ pub const CARD_KINDS: &[&str] = &["gate", "blocker", "report", "escalate"];
 const FEED_KINDS: &[&str] = &["note", "event"];
 const DONE_SHOWN: usize = 20;
 const ASKS_SHOWN: usize = 8;
+const SETTLED_SHOWN: usize = 200;
 const MAX_OPTIONS: usize = 8;
 const MAX_TEXT: usize = 2000;
 const ANSWER_CAP: usize = 1500;
@@ -760,7 +761,121 @@ impl Wf {
             let _ = self.read_thread(&t).await;
         }
         self.check_asks(None).await?;
+        let hours = self.config.board.settle_after_hours;
+        if hours > 0 {
+            self.settle_closed(Some(hours as f64 * 60.0)).await?;
+        }
         Ok(())
+    }
+
+    fn board_ticket(&self, thread: &str) -> Result<Link> {
+        self.store.link_get(thread)?.filter(|l| l.parent == BOARD).ok_or_else(|| anyhow!("no board ticket {thread:?}"))
+    }
+
+    async fn organize(&self, thread: &str, action: &str) -> Value {
+        match self.t3.call("t3_thread_organize", json!({"threadId": thread, "action": action})).await {
+            Ok(_) => json!({"ok": true}),
+            Err(e) => {
+                let why = self.t3.redact(e.to_string());
+                tracing::warn!("t3_thread_organize {action} {thread} failed: {why}");
+                json!({"ok": false, "error": why})
+            }
+        }
+    }
+
+    pub async fn settle_ticket(&self, thread: &str) -> Result<Value> {
+        {
+            let _g = self.lock.lock().await;
+            let mut ln = self.board_ticket(thread)?;
+            if !ln.closed {
+                bail!("{} is not done; only done tickets can be settled", ln.label);
+            }
+            if ln.settled_at.is_some() {
+                bail!("{} is already settled", ln.label);
+            }
+            ln.settled_at = Some(self.now());
+            self.store.link_save(&ln)?;
+        }
+        let t3 = self.organize(thread, "settle").await;
+        self.changed();
+        Ok(json!({"thread": thread, "settled": true, "t3": t3}))
+    }
+
+    pub async fn restore_ticket(&self, thread: &str) -> Result<Value> {
+        {
+            let _g = self.lock.lock().await;
+            let mut ln = self.board_ticket(thread)?;
+            if ln.settled_at.is_none() {
+                bail!("{} is not settled", ln.label);
+            }
+            ln.settled_at = None;
+            ln.restored_at = Some(self.now());
+            self.store.link_save(&ln)?;
+        }
+        let t3 = self.organize(thread, "unsettle").await;
+        self.changed();
+        Ok(json!({"thread": thread, "settled": false, "t3": t3}))
+    }
+
+    fn ask_seq(id: &str) -> Result<i64> {
+        id.strip_prefix('q').and_then(|n| n.parse().ok()).ok_or_else(|| anyhow!("no ask {id:?}; ask ids look like q12"))
+    }
+
+    fn ask_row(&self, id: &str) -> Result<(i64, bool, Value)> {
+        let seq = Self::ask_seq(id)?;
+        let (open, data) = self.store.ask_get(seq)?.ok_or_else(|| anyhow!("no ask {id:?}"))?;
+        Ok((seq, open, data))
+    }
+
+    pub fn settle_ask(&self, id: &str) -> Result<Value> {
+        let (seq, open, mut data) = self.ask_row(id)?;
+        if open {
+            bail!("ask {id} is still open; only closed asks can be settled");
+        }
+        if !data["settledAt"].is_null() {
+            bail!("ask {id} is already settled");
+        }
+        data["settledAt"] = json!(self.now());
+        self.store.ask_update(seq, false, &data)?;
+        self.changed();
+        Ok(json!({"ask": id, "settled": true}))
+    }
+
+    pub fn restore_ask(&self, id: &str) -> Result<Value> {
+        let (seq, _, mut data) = self.ask_row(id)?;
+        if data["settledAt"].is_null() {
+            bail!("ask {id} is not settled");
+        }
+        data["settledAt"] = Value::Null;
+        data["restoredAt"] = json!(self.now());
+        self.store.ask_update(seq, false, &data)?;
+        self.changed();
+        Ok(json!({"ask": id, "settled": false}))
+    }
+
+    pub async fn settle_closed(&self, older_than_mins: Option<f64>) -> Result<Value> {
+        let due = |since: Option<&str>| match older_than_mins {
+            None => true,
+            Some(min) => self.mins(since).is_some_and(|age| age >= min),
+        };
+        let mut tickets = 0;
+        for ln in self.store.children(BOARD, false)? {
+            if ln.closed
+                && ln.settled_at.is_none()
+                && due(ln.closed_since())
+                && self.settle_ticket(&ln.child).await.is_ok()
+            {
+                tickets += 1;
+            }
+        }
+        let mut asks = 0;
+        for (seq, d) in self.store.asks_closed_unsettled()? {
+            let since = d["restoredAt"].as_str().or(d["answeredAt"].as_str()).or(d["at"].as_str());
+            if due(since) && self.settle_ask(&format!("q{seq}")).is_ok() {
+                asks += 1;
+            }
+        }
+        Ok(json!({"tickets": tickets, "asks": asks}))
     }
 
     fn node_view(&self, ln: &Link) -> Value {
@@ -775,10 +890,25 @@ impl Wf {
         })
     }
 
+    fn settled_tickets(&self) -> Result<Vec<Value>> {
+        let mut settled: Vec<Link> =
+            self.store.children(BOARD, false)?.into_iter().filter(|l| l.settled_at.is_some()).collect();
+        settled.sort_by(|a, b| b.settled_at.cmp(&a.settled_at));
+        Ok(settled
+            .iter()
+            .map(|l| {
+                let mut v = self.node_view(l);
+                v["settledAt"] = json!(l.settled_at.as_deref().map(local_clock));
+                v
+            })
+            .collect())
+    }
+
     pub fn tree(&self) -> Result<Vec<Value>> {
         let all = self.store.children(BOARD, false)?;
-        let (open, mut closed): (Vec<Link>, Vec<Link>) = all.into_iter().partition(|l| !l.closed);
-        closed.sort_by(|a, b| b.closed_at.cmp(&a.closed_at));
+        let (open, mut closed): (Vec<Link>, Vec<Link>) =
+            all.into_iter().filter(|l| l.settled_at.is_none()).partition(|l| !l.closed);
+        closed.sort_by(|a, b| b.closed_since().cmp(&a.closed_since()));
         closed.truncate(DONE_SHOWN);
         let mut out = Vec::new();
         for t in open.iter().chain(closed.iter()) {
@@ -811,7 +941,16 @@ impl Wf {
     }
 
     pub fn asks(&self) -> Result<Vec<Value>> {
-        Ok(self.store.asks_recent(ASKS_SHOWN)?.iter().map(|(seq, d)| ask_view(*seq, d)).collect())
+        Ok(self.store.asks_unsettled(ASKS_SHOWN)?.iter().map(|(seq, d)| ask_view(*seq, d)).collect())
+    }
+
+    fn settled(&self) -> Result<(Value, usize)> {
+        let mut tickets = self.settled_tickets()?;
+        let total = tickets.len() + self.store.asks_settled_count()?;
+        tickets.truncate(SETTLED_SHOWN);
+        let asks: Vec<Value> =
+            self.store.asks_settled(SETTLED_SHOWN)?.iter().map(|(seq, d)| ask_view(*seq, d)).collect();
+        Ok((json!({"tickets": tickets, "asks": asks}), total))
     }
 
     pub fn snapshot(&self) -> Result<Value> {
@@ -819,6 +958,7 @@ impl Wf {
         let tree = self.tree()?;
         let feed = self.feed(self.config.board.feed)?;
         let asks = self.asks()?;
+        let (settled, settled_total) = self.settled()?;
         let t3 = self.t3.status();
         let last = self.store.meta_get(crate::wf::LAST_PASS)?;
         let open = tree.iter().filter(|t| t["done"] == false).count();
@@ -828,7 +968,8 @@ impl Wf {
             "tree": tree,
             "feed": feed,
             "asks": asks,
-            "counts": {"cards": cards.len(), "tickets": open, "running": running},
+            "settled": settled,
+            "counts": {"cards": cards.len(), "tickets": open, "running": running, "settled": settled_total},
             "service": {
                 "version": env!("CARGO_PKG_VERSION"),
                 "t3": {"connected": t3.connected, "lastError": t3.last_error},

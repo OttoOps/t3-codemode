@@ -168,6 +168,13 @@ details.feed > summary { cursor: pointer; padding: 12px 14px; font-size: 13px; f
 .feed li { display: grid; grid-template-columns: 5.5em minmax(0, 1fr); gap: 8px; font-size: 13px; padding: 5px 0; border-top: 1px solid var(--line); }
 .feed time { color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .feed .who { font-weight: 600; margin-right: 6px; }
+details.settled { background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow); }
+details.settled > summary { cursor: pointer; padding: 12px 14px; font-size: 13px; font-weight: 650; color: var(--ink-2); }
+.settled-body { display: grid; gap: 8px; padding: 0 14px 12px; }
+.settled-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.settled-list li { border-top: 1px solid var(--line); padding: 8px 0; font-size: 14px; }
+.settled-list .a { margin: 4px 0 0; font-size: 13px; color: var(--ink-2); white-space: pre-wrap; }
+.h-act { margin-left: auto; font-weight: 400; }
 .tools { display: grid; gap: 20px; }
 @media (min-width: 900px) { .tools { grid-template-columns: 1fr 1fr; } }
 .panel { background: var(--panel); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 14px; display: grid; gap: 8px; }
@@ -194,13 +201,24 @@ details.feed > summary { cursor: pointer; padding: 12px 14px; font-size: 13px; f
     <div class="stack" id="cards"><div class="skel"></div></div>
   </section>
   <section aria-labelledby="h-tix">
-    <h2 id="h-tix">Tickets <span class="n" id="n-tix"></span></h2>
+    <h2 id="h-tix">Tickets <span class="n" id="n-tix"></span>
+      <button class="btn quiet h-act" id="settle-all" type="button" hidden>Settle all done</button></h2>
+    <p class="err" id="act-err" role="alert"></p>
     <div class="tickets" id="tree"><div class="skel"></div></div>
   </section>
   <section class="wide" aria-label="Activity">
     <details class="feed" id="feed-box">
       <summary>Activity <span id="n-feed" class="muted"></span></summary>
       <ol id="feed"></ol>
+    </details>
+  </section>
+  <section class="wide" aria-label="Settled">
+    <details class="settled" id="settled-box">
+      <summary>Settled (<span id="n-settled">0</span>)</summary>
+      <div class="settled-body">
+        <input type="text" id="settled-filter" placeholder="Filter by ticket, issue, question or answer" aria-label="Filter settled items" autocomplete="off">
+        <ul class="settled-list" id="settled-list"></ul>
+      </div>
     </details>
   </section>
   <div class="wide tools">
@@ -345,13 +363,30 @@ function prLink(pr) {
   return ext(pr.url, "PR #" + pr.number + (pr.state ? " " + pr.state : ""));
 }
 
+const actErr = () => document.getElementById("act-err");
+
+async function act(btn, path) {
+  btn.disabled = true;
+  actErr().textContent = "";
+  try { await post(path); }
+  catch (e) { actErr().textContent = e.message; btn.disabled = false; }
+}
+
+function actButton(label, path) {
+  const b = h("button", { class: "btn quiet", type: "button", onclick: () => act(b, path) }, label);
+  return b;
+}
+
+const isClosedAsk = (a) => a.status !== "running" && a.status !== "waiting";
+
 function renderTicket(t) {
   const row = h("div", { class: "t-row" },
     h("span", { class: "t-label" }, t.label),
     chip(t.status),
     t.gate ? h("span", { class: "gate", title: "gate open" }, "gate: " + t.gate) : null,
     t.joined ? null : h("span", { class: "muted" }, "not joined yet"),
-    h("span", { class: "links" }, prLink(t.pr), ext(t.link, "thread")));
+    h("span", { class: "links" }, prLink(t.pr), ext(t.link, "thread")),
+    t.done ? actButton("Settle", "/api/tickets/" + encodeURIComponent(t.thread) + "/settle") : null);
   const kids = [row];
   if (t.last && !t.done) kids.push(h("p", { class: "t-last" }, t.last.at + " " + t.last.kind + ": " + t.last.head));
   if (t.workers && t.workers.length) {
@@ -366,8 +401,37 @@ function renderTicket(t) {
 function renderAsk(a) {
   return h("li", {},
     h("div", { class: "t-row" }, h("span", { class: "q" }, a.question), chip(a.status === "answered" ? "done" : a.status === "running" ? "running" : a.status === "waiting" ? "waiting" : "failed"),
-      h("span", { class: "links" }, ext(a.link, "thread"))),
+      h("span", { class: "links" }, ext(a.link, "thread")),
+      isClosedAsk(a) ? actButton("Settle", "/api/asks/" + encodeURIComponent(a.id) + "/settle") : null),
     a.answer ? h("p", { class: "a" }, a.answer) : h("p", { class: "a muted" }, a.status === "running" ? "Working on it..." : a.status));
+}
+
+function renderSettledTicket(t) {
+  return h("li", {},
+    h("div", { class: "t-row" }, h("span", { class: "t-label" }, t.label), chip("done"),
+      h("span", { class: "muted" }, "settled " + t.settledAt),
+      h("span", { class: "links" }, prLink(t.pr), ext(t.link, "thread")),
+      actButton("Restore", "/api/tickets/" + encodeURIComponent(t.thread) + "/restore")));
+}
+
+function renderSettledAsk(a) {
+  return h("li", {},
+    h("div", { class: "t-row" }, h("span", { class: "q" }, a.question),
+      h("span", { class: "links" }, ext(a.link, "thread")),
+      actButton("Restore", "/api/asks/" + encodeURIComponent(a.id) + "/restore")),
+    a.answer ? h("p", { class: "a" }, a.answer) : null);
+}
+
+function renderSettled(s) {
+  const q = document.getElementById("settled-filter").value.trim().toLowerCase();
+  const hit = (...parts) => !q || parts.some((p) => typeof p === "string" && p.toLowerCase().includes(q));
+  const tickets = s.settled.tickets.filter((t) => hit(t.label, t.link));
+  const asks = s.settled.asks.filter((a) => hit(a.question, a.answer));
+  const items = [...tickets.map(renderSettledTicket), ...asks.map(renderSettledAsk)];
+  const total = s.settled.tickets.length + s.settled.asks.length;
+  document.getElementById("n-settled").textContent = String(s.counts.settled);
+  document.getElementById("settled-list").replaceChildren(...(items.length ? items
+    : [h("li", { class: "muted" }, total ? "Nothing matches the filter." : "Nothing settled yet.")]));
 }
 
 function notifyNew(cards) {
@@ -404,6 +468,9 @@ function render(s) {
     h("li", {}, h("time", { title: f.iso }, f.at), h("span", {}, h("span", { class: "who" }, f.label), f.head))));
   document.getElementById("n-feed").textContent = s.feed.length ? "(" + s.feed.length + ")" : "(none yet)";
   document.getElementById("asks").replaceChildren(...s.asks.map(renderAsk));
+  renderSettled(s);
+  const settleAll = document.getElementById("settle-all");
+  settleAll.hidden = !(s.tree.some((t) => t.done) || s.asks.some(isClosedAsk));
   document.getElementById("counts").replaceChildren(
     h("span", {}, h("b", {}, s.counts.cards), " decisions"),
     h("span", {}, h("b", {}, s.counts.tickets), " tickets"),
@@ -447,6 +514,13 @@ setInterval(() => {
 document.addEventListener("click", () => {
   if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
 }, { once: true });
+
+document.getElementById("settle-all").addEventListener("click", async (e) => {
+  const b = e.currentTarget;
+  await act(b, "/api/settle-done");
+  b.disabled = false;
+});
+document.getElementById("settled-filter").addEventListener("input", () => { if (state) renderSettled(state); });
 
 document.getElementById("launch").addEventListener("submit", async (e) => {
   e.preventDefault();
