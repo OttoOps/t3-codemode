@@ -1,0 +1,16 @@
+[Unit]
+Description=t3-codemode: Code Mode MCP server for T3 Code (search + execute, memory, link watcher)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/t3cm serve
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+Environment=RUST_LOG=info
+MemoryMax=512M
+Nice=5
+
+[Install]
+WantedBy=default.target

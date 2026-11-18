@@ -1,0 +1,375 @@
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+
+use crate::board::{GitRemotes, Remotes};
+use crate::catalog::Catalog;
+use crate::clock::{Clock, iso};
+use crate::config::Config;
+use crate::sandbox::{self, Host, Limits, NoHost, Run};
+use crate::store::Store;
+use crate::t3::{BoxFut, T3Client};
+use crate::wf::{LAST_PASS, Wf};
+use crate::{js, truncate};
+
+pub const VARS_KEY: &str = "__vars__";
+pub const EXEC_GLOBALS: &str = "t3, mem, vars, wf, console";
+pub const SEARCH_GLOBALS: &str = "catalog, console";
+const TOOLS_CACHE: &str = "t3_tools";
+const MAX_VALUE: usize = 1024 * 1024;
+const REFRESH_BACKOFF: Duration = Duration::from_secs(30);
+
+const EXEC_PRELUDE: &str = r#"
+(() => {
+  const host = globalThis.__host;
+  const names = globalThis.__names;
+  delete globalThis.__host;
+  delete globalThis.__names;
+  const call = async (op, args) => {
+    const r = JSON.parse(await host(op, JSON.stringify(args === undefined ? null : args)));
+    if (!r.ok) throw new Error(r.error);
+    return r.value;
+  };
+  const input = (x) => (x === undefined ? {} : x);
+  const t3 = { call: (name, x) => call("t3", { name: String(name), input: input(x) }) };
+  for (const n of names) t3[n] = (x) => call("t3", { name: n, input: input(x) });
+  for (const n of names) {
+    if (n.startsWith("t3_") && !(n.slice(3) in t3)) t3[n.slice(3)] = t3[n];
+  }
+  const memApi = (ns) => Object.freeze({
+    get: (key) => call("mem.get", { ns, key }),
+    set: (key, value) => call("mem.set", { ns, key, value }),
+    del: (key) => call("mem.del", { ns, key }),
+    list: (prefix) => call("mem.list", { ns, prefix }),
+    ns: (name) => memApi(String(name)),
+  });
+  const m = (name) => (x) => call("wf." + name, input(x));
+  const wf = Object.freeze({
+    init: m("init"), openChild: m("openChild"), join: m("join"), send: m("send"), reply: m("reply"),
+    gate: m("gate"), close: m("close"), inbox: m("inbox"), board: m("board"), adopt: m("adopt"), sweep: m("sweep"),
+    show: (handle) => call("wf.show", { handle }),
+    launchTicket: m("launchTicket"), cards: m("cards"), feed: m("feed"),
+    answer: (id, text) => call("wf.answer", { id, text }),
+    waiting: Object.freeze({
+      add: m("waiting.add"),
+      list: m("waiting.list"),
+      resolve: (id, note) => call("wf.waiting.resolve", note === undefined ? { id } : { id, note }),
+    }),
+  });
+  for (const [k, v] of [["t3", Object.freeze(t3)], ["mem", memApi(null)], ["wf", wf]]) {
+    Object.defineProperty(globalThis, k, { value: v, writable: false, enumerable: true, configurable: false });
+  }
+})();
+"#;
+
+const SEARCH_PRELUDE: &str = "delete globalThis.__host;";
+
+pub struct ExecuteRequest {
+    pub code: String,
+    pub session: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub caller: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolOutput {
+    pub is_error: bool,
+    pub text: String,
+}
+
+pub struct App {
+    pub config: Arc<Config>,
+    pub store: Arc<Store>,
+    pub t3: Arc<dyn T3Client>,
+    pub clock: Arc<dyn Clock>,
+    pub wf: Arc<Wf>,
+    pub csrf: String,
+    catalog: RwLock<Arc<Catalog>>,
+    last_refresh: Mutex<Option<Instant>>,
+    started: Instant,
+}
+
+fn csrf_token() -> String {
+    let mut b = [0u8; 24];
+    getrandom::fill(&mut b).expect("system randomness");
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn nonempty(s: Option<String>) -> Option<String> {
+    s.map(|x| x.trim().to_string()).filter(|x| !x.is_empty())
+}
+
+fn error_output(msg: &str, logs: Vec<String>, globals: &str) -> ToolOutput {
+    let mut text = format!("Error: {msg}");
+    if msg.contains("is not defined") {
+        text.push_str(&format!("\nAvailable globals: {globals}."));
+    }
+    if !logs.is_empty() {
+        text.push_str("\nLogs:\n");
+        text.push_str(&logs.join("\n"));
+    }
+    ToolOutput { is_error: true, text }
+}
+
+impl App {
+    pub fn new(config: Config, store: Arc<Store>, t3: Arc<dyn T3Client>, clock: Arc<dyn Clock>) -> Arc<App> {
+        App::with_remotes(config, store, t3, clock, Arc::new(GitRemotes))
+    }
+
+    pub fn with_remotes(
+        config: Config,
+        store: Arc<Store>,
+        t3: Arc<dyn T3Client>,
+        clock: Arc<dyn Clock>,
+        remotes: Arc<dyn Remotes>,
+    ) -> Arc<App> {
+        let config = Arc::new(config);
+        let wf = Arc::new(Wf::new(store.clone(), t3.clone(), clock.clone(), config.clone(), remotes));
+        let cached: Vec<Value> =
+            store.meta_get(TOOLS_CACHE).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        Arc::new(App {
+            config,
+            store,
+            t3,
+            clock,
+            wf,
+            csrf: csrf_token(),
+            catalog: RwLock::new(Arc::new(Catalog::build(&cached))),
+            last_refresh: Mutex::new(None),
+            started: Instant::now(),
+        })
+    }
+
+    pub fn catalog(&self) -> Arc<Catalog> {
+        self.catalog.read().unwrap().clone()
+    }
+
+    pub async fn refresh_catalog(&self) -> Result<usize, String> {
+        *self.last_refresh.lock().unwrap() = Some(Instant::now());
+        let tools = self.t3.list_tools().await.map_err(|e| e.to_string())?;
+        if tools.is_empty() {
+            return Ok(self.catalog().t3_names.len());
+        }
+        let _ = self.store.meta_set(TOOLS_CACHE, &Value::Array(tools.clone()).to_string());
+        let cat = Arc::new(Catalog::build(&tools));
+        let n = cat.t3_names.len();
+        *self.catalog.write().unwrap() = cat;
+        Ok(n)
+    }
+
+    async fn catalog_for_run(&self) -> Arc<Catalog> {
+        let cat = self.catalog();
+        if !cat.t3_names.is_empty() {
+            return cat;
+        }
+        let stale = self.last_refresh.lock().unwrap().is_none_or(|t| t.elapsed() >= REFRESH_BACKOFF);
+        if stale {
+            let _ = self.refresh_catalog().await;
+        }
+        self.catalog()
+    }
+
+    fn limits(&self, timeout_ms: Option<u64>) -> Limits {
+        let ms = timeout_ms.unwrap_or(self.config.default_timeout_ms).clamp(100, self.config.max_timeout_ms);
+        Limits {
+            memory: sandbox::MEMORY_LIMIT,
+            cpu: Duration::from_millis(self.config.cpu_budget_ms),
+            wall: Duration::from_millis(ms),
+        }
+    }
+
+    pub fn session_ns(session: Option<String>, caller: Option<&str>) -> String {
+        nonempty(session).unwrap_or_else(|| match caller {
+            Some(c) => format!("thread:{c}"),
+            None => "default".into(),
+        })
+    }
+
+    pub async fn execute(self: &Arc<Self>, req: ExecuteRequest) -> ToolOutput {
+        let js = match js::prepare(&req.code) {
+            Ok(j) => j,
+            Err(e) => return error_output(&e, Vec::new(), EXEC_GLOBALS),
+        };
+        let caller = nonempty(req.caller);
+        let ns = App::session_ns(req.session, caller.as_deref());
+        let vars =
+            self.store.kv_get(&ns, VARS_KEY).ok().flatten().filter(Value::is_object).unwrap_or_else(|| json!({}));
+        let catalog = self.catalog_for_run().await;
+        let names = serde_json::to_string(&catalog.t3_names).unwrap_or_else(|_| "[]".into());
+        let host = Arc::new(ExecHost { app: self.clone(), caller, ns: ns.clone(), catalog });
+        let out = sandbox::run(Run {
+            js,
+            prelude: EXEC_PRELUDE,
+            globals: vec![("__names", names), ("vars", vars.to_string())],
+            host,
+            limits: self.limits(req.timeout_ms),
+            keep_vars: true,
+        })
+        .await;
+        let mut logs = out.logs;
+        if let Some(v) = out.vars {
+            if v.to_string().len() > MAX_VALUE {
+                logs.push("[t3cm] vars not saved: over 1 MB serialized".into());
+            } else if let Err(e) = self.store.kv_set(&ns, VARS_KEY, &v, &iso(self.clock.now())) {
+                logs.push(format!("[t3cm] vars not saved: {e}"));
+            }
+        }
+        let output = match out.result {
+            Ok(v) => ToolOutput { is_error: false, text: truncate::render(v, logs) },
+            Err(e) => error_output(&e, logs, EXEC_GLOBALS),
+        };
+        ToolOutput { text: self.t3.redact(output.text), ..output }
+    }
+
+    pub async fn search(self: &Arc<Self>, code: &str) -> ToolOutput {
+        let js = match js::prepare(code) {
+            Ok(j) => j,
+            Err(e) => return error_output(&e, Vec::new(), SEARCH_GLOBALS),
+        };
+        let catalog = self.catalog_for_run().await;
+        let out = sandbox::run(Run {
+            js,
+            prelude: SEARCH_PRELUDE,
+            globals: vec![("catalog", catalog.json.clone())],
+            host: Arc::new(NoHost),
+            limits: self.limits(None),
+            keep_vars: false,
+        })
+        .await;
+        match out.result {
+            Ok(v) => ToolOutput { is_error: false, text: truncate::render(v, out.logs) },
+            Err(e) => error_output(&e, out.logs, SEARCH_GLOBALS),
+        }
+    }
+
+    pub async fn ask(self: &Arc<Self>, question: &str) -> anyhow::Result<Value> {
+        let v = self.wf.ask(question).await?;
+        let seq = v["seq"].as_i64().unwrap_or_default();
+        let app = self.clone();
+        let every = Duration::from_secs(self.config.board.ask_poll_secs.max(1));
+        let until = Instant::now() + Duration::from_secs(self.config.board.ask_timeout_minutes.max(1) * 60 + 60);
+        tokio::spawn(async move {
+            while Instant::now() < until {
+                tokio::time::sleep(every).await;
+                match app.wf.check_asks(Some(seq)).await {
+                    Ok(false) => break,
+                    Ok(true) => {}
+                    Err(e) => tracing::warn!("ask q{seq} check failed: {}", app.t3.redact(e.to_string())),
+                }
+            }
+        });
+        Ok(v)
+    }
+
+    pub fn health(&self) -> Value {
+        let last_pass = self.store.meta_get(LAST_PASS).ok().flatten();
+        json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "uptimeSecs": self.started.elapsed().as_secs(),
+            "t3": self.t3.status(),
+            "tools": self.catalog().t3_names.len(),
+            "watcher": {
+                "lastPass": last_pass,
+                "alive": self.wf.watcher_alive(),
+                "intervalSecs": self.config.watcher_interval_secs,
+            },
+            "store": self.store.path().display().to_string(),
+        })
+    }
+
+    async fn host_op(
+        &self,
+        op: &str,
+        args: Value,
+        caller: Option<&str>,
+        ns: &str,
+        catalog: &Catalog,
+    ) -> Result<Value, String> {
+        let pick_ns = |args: &Value| -> Result<String, String> {
+            match &args["ns"] {
+                Value::Null => Ok(ns.to_string()),
+                Value::String(s) if !s.trim().is_empty() && s.len() <= 200 => Ok(s.clone()),
+                _ => Err("mem.ns(name): name must be a non-empty string of at most 200 chars".into()),
+            }
+        };
+        let key = |args: &Value, method: &str| -> Result<String, String> {
+            match args["key"].as_str() {
+                Some(k) if !k.is_empty() && k.len() <= 512 => Ok(k.to_string()),
+                _ => Err(format!("mem.{method}(key): key must be a non-empty string of at most 512 chars")),
+            }
+        };
+        let store_err = |e: anyhow::Error| format!("store: {e}");
+        match op {
+            "t3" => {
+                let name = args["name"].as_str().unwrap_or_default();
+                let resolved = if catalog.t3_names.is_empty() || catalog.t3_names.contains(name) {
+                    name.to_string()
+                } else if catalog.t3_names.contains(&format!("t3_{name}")) {
+                    format!("t3_{name}")
+                } else {
+                    return Err(format!("unknown T3 tool {name:?}; use the search tool to find the right name"));
+                };
+                if self.config.deny.contains(&resolved) {
+                    return Err(format!("{resolved} is denied by the t3-codemode deny list; do not retry it"));
+                }
+                let input = match args.get("input") {
+                    Some(v @ Value::Object(_)) => v.clone(),
+                    Some(Value::Null) | None => json!({}),
+                    Some(_) => return Err(format!("t3.{resolved}(input): input must be an object")),
+                };
+                self.t3.call(&resolved, input).await.map_err(|e| e.to_string())
+            }
+            "mem.get" => {
+                let (ns, key) = (pick_ns(&args)?, key(&args, "get")?);
+                self.store.kv_get(&ns, &key).map(|v| v.unwrap_or(Value::Null)).map_err(store_err)
+            }
+            "mem.set" => {
+                let (ns, key) = (pick_ns(&args)?, key(&args, "set")?);
+                if key == VARS_KEY {
+                    return Err(format!("{VARS_KEY} is reserved for vars; assign to vars instead"));
+                }
+                let value =
+                    args.get("value").ok_or("mem.set(key, value): value must be JSON-serializable, not undefined")?;
+                if value.to_string().len() > MAX_VALUE {
+                    return Err("mem.set: value is over 1 MB serialized".into());
+                }
+                self.store.kv_set(&ns, &key, value, &iso(self.clock.now())).map_err(store_err)?;
+                Ok(Value::Null)
+            }
+            "mem.del" => {
+                let (ns, key) = (pick_ns(&args)?, key(&args, "del")?);
+                self.store.kv_del(&ns, &key).map(Value::Bool).map_err(store_err)
+            }
+            "mem.list" => {
+                let ns = pick_ns(&args)?;
+                let prefix = args["prefix"].as_str().unwrap_or("");
+                let keys = self.store.kv_list(&ns, prefix).map_err(store_err)?;
+                Ok(json!(keys.into_iter().filter(|k| k != VARS_KEY).collect::<Vec<_>>()))
+            }
+            other => match other.strip_prefix("wf.") {
+                Some(method) => self.wf.dispatch(method, caller, args).await.map_err(|e| e.to_string()),
+                None => Err(format!("unknown host operation {other}")),
+            },
+        }
+    }
+}
+
+struct ExecHost {
+    app: Arc<App>,
+    caller: Option<String>,
+    ns: String,
+    catalog: Arc<Catalog>,
+}
+
+impl Host for ExecHost {
+    fn call(&self, op: String, args: Value) -> BoxFut<'static, Result<Value, String>> {
+        let app = self.app.clone();
+        let caller = self.caller.clone();
+        let ns = self.ns.clone();
+        let catalog = self.catalog.clone();
+        Box::pin(
+            async move { app.host_op(&op, args, caller.as_deref(), &ns, &catalog).await.map_err(|e| app.t3.redact(e)) },
+        )
+    }
+}

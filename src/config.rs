@@ -1,0 +1,239 @@
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+pub const UP_KINDS: &[&str] = &["note", "event", "gate", "blocker", "report", "handoff", "closed"];
+pub const CLOSING: &[&str] = &["handoff", "closed"];
+const EXTRA_WAKE_KINDS: &[&str] = &["escalate", "reply"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LinkParams {
+    pub down: i64,
+    pub miss: i64,
+    pub stall: i64,
+}
+
+impl LinkParams {
+    pub fn validate(&self) -> Result<()> {
+        for (k, v) in [("down", self.down), ("miss", self.miss), ("stall", self.stall)] {
+            if v < 1 {
+                bail!("{k} must be a positive integer, got {v}");
+            }
+        }
+        if self.stall <= self.down {
+            bail!("stall ({}) must exceed down ({})", self.stall, self.down);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChildPolicy {
+    pub down: Option<i64>,
+    pub miss: Option<i64>,
+    pub stall: Option<i64>,
+    pub wake: Option<Vec<String>>,
+    pub body_cap: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleConfig {
+    #[serde(default)]
+    pub children: BTreeMap<String, ChildPolicy>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BoardConfig {
+    pub instance_id: String,
+    pub ticket_model: String,
+    pub ticket_effort: Option<String>,
+    pub ask_model: String,
+    pub ask_effort: Option<String>,
+    pub runtime_mode: Option<String>,
+    pub ask_poll_secs: u64,
+    pub ask_timeout_minutes: u64,
+    pub feed: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Config {
+    pub deny: Vec<String>,
+    pub watcher_interval_secs: u64,
+    pub max_hold_minutes: f64,
+    pub cpu_budget_ms: u64,
+    pub default_timeout_ms: u64,
+    pub max_timeout_ms: u64,
+    pub link: LinkParams,
+    pub wake: Vec<String>,
+    pub body_cap: usize,
+    pub reply_cap: usize,
+    pub digest_lines: usize,
+    pub roles: BTreeMap<String, RoleConfig>,
+    pub board: BoardConfig,
+}
+
+pub fn builtin_defaults() -> Value {
+    json!({
+        "deny": ["t3_project_delete", "t3_environment_unlink"],
+        "watcherIntervalSecs": 60,
+        "maxHoldMinutes": 30,
+        "cpuBudgetMs": 2000,
+        "defaultTimeoutMs": 60000,
+        "maxTimeoutMs": 600000,
+        "link": {"down": 45, "miss": 2, "stall": 240},
+        "wake": ["event", "gate", "blocker", "handoff", "closed", "report", "escalate", "reply"],
+        "bodyCap": 1500,
+        "replyCap": 1500,
+        "digestLines": 6,
+        "roles": {
+            "overseer": {"children": {"ticket": {
+                "down": 75, "stall": 480,
+                "wake": ["gate", "blocker", "handoff", "closed", "report", "escalate"],
+                "bodyCap": 600
+            }}},
+            "ticket": {"children": {"worker": {}}},
+            "worker": {"children": {}}
+        },
+        "board": {
+            "instanceId": "claudeAgent",
+            "ticketModel": "claude-opus-5-5",
+            "ticketEffort": "high",
+            "askModel": "claude-haiku-5-5",
+            "askEffort": null,
+            "runtimeMode": "full-access",
+            "askPollSecs": 4,
+            "askTimeoutMinutes": 15,
+            "feed": 50
+        }
+    })
+}
+
+fn merge(base: &mut Value, over: Value) {
+    match (base, over) {
+        (Value::Object(b), Value::Object(o)) => {
+            for (k, v) in o {
+                match b.get_mut(&k) {
+                    Some(slot) => merge(slot, v),
+                    None => {
+                        b.insert(k, v);
+                    }
+                }
+            }
+        }
+        (slot, v) => *slot = v,
+    }
+}
+
+pub fn default_path() -> PathBuf {
+    if let Ok(p) = std::env::var("T3CM_CONFIG") {
+        return PathBuf::from(p);
+    }
+    let base = std::env::var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_| home().join(".config"));
+    base.join("t3-codemode").join("config.json")
+}
+
+pub fn home() -> PathBuf {
+    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config::from_value(Value::Null).expect("built-in defaults are valid")
+    }
+}
+
+impl Config {
+    pub fn load(path: &Path) -> Result<Config> {
+        let over = match std::fs::read_to_string(path) {
+            Ok(s) => serde_json::from_str(&s).with_context(|| format!("{} is not valid JSON", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        Config::from_value(over).with_context(|| format!("config {}", path.display()))
+    }
+
+    pub fn from_value(over: Value) -> Result<Config> {
+        let mut v = builtin_defaults();
+        if !over.is_null() {
+            merge(&mut v, over);
+        }
+        let cfg: Config = serde_json::from_value(v)?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.link.validate().context("link")?;
+        if !self.roles.get("overseer").is_some_and(|r| r.children.contains_key("ticket")) {
+            bail!("the board needs the overseer role to open ticket links");
+        }
+        check_wake(&self.wake).context("wake")?;
+        for (role, rc) in &self.roles {
+            for child in rc.children.keys() {
+                if !self.roles.contains_key(child) {
+                    bail!("role {role} opens links to unknown role {child}");
+                }
+                self.link_params(role, child)?;
+                if let Some(w) = &rc.children[child].wake {
+                    check_wake(w).with_context(|| format!("{role} -> {child} wake"))?;
+                }
+                if let Some(c) = rc.children[child].body_cap
+                    && c < 200
+                {
+                    bail!("{role} -> {child}: bodyCap must be at least 200");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn check_role(&self, role: &str) -> Result<()> {
+        if self.roles.contains_key(role) {
+            Ok(())
+        } else {
+            let known: Vec<&str> = self.roles.keys().map(String::as_str).collect();
+            Err(anyhow!("unknown role {role:?}; roles are {}", known.join(", ")))
+        }
+    }
+
+    pub fn link_params(&self, parent_role: &str, child_role: &str) -> Result<LinkParams> {
+        self.check_role(parent_role)?;
+        let child = self.roles[parent_role]
+            .children
+            .get(child_role)
+            .ok_or_else(|| anyhow!("role {parent_role:?} opens no links to {child_role:?}"))?;
+        let p = LinkParams {
+            down: child.down.unwrap_or(self.link.down),
+            miss: child.miss.unwrap_or(self.link.miss),
+            stall: child.stall.unwrap_or(self.link.stall),
+        };
+        p.validate().with_context(|| format!("{parent_role} -> {child_role} link numbers"))?;
+        Ok(p)
+    }
+
+    pub fn link_policy(&self, parent_role: Option<&str>, child_role: &str) -> (Vec<String>, usize) {
+        let child = parent_role.and_then(|r| self.roles.get(r)).and_then(|rc| rc.children.get(child_role));
+        let wake = child.and_then(|c| c.wake.clone()).unwrap_or_else(|| self.wake.clone());
+        let cap = child.and_then(|c| c.body_cap).unwrap_or(self.body_cap);
+        (wake, cap)
+    }
+}
+
+fn check_wake(kinds: &[String]) -> Result<()> {
+    for k in kinds {
+        if k == "note" {
+            bail!("a note never wakes its parent; take it out of wake");
+        }
+        if !UP_KINDS.contains(&k.as_str()) && !EXTRA_WAKE_KINDS.contains(&k.as_str()) {
+            bail!("unknown wake kind {k:?}");
+        }
+    }
+    Ok(())
+}
