@@ -1,4 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -152,10 +151,10 @@ fn handle_seq(handle: &str) -> Option<i64> {
 impl Store {
     pub fn open(dir: &Path) -> Result<Store> {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        crate::platform::private_dir(dir)?;
         let path = dir.join("store.db");
         let conn = Connection::open(&path).with_context(|| format!("opening {}", path.display()))?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        crate::platform::private_file(&path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;

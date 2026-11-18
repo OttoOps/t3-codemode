@@ -12,7 +12,7 @@ use t3_codemode::clock::{SystemClock, local_datetime, parse_ts};
 use t3_codemode::config::{self, Config};
 use t3_codemode::store::Store;
 use t3_codemode::t3_http::HttpT3;
-use t3_codemode::{bench, server, watcher};
+use t3_codemode::{bench, platform, server, watcher};
 
 #[derive(Parser)]
 #[command(name = "t3cm", version, about = "Code Mode MCP server for T3 Code: two tools, search and execute")]
@@ -96,12 +96,7 @@ enum Cmd {
 }
 
 fn state_dir(a: &StateArgs) -> PathBuf {
-    a.state_dir.clone().unwrap_or_else(|| {
-        std::env::var("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| config::home().join(".local").join("state"))
-            .join("t3-codemode")
-    })
+    a.state_dir.clone().unwrap_or_else(platform::state_dir)
 }
 
 fn init_logging() {
@@ -138,11 +133,30 @@ async fn warm_up(app: Arc<App>, t3: Arc<HttpT3>) {
     }
 }
 
+#[cfg(unix)]
+async fn os_shutdown() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
+    term.recv().await;
+}
+
+#[cfg(windows)]
+async fn os_shutdown() {
+    use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+    let mut brk = ctrl_break().expect("CTRL_BREAK handler");
+    let mut close = ctrl_close().expect("CTRL_CLOSE handler");
+    let mut shutdown = ctrl_shutdown().expect("CTRL_SHUTDOWN handler");
+    tokio::select! {
+        _ = brk.recv() => {},
+        _ = close.recv() => {},
+        _ = shutdown.recv() => {},
+    }
+}
+
 async fn shutdown_signal() {
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},
-        _ = term.recv() => {},
+        _ = os_shutdown() => {},
     }
     tracing::info!("shutting down");
 }

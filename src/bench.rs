@@ -10,12 +10,21 @@ use crate::config::Config;
 use crate::fake::{FakeT3, thread};
 use crate::store::Store;
 
-pub fn rss_kb() -> u64 {
+#[cfg(not(target_os = "linux"))]
+pub fn rss_kb() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+pub fn rss_kb() -> Option<u64> {
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| s.lines().find(|l| l.starts_with("VmRSS:")).map(String::from))
         .and_then(|l| l.split_whitespace().nth(1).and_then(|n| n.parse().ok()))
-        .unwrap_or(0)
+}
+
+fn rss() -> String {
+    rss_kb().map_or_else(|| "n/a (Linux only)".into(), |kb| format!("{kb} KB"))
 }
 
 fn pct(xs: &mut [f64], q: f64) -> f64 {
@@ -50,14 +59,14 @@ pub async fn run(n: usize, tools: Option<&Path>) -> anyhow::Result<()> {
     let fake = Arc::new(FakeT3::with_tools(tools));
     fake.put(thread("bench:thread", "idle", "2026-11-17T12:00:00Z"));
     let store = Arc::new(Store::open(&dir)?);
-    let rss0 = rss_kb();
+    let rss0 = rss();
     let app = App::new(Config::default(), store, fake, Arc::new(SystemClock));
     app.refresh_catalog().await.map_err(anyhow::Error::msg)?;
     println!("tools in catalog: {}", app.catalog().t3_names.len());
-    println!("rss idle (app ready): {} KB (process start {} KB)", rss_kb(), rss0);
+    println!("rss idle (app ready): {} (process start {rss0})", rss());
     let (p50, p95) = time_exec(&app, "async () => 1", n).await;
     println!("execute trivial x{n}: p50 {p50:.2} ms, p95 {p95:.2} ms");
-    println!("rss after {n} executes: {} KB", rss_kb());
+    println!("rss after {n} executes: {}", rss());
     let (p50, p95) = time_exec(&app, "async () => (await t3.t3_thread_list({ limit: 1 })).threads.length", n).await;
     println!("execute 1 host call x{n}: p50 {p50:.2} ms, p95 {p95:.2} ms");
     let (p50, p95) = time_exec(
@@ -75,7 +84,8 @@ pub async fn run(n: usize, tools: Option<&Path>) -> anyhow::Result<()> {
         assert!(!out.is_error, "{}", out.text);
     }
     println!("search x{n}: p50 {:.2} ms, p95 {:.2} ms", pct(&mut t, 0.5), pct(&mut t, 0.95));
-    println!("rss after {} runs: {} KB", 4 * n, rss_kb());
+    println!("rss after {} runs: {}", 4 * n, rss());
+    drop(app);
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }

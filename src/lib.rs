@@ -8,6 +8,7 @@ pub mod desktop;
 pub mod fake;
 pub mod js;
 pub mod mcp;
+pub mod platform;
 pub mod sandbox;
 pub mod server;
 pub mod store;

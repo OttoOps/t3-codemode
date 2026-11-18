@@ -15,14 +15,15 @@ Beyond T3's tools, the sandbox carries:
   wakes and a watcher that nudges stalled threads,
 - a local web board that acts as the root overseer for ticket threads.
 
-Status: prototype. Linux only (systemd user unit, T3 runtime discovery via
-`/proc`).
+Status: prototype. It builds and passes its tests on Linux, macOS and Windows.
+The installer and the service unit are Linux and systemd only for now.
 
 Documentation: https://potto007.github.io/t3-codemode/
 
 ## Requirements
 
-- Linux with systemd user services
+- Linux with systemd user services, for `deploy/install.sh`. On macOS and
+  Windows, run `t3cm serve` yourself for now.
 - Rust 1.95 or newer (`oxc` is pinned to `=0.146.0` because later releases need a newer compiler)
 - A running T3 Code server and its `t3` CLI
 - Claude Code, if you want the installer to register the MCP server for you
@@ -69,8 +70,16 @@ DNS rebinding.
 
 ## Config
 
-Optional JSON at `~/.config/t3-codemode/config.json` (`T3CM_CONFIG` points
-elsewhere), deep-merged over the built-in defaults. It sets:
+Optional JSON at `config.json` in the config directory (`T3CM_CONFIG` points
+elsewhere), deep-merged over the built-in defaults:
+
+| OS | Config and state directory |
+|---|---|
+| Linux | `$XDG_CONFIG_HOME/t3-codemode/` (default `~/.config/t3-codemode/`) for config, `$XDG_STATE_HOME/t3-codemode/` (default `~/.local/state/t3-codemode/`) for state |
+| macOS | `~/Library/Application Support/t3-codemode/` for both |
+| Windows | `%LOCALAPPDATA%\t3-codemode\` for both |
+
+It sets:
 
 - `deny`: T3 tools scripts may not call (default `t3_project_delete`, `t3_environment_unlink`)
 - `upstreams`: other MCP servers to wrap (see Upstreams below)
@@ -79,9 +88,12 @@ elsewhere), deep-merged over the built-in defaults. It sets:
 - `link`, `wake`, `bodyCap`, `replyCap`, `digestLines` and per-role `roles` policy for the workflow layer
 - `board`: `ticketModel` (`claude-opus-5-5`), `ticketEffort` (`high`), `askModel` (`claude-haiku-5-5`), `askEffort`, `instanceId` (`claudeAgent`), `runtimeMode` (`full-access`, for launches from the service, which has no thread to inherit a mode from), `askPollSecs`, `askTimeoutMinutes`, `feed` (50), `settleAfterHours` (24; `0` turns auto-settle off), `openLinks` (`desktop`: thread links open in the running T3 Code desktop app, or in a new tab when it is not running; `tab`: always a new tab)
 
-State lives in SQLite at `$XDG_STATE_HOME/t3-codemode/store.db` (default
-`~/.local/state/t3-codemode/`; `--state-dir` or `T3CM_STATE_DIR` override). The
-directory is `0700` and the database `0600`. Everything survives restarts.
+State lives in SQLite at `store.db` in the state directory above
+(`--state-dir` or `T3CM_STATE_DIR` override). On Linux and macOS the directory
+is `0700` and the database `0600`. On Windows t3cm sets no ACL of its own: the
+store relies on the per-user ACL that `%LOCALAPPDATA%` already carries, which
+grants access to you, SYSTEM and Administrators, so a `--state-dir` outside
+your profile gets whatever its parent grants. Everything survives restarts.
 
 ## The two tools
 
@@ -163,7 +175,7 @@ the namespace `t3`, with its own OAuth client.
 |---|---|---|
 | `name` | required | the JS namespace: `^[a-z][a-z0-9_]{0,31}$`, unique, not `t3`, `mem`, `vars`, `wf`, `console`, `tools`, `catalog` or a JS reserved word |
 | `transport` | required | `"stdio"` or `"http"`; exactly the matching section is present |
-| `stdio.command` | required | a bare name (searched on `PATH`, then `$HOME/.local/bin`) or a path; a relative path (`./bin/srv`) is resolved against `stdio.cwd` |
+| `stdio.command` | required | a bare name (searched on `PATH`, then `$HOME/.local/bin`) or a path; a relative path (`./bin/srv`) is resolved against `stdio.cwd`; on Windows a name with no extension also tries each `PATHEXT` extension (`npx` finds `npx.cmd`) |
 | `stdio.args`, `stdio.cwd` | `[]`, service cwd | no references |
 | `stdio.env` | `{}` | values may hold references |
 | `http.url` | required | `http://` or `https://`; references allowed in the userinfo, path and query, not in the host |
@@ -222,14 +234,19 @@ upstream's stderr is logged at `debug` only, redacted.
   sandbox never sees them: results are redacted before they enter it, so code
   cannot rebuild a secret from a result, and errors, final output, `/healthz`
   `lastError` and log lines are redacted too.
-- A stdio upstream runs as a child of the service, in its own process group,
-  with only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`,
-  `LC_*`, `TZ`, `TMPDIR`, `TERM` and the `XDG_*` base directories from the
-  service's environment, plus its own `env`, so no upstream sees another's
-  `${env:..}` credentials. Pass anything else it needs through its `env`
+- A stdio upstream runs as a child of the service, in its own process group
+  or, on Windows, its own Job Object, with only `PATH`, `HOME`, `USER`,
+  `LOGNAME`, `SHELL`, `LANG`, `LANGUAGE`, `LC_*`, `TZ`, `TMPDIR`, `TERM` and
+  the `XDG_*` base directories from the service's environment, plus its own
+  `env`, so no upstream sees another's `${env:..}` credentials.
+  Pass anything else it needs through its `env`
   (`"NODE_OPTIONS": "${env:NODE_OPTIONS}"`). Stopping it kills the whole
   group, so a server behind a wrapper (`npx`, `uvx`, `sh`) stops too. `args`
-  are visible in `ps`, which is why they cannot hold references.
+  are visible in `ps`, which is why they cannot hold references. On Windows the
+  allowlist also passes the system variables programs need to start
+  (`SYSTEMROOT`, `COMSPEC`, `PATHEXT`, `TEMP`, `USERPROFILE`, `APPDATA`,
+  `LOCALAPPDATA` and the rest of `client_stdio::INHERITED_ENV_WINDOWS`), and
+  matches names in any case.
 - An HTTP upstream never follows redirects (a 3xx is an error), so its headers
   never reach another host. Credentials over `http://` to a non-loopback host
   need `http.allow_insecure: true`. Error text never carries the URL.
@@ -320,8 +337,9 @@ service runs T3's MCP OAuth flow against the local server: it registers a
 client, mints a 5-minute pairing code with the `t3` CLI, approves it as
 `full-access`, and exchanges the code with PKCE for a 30-day bearer token. The T3
 origin comes from `~/.t3/userdata/server-runtime.json`; the `t3` binary is
-`$T3CM_T3_BIN`, else the running server's `/proc/<pid>/exe`, else the newest
-`~/.t3/wsl-runtime/sha256-*/t3`.
+`$T3CM_T3_BIN`, else the running server's executable when it is named `t3`
+(`t3.exe` on Windows), else the newest `~/.t3/wsl-runtime/sha256-*/t3`, else
+the newest `~/.t3/runtime/versions/*/t3` that T3's installer unpacks.
 
 ## Security
 

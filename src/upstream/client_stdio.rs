@@ -18,6 +18,7 @@ use super::{
     redact_secrets, unwrap_call_result,
 };
 use crate::mcp::SUPPORTED_VERSIONS;
+use crate::platform::ProcessTree;
 use crate::t3::truncate_chars;
 
 const MAX_PAGES: usize = 50;
@@ -45,7 +46,41 @@ pub const INHERITED_ENV: &[&str] = &[
     "XDG_STATE_HOME",
 ];
 
+pub const INHERITED_ENV_WINDOWS: &[&str] = &[
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "USERNAME",
+    "USERDOMAIN",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+    "COMMONPROGRAMFILES",
+    "COMMONPROGRAMFILES(X86)",
+    "COMMONPROGRAMW6432",
+    "COMPUTERNAME",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "OS",
+];
+
 pub fn inherited_env(key: &str) -> bool {
+    if cfg!(windows) {
+        let key = key.to_ascii_uppercase();
+        return INHERITED_ENV.contains(&key.as_str())
+            || INHERITED_ENV_WINDOWS.contains(&key.as_str())
+            || key.starts_with("LC_");
+    }
     INHERITED_ENV.contains(&key) || key.starts_with("LC_")
 }
 
@@ -352,14 +387,6 @@ async fn write_stdin(mut stdin: ChildStdin, mut rx: mpsc::Receiver<String>, wire
     }
 }
 
-fn kill_group(pid: Option<u32>) {
-    if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()).filter(|p| *p > 1) {
-        unsafe {
-            libc::killpg(pid, libc::SIGKILL);
-        }
-    }
-}
-
 async fn drain_stderr(stderr: ChildStderr, wire: Arc<Wire>) {
     let mut reader = BufReader::new(stderr);
     let mut buf = Vec::new();
@@ -378,17 +405,22 @@ async fn drain_stderr(stderr: ChildStderr, wire: Arc<Wire>) {
     }
 }
 
-async fn watch_child(mut child: Child, wire: Arc<Wire>, mut kill: oneshot::Receiver<()>, stderr: JoinHandle<()>) {
-    let pid = child.id();
+async fn watch_child(
+    mut child: Child,
+    tree: ProcessTree,
+    wire: Arc<Wire>,
+    mut kill: oneshot::Receiver<()>,
+    stderr: JoinHandle<()>,
+) {
     let status = tokio::select! {
         s = child.wait() => s,
         _ = &mut kill => {
-            kill_group(pid);
+            tree.kill();
             let _ = child.start_kill();
             child.wait().await
         }
     };
-    kill_group(pid);
+    tree.kill();
     wire.close_stdin();
     let _ = tokio::time::timeout(STDERR_DRAIN, stderr).await;
     let status = match status {
@@ -439,8 +471,8 @@ impl StdioClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .process_group(0)
             .env_clear();
+        ProcessTree::prepare(&mut cmd);
         for (key, value) in std::env::vars_os() {
             if key.to_str().is_some_and(inherited_env) {
                 cmd.env(&key, &value);
@@ -453,6 +485,9 @@ impl StdioClient {
             cmd.current_dir(dir);
         }
         let mut child = cmd.spawn().map_err(|e| {
+            UpstreamError::Unavailable(spec.redact(format!("{}: cannot start {}: {e}", spec.name, command.display())))
+        })?;
+        let tree = ProcessTree::start(&child).map_err(|e| {
             UpstreamError::Unavailable(spec.redact(format!("{}: cannot start {}: {e}", spec.name, command.display())))
         })?;
         let pid = child.id();
@@ -474,7 +509,7 @@ impl StdioClient {
         let stderr_task = tokio::spawn(drain_stderr(stderr, wire.clone()));
         tokio::spawn(read_stdout(stdout, wire.clone()));
         tokio::spawn(write_stdin(stdin, out_rx, wire.clone()));
-        tokio::spawn(watch_child(child, wire.clone(), kill_rx, stderr_task));
+        tokio::spawn(watch_child(child, tree, wire.clone(), kill_rx, stderr_task));
         let mut client = StdioClient {
             name: spec.name.clone(),
             wire,
