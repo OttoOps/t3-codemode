@@ -1,0 +1,198 @@
+{
+ "pageHeight1440": 2345,
+ "pageHeightOpen1440": 5323,
+ "launchBelowFold": {
+  "top": 2001,
+  "viewport": 900,
+  "screensDown": 2.22
+ },
+ "focusedInputDrift": [
+  {
+   "t": 1794983716322,
+   "id": "issues",
+   "top": 556,
+   "scrollY": 1445,
+   "height": 2345,
+   "cards": 7
+  },
+  {
+   "t": 1794983718827,
+   "id": "issues",
+   "top": 556,
+   "scrollY": 1445,
+   "height": 2345,
+   "cards": 7
+  },
+  {
+   "t": 1794983721336,
+   "id": "issues",
+   "top": 556,
+   "scrollY": 1445,
+   "height": 2345,
+   "cards": 7
+  },
+  {
+   "t": 1794983723839,
+   "id": "issues",
+   "top": 557,
+   "scrollY": 1407,
+   "height": 2307,
+   "cards": 7
+  },
+  {
+   "t": 1794983726344,
+   "id": "issues",
+   "top": 557,
+   "scrollY": 1407,
+   "height": 2307,
+   "cards": 7
+  },
+  {
+   "t": 1794983728850,
+   "id": "issues",
+   "top": 557,
+   "scrollY": 1407,
+   "height": 2307,
+   "cards": 7
+  },
+  {
+   "t": 1794983731356,
+   "id": "issues",
+   "top": 604,
+   "scrollY": 1407,
+   "height": 2355,
+   "cards": 8
+  },
+  {
+   "t": 1794983733860,
+   "id": "issues",
+   "top": 604,
+   "scrollY": 1407,
+   "height": 2355,
+   "cards": 8
+  },
+  {
+   "t": 1794983736365,
+   "id": "issues",
+   "top": 604,
+   "scrollY": 1407,
+   "height": 2355,
+   "cards": 8
+  },
+  {
+   "t": 1794983737115,
+   "id": "issues",
+   "top": 604,
+   "scrollY": 1407,
+   "height": 2355,
+   "cards": 8
+  },
+  {
+   "t": 1794983739620,
+   "id": "issues",
+   "top": 604,
+   "scrollY": 1407,
+   "height": 2355,
+   "cards": 8
+  },
+  {
+   "t": 1794983742126,
+   "id": "issues",
+   "top": 604,
+   "scrollY": 1407,
+   "height": 2355,
+   "cards": 8
+  },
+  {
+   "t": 1794983744629,
+   "id": "issues",
+   "top": 604,
+   "scrollY": 1407,
+   "height": 2355,
+   "cards": 8
+  },
+  {
+   "t": 1794983747135,
+   "id": "issues",
+   "top": 604,
+   "scrollY": 1407,
+   "height": 2355,
+   "cards": 8
+  },
+  {
+   "t": 1794983749640,
+   "id": "issues",
+   "top": 604,
+   "scrollY": 1407,
+   "height": 2355,
+   "cards": 8
+  },
+  {
+   "t": 1794983752148,
+   "id": "issues",
+   "top": 770,
+   "scrollY": 1407,
+   "height": 2521,
+   "cards": 9
+  }
+ ],
+ "focusedInputDriftPx": 214,
+ "cardReplyDrift": [
+  {
+   "tag": "INPUT",
+   "top": 226,
+   "value": "hold the deploy until"
+  },
+  {
+   "tag": "INPUT",
+   "top": 226,
+   "value": "hold the deploy until"
+  },
+  {
+   "tag": "INPUT",
+   "top": 226,
+   "value": "hold the deploy until"
+  },
+  {
+   "tag": "INPUT",
+   "top": 226,
+   "value": "hold the deploy until"
+  },
+  {
+   "tag": "INPUT",
+   "top": 226,
+   "value": "hold the deploy until"
+  },
+  {
+   "tag": "INPUT",
+   "top": 226,
+   "value": "hold the deploy until"
+  },
+  {
+   "tag": "INPUT",
+   "top": 226,
+   "value": "hold the deploy until"
+  },
+  {
+   "tag": "INPUT",
+   "top": 226,
+   "value": "hold the deploy until"
+  },
+  {
+   "tag": "INPUT",
+   "top": 226,
+   "value": "hold the deploy until"
+  },
+  {
+   "tag": "INPUT",
+   "top": 226,
+   "value": "hold the deploy until"
+  }
+ ],
+ "phone": {
+  "scrollWidth": 390,
+  "innerWidth": 390,
+  "pageHeight": 6263,
+  "launchScreensDown": 6.55
+ }
+}
