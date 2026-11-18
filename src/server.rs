@@ -34,6 +34,22 @@ fn local_origin(headers: &HeaderMap) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
+pub fn local_host(headers: &HeaderMap) -> bool {
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else { return false };
+    let name = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.split(':').next().unwrap_or(""),
+    };
+    matches!(name.to_ascii_lowercase().as_str(), "127.0.0.1" | "localhost" | "::1")
+}
+
+async fn check_host(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    if !local_host(req.headers()) {
+        return json_response(StatusCode::FORBIDDEN, json!({"error": "requests must address a loopback host"}));
+    }
+    next.run(req).await
+}
+
 fn json_response(status: StatusCode, body: Value) -> Response {
     (status, [(header::CONTENT_TYPE, "application/json")], body.to_string()).into_response()
 }
@@ -89,6 +105,7 @@ pub fn router(app: Arc<App>, port: u16) -> Router {
         .route("/healthz", get(healthz))
         .with_state(app.clone())
         .merge(web::routes(app, port))
+        .layer(axum::middleware::from_fn(check_host))
 }
 
 pub async fn serve(

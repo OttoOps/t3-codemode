@@ -123,6 +123,11 @@ fn build(state: &StateArgs) -> Result<(Arc<App>, Arc<HttpT3>)> {
 }
 
 async fn warm_up(app: Arc<App>, t3: Arc<HttpT3>) {
+    let up = app.clone();
+    tokio::spawn(async move {
+        let listed = up.upstreams.tools().await;
+        tracing::info!(upstreams = listed.len(), "upstream catalogs loaded");
+    });
     if let Err(e) = t3.ensure_token(false).await {
         tracing::warn!("T3 auth not ready yet: {e}");
         return;
@@ -180,7 +185,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             if !no_watcher {
                 watcher::spawn(app.clone());
             }
-            server::serve(app, listener, shutdown_signal()).await?;
+            server::serve(app.clone(), listener, shutdown_signal()).await?;
+            app.upstreams.shutdown().await;
         }
         Cmd::Stdio { state, watcher: with_watcher } => {
             init_logging();
@@ -190,7 +196,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 watcher::spawn(app.clone());
             }
             let caller = std::env::var("T3CODE_THREAD_ID").ok().filter(|s| !s.is_empty());
-            server::stdio(app, caller).await?;
+            server::stdio(app.clone(), caller).await?;
+            app.upstreams.shutdown().await;
         }
         Cmd::Auth { state } => {
             let (_, t3) = build(&state)?;

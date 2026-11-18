@@ -6,40 +6,55 @@ use crate::app::{App, ExecuteRequest, ToolOutput};
 
 pub const SUPPORTED_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
-pub const SEARCH_DESCRIPTION: &str = r#"Search the T3 Code API before you call `execute`. Write a JavaScript async arrow function; it runs in a sandbox whose only globals are `catalog` and `console`, and its return value comes back as JSON.
+pub const SEARCH_DESCRIPTION: &str = r#"Search the API before you call `execute`: T3 Code tools, the tools of any configured MCP servers, and the built-ins. Write a JavaScript async arrow function; it runs in a sandbox whose only globals are `catalog` and `console`, and its return value comes back as JSON.
 
-`catalog` is an array of { name, kind, description, signature, inputSchema }. `signature` is a TypeScript declaration with the input and result types. kind "t3": T3 Code tools, called in execute as t3.<name>(input). kind "wf": the thread-workflow layer (wf.*). kind "mem": persistent memory (mem.*, vars).
+`catalog` is an array of { name, kind, server, description, signature, inputSchema }. `signature` is a TypeScript declaration with the input and result types. kind "t3": T3 Code tools, called in execute as t3.<name>(input). kind "mcp": a configured MCP server's tool, named "<server>.<tool>" and called as <server>.<tool>(input). kind "wf": the thread-workflow layer (wf.*). kind "mem": persistent memory (mem.*, vars). `server` is the namespace: "t3", the MCP server's name, "wf" or "mem".
 
 Examples:
 async () => catalog.filter(t => /thread/.test(t.name)).map(t => t.name)
 async () => catalog.find(t => t.name === "t3_thread_send").signature
-async () => catalog.filter(t => t.kind === "wf").map(t => t.signature).join("\n\n")"#;
+async () => catalog.filter(t => t.kind === "mcp").map(t => t.name)
+async () => catalog.filter(t => t.server === "wf").map(t => t.signature).join("\n\n")"#;
 
-pub const EXECUTE_DESCRIPTION: &str = r#"Run JavaScript against T3 Code. Use `search` first to find tool names and their TypeScript signatures; do not guess.
+pub const EXECUTE_DESCRIPTION: &str = r#"Run JavaScript against T3 Code and any configured MCP servers. Use `search` first to find tool names and their TypeScript signatures; do not guess.
 
-Write an async arrow function that returns a JSON-serializable value. TypeScript annotations are fine (they are stripped). The ONLY globals are:
+Write an async arrow function that returns a JSON-serializable value. TypeScript annotations are stripped. The ONLY globals are:
 - t3: every T3 Code tool by exact name, e.g. await t3.t3_thread_list({ allProjects: true }); also without the t3_ prefix, and t3.call(name, input).
-- mem: persistent key-value store: get(key), set(key, value), del(key), list(prefix?); mem.ns(name) opens a shared namespace.
+- one object per MCP server namespace: <namespace>.<tool>(input), <namespace>["odd-name"](input), <namespace>.call(name, input).
+- tools: tools.call("<namespace>.<tool>", input) reaches any namespace, t3 included.
+- mem: persistent store: get(key), set(key, value), del(key), list(prefix?); mem.ns(name) opens a shared namespace.
 - vars: a plain object restored before the run and saved after it, per session.
-- wf: the thread-workflow layer (parent/child links, notes and wakes, gates, the waiting list); search kind "wf".
+- wf: the thread-workflow layer; search kind "wf".
 - console: log/warn/error lines come back as `logs`.
-There is no fs, require, process, fetch, import or timers.
+No fs, require, process, fetch, import or timers.
 
-Returns {"result": ..., "logs": [...]}; output over 24,000 chars is cut structurally. A failed T3 call throws an Error carrying T3's message. A tool denied by policy throws too: do not retry it. timeout_ms defaults to 60000 (max 600000). session names the mem/vars namespace (default: your thread).
+Returns {"result": ..., "logs": [...]}; output over 24,000 chars is cut structurally. A failed tool call throws an Error with the tool's message. A tool denied by policy throws too: do not retry it. timeout_ms defaults to 60000 (max 600000). session names the mem/vars namespace (default: your thread).
 
 Example:
 async () => {
-  const { threads } = await t3.t3_thread_list({ allProjects: true, statuses: ["idle"], limit: 50 });
-  vars.idle = threads.map(t => ({ id: t.threadId, title: t.title }));
-  return { idle: vars.idle.length };
+  const { threads } = await t3.thread_list({ statuses: ["idle"], limit: 50 });
+  vars.idle = threads.map(t => t.threadId);
+  return vars.idle.length;
 }"#;
 
+fn with_namespaces(text: &str, namespaces: &[String]) -> String {
+    if namespaces.is_empty() {
+        format!("{text}\n\nNo MCP servers are configured.")
+    } else {
+        format!("{text}\n\nMCP server namespaces: {}.", namespaces.join(", "))
+    }
+}
+
 pub fn tools() -> Value {
+    tools_with(&[])
+}
+
+pub fn tools_with(namespaces: &[String]) -> Value {
     json!([
         {
             "name": "search",
-            "title": "Search the T3 Code API",
-            "description": SEARCH_DESCRIPTION,
+            "title": "Search the Code Mode API",
+            "description": with_namespaces(SEARCH_DESCRIPTION, namespaces),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -48,12 +63,12 @@ pub fn tools() -> Value {
                 "required": ["code"],
                 "additionalProperties": false
             },
-            "annotations": {"title": "Search the T3 Code API", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
+            "annotations": {"title": "Search the Code Mode API", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false}
         },
         {
             "name": "execute",
-            "title": "Run code against T3 Code",
-            "description": EXECUTE_DESCRIPTION,
+            "title": "Run code against T3 Code and MCP servers",
+            "description": with_namespaces(EXECUTE_DESCRIPTION, namespaces),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -65,7 +80,7 @@ pub fn tools() -> Value {
                 "required": ["code"],
                 "additionalProperties": false
             },
-            "annotations": {"title": "Run code against T3 Code", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true}
+            "annotations": {"title": "Run code against T3 Code and MCP servers", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true}
         }
     ])
 }
@@ -107,12 +122,12 @@ pub async fn handle(app: &Arc<App>, msg: Value, caller: Option<&str>) -> Option<
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "t3-codemode", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": "T3 Code in two tools: `search` the API catalog with code, then `execute` code against it."
+                    "instructions": "T3 Code and the configured MCP servers in two tools: `search` the API catalog with code, then `execute` code against it."
                 }),
             )
         }
         "ping" => ok(id, json!({})),
-        "tools/list" => ok(id, json!({"tools": tools()})),
+        "tools/list" => ok(id, json!({"tools": tools_with(&app.upstreams.namespaces())})),
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
             let args = &params["arguments"];

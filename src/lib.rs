@@ -14,6 +14,7 @@ pub mod t3;
 pub mod t3_http;
 pub mod truncate;
 pub mod types;
+pub mod upstream;
 pub mod watcher;
 pub mod web;
 pub mod wf;

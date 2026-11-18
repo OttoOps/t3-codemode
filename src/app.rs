@@ -4,39 +4,61 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::board::{GitRemotes, Remotes};
-use crate::catalog::Catalog;
+use crate::catalog::{Catalog, aliases};
 use crate::clock::{Clock, iso};
 use crate::config::Config;
 use crate::sandbox::{self, Host, Limits, NoHost, Run};
 use crate::store::Store;
 use crate::t3::{BoxFut, T3Client};
+use crate::upstream::{T3_NAMESPACE, UpstreamManager, qualified, redact_json, split_qualified};
 use crate::wf::{LAST_PASS, Wf};
 use crate::{js, truncate};
 
 pub const VARS_KEY: &str = "__vars__";
 pub const EXEC_GLOBALS: &str = "t3, mem, vars, wf, console";
+const EXEC_TAIL: &str = "tools, mem, vars, wf, console";
 pub const SEARCH_GLOBALS: &str = "catalog, console";
 const TOOLS_CACHE: &str = "t3_tools";
 const MAX_VALUE: usize = 1024 * 1024;
 const REFRESH_BACKOFF: Duration = Duration::from_secs(30);
+pub const RUN_CONNECT_WAIT: Duration = Duration::from_secs(2);
 
 const EXEC_PRELUDE: &str = r#"
 (() => {
   const host = globalThis.__host;
   const names = globalThis.__names;
+  const upstreams = globalThis.__upstreams;
   delete globalThis.__host;
   delete globalThis.__names;
+  delete globalThis.__upstreams;
   const call = async (op, args) => {
     const r = JSON.parse(await host(op, JSON.stringify(args === undefined ? null : args)));
     if (!r.ok) throw new Error(r.error);
     return r.value;
   };
-  const input = (x) => (x === undefined ? {} : x);
-  const t3 = { call: (name, x) => call("t3", { name: String(name), input: input(x) }) };
-  for (const n of names) t3[n] = (x) => call("t3", { name: n, input: input(x) });
+  const input = (x) => (x === undefined ? null : x);
+  const tool = (ns, name, x) => call("call", { ns, name: String(name), input: input(x) });
+  const define = (k, v) =>
+    Object.defineProperty(globalThis, k, { value: v, writable: false, enumerable: true, configurable: false });
+  const t3 = { call: (name, x) => tool("t3", name, x) };
+  for (const n of names) t3[n] = (x) => tool("t3", n, x);
   for (const n of names) {
     if (n.startsWith("t3_") && !(n.slice(3) in t3)) t3[n.slice(3)] = t3[n];
   }
+  define("t3", Object.freeze(t3));
+  for (const [ns, members] of upstreams) {
+    const api = {};
+    const put = (k, v) => Object.defineProperty(api, k, { value: v, enumerable: true });
+    put("call", (name, x) => tool(ns, name, x));
+    for (const [n, alias] of members) {
+      if (n === "call") continue;
+      const f = (x) => tool(ns, n, x);
+      put(n, f);
+      if (alias !== null) put(alias, f);
+    }
+    define(ns, Object.freeze(api));
+  }
+  define("tools", Object.freeze({ call: (name, x) => call("call", { qualified: String(name), input: input(x) }) }));
   const memApi = (ns) => Object.freeze({
     get: (key) => call("mem.get", { ns, key }),
     set: (key, value) => call("mem.set", { ns, key, value }),
@@ -57,9 +79,8 @@ const EXEC_PRELUDE: &str = r#"
       resolve: (id, note) => call("wf.waiting.resolve", note === undefined ? { id } : { id, note }),
     }),
   });
-  for (const [k, v] of [["t3", Object.freeze(t3)], ["mem", memApi(null)], ["wf", wf]]) {
-    Object.defineProperty(globalThis, k, { value: v, writable: false, enumerable: true, configurable: false });
-  }
+  define("mem", memApi(null));
+  define("wf", wf);
 })();
 "#;
 
@@ -84,10 +105,29 @@ pub struct App {
     pub t3: Arc<dyn T3Client>,
     pub clock: Arc<dyn Clock>,
     pub wf: Arc<Wf>,
+    pub upstreams: Arc<UpstreamManager>,
     pub csrf: String,
-    catalog: RwLock<Arc<Catalog>>,
+    built: RwLock<Built>,
     last_refresh: Mutex<Option<Instant>>,
     started: Instant,
+}
+
+struct Built {
+    catalog: Arc<Catalog>,
+    t3_tools: Arc<Vec<Value>>,
+    generation: u64,
+}
+
+fn exec_globals(namespaces: &[String]) -> String {
+    if namespaces.is_empty() { EXEC_GLOBALS.to_string() } else { format!("t3, {}, {EXEC_TAIL}", namespaces.join(", ")) }
+}
+
+fn object_input(qualified: &str, input: Option<&Value>) -> Result<Value, String> {
+    match input {
+        Some(v @ Value::Object(_)) => Ok(v.clone()),
+        Some(Value::Null) | None => Ok(json!({})),
+        Some(_) => Err(format!("{qualified}(input): input must be an object")),
+    }
 }
 
 fn csrf_token() -> String {
@@ -114,7 +154,18 @@ fn error_output(msg: &str, logs: Vec<String>, globals: &str) -> ToolOutput {
 
 impl App {
     pub fn new(config: Config, store: Arc<Store>, t3: Arc<dyn T3Client>, clock: Arc<dyn Clock>) -> Arc<App> {
-        App::with_remotes(config, store, t3, clock, Arc::new(GitRemotes))
+        let upstreams = Arc::new(UpstreamManager::new(config.upstreams.clone()));
+        App::build(config, store, t3, clock, Arc::new(GitRemotes), upstreams)
+    }
+
+    pub fn with_upstreams(
+        config: Config,
+        store: Arc<Store>,
+        t3: Arc<dyn T3Client>,
+        clock: Arc<dyn Clock>,
+        upstreams: Arc<UpstreamManager>,
+    ) -> Arc<App> {
+        App::build(config, store, t3, clock, Arc::new(GitRemotes), upstreams)
     }
 
     pub fn with_remotes(
@@ -124,50 +175,113 @@ impl App {
         clock: Arc<dyn Clock>,
         remotes: Arc<dyn Remotes>,
     ) -> Arc<App> {
+        let upstreams = Arc::new(UpstreamManager::new(config.upstreams.clone()));
+        App::build(config, store, t3, clock, remotes, upstreams)
+    }
+
+    pub fn build(
+        config: Config,
+        store: Arc<Store>,
+        t3: Arc<dyn T3Client>,
+        clock: Arc<dyn Clock>,
+        remotes: Arc<dyn Remotes>,
+        upstreams: Arc<UpstreamManager>,
+    ) -> Arc<App> {
         let config = Arc::new(config);
         let wf = Arc::new(Wf::new(store.clone(), t3.clone(), clock.clone(), config.clone(), remotes));
         let cached: Vec<Value> =
             store.meta_get(TOOLS_CACHE).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let generation = upstreams.generation();
+        let catalog = Arc::new(Catalog::build_with(&cached, &upstreams.cached_tools()));
         Arc::new(App {
             config,
             store,
             t3,
             clock,
             wf,
+            upstreams,
             csrf: csrf_token(),
-            catalog: RwLock::new(Arc::new(Catalog::build(&cached))),
+            built: RwLock::new(Built { catalog, t3_tools: Arc::new(cached), generation }),
             last_refresh: Mutex::new(None),
             started: Instant::now(),
         })
     }
 
     pub fn catalog(&self) -> Arc<Catalog> {
-        self.catalog.read().unwrap().clone()
+        self.built.read().unwrap().catalog.clone()
     }
 
-    pub async fn refresh_catalog(&self) -> Result<usize, String> {
+    fn rebuild(&self, t3_tools: Option<Vec<Value>>) -> Arc<Catalog> {
+        let generation = self.upstreams.generation();
+        let upstream_tools = self.upstreams.cached_tools();
+        let t3_tools = t3_tools.map(Arc::new).unwrap_or_else(|| self.built.read().unwrap().t3_tools.clone());
+        let catalog = Arc::new(Catalog::build_with(&t3_tools, &upstream_tools));
+        *self.built.write().unwrap() = Built { catalog: catalog.clone(), t3_tools, generation };
+        catalog
+    }
+
+    async fn refresh_t3(&self) -> Result<usize, String> {
         *self.last_refresh.lock().unwrap() = Some(Instant::now());
         let tools = self.t3.list_tools().await.map_err(|e| e.to_string())?;
         if tools.is_empty() {
             return Ok(self.catalog().t3_names.len());
         }
         let _ = self.store.meta_set(TOOLS_CACHE, &Value::Array(tools.clone()).to_string());
-        let cat = Arc::new(Catalog::build(&tools));
-        let n = cat.t3_names.len();
-        *self.catalog.write().unwrap() = cat;
-        Ok(n)
+        Ok(self.rebuild(Some(tools)).t3_names.len())
+    }
+
+    fn rebuild_if_stale(&self) {
+        if self.built.read().unwrap().generation != self.upstreams.generation() {
+            self.rebuild(None);
+        }
+    }
+
+    pub async fn refresh_catalog(&self) -> Result<usize, String> {
+        let (_, t3) = tokio::join!(self.upstreams.refresh(), self.refresh_t3());
+        self.rebuild_if_stale();
+        t3
+    }
+
+    pub async fn refresh_t3_catalog(&self) -> Result<usize, String> {
+        let t3 = self.refresh_t3().await;
+        self.rebuild_if_stale();
+        t3
+    }
+
+    pub async fn refresh_upstreams(&self) {
+        for (name, r) in self.upstreams.refresh().await {
+            if let Err(e) = r {
+                tracing::debug!(upstream = %name, "upstream refresh failed: {e}");
+            }
+        }
+        self.rebuild_if_stale();
     }
 
     async fn catalog_for_run(&self) -> Arc<Catalog> {
-        let cat = self.catalog();
-        if !cat.t3_names.is_empty() {
-            return cat;
+        if self.catalog().t3_names.is_empty() {
+            let stale = self.last_refresh.lock().unwrap().is_none_or(|t| t.elapsed() >= REFRESH_BACKOFF);
+            if stale {
+                let _ = self.refresh_t3().await;
+            }
         }
-        let stale = self.last_refresh.lock().unwrap().is_none_or(|t| t.elapsed() >= REFRESH_BACKOFF);
-        if stale {
-            let _ = self.refresh_catalog().await;
+        if !self.upstreams.namespaces().is_empty() {
+            let _ = self.upstreams.tools_for_run(RUN_CONNECT_WAIT).await;
         }
-        self.catalog()
+        let built = self.built.read().unwrap();
+        if built.generation == self.upstreams.generation() {
+            return built.catalog.clone();
+        }
+        drop(built);
+        self.rebuild(None)
+    }
+
+    pub fn redact(&self, text: String) -> String {
+        self.upstreams.redact(self.t3.redact(text))
+    }
+
+    fn redact_value(&self, value: Value) -> Value {
+        let r = self.upstreams.redactor();
+        redact_json(value, &|s| r.apply(self.t3.redact(s)))
     }
 
     fn limits(&self, timeout_ms: Option<u64>) -> Limits {
@@ -187,9 +301,11 @@ impl App {
     }
 
     pub async fn execute(self: &Arc<Self>, req: ExecuteRequest) -> ToolOutput {
+        let namespaces = self.upstreams.namespaces();
+        let globals = exec_globals(&namespaces);
         let js = match js::prepare(&req.code) {
             Ok(j) => j,
-            Err(e) => return error_output(&e, Vec::new(), EXEC_GLOBALS),
+            Err(e) => return error_output(&e, Vec::new(), &globals),
         };
         let caller = nonempty(req.caller);
         let ns = App::session_ns(req.session, caller.as_deref());
@@ -197,17 +313,22 @@ impl App {
             self.store.kv_get(&ns, VARS_KEY).ok().flatten().filter(Value::is_object).unwrap_or_else(|| json!({}));
         let catalog = self.catalog_for_run().await;
         let names = serde_json::to_string(&catalog.t3_names).unwrap_or_else(|_| "[]".into());
+        let upstreams: Vec<Value> = namespaces.iter().map(|n| json!([n, aliases(&catalog.tools_of(n))])).collect();
         let host = Arc::new(ExecHost { app: self.clone(), caller, ns: ns.clone(), catalog });
         let out = sandbox::run(Run {
             js,
             prelude: EXEC_PRELUDE,
-            globals: vec![("__names", names), ("vars", vars.to_string())],
+            globals: vec![
+                ("__names", names),
+                ("__upstreams", Value::Array(upstreams).to_string()),
+                ("vars", vars.to_string()),
+            ],
             host,
             limits: self.limits(req.timeout_ms),
             keep_vars: true,
         })
         .await;
-        let mut logs = out.logs;
+        let mut logs: Vec<String> = out.logs.into_iter().map(|l| self.redact(l)).collect();
         if let Some(v) = out.vars {
             if v.to_string().len() > MAX_VALUE {
                 logs.push("[t3cm] vars not saved: over 1 MB serialized".into());
@@ -216,10 +337,10 @@ impl App {
             }
         }
         let output = match out.result {
-            Ok(v) => ToolOutput { is_error: false, text: truncate::render(v, logs) },
-            Err(e) => error_output(&e, logs, EXEC_GLOBALS),
+            Ok(v) => ToolOutput { is_error: false, text: truncate::render(self.redact_value(v), logs) },
+            Err(e) => error_output(&self.redact(e), logs, &globals),
         };
-        ToolOutput { text: self.t3.redact(output.text), ..output }
+        ToolOutput { text: self.redact(output.text), ..output }
     }
 
     pub async fn search(self: &Arc<Self>, code: &str) -> ToolOutput {
@@ -237,10 +358,12 @@ impl App {
             keep_vars: false,
         })
         .await;
-        match out.result {
-            Ok(v) => ToolOutput { is_error: false, text: truncate::render(v, out.logs) },
-            Err(e) => error_output(&e, out.logs, SEARCH_GLOBALS),
-        }
+        let logs: Vec<String> = out.logs.into_iter().map(|l| self.redact(l)).collect();
+        let output = match out.result {
+            Ok(v) => ToolOutput { is_error: false, text: truncate::render(self.redact_value(v), logs) },
+            Err(e) => error_output(&self.redact(e), logs, SEARCH_GLOBALS),
+        };
+        ToolOutput { text: self.redact(output.text), ..output }
     }
 
     pub async fn ask(self: &Arc<Self>, question: &str) -> anyhow::Result<Value> {
@@ -275,6 +398,7 @@ impl App {
                 "intervalSecs": self.config.watcher_interval_secs,
             },
             "store": self.store.path().display().to_string(),
+            "upstreams": self.upstreams.status(),
         })
     }
 
@@ -301,24 +425,17 @@ impl App {
         };
         let store_err = |e: anyhow::Error| format!("store: {e}");
         match op {
-            "t3" => {
-                let name = args["name"].as_str().unwrap_or_default();
-                let resolved = if catalog.t3_names.is_empty() || catalog.t3_names.contains(name) {
-                    name.to_string()
-                } else if catalog.t3_names.contains(&format!("t3_{name}")) {
-                    format!("t3_{name}")
-                } else {
-                    return Err(format!("unknown T3 tool {name:?}; use the search tool to find the right name"));
+            "call" => {
+                let (ns, tool) = match args["qualified"].as_str() {
+                    Some(q) => split_qualified(q).ok_or_else(|| {
+                        format!(
+                            "tools.call(name): name must be \"<namespace>.<tool>\", got {q:?}; namespaces are {}",
+                            self.namespace_list()
+                        )
+                    })?,
+                    None => (args["ns"].as_str().unwrap_or_default(), args["name"].as_str().unwrap_or_default()),
                 };
-                if self.config.deny.contains(&resolved) {
-                    return Err(format!("{resolved} is denied by the t3-codemode deny list; do not retry it"));
-                }
-                let input = match args.get("input") {
-                    Some(v @ Value::Object(_)) => v.clone(),
-                    Some(Value::Null) | None => json!({}),
-                    Some(_) => return Err(format!("t3.{resolved}(input): input must be an object")),
-                };
-                self.t3.call(&resolved, input).await.map_err(|e| e.to_string())
+                self.call_tool(ns, tool, args.get("input"), catalog).await
             }
             "mem.get" => {
                 let (ns, key) = (pick_ns(&args)?, key(&args, "get")?);
@@ -355,6 +472,42 @@ impl App {
     }
 }
 
+impl App {
+    fn namespace_list(&self) -> String {
+        let mut all = vec![T3_NAMESPACE.to_string()];
+        all.extend(self.upstreams.namespaces());
+        all.join(", ")
+    }
+
+    async fn call_tool(&self, ns: &str, tool: &str, input: Option<&Value>, catalog: &Catalog) -> Result<Value, String> {
+        if ns == T3_NAMESPACE {
+            return self.call_t3(tool, input, catalog).await;
+        }
+        if !self.upstreams.is_namespace(ns) {
+            return Err(format!("unknown namespace {ns:?}; namespaces are {}", self.namespace_list()));
+        }
+        let input = object_input(&qualified(ns, tool), input)?;
+        let value = self.upstreams.call(ns, tool, input).await.map_err(|e| e.to_string())?;
+        Ok(self.redact_value(value))
+    }
+
+    async fn call_t3(&self, name: &str, input: Option<&Value>, catalog: &Catalog) -> Result<Value, String> {
+        let resolved = if catalog.t3_names.is_empty() || catalog.t3_names.contains(name) {
+            name.to_string()
+        } else if catalog.t3_names.contains(&format!("t3_{name}")) {
+            format!("t3_{name}")
+        } else {
+            return Err(format!("unknown T3 tool {name:?}; use the search tool to find the right name"));
+        };
+        if self.config.deny.contains(&resolved) {
+            return Err(format!("{resolved} is denied by the t3-codemode deny list; do not retry it"));
+        }
+        let input = object_input(&format!("t3.{resolved}"), input)?;
+        let value = self.t3.call(&resolved, input).await.map_err(|e| e.to_string())?;
+        Ok(self.redact_value(value))
+    }
+}
+
 struct ExecHost {
     app: Arc<App>,
     caller: Option<String>,
@@ -369,7 +522,7 @@ impl Host for ExecHost {
         let ns = self.ns.clone();
         let catalog = self.catalog.clone();
         Box::pin(
-            async move { app.host_op(&op, args, caller.as_deref(), &ns, &catalog).await.map_err(|e| app.t3.redact(e)) },
+            async move { app.host_op(&op, args, caller.as_deref(), &ns, &catalog).await.map_err(|e| app.redact(e)) },
         )
     }
 }
