@@ -160,13 +160,19 @@ pub fn reply_options(body: &str) -> Vec<String> {
     out
 }
 
-fn same_card(card: &Card, id: &str, at: Option<&str>) -> Result<()> {
-    match at {
-        Some(at) if at != card.at => {
-            bail!("no open board card {id:?} from {at}; a newer decision has that id, so nothing was done")
-        }
-        _ => Ok(()),
+#[derive(Default)]
+pub struct CardRef<'a> {
+    pub at: Option<&'a str>,
+    pub token: Option<&'a str>,
+}
+
+fn same_card(card: &Card, id: &str, want: &CardRef) -> Result<()> {
+    let stale_at = want.at.is_some_and(|at| at != card.at);
+    let stale_token = want.token.is_some_and(|t| card.token.as_deref() != Some(t));
+    if stale_at || stale_token {
+        bail!("no open board card {id:?} for that decision; a newer decision has that id, so nothing was done");
     }
+    Ok(())
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -186,6 +192,8 @@ pub struct Card {
     pub resolved: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 pub struct NewCard<'a> {
@@ -357,6 +365,7 @@ impl Wf {
                     at: w.at,
                     resolved,
                     resolution,
+                    token: s("token"),
                 }
             })
             .collect())
@@ -364,7 +373,8 @@ impl Wf {
 
     pub(crate) fn card_add(&self, c: NewCard) -> Result<String> {
         let options = reply_options(c.body);
-        let data = json!({"kind": c.kind, "ticket": c.ticket, "handle": c.handle, "options": options});
+        let data =
+            json!({"kind": c.kind, "ticket": c.ticket, "handle": c.handle, "options": options, "token": random_id()});
         let id = self.alloc_waiting(
             BOARD,
             &card_text(c.body),
@@ -427,10 +437,10 @@ impl Wf {
     }
 
     pub async fn answer(&self, id: &str, text: &str) -> Result<Value> {
-        self.answer_at(id, text, None).await
+        self.answer_at(id, text, &CardRef::default()).await
     }
 
-    pub async fn answer_at(&self, id: &str, text: &str, at: Option<&str>) -> Result<Value> {
+    pub async fn answer_at(&self, id: &str, text: &str, want: &CardRef<'_>) -> Result<Value> {
         let text = text.trim();
         if text.is_empty() {
             bail!("wf.answer: empty answer text");
@@ -444,7 +454,7 @@ impl Wf {
             .into_iter()
             .find(|c| c.id == id)
             .ok_or_else(|| anyhow!("no open board card {id:?}; wf.cards() lists the open ones"))?;
-        same_card(&card, id, at)?;
+        same_card(&card, id, want)?;
         let ticket = card
             .ticket
             .clone()
@@ -470,12 +480,12 @@ impl Wf {
         }
     }
 
-    pub async fn dismiss_at(&self, id: &str, at: Option<&str>) -> Result<Value> {
+    pub async fn dismiss_at(&self, id: &str, want: &CardRef<'_>) -> Result<Value> {
         let _g = self.lock.lock().await;
-        if at.is_some() {
+        if want.at.is_some() || want.token.is_some() {
             let card =
                 self.cards()?.into_iter().find(|c| c.id == id).ok_or_else(|| anyhow!("no open board card {id:?}"))?;
-            same_card(&card, id, at)?;
+            same_card(&card, id, want)?;
         }
         self.dismiss(id)
     }
