@@ -154,12 +154,7 @@ pub fn default_path() -> PathBuf {
     if let Ok(p) = std::env::var("T3CM_CONFIG") {
         return PathBuf::from(p);
     }
-    let base = std::env::var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_| home().join(".config"));
-    base.join("t3-codemode").join("config.json")
-}
-
-pub fn home() -> PathBuf {
-    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"))
+    crate::platform::config_dir().join("config.json")
 }
 
 impl Default for Config {

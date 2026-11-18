@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::clock::{Clock, iso, minutes_since, parse_ts};
-use crate::config::home;
+use crate::platform::{exe_name, home, process_exe};
 use crate::store::{Store, StoredToken};
 use crate::t3::{BoxFut, T3Client, T3Error, T3Status, truncate_chars, unwrap_tool_result};
 
@@ -44,18 +44,24 @@ pub fn find_t3_binary() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("T3CM_T3_BIN") {
         return Some(PathBuf::from(p));
     }
+    let name = exe_name("t3");
     if let Some(pid) = runtime().ok().and_then(|r| r.pid)
-        && let Ok(real) = std::fs::canonicalize(format!("/proc/{pid}/exe"))
-        && real.file_name().is_some_and(|n| n == "t3")
+        && let Some(real) = process_exe(pid)
+        && real.file_name().is_some_and(|n| n.eq_ignore_ascii_case(&name))
     {
         return Some(real);
     }
-    let dir = t3_home().join("wsl-runtime");
+    let home = t3_home();
+    newest_binary(&home.join("wsl-runtime"), Some("sha256-"), &name)
+        .or_else(|| newest_binary(&home.join("runtime").join("versions"), None, &name))
+}
+
+fn newest_binary(dir: &Path, prefix: Option<&str>, name: &str) -> Option<PathBuf> {
     std::fs::read_dir(dir)
         .ok()?
         .filter_map(Result::ok)
-        .filter(|e| e.file_name().to_string_lossy().starts_with("sha256-"))
-        .map(|e| e.path().join("t3"))
+        .filter(|e| prefix.is_none_or(|p| e.file_name().to_string_lossy().starts_with(p)))
+        .map(|e| e.path().join(name))
         .filter(|p| p.is_file())
         .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
 }

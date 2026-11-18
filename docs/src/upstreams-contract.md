@@ -37,7 +37,7 @@ merge. Keys inside an upstream are snake_case, as below.
 |---|---|---|---|
 | `name` | string | required | the JS namespace; identifier rules in section 4 |
 | `transport` | `"stdio"` \| `"http"` | required | selects the section below |
-| `stdio.command` | string | required for stdio | bare name (searched on `PATH`, then `$HOME/.local/bin`) or a path (`~` expanded); no references |
+| `stdio.command` | string | required for stdio | bare name (searched on `PATH`, then `$HOME/.local/bin`; on Windows each `PATHEXT` extension too) or a path (`~` expanded); no references |
 | `stdio.args` | string[] | `[]` | no references (argv is visible in `ps`) |
 | `stdio.env` | {string: string} | `{}` | values may hold references |
 | `stdio.cwd` | string | service cwd | `~` expanded; must exist at connect; no references |
@@ -59,8 +59,8 @@ and references:
 - `${env:NAME}`: the service process's environment variable `NAME`
   (`[A-Za-z_][A-Za-z0-9_]*`). Note: under systemd this is the unit's
   environment, not the caller's shell.
-- `${file:/abs/path}` or `${file:~/path}`: the file's UTF-8 content with
-  trailing `\r`/`\n` trimmed.
+- `${file:/abs/path}` or `${file:~/path}` (on Windows also `C:\path` or
+  `~\path`): the file's UTF-8 content with trailing `\r`/`\n` trimmed.
 - `$${` is a literal `${`. Any other `${` is a config error.
 
 Examples: `"Bearer ${env:LINEAR_TOKEN}"`, `"${file:~/.config/t3-codemode/gh.pat}"`.
@@ -234,8 +234,9 @@ Stdio specifics: spawn with `kill_on_drop`, stdin/stdout piped, stderr drained
 continuously into a ring of the last `STDERR_LINES` lines (redacted; the last
 lines are appended to a connect failure and logged at `debug`, never at a
 higher level). The child gets only an allowlist of the service environment
-(`client_stdio::INHERITED_ENV` and `LC_*`), plus the resolved `env`, and runs
-in its own process group. Non-JSON stdout lines are ignored.
+(`client_stdio::INHERITED_ENV` and `LC_*`; on Windows `INHERITED_ENV` and
+`INHERITED_ENV_WINDOWS`, matched in any case), plus the resolved `env`, and
+runs in its own process group, or its own Job Object on Windows. Non-JSON stdout lines are ignored.
 A dead child (EOF, write error, exit) fails every pending and later request
 with `Unavailable("ns: process exited (<status>)")` at once, no hang.
 `shutdown`: close stdin, wait up to 2 s, then kill.
@@ -283,8 +284,9 @@ impl UpstreamManager {
 ```
 
 `validate` errors name the upstream (`upstreams[2] "linear": ...`) and the
-field. `resolve` expands `~`, resolves the command (`/` in it: a path; else
-`PATH`, then `$HOME/.local/bin`; not found is `Config` naming the command),
+field. `resolve` expands `~`, resolves the command (`/`, or `\` on Windows, in
+it: a path; else `PATH`, then `$HOME/.local/bin`; on Windows each `PATHEXT`
+extension is tried too; not found is `Config` naming the command),
 resolves references, checks `cwd` exists, and fills `secrets`.
 
 Lifecycle per upstream (`UpstreamState`):

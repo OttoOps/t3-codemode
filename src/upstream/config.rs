@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -10,6 +9,7 @@ use super::{
     ResolvedTransport, ResolvedUpstream, SECRET_NAME_HINTS, Secret, StdioConfig, ToolFilter, Transport, UpstreamConfig,
     UpstreamError, is_loopback_host,
 };
+use crate::platform::{executable_variants, has_separator, home_dir, is_executable};
 use crate::types::sanitize_identifier;
 
 const MAX_UPSTREAMS: usize = 32;
@@ -210,7 +210,8 @@ fn parse_one(body: &str) -> Result<Reference> {
         return Ok(Reference::Env(name.into()));
     }
     if let Some(path) = body.strip_prefix("file:") {
-        if !(path.starts_with('/') || path.starts_with("~/")) {
+        let home_relative = path.starts_with("~/") || (cfg!(windows) && path.starts_with("~\\"));
+        if !(path.starts_with('/') || home_relative || Path::new(path).is_absolute()) {
             bail!("invalid reference ${{file:{path}}}: the path must be absolute or start with ~/");
         }
         return Ok(Reference::File(PathBuf::from(path)));
@@ -332,42 +333,37 @@ fn push_secret(secrets: &mut Vec<Secret>, value: String) {
     }
 }
 
-fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from)
-}
-
 fn expand_tilde(raw: &str) -> PathBuf {
-    match (raw, home()) {
-        ("~", Some(h)) => h,
-        (r, Some(h)) if r.starts_with("~/") => h.join(&r[2..]),
-        (r, _) => PathBuf::from(r),
+    let rest =
+        raw.strip_prefix('~').filter(|r| r.is_empty() || r.starts_with('/') || (cfg!(windows) && r.starts_with('\\')));
+    match (rest, home_dir()) {
+        (Some(""), Some(h)) => h,
+        (Some(r), Some(h)) => h.join(&r[1..]),
+        _ => PathBuf::from(raw),
     }
 }
 
-fn is_executable(path: &Path) -> bool {
-    path.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+fn first_executable(path: PathBuf) -> Option<PathBuf> {
+    executable_variants(path).into_iter().find(|p| is_executable(p))
 }
 
 fn find_command(command: &str, cwd: Option<&Path>) -> Option<PathBuf> {
-    if command.starts_with('/') || command.starts_with('~') {
-        let path = expand_tilde(command);
-        return is_executable(&path).then_some(path);
+    if command.starts_with('/') || command.starts_with('~') || Path::new(command).is_absolute() {
+        return first_executable(expand_tilde(command));
     }
-    if command.contains('/') {
+    if has_separator(command) {
         let base = match cwd {
             Some(dir) => dir.to_path_buf(),
             None => std::env::current_dir().ok()?,
         };
-        let path = base.join(command);
-        return is_executable(&path).then_some(path);
+        return first_executable(base.join(command));
     }
     let path_dirs = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default();
     path_dirs
         .into_iter()
         .filter(|d| !d.as_os_str().is_empty())
-        .chain(home().map(|h| h.join(".local/bin")))
-        .map(|d| d.join(command))
-        .find(|p| is_executable(p))
+        .chain(home_dir().map(|h| h.join(".local").join("bin")))
+        .find_map(|d| first_executable(d.join(command)))
 }
 
 pub fn glob_match(pattern: &str, name: &str) -> bool {

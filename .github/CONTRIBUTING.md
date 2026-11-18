@@ -109,9 +109,8 @@ the triage labels.
 
 ## Development setup
 
-**Requirements.** Use Linux (macOS and Windows support is tracked in
-[#2](https://github.com/potto007/t3-codemode/issues/2)), Git, and Rust 1.95 or
-newer.
+**Requirements.** Use Linux, macOS or Windows, Git, and Rust 1.95 or newer. CI
+runs the checks on all three.
 
 **Get the code.** Fork the repository, clone your fork, and create a branch:
 
