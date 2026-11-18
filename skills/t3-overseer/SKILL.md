@@ -22,12 +22,19 @@ list, and ends the turn waiting.
 When `mcp__t3cm__execute` is listed, the t3-codemode service is the Ticket
 Boss and its page is the waiting list, so this thread only starts the work:
 
-1. Show the issues, one line each with its title, under the action line
-   "approve starting these issues, or reply with changes", and wait.
+1. Map each issue's repo to its workspace root as step 1 items 3 and 4
+   say, and read the slots (Slots, below) for each. Show the issues, one
+   line each with its title, under the action line "approve starting these
+   issues, or reply with changes", and wait.
 2. On approval, one `execute` call launches them all and returns one line
-   each: `wf.launchTicket({ issue: url })` per issue, `Promise.all`, mapping
-   each result to its label and link (a failure throws and also leaves a
-   card on the board).
+   each: `wf.launchTicket({ issue: url, model, effort })` per issue,
+   `Promise.all`, mapping each result to its label and link (a failure
+   throws and also leaves a card on the board). The board launches on its
+   own provider (`instanceId` in the t3cm config, `claudeAgent` by
+   default) and fills what you leave out from its own `ticketModel` and
+   `ticketEffort`. Pass the `model ticket` line's model and effort only
+   when its provider is the board's or unnamed; otherwise pass neither and
+   tell the user the board's ticket model applies.
 3. Reply with the ticket links and
    `**ACTION NEEDED:** answer the tickets' decisions on the board, here: http://127.0.0.1:47731/`,
    then end the turn. Do not open links or watch: the board does both.
@@ -36,6 +43,17 @@ When the user asks this thread a status question later, answer it from one
 `execute` over `wf.board({ parent: "board", all: true })` and
 `wf.cards({ all: true })`. Everything below this section is the path without
 the service.
+
+## Slots
+
+Read them with `t3wf slots` as
+[Reading slots in a role](../t3-workflow/slots.md#reading-slots-in-a-role)
+says, with `--repo` set to the repo's workspace root when you know it (a
+repo's `AGENTS.md` can set its own ticket model), and tell the user its
+skip and no-config lines. The overseer uses one line: `model
+ticket`, the ticket threads' model, as `<model> effort <effort> on
+<provider>` with each part present only when set, or `provider default`.
+A `PROBLEM:` on it is a skip, and tickets get the provider default.
 
 ## On the link protocol
 
@@ -56,7 +74,9 @@ characters.
 4. Map each repo to a T3 project: `t3_project_list`, then the project whose
    workspace root has that repo as its `origin` remote
    (`git -C <root> remote get-url origin`). When no project matches, ask.
-5. Show the list, one line per issue with its title and project, under the
+5. Read the slots (Slots, above) once per repo, with `--repo <workspace
+   root>`.
+6. Show the list, one line per issue with its title and project, under the
    action line "approve starting these issues, or reply with changes", and
    wait.
 
@@ -69,7 +89,9 @@ For each approved issue:
    joins.
 2. `t3_thread_launch` with `title` `<repo name>#<n>: <issue title>`, the
    issue's `projectId`, no `workspaceStrategy` (a ticket thread works from
-   the project root and edits nothing), and this `message`:
+   the project root and edits nothing), the `model ticket` slot as
+   `modelSelection` (built as `t3-ticket` step 3 builds the worker's, left
+   out for `provider default`), and this `message`:
 
    ```markdown
    Work <issue URL> with the t3-ticket skill.

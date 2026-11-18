@@ -93,6 +93,8 @@ acknowledging. Lines under "Notes since your last wake" are the digest.
 The roles' review, passes, credential renewal, delivery and models are
 **slots**, set per user and per repository. `t3wf slots` prints the
 effective settings and how to run each skill; `t3wf doctor` checks them.
+How a role acts on each line, including a skill that no longer resolves:
+[slots.md, Reading slots in a role](slots.md#reading-slots-in-a-role).
 Config file, `AGENTS.md` keys and skill search: [slots.md](slots.md).
 
 ## What each role supplies
