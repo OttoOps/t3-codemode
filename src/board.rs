@@ -160,6 +160,15 @@ pub fn reply_options(body: &str) -> Vec<String> {
     out
 }
 
+fn same_card(card: &Card, id: &str, at: Option<&str>) -> Result<()> {
+    match at {
+        Some(at) if at != card.at => {
+            bail!("no open board card {id:?} from {at}; a newer decision has that id, so nothing was done")
+        }
+        _ => Ok(()),
+    }
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Card {
@@ -418,6 +427,10 @@ impl Wf {
     }
 
     pub async fn answer(&self, id: &str, text: &str) -> Result<Value> {
+        self.answer_at(id, text, None).await
+    }
+
+    pub async fn answer_at(&self, id: &str, text: &str, at: Option<&str>) -> Result<Value> {
         let text = text.trim();
         if text.is_empty() {
             bail!("wf.answer: empty answer text");
@@ -431,6 +444,7 @@ impl Wf {
             .into_iter()
             .find(|c| c.id == id)
             .ok_or_else(|| anyhow!("no open board card {id:?}; wf.cards() lists the open ones"))?;
+        same_card(&card, id, at)?;
         let ticket = card
             .ticket
             .clone()
@@ -454,6 +468,16 @@ impl Wf {
             }
             None => bail!("no open board card {id:?}"),
         }
+    }
+
+    pub async fn dismiss_at(&self, id: &str, at: Option<&str>) -> Result<Value> {
+        let _g = self.lock.lock().await;
+        if at.is_some() {
+            let card =
+                self.cards()?.into_iter().find(|c| c.id == id).ok_or_else(|| anyhow!("no open board card {id:?}"))?;
+            same_card(&card, id, at)?;
+        }
+        self.dismiss(id)
     }
 
     pub fn feed(&self, limit: usize) -> Result<Vec<Value>> {

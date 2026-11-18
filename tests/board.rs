@@ -364,6 +364,25 @@ async fn the_answer_endpoint_sends_one_reply_and_resolves_the_card() {
 }
 
 #[tokio::test]
+async fn card_actions_for_an_older_decision_with_the_same_id_do_nothing() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    s.h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE})).await;
+    let at = cards(&s.h)[0]["at"].as_str().unwrap().to_string();
+    let old = "2000-01-01T00:00:00Z";
+    let r = s.post("/api/cards/a1/answer", json!({"text": "merge", "at": old}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 404);
+    let r = s.post("/api/cards/a1/dismiss", json!({"at": old}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 404);
+    assert!(s.h.sent().is_empty());
+    assert_eq!(cards(&s.h).len(), 1);
+    let r = s.post("/api/cards/a1/answer", json!({"text": "merge", "at": at}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(sent_to(&s.h, TICKET).len(), 1);
+    assert!(cards(&s.h).is_empty());
+}
+
+#[tokio::test]
 async fn posts_need_the_csrf_token_and_the_boards_own_origin() {
     let s = start(H::new()).await;
     join_board(&s.h, TICKET, "widgets#41").await;
@@ -1066,7 +1085,7 @@ return { what, at0, at4999, sent, after: answers().length, back: !card("a2").que
     );
     assert_eq!(r["what"], "Sending \u{201c}merge\u{201d} to widgets#41", "{r}");
     assert_eq!((r["at0"].as_i64(), r["at4999"].as_i64()), (Some(0), Some(0)), "{r}");
-    assert_eq!(r["sent"], json!([["/api/cards/a1/answer", {"text": "merge"}]]), "{r}");
+    assert_eq!(r["sent"], json!([["/api/cards/a1/answer", {"text": "merge", "at": st["cards"][0]["at"]}]]), "{r}");
     assert_eq!(r["after"], 1, "{r}");
     assert_eq!(r["back"], true, "{r}");
 }
@@ -1323,6 +1342,76 @@ return { stale, back: b.getAttribute("aria-disabled") };
     );
     assert_eq!(r["stale"], "true", "{r}");
     assert_eq!(r["back"], serde_json::Value::Null, "{r}");
+}
+
+#[tokio::test]
+async fn a_card_replaced_while_typing_a_reply_keeps_keyboard_focus() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+const c = card("a1");
+c.querySelector('[data-part="replybtn"]').dispatch("click");
+typeKeys("for the old gate");
+emitState({ ...base, cards: base.cards.map((x) => x.id === "a1" ? { ...x, at: "2099-01-01T00:00:00Z" } : x) });
+return { focused: document.activeElement === c, value: c.querySelector("input").value };
+"##,
+    );
+    assert_eq!(r["focused"], true, "{r}");
+    assert_eq!(r["value"], "", "{r}");
+}
+
+#[tokio::test]
+async fn a_resolution_note_stays_with_the_decision_that_produced_it() {
+    let (html, st) = two_gate_page().await;
+    let r = run_page_async(
+        &html,
+        &format!(
+            "async () => {{\n{PAGE_HELPERS}\nconst base = {st};\n{}\n}}",
+            r##"
+fetchReply = async () => ({ ok: true, json: async () => ({}) });
+emitState(base);
+card("a1").querySelector('[data-opt="1"]').dispatch("click");
+advance(5000);
+for (let i = 0; i < 5; i++) await Promise.resolve();
+emitState({ ...base, cards: base.cards.map((x) => x.id === "a1" ? { ...x, at: "2099-01-01T00:00:00Z" } : x) });
+card("a2").focus();
+emitState({ ...base, cards: base.cards.filter((x) => x.id !== "a1") });
+return { note: card("a1").textContent };
+"##
+        ),
+    );
+    assert_eq!(r["note"], "a1 resolved", "{r}");
+}
+
+#[tokio::test]
+async fn a_pending_launch_row_is_not_given_to_one_of_two_threads_with_its_label() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+const P = { ...base.tree[0], thread: null, label: "acme/widgets#9", status: "running", done: false, gate: null, last: null };
+emitState({ ...base, tree: [...base.tree, P] });
+const row = q('#open [data-key="pending:acme/widgets#9"]');
+q("#open").children[0].focus();
+emitState({ ...base, tree: [...base.tree, { ...P, thread: "th-9" }, { ...P, thread: "th-10" }] });
+return { key: row.getAttribute("data-key"), gone: row.classList.contains("gone") };
+"##,
+    );
+    assert_eq!(r["key"], "pending:acme/widgets#9", "{r}");
+    assert_eq!(r["gone"], true, "{r}");
+}
+
+#[tokio::test]
+async fn the_composer_error_strip_moves_with_the_dock() {
+    let (html, _) = two_gate_page().await;
+    let dock = html.find(r#"id="dock""#).unwrap();
+    let err = html.find(r#"id="composer-err""#).unwrap();
+    let forms = html.find(r#"class="forms""#).unwrap();
+    assert!(dock < err && err < forms);
 }
 
 #[tokio::test]

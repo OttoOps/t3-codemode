@@ -511,8 +511,8 @@ kbd { font-family: var(--mono); font-size: 12px; }
     </div>
   </section>
   <section id="composer" aria-label="Launch and Ask" data-mode="launch">
-    <div class="err-strip" id="composer-err" hidden><span id="composer-err-text"></span><button class="btn quiet" type="button" id="composer-err-close">Close</button></div>
     <div class="dock" id="dock">
+      <div class="err-strip" id="composer-err" hidden><span id="composer-err-text"></span><button class="btn quiet" type="button" id="composer-err-close">Close</button></div>
       <div id="out" aria-label="Launch results and answers">
         <ul id="launch-out" aria-label="Launch results"></ul>
         <p class="oh" id="asks-h">Answers</p>
@@ -957,7 +957,11 @@ function resetCard(card) {
 function optionsSig(c) { return JSON.stringify([c.options, !!c.ticket]); }
 
 function patchCard(card, c) {
-  if (card._card && inst(card._card) !== inst(c)) resetCard(card);
+  if (card._card && inst(card._card) !== inst(c)) {
+    const typing = part(card, "reply").contains(document.activeElement);
+    resetCard(card);
+    if (typing) card.focus();
+  }
   card._card = c;
   setAttr(card, "data-id", c.id);
   setAttr(card, "data-ticket", c.ticket || null);
@@ -1045,7 +1049,7 @@ function paintSending(card) {
 function startSend(c, kind, text, raw) {
   if (pending.has(c.id)) return;
   const card = cardEl(c.id);
-  const p = { kind, text, raw: raw === undefined ? text : raw, label: c.label || c.id, inst: inst(c), sent: false };
+  const p = { kind, text, raw: raw === undefined ? text : raw, label: c.label || c.id, inst: inst(c), at: c.at, sent: false };
   p.timer = setTimeout(() => fire(c.id), SEND_DELAY);
   pending.set(c.id, p);
   if (card) {
@@ -1097,14 +1101,14 @@ async function fire(id) {
   }
   const path = "/api/cards/" + encodeURIComponent(id) + (p.kind === "dismiss" ? "/dismiss" : "/answer");
   try {
-    await post(path, p.kind === "dismiss" ? {} : { text: p.text });
+    await post(path, p.kind === "dismiss" ? { at: p.at } : { text: p.text, at: p.at });
     if (pending.get(id) !== p) return;
     const input = card && part(card, "input");
     if (!input || input.value === p.raw) {
       drafts.delete(id);
       if (input) input.value = "";
     }
-    goneNote.set(id, p.kind === "dismiss" ? id + " dismissed" : id + " answered: " + p.text);
+    goneNote.set(id, { inst: p.inst, text: p.kind === "dismiss" ? id + " dismissed" : id + " answered: " + p.text });
   } catch (e) {
     if (pending.get(id) !== p) return;
     pending.delete(id);
@@ -1160,7 +1164,8 @@ function goneCard(card) {
   const p = pending.get(id);
   if (p && !p.sent) { clearTimeout(p.timer); }
   pending.delete(id);
-  const note = goneNote.get(id) || (p && !p.sent ? id + " resolved elsewhere; your reply was not sent" : id + " resolved");
+  const n = goneNote.get(id);
+  const note = n && card._card && n.inst === inst(card._card) ? n.text : p && !p.sent ? id + " resolved elsewhere; your reply was not sent" : id + " resolved";
   const hgt = card.getBoundingClientRect ? card.getBoundingClientRect().height : 0;
   card.className = "card gone";
   card._card = null;
@@ -1377,13 +1382,13 @@ function syncTickets(tree, cards) {
   const po = panels.open, pd = panels.done;
   const ol = $("open");
   for (const t of open) {
-    if (!t.thread || open.some((u) => !u.thread && u.label === t.label)) continue;
+    if (!t.thread || open.some((u) => u !== t && u.label === t.label)) continue;
     const was = ol.querySelector('[data-key="' + CSS.escape("pending:" + t.label) + '"]');
     if (was && !ol.querySelector('[data-key="' + CSS.escape(t.thread) + '"]')) setAttr(was, "data-key", t.thread);
   }
   const lo = firstState || isLive(po);
   const heldOpen = sync($("open"), open, {
-    key: (t, have) => have.has("pending:" + t.label) ? "pending:" + t.label : t.thread || "pending:" + t.label,
+    key: (t) => t.thread || "pending:" + t.label,
     make: makeTicket,
     patch: (el, t) => patchTicket(el, t, { needs, live: lo, done: false }),
     gone: (el) => goneTicket(el, (l) => {
