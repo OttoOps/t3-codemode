@@ -250,7 +250,7 @@ impl Wf {
         let last = self.store.meta_get(LAST_PASS).ok().flatten();
         match self.mins(last.as_deref()) {
             Some(m) if self.watcher_alive() => format!("running (last pass {m:.0} min ago)"),
-            Some(m) => format!("stale (last pass {m:.0} min ago); check `systemctl --user status t3-codemode`"),
+            Some(m) => format!("stale (last pass {m:.0} min ago); check `{}`", crate::platform::SERVICE.status),
             None => "no pass recorded yet".into(),
         }
     }

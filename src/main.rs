@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -43,6 +43,11 @@ enum Cmd {
         state: StateArgs,
         #[arg(long)]
         no_watcher: bool,
+        /// Append logs to this file instead of stderr; past 10 MB it rolls to <file>.1 at start.
+        /// On Windows it also lets go of a console that t3cm alone holds, so a logon task runs
+        /// without a window.
+        #[arg(long, value_name = "FILE")]
+        log_file: Option<PathBuf>,
     },
     /// Serve MCP over stdio (no watcher unless --watcher)
     Stdio {
@@ -99,14 +104,54 @@ fn state_dir(a: &StateArgs) -> PathBuf {
     a.state_dir.clone().unwrap_or_else(platform::state_dir)
 }
 
-fn init_logging() {
+fn init_logging(log_file: Option<&Path>) -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
-        .with_target(false)
-        .init();
+    let fmt = tracing_subscriber::fmt().with_env_filter(filter).with_target(false);
+    match log_file {
+        Some(path) => {
+            fmt.with_writer(std::sync::Mutex::new(open_log(path)?)).with_ansi(false).init();
+            LOGS_TO_FILE.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        None => fmt.with_writer(std::io::stderr).with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr())).init(),
+    }
+    Ok(())
+}
+
+const LOG_ROLL_BYTES: u64 = 10 << 20;
+
+static LOGS_TO_FILE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn open_log(path: &Path) -> Result<std::fs::File> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > LOG_ROLL_BYTES) {
+        let mut rolled = path.as_os_str().to_owned();
+        rolled.push(".1");
+        std::fs::rename(path, &rolled).with_context(|| format!("rolling {}", path.display()))?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))
+}
+
+#[cfg(windows)]
+fn release_own_console() {
+    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
+    let mut pids = [0u32; 2];
+    if unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) } == 1 {
+        unsafe { FreeConsole() };
+    }
+}
+
+#[cfg(not(windows))]
+fn release_own_console() {}
+
+fn not_serving(port: u16) -> String {
+    let svc = &platform::SERVICE;
+    format!("is t3cm serving on 127.0.0.1:{port}? Start it with `{}`; logs: {}", svc.start, svc.logs)
 }
 
 fn build(state: &StateArgs) -> Result<(Arc<App>, Arc<HttpT3>)> {
@@ -178,7 +223,7 @@ async fn call_service(port: u16, tool: &str, args: Value, thread: Option<&str>) 
     if let Some(t) = thread {
         req = req.header(server::THREAD_HEADER, t);
     }
-    let v: Value = req.send().await.with_context(|| format!("is t3cm serving on 127.0.0.1:{port}?"))?.json().await?;
+    let v: Value = req.send().await.with_context(|| not_serving(port))?.json().await?;
     if let Some(e) = v.get("error") {
         bail!("{}", e["message"]);
     }
@@ -189,8 +234,11 @@ async fn call_service(port: u16, tool: &str, args: Value, thread: Option<&str>) 
 
 async fn run(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
-        Cmd::Serve { port, state, no_watcher } => {
-            init_logging();
+        Cmd::Serve { port, state, no_watcher, log_file } => {
+            init_logging(log_file.as_deref())?;
+            if log_file.is_some() {
+                release_own_console();
+            }
             let (app, t3) = build(&state)?;
             let (listener, addr) =
                 server::bind(port.port).await.with_context(|| format!("binding 127.0.0.1:{}", port.port))?;
@@ -203,7 +251,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             app.upstreams.shutdown().await;
         }
         Cmd::Stdio { state, watcher: with_watcher } => {
-            init_logging();
+            init_logging(None)?;
             let (app, t3) = build(&state)?;
             tokio::spawn(warm_up(app.clone(), t3));
             if with_watcher {
@@ -226,7 +274,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 .get(format!("http://127.0.0.1:{}/healthz", port.port))
                 .send()
                 .await
-                .with_context(|| format!("is t3cm serving on 127.0.0.1:{}?", port.port))?
+                .with_context(|| not_serving(port.port))?
                 .json()
                 .await?;
             println!("{}", serde_json::to_string_pretty(&v)?);
@@ -284,6 +332,9 @@ async fn main() -> ExitCode {
     match run(Cli::parse()).await {
         Ok(code) => code,
         Err(e) => {
+            if LOGS_TO_FILE.load(std::sync::atomic::Ordering::Relaxed) {
+                tracing::error!("t3cm: {e:#}");
+            }
             eprintln!("t3cm: {e:#}");
             ExitCode::FAILURE
         }

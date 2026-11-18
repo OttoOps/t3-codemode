@@ -50,6 +50,33 @@ pub fn state_dir() -> PathBuf {
         .join(APP)
 }
 
+pub struct Service {
+    pub status: &'static str,
+    pub start: &'static str,
+    pub logs: &'static str,
+}
+
+#[cfg(target_os = "macos")]
+pub const SERVICE: Service = Service {
+    status: "launchctl print gui/$(id -u)/com.ottoops.t3-codemode",
+    start: "launchctl kickstart gui/$(id -u)/com.ottoops.t3-codemode",
+    logs: "~/Library/Logs/t3-codemode/t3cm.log",
+};
+
+#[cfg(windows)]
+pub const SERVICE: Service = Service {
+    status: "Get-ScheduledTask t3-codemode | Get-ScheduledTaskInfo",
+    start: "Enable-ScheduledTask t3-codemode; Start-ScheduledTask t3-codemode",
+    logs: "Get-Content \"$env:LOCALAPPDATA\\t3-codemode\\logs\\t3cm.log\"",
+};
+
+#[cfg(not(any(target_os = "macos", windows)))]
+pub const SERVICE: Service = Service {
+    status: "systemctl --user status t3-codemode",
+    start: "systemctl --user start t3-codemode",
+    logs: "journalctl --user -u t3-codemode",
+};
+
 #[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
