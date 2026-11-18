@@ -826,7 +826,7 @@ async fn typing_in_a_card_reply_survives_state_events() {
   const last = input("a1");
   return {{
     kept,
-    rebuilt: rebuilt !== first && last !== rebuilt,
+    same: rebuilt === first && last === first,
     value: last.value,
     focused: document.activeElement === last,
     selection: [last.selectionStart, last.selectionEnd, last.selectionDirection],
@@ -836,7 +836,7 @@ async fn typing_in_a_card_reply_survives_state_events() {
     );
     let r = run_page(&html, &scenario);
     assert_eq!(r["kept"], true, "{r}");
-    assert_eq!(r["rebuilt"], true, "{r}");
+    assert_eq!(r["same"], true, "{r}");
     assert_eq!(r["value"], "heXYZWllo", "{r}");
     assert_eq!(r["focused"], true, "{r}");
     assert_eq!(r["selection"], json!([1, 4, "backward"]), "{r}");
@@ -914,4 +914,324 @@ async fn the_open_route_refuses_other_links_and_missing_csrf() {
 fn open_links_accepts_only_desktop_or_tab() {
     assert!(Config::from_value(json!({"board": {"openLinks": "window"}})).is_err());
     assert_eq!(Config::default().board.open_links, t3_codemode::config::OpenLinks::Desktop);
+}
+
+async fn two_gate_page() -> (String, Value) {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    join_board(&s.h, WORKER, "widgets#42").await;
+    s.h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": GATE})).await;
+    s.h.wf(WORKER, "send", json!({"kind": "gate", "gate": "merge", "body": GATE})).await;
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    (html, st)
+}
+
+const PAGE_HELPERS: &str = r##"
+const q = (sel) => document.querySelector(sel);
+const card = (id) => q('#cards [data-key="' + id + '"]');
+const ids = () => [...document.getElementById("cards").children].map((c) => c.dataset.key);
+const answers = () => fetches.filter((f) => /\/(answer|dismiss)$/.test(f.url));
+"##;
+
+fn page_scenario(html: &str, st: &Value, body: &str) -> Value {
+    run_page(html, &format!("() => {{\n{PAGE_HELPERS}\nconst base = {st};\n{body}\n}}"))
+}
+
+#[tokio::test]
+async fn the_page_is_a_fixed_shell_with_panels_tabs_and_skip_links() {
+    let (html, _) = two_gate_page().await;
+    for needle in [
+        "height: 100dvh",
+        "html, body { height: 100%; margin: 0; overflow: hidden; }",
+        r#"role="tablist" aria-label="Ticket lists""#,
+        r#"id="tab-open""#,
+        r#"id="tab-done""#,
+        r#"id="tab-settled""#,
+        r#"id="new-cards""#,
+        r#"id="new-tix""#,
+        r#"id="new-feed""#,
+        r#"aria-live="polite""#,
+        r#"role="alert""#,
+        "Skip to Decisions",
+        "Skip to Launch",
+        "Skip to Ask",
+        "Skip to Tickets",
+        "Skip to Activity",
+        r#"aria-label="Launch and Ask""#,
+    ] {
+        assert!(html.contains(needle), "missing {needle}");
+    }
+    assert!(html.find("Skip to Ask").unwrap() < html.find("Skip to Tickets").unwrap());
+    for banned in ["gradient", "btn primary", "backdrop-filter", "requestPermission();\n}, { once: true }"] {
+        assert!(!html.contains(banned), "found {banned}");
+    }
+    for line in html.lines().filter(|l| l.contains("box-shadow")) {
+        assert!(line.contains("box-shadow: none"), "{line}");
+    }
+}
+
+#[tokio::test]
+async fn new_cards_wait_behind_the_count_while_the_reader_is_in_the_panel() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+const input = card("a1").querySelector("input");
+input.focus();
+const blocker = { ...base.cards[1], id: "a9", kind: "blocker" };
+emitState({ ...base, cards: [...base.cards, blocker] });
+const held = { order: ids(), slot: q("#new-cards").textContent, shown: !q("#new-cards").classList.contains("off"), focused: document.activeElement === input };
+q("#new-cards").dispatch("click");
+return { held, after: ids(), focus: document.activeElement.dataset.key, slotAfter: q("#new-cards").classList.contains("off") };
+"##,
+    );
+    assert_eq!(
+        r["held"],
+        json!({"order": ["a1", "a2"], "slot": "1 new - 1 blocker", "shown": true, "focused": true}),
+        "{r}"
+    );
+    assert_eq!(r["after"], json!(["a9", "a1", "a2"]), "{r}");
+    assert_eq!(r["focus"], "a9", "{r}");
+    assert_eq!(r["slotAfter"], true, "{r}");
+}
+
+#[tokio::test]
+async fn a_removed_card_keeps_a_placeholder_until_the_panel_is_free() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+card("a2").querySelector("input").focus();
+emitState({ ...base, cards: [base.cards[1]] });
+const a1 = card("a1");
+const held = { gone: a1.classList.contains("gone"), buttons: a1.querySelectorAll("button").length, text: a1.textContent, order: ids() };
+document.activeElement = document.body;
+emitState({ ...base, cards: [base.cards[1]] });
+return { held, after: ids() };
+"##,
+    );
+    assert_eq!(r["held"], json!({"gone": true, "buttons": 0, "text": "a1 resolved", "order": ["a1", "a2"]}), "{r}");
+    assert_eq!(r["after"], json!(["a2"]), "{r}");
+}
+
+#[tokio::test]
+async fn a_reply_leaves_after_five_seconds_and_undo_sends_nothing() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+card("a1").querySelector('[data-opt="1"]').dispatch("click");
+const what = card("a1").querySelector('[data-part="what"]').textContent;
+const at0 = answers().length;
+advance(4999);
+const at4999 = answers().length;
+advance(1);
+const sent = answers().map((f) => [f.url, JSON.parse(f.body)]);
+card("a2").querySelector('[data-opt="2"]').dispatch("click");
+advance(1000);
+card("a2").querySelector('[data-part="undo"]').dispatch("click");
+advance(10000);
+return { what, at0, at4999, sent, after: answers().length, back: !card("a2").querySelector('[data-part="act"]').hidden };
+"##,
+    );
+    assert_eq!(r["what"], "Sending \u{201c}merge\u{201d} to widgets#41", "{r}");
+    assert_eq!((r["at0"].as_i64(), r["at4999"].as_i64()), (Some(0), Some(0)), "{r}");
+    assert_eq!(r["sent"], json!([["/api/cards/a1/answer", {"text": "merge"}]]), "{r}");
+    assert_eq!(r["after"], 1, "{r}");
+    assert_eq!(r["back"], true, "{r}");
+}
+
+#[tokio::test]
+async fn a_reply_to_a_card_resolved_in_the_undo_window_sends_nothing() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+card("a1").querySelector('[data-opt="1"]').dispatch("click");
+emitState({ ...base, cards: base.cards.filter((c) => c.id !== "a1") });
+advance(6000);
+const c = card("a1");
+return {
+  sent: answers().length,
+  kept: !!c,
+  sending: c ? !c.querySelector('[data-part="sending"]').hidden : null,
+  focused: document.activeElement === c,
+  disabled: c ? [...c.querySelectorAll('[data-part="act"] button[data-opt]')].map((b) => b.getAttribute("aria-disabled")) : null,
+  live: document.getElementById("live").textContent,
+};
+"##,
+    );
+    assert_eq!(r["sent"], 0, "{r}");
+    assert_eq!(r["kept"], true, "{r}");
+    assert_eq!(r["sending"], false, "{r}");
+    assert_eq!(r["focused"], true, "{r}");
+    assert_eq!(r["disabled"], json!(["true", "true"]), "{r}");
+    assert_eq!(r["live"], "a1 was already resolved. Nothing was sent.", "{r}");
+}
+
+#[tokio::test]
+async fn a_reply_waiting_on_undo_is_not_sent_after_the_stream_drops() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+card("a1").querySelector('[data-opt="1"]').dispatch("click");
+advance(1000);
+eventSource.onerror();
+advance(5000);
+const sent = answers().length;
+const alert = document.getElementById("alert").textContent;
+emitState(base);
+return { sent, alert, again: !card("a1").querySelector('[data-part="act"]').hidden };
+"##,
+    );
+    assert_eq!(r["sent"], 0, "{r}");
+    assert_eq!(r["alert"], "a1 was not sent because the board is offline. Send it again after it reconnects.", "{r}");
+    assert_eq!(r["again"], true, "{r}");
+}
+
+#[tokio::test]
+async fn a_reply_is_not_sent_to_a_new_card_that_reuses_the_id() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+card("a1").querySelector('[data-opt="1"]').dispatch("click");
+emitState({ ...base, cards: base.cards.map((c) => c.id === "a1" ? { ...c, at: "2099-01-01T00:00:00Z" } : c) });
+advance(6000);
+return { sent: answers().length, live: document.getElementById("live").textContent };
+"##,
+    );
+    assert_eq!(r["sent"], 0, "{r}");
+    assert_eq!(r["live"], "a1 was already resolved. Nothing was sent.", "{r}");
+}
+
+#[tokio::test]
+async fn options_have_equal_weight_and_digits_only_focus_them() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+const opts = [...document.querySelectorAll("#cards button[data-opt]")];
+card("a1").focus();
+for (const f of document.listeners.keydown) f({ key: "2", target: card("a1"), preventDefault() {} });
+advance(10000);
+return {
+  classes: [...new Set(opts.map((b) => b.className))],
+  names: opts.map((b) => b.getAttribute("aria-label")),
+  focused: document.activeElement.textContent,
+  sent: answers().length,
+};
+"##,
+    );
+    assert_eq!(r["classes"], json!(["btn"]), "{r}");
+    assert_eq!(r["names"][0], "merge, reply to a1 widgets#41", "{r}");
+    assert_eq!(r["names"][3], "merge and deploy, reply to a2 widgets#42", "{r}");
+    assert_eq!(r["focused"], "merge and deploy", "{r}");
+    assert_eq!(r["sent"], 0, "{r}");
+}
+
+#[tokio::test]
+async fn ticket_rows_update_in_place_and_finished_tickets_move_to_done() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"
+const T = "{TICKET}";
+const row = (list) => q("#" + list + ' [data-thread="' + T + '"]');
+emitState(base);
+const label = row("open").querySelector('[data-part="label"]');
+const noted = base.tree.map((t) => t.thread === T ? {{ ...t, last: {{ handle: "m9", kind: "note", head: "**ACTION NEEDED:** build green", at: "10:15 MST" }} }} : t);
+emitState({{ ...base, cards: [], tree: noted }});
+const kept = row("open").querySelector('[data-part="label"]') === label;
+const note = row("open").querySelector('[data-part="note"]').textContent;
+q("#open").children.find((el) => el.dataset.thread !== T).focus();
+const done = noted.map((t) => t.thread === T ? {{ ...t, done: true, status: "done" }} : t);
+emitState({{ ...base, cards: [], tree: done }});
+return {{
+  kept, note,
+  placeholder: row("open").textContent,
+  inDone: !!row("done"),
+  settle: row("done").querySelector('[data-part="settle"]').getAttribute("aria-label"),
+  doneCount: q("#n-done").textContent,
+}};
+"##
+        ),
+    );
+    assert_eq!(r["kept"], true, "{r}");
+    assert_eq!(r["note"], "10:15  note: build green", "{r}");
+    assert_eq!(r["placeholder"], "widgets#41 finished and moved to Done", "{r}");
+    assert_eq!(r["inDone"], true, "{r}");
+    assert_eq!(r["settle"], "Settle widgets#41", "{r}");
+    assert_eq!(r["doneCount"], "1", "{r}");
+}
+
+#[tokio::test]
+async fn a_needs_you_row_links_to_its_card() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"
+emitState(base);
+const needs = q('#open [data-thread="{TICKET}"] [data-part="needs"]');
+needs.dispatch("click");
+const toCard = document.activeElement.dataset.key;
+card("a1").querySelector('[data-part="id"]').dispatch("click");
+return {{ text: needs.textContent, hidden: needs.hidden, toCard, back: document.activeElement.dataset.thread }};
+"##
+        ),
+    );
+    assert_eq!(r["text"], "needs you - a1", "{r}");
+    assert_eq!(r["hidden"], false, "{r}");
+    assert_eq!(r["toCard"], "a1", "{r}");
+    assert_eq!(r["back"], TICKET, "{r}");
+}
+
+#[tokio::test]
+async fn a_dropped_stream_marks_the_board_stale_and_holds_replies() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+eventSource.onerror();
+const opts = [...document.querySelectorAll("#cards [data-opt]")];
+opts[0].dispatch("click");
+advance(6000);
+const during = {
+  stale: document.body.classList.contains("stale"),
+  header: q("#svc-text").textContent,
+  disabled: opts.every((b) => b.getAttribute("aria-disabled") === "true"),
+  sent: answers().length,
+};
+emitState(base);
+return { during, after: { stale: document.body.classList.contains("stale"), header: q("#svc-text").textContent } };
+"##,
+    );
+    assert_eq!(r["during"]["stale"], true, "{r}");
+    assert!(r["during"]["header"].as_str().unwrap().starts_with("Disconnected"), "{r}");
+    assert_eq!(r["during"]["disabled"], true, "{r}");
+    assert_eq!(r["during"]["sent"], 0, "{r}");
+    assert_eq!(r["after"]["stale"], false, "{r}");
+    assert!(r["after"]["header"].as_str().unwrap().starts_with("T3 connected"), "{r}");
 }
