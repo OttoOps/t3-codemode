@@ -42,7 +42,8 @@ class RoleSkillTests(unittest.TestCase):
             self.assertIn(SLOTS_LINK, text, path)
 
     def test_relative_links_resolve(self):
-        for path in [*ROLE_FILES, *(SKILLS / "t3-workflow").glob("*.md")]:
+        for path in [*ROLE_FILES, *(SKILLS / "t3-workflow").glob("*.md"),
+                     *(SKILLS / "setup-t3-workflow").rglob("*.md")]:
             for target in re.findall(r"\]\(([^)\s]+)\)", path.read_text()):
                 if re.match(r"[a-z]+:", target):
                     continue
@@ -52,6 +53,15 @@ class RoleSkillTests(unittest.TestCase):
                 if frag and dest.suffix == ".md":
                     heads = {anchor(h) for h in re.findall(r"^#+ (.+)$", dest.read_text(), re.M)}
                     self.assertIn(frag, heads, f"{path.relative_to(ROOT)} -> {target}")
+
+    def test_the_router_names_every_skill(self):
+        text = (SKILLS / "t3-workflow" / "SKILL.md").read_text()
+        table = text.split("## Which skill", 1)[1].split("\n## ", 1)[0]
+        go_to = " ".join(row.rstrip(" |").rsplit("|", 1)[-1] for row in table.splitlines()[3:] if row.startswith("|"))
+        for skill in SKILLS.glob("*/SKILL.md"):
+            name = skill.parent.name
+            if name != "t3-workflow":
+                self.assertIn(f"`{name}`", go_to, f"t3-workflow's Which skill table does not route to {name}")
 
     def test_no_skill_is_slash_only(self):
         for path in SKILLS.glob("*/SKILL.md"):
