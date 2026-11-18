@@ -24,7 +24,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 base64 = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-getrandom = "0.3"
+getrandom = "0.4"
 jiff = "0.2"
 oxc_allocator = "=0.146.0"
 oxc_ast = "=0.146.0"
