@@ -10,7 +10,13 @@ Judges: Claude Opus 5.5, GPT 6.2 Sol and Claude Sonnet 5.5, each with its own pa
 | --- | --- | --- |
 | U1 | pass | scrollHeight = innerHeight at 1440x900, 1280x800, 1024x768, seeded and heavy (30 open tickets) |
 | U2 | pass | at 1440 and 1280 both inputs in view after scrolling every panel; at 1024 the selected input (Launch) in view, and one activation switches to Ask keeping both drafts; Tab presses: Launch 2, Ask 3; `l` and `/` focus them |
-| U3 | pass | focused Launch, Ask, card reply, Settled filter: 0 px moved, value and caret kept through a second-context answer and a stream cut; focused thread link, worker PR link, ask Settle, settled Restore stayed the same connected node for 30 s; hovered card option and ticket Settle never moved |
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:b93f0cddc36fd2bdcbe11af6a9a5ea53437f8d160c98ae043fb3bc81dac89a42 -->
+
+| U3 | pass | focused Launch, Ask, card reply, Settled filter: 0 px moved, value and caret kept through a second-context answer and a stream cut; focused thread link, worker PR link, ask Settle, settled Restore stayed the same connected node for 30 s; hovered card option and ticket Settle did not move in the recorded samples |
+
+<!-- /coderabbit-ai-generated:v1 -->
 | U4 | pass | first visible item unchanged after 60 s in Decisions, Tickets and Activity; header slots read cards: 2 new, tickets: 1 new, feed: 15 new; tab switch restored scrollTop 78 |
 | U5 | pass | 6 cards fully visible at 1440x900, median height 118 px |
 | U6 | pass | 12 open rows visible at 1440 (12 on the heavy board); same-field rows share one height at 1024 and 1440 |
@@ -20,7 +26,13 @@ Judges: Claude Opus 5.5, GPT 6.2 Sol and Claude Sonnet 5.5, each with its own pa
 | U10 | pass | no horizontal scroll at 768 and 390; one panel shown; no target under 44 px; nothing clipped at 195 px (200% zoom); emulated keyboard keeps field and submit in view; a 250 px viewport switches the composer to sheet mode (height and restore on close not measured) |
 | U11 | pass | header during the cut: "Disconnected. Reconnecting; showing data from 02:41."; panels dimmed; reply controls aria-disabled; panes and composer moved 0 px |
 | P1 | pass | lowest status text light 6.37, dark 6.74; input border light 3.21, dark 4.32 |
-| P2 | FAIL | sizes ['16px', '13px', '14px', '12px'], weights ['600', '400', '500'], no off-scale spacing |
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:3f755b70421f2677964fdbaa73d1848dffe91c634d42f387befbe0991e2968b5 -->
+
+| P2 | FAIL | sizes ['16px', '13px', '14px', '12px'], weights ['600', '400', '500'], off-scale spacing in seeded and heavy P2.offScale: `css .ch .cid margin-left:-12px` |
+
+<!-- /coderabbit-ai-generated:v1 -->
 | P3 | pass | accent on no status mark; amber only on needs-you items; running is neutral |
 | N1 | pass | no gradients, shadows or emoji |
 | N2 | pass | no Markdown; zone MST once; 43 truncated strings, all with full text in a tooltip or disclosure |

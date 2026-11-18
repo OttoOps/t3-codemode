@@ -269,9 +269,9 @@ impl Demo {
                     Some(l) => l.clone(),
                     None => id("ticket", 1 + (n * 3) % 14),
                 };
-                gated.insert(t.clone());
-                let _ =
-                    self.app.wf.dispatch("send", Some(&t), json!({"kind": "gate", "gate": gate, "body": body})).await;
+                if self.app.wf.dispatch("send", Some(&t), json!({"kind": "gate", "gate": gate, "body": body})).await.is_ok() {
+                    gated.insert(t.clone());
+                }
             }
             if n.is_multiple_of(9) {
                 let label = format!("{}#{}", REPOS[n % REPOS.len()], 500 + n);

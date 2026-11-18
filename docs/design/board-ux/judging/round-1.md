@@ -10,7 +10,13 @@ Judges: Claude Opus 5.5, GPT 6.2 Sol and Claude Sonnet 5.5, each with its own pa
 | --- | --- | --- |
 | U1 | pass | scrollHeight = innerHeight at 1440x900, 1280x800, 1024x768, seeded and heavy (57 open tickets) |
 | U2 | pass | at 1440 and 1280 both inputs in view after scrolling every panel; at 1024 the selected input (Launch) in view, and one activation switches to Ask keeping both drafts; Tab presses: Launch 2, Ask 3; `l` and `/` focus them |
-| U3 | pass | focused Launch, Ask, card reply, Settled filter: 0 px moved, value and caret kept through a second-context answer and a stream cut; focused thread link, worker PR link, ask Settle, settled Restore stayed the same connected node for 30 s; hovered card option and ticket Settle never moved |
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:b93f0cddc36fd2bdcbe11af6a9a5ea53437f8d160c98ae043fb3bc81dac89a42 -->
+
+| U3 | pass | focused Launch, Ask, card reply, Settled filter: 0 px moved, value and caret kept through a second-context answer and a stream cut; focused thread link, worker PR link, ask Settle, settled Restore stayed the same connected node for 30 s; hovered card option and ticket Settle did not move in the recorded samples |
+
+<!-- /coderabbit-ai-generated:v1 -->
 | U4 | pass | first visible item unchanged after 60 s in Decisions, Tickets and Activity; header slots read cards: 2 new, tickets: 2 new, feed: 15 new; tab switch restored scrollTop 61 |
 | U5 | pass | 6 cards fully visible at 1440x900, median height 118 px |
 | U6 | pass | 13 open rows visible at 1440 (13 on the heavy board); same-field rows share one height at 1024 and 1440 |

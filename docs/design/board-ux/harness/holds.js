@@ -9,7 +9,19 @@ async (page) => {
     window.__notes = [];
     const RN = window.Notification;
     if (RN) {
-      const W = function (t, o) { window.__notes.push(t); return new RN(t, o); };
+      const W = function (t, o) {
+        const note = new RN(t, o);
+        let pending = true;
+        const timer = setTimeout(() => { pending = false; }, 10000);
+        note.addEventListener("show", () => {
+          if (!pending) return;
+          pending = false;
+          clearTimeout(timer);
+          window.__notes.push(t);
+        }, { once: true });
+        note.addEventListener("error", () => { pending = false; clearTimeout(timer); }, { once: true });
+        return note;
+      };
       Object.defineProperty(W, "permission", { get: () => RN.permission });
       W.requestPermission = (...a) => RN.requestPermission(...a);
       window.Notification = W;

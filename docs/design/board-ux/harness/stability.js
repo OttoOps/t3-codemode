@@ -45,7 +45,7 @@ async (page) => {
     const box = await loc.first().boundingBox();
     const x = box.x + box.width / 2, y = box.y + box.height / 2;
     await page.mouse.move(x, y);
-    await page.evaluate(([px, py]) => { window.__hov = document.elementFromPoint(px, py); window.__hovItem = window.__hov.closest(".card, .tk"); window.__hovH = window.__hovItem.getBoundingClientRect().height; }, [x, y]);
+    await page.evaluate(([px, py]) => { window.__hov = document.elementFromPoint(px, py); window.__hovItem = window.__hov.closest(".card, .tk"); window.__hovRect = window.__hov.getBoundingClientRect().toJSON(); window.__hovItemRect = window.__hovItem.getBoundingClientRect().toJSON(); }, [x, y]);
     let changed = 0;
     for (let i = 0; i < 20; i++) {
       if (i === 5 && name === "card option") {
@@ -55,9 +55,10 @@ async (page) => {
       await page.waitForTimeout(1000);
       const ok = await page.evaluate(([px, py]) => {
         const el = document.elementFromPoint(px, py);
-        if (el === window.__hov) return true;
+        const same = (a, b) => ["top", "left", "width", "height"].every((k) => Math.abs(a[k] - b[k]) < 1);
+        if (el === window.__hov) return same(el.getBoundingClientRect(), window.__hovRect);
         const item = el && el.closest(".gone");
-        return !!item && item === window.__hovItem && Math.abs(item.getBoundingClientRect().height - window.__hovH) < 1;
+        return !!item && item === window.__hovItem && same(item.getBoundingClientRect(), window.__hovItemRect);
       }, [x, y]);
       if (!ok) changed++;
     }

@@ -10,9 +10,21 @@ The judges saw `edf2ff3`. Its measurement failed P2 on one negative margin in th
 
 | Gate | Result | Evidence |
 | --- | --- | --- |
-| U1 | pass | scrollHeight = innerHeight at 1440x900, 1280x800, 1024x768, seeded and heavy (30 open tickets and 26 decisions) |
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:ab37b46ee0ac81f6bea18aa738a3270cb1bb45fb0f8ca69877adca8517c96bbb -->
+
+| U1 | incomplete | scrollHeight = innerHeight at 1440x900, 1280x800, 1024x768, seeded and nominal heavy runs; U1 decision and open-ticket load counts were not recorded |
+
+<!-- /coderabbit-ai-generated:v1 -->
 | U2 | pass | at 1440 and 1280 both inputs in view after scrolling every panel; at 1024 the selected input (Launch) in view, and one activation switches to Ask keeping both drafts; Tab presses: Launch 2, Ask 3; `l` and `/` focus them |
-| U3 | pass | focused Launch, Ask, card reply, Settled filter: 0 px moved, value and caret kept through a second-context answer and a stream cut; focused thread link, worker PR link, ask Settle, settled Restore stayed the same connected node for 30 s; hovered card option and ticket Settle never moved |
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:b93f0cddc36fd2bdcbe11af6a9a5ea53437f8d160c98ae043fb3bc81dac89a42 -->
+
+| U3 | pass | focused Launch, Ask, card reply, Settled filter: 0 px moved, value and caret kept through a second-context answer and a stream cut; focused thread link, worker PR link, ask Settle, settled Restore stayed the same connected node for 30 s; hovered card option and ticket Settle did not move in the recorded samples |
+
+<!-- /coderabbit-ai-generated:v1 -->
 | U4 | pass | first visible item unchanged after 60 s in Decisions, Tickets and Activity; header slots read cards: 2 new, tickets: 1 new, feed: 15 new; tab switch restored scrollTop 78 |
 | U5 | pass | 6 cards fully visible at 1440x900, median height 118 px |
 | U6 | pass | 12 open rows visible at 1440 (12 on the heavy board); same-field rows share one height at 1024 and 1440 |
@@ -33,7 +45,13 @@ The judges saw `edf2ff3`. Its measurement failed P2 on one negative margin in th
 
 F1's other items are covered by the gate scripts and tests above (a failing Ask, a card reply that errors, a disconnect, Settle and Restore) and the existing thread-link fallback tests.
 
-The heavy board reached 30 open tickets and 26 decisions; the harness now sends each new gate to a ticket that arrived during the run and has none.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:e4143f71d99c50b5aeec383a8a05763d6aca5039ad5c1a596b1dfd778a4b7eff -->
+
+The U1 measurement did not record decision or open-ticket counts, so the required heavy load cannot be confirmed from that measurement. The harness sends each new gate to a ticket that arrived during the run and has none.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ## Judged scores
 
