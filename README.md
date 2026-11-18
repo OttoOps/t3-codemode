@@ -18,6 +18,8 @@ Beyond T3's tools, the sandbox carries:
 Status: prototype. Linux only (systemd user unit, T3 runtime discovery via
 `/proc`).
 
+Documentation: https://potto007.github.io/t3-codemode/
+
 ## Requirements
 
 - Linux with systemd user services
@@ -334,7 +336,7 @@ origin comes from `~/.t3/userdata/server-runtime.json`; the `t3` binary is
 - Upstream secrets live only in the config's references and in memory; the same
   redaction applies to them, and to upstream results before the sandbox sees
   them. `allow`/`deny` per upstream are enforced in the host, not in the prompt.
-  See [Upstreams](#upstreams-wrap-any-mcp-server) and `docs/upstreams-contract.md`.
+  See [Upstreams](#upstreams-wrap-any-mcp-server) and `docs/src/upstreams-contract.md`.
 - Any local process that can reach the port acts with the service's T3 session.
   That is the same trust boundary as the `t3` CLI for the same user.
 
@@ -350,6 +352,10 @@ t3cm bench -n 1000 --tools tests/fixtures/t3-tools.json   # hidden: latency and 
 `tests/fixtures/t3-tools.json` is a snapshot of T3's 74 tools; at runtime the
 catalog comes live from `tools/list` (refreshed every 10 minutes, cached in the
 store for when T3 is down).
+
+`docs/build.sh` generates the API reference page from `t3cm types`, then builds
+the docs site into `docs/book/` with mdBook 0.5.4. CI builds it on every pull
+request and deploys it to GitHub Pages from `main`.
 
 ## Contributing
 

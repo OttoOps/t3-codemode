@@ -1,0 +1,12 @@
+[book]
+title = "t3-codemode"
+authors = ["Paul Otto"]
+language = "en"
+src = "src"
+
+[build]
+create-missing = false
+
+[output.html]
+site-url = "/t3-codemode/"
+git-repository-url = "https://github.com/potto007/t3-codemode"
