@@ -490,6 +490,16 @@ impl Store {
         Ok(())
     }
 
+    pub fn waiting_resolve_seq(&self, owner: &str, seq: i64, note: Option<&str>, at: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE waiting SET resolved_at = ?3, note = ?4 WHERE owner = ?1 AND seq = ?2 AND resolved_at IS NULL",
+                params![owner, seq, at, note],
+            )
+        })
+        .map(|n| n > 0)
+    }
+
     pub fn waiting_resolve(&self, owner: &str, id: &str, note: Option<&str>, at: &str) -> Result<Option<String>> {
         self.with(|c| {
             let text: Option<String> = c

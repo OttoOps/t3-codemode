@@ -398,6 +398,40 @@ async fn card_actions_for_an_older_decision_with_the_same_id_do_nothing() {
 }
 
 #[tokio::test]
+async fn a_reply_in_flight_resolves_only_the_card_it_answered() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    s.h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE})).await;
+    let old = cards(&s.h)[0].clone();
+    s.h.fake.set_delay(Duration::from_millis(400));
+    let body = json!({"text": "merge", "at": old["at"], "token": old["token"]});
+    let csrf = s.csrf();
+    let reply = s.post("/api/cards/a1/answer", body, Some(&csrf), None);
+    let reuse = async {
+        while s.h.app.store.outbox_all().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        s.h.app.store.waiting_resolve(BOARD, "a1", Some("resolved elsewhere"), "2026-11-17T12:00:00Z").unwrap();
+        let item = t3_codemode::store::WaitingItem {
+            id: "a1".into(),
+            text: "a newer gate".into(),
+            from: None,
+            link: None,
+            at: old["at"].as_str().unwrap().into(),
+        };
+        s.h.app.store.waiting_insert(BOARD, &item, Some(&json!({"kind": "gate", "ticket": TICKET}))).unwrap();
+    };
+    let (r, ()) = tokio::join!(reply, reuse);
+    s.h.fake.set_delay(Duration::ZERO);
+    assert_eq!(r.status(), 200);
+    let open = cards(&s.h);
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0]["id"], "a1");
+    assert_eq!(open[0]["text"], "a newer gate");
+    assert_ne!(open[0]["token"], old["token"]);
+}
+
+#[tokio::test]
 async fn posts_need_the_csrf_token_and_the_boards_own_origin() {
     let s = start(H::new()).await;
     join_board(&s.h, TICKET, "widgets#41").await;
