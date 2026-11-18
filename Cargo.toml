@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.95"
 description = "Code Mode MCP server over T3 Code and other MCP servers: search + execute, with memory and a thread-workflow layer"
 license = "MIT"
-repository = "https://github.com/potto007/t3-codemode"
+repository = "https://github.com/OttoOps/t3-codemode"
 publish = false
 
 [[bin]]

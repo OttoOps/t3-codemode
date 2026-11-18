@@ -9,4 +9,4 @@ create-missing = false
 
 [output.html]
 site-url = "/t3-codemode/"
-git-repository-url = "https://github.com/potto007/t3-codemode"
+git-repository-url = "https://github.com/OttoOps/t3-codemode"

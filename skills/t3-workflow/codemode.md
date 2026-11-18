@@ -113,17 +113,17 @@ systemd user service and a user-scope MCP server.
 
 1. **Platform.** It needs Linux with systemd user services. On macOS or
    Windows, say builds for those are tracked in
-   [potto007/t3-codemode#2](https://github.com/potto007/t3-codemode/issues/2)
+   [OttoOps/t3-codemode#2](https://github.com/OttoOps/t3-codemode/issues/2)
    and stop.
 2. **Prebuilt release first.** If
-   `gh release view -R potto007/t3-codemode` lists an asset for this
+   `gh release view -R OttoOps/t3-codemode` lists an asset for this
    platform, install it with the steps in that release's notes and skip to
    step 4.
 3. **Otherwise build from source.**
    - Check `rustc --version` reports 1.95 or newer. If Rust is missing or
      older, ask the user to install or update it through rustup, and stop
      until they have.
-   - Clone https://github.com/potto007/t3-codemode, or `git pull` in an
+   - Clone https://github.com/OttoOps/t3-codemode, or `git pull` in an
      existing checkout.
    - Run `deploy/install.sh` there. It builds the binary, installs it to
      `~/.local/bin/t3cm`, enables the `t3-codemode` user unit and registers

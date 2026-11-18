@@ -18,7 +18,7 @@ Beyond T3's tools, the sandbox carries:
 Status: prototype. It builds and passes its tests on Linux, macOS and Windows.
 The installer and the service unit are Linux and systemd only for now.
 
-Documentation: https://potto007.github.io/t3-codemode/
+Documentation: https://ottoops.com/t3-codemode/
 
 ## Requirements
 
@@ -31,7 +31,7 @@ Documentation: https://potto007.github.io/t3-codemode/
 ## Install
 
 ```bash
-git clone https://github.com/potto007/t3-codemode
+git clone https://github.com/OttoOps/t3-codemode
 cd t3-codemode
 deploy/install.sh              # build, install ~/.local/bin/t3cm, enable the user unit, register with Claude Code
 deploy/install.sh --uninstall  # reverse it (the store is kept)
