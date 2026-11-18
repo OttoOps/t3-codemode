@@ -48,7 +48,8 @@ class Env:
 
     def environ(self, **extra):
         env = {k: v for k, v in os.environ.items()
-               if not k.startswith(("T3WF_", "T3CODE_", "XDG_"))}
+               if not k.startswith(("T3WF_", "T3CODE_", "XDG_"))
+               and k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")}
         env.update(HOME=str(self.home), XDG_STATE_HOME=str(self.state),
                    XDG_CONFIG_HOME=str(self.config), T3WF_FAKE_T3=str(self.fake),
                    T3WF_NO_LAZY="1", T3WF_SYSTEMCTL=str(self.sysctl), T3WF_TZ="UTC")
