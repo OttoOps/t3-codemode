@@ -325,14 +325,25 @@ End the turn.
    gets a new gate, not a merge.
 2. `gh pr merge <number> -R <repo> --<merge method> --match-head-commit
    <sha>`. Never pass `--delete-branch`: it checks out the default branch
-   wherever it runs.
-3. `git -C <main workspace root> push origin --delete <branch>`. The
-   worker's worktree still has the branch checked out, so the local branch
-   waits for The handoff.
-4. Read the merge commit: `gh pr view <number> -R <repo> --json
-   state,mergeCommit`.
-5. Delivery `merge`: send the worker "Merged #<number> at <sha>. Hand off."
-   and end the turn.
+   wherever it runs. On a branch with a merge queue this queues the PR, or
+   sets it to auto-merge, and the PR merges later.
+3. Read where the PR stands, in one query so a merge cannot land between
+   two reads: `gh api graphql -f query='query{repository(owner:"<owner>",
+   name:"<name>"){pullRequest(number:<number>){state mergeCommit{oid}
+   isInMergeQueue autoMergeRequest{enabledAt}}}}'`.
+   - `MERGED`: go on to item 4.
+   - `OPEN`, and in the queue or with an `autoMergeRequest`: start the
+     merge watch (below) and end the turn.
+   - `OPEN` with neither: nothing will merge it. Tell the user what
+     `gh pr merge` printed, and end the turn.
+   - `CLOSED`: send the gate "reopen #<number>, then reply \"merge\" to
+     queue it again, here: <PR URL>", and end the turn.
+4. Only now that GitHub shows it merged, delete its branch:
+   `git -C <main workspace root> push origin --delete <branch>`. Deleting
+   the head branch of an open PR closes the PR. The worker's worktree still
+   has the branch checked out, so the local branch waits for The handoff.
+5. Delivery `merge`: send the worker "Merged #<number> at <merge commit
+   sha>. Hand off." and end the turn.
 6. Delivery `tag-deploy` with "merge and deploy": go to Deploy. With
    "merge" alone: send the gate "reply \"deploy\" to push
    <family>/v<version> from main at <sha>, or \"skip deploy\", here: <PR
@@ -341,7 +352,26 @@ End the turn.
    it is merged but not deployed.
 
 A user who merged the PR on GitHub themselves counts as "merge": verify
-the merged state and continue from item 3.
+the merged state and continue from item 4.
+
+#### The merge watch
+
+Create it as items 1 and 2 of "The deploy watch" say, with `title` `<#n or
+slug> PR n/N merge watch`, and a prompt that names the task id, the PR
+number and URL, its head SHA and branch, the main workspace root, the
+user's reply ("merge" or "merge and deploy"), and ends with "Follow 'Each
+merge-watch run' in the t3-ticket skill."
+
+Each merge-watch run reads the item 3 fields:
+
+- **`MERGED`:** delete the task with `delete_scheduled_task`, then go on
+  from item 4.
+- **Still queued, or waiting on auto-merge:** end the turn quietly.
+- **`OPEN`, out of the queue, with no `autoMergeRequest`:** delete the
+  task and send the gate "reply \"merge\" to queue #<number> again, or
+  check why it left the queue, here: <PR URL>". End the turn.
+- **`CLOSED`:** delete the task and send item 3's `CLOSED` gate. End the
+  turn.
 
 ### Deploy
 
