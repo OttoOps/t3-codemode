@@ -434,6 +434,8 @@ impl Wf {
             closed_how: None,
             unread: old.as_ref().map(|o| o.unread.clone()).unwrap_or_default(),
             bad_run: None,
+            settled_at: None,
+            restored_at: None,
         };
         self.store.link_save(&ln)?;
         Ok(json!({
@@ -603,6 +605,7 @@ impl Wf {
                 "label": k.label, "role": k.role, "thread": k.child, "link": k.link.clone().or_else(|| live["link"].as_str().map(String::from)),
                 "status": status, "asks": count(&live["pendingRequestCount"]), "background": count(&live["pendingBackgroundTasks"]),
                 "gate": k.gate, "lastUp": local_clock(&k.last_up), "nudges": k.nudges, "unread": k.unread.len(),
+                "settled": k.settled_at.is_some(),
                 "last": last.map(|m| json!({"handle": m.handle, "kind": m.kind, "head": m.head(90)})),
             }));
         }
