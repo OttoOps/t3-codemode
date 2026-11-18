@@ -49,6 +49,76 @@ fn parsing_issues_remotes_and_options() {
     assert_eq!(card_text("\n  first line\nsecond"), "first line");
 }
 
+#[test]
+fn every_quoted_answer_on_an_action_line_is_an_option() {
+    let corpus: &[(&str, &[&str])] = &[
+        (
+            "**ACTION NEEDED:** reply how to track the finding (...): \"advisory\" for a private \
+             security advisory, \"issue\" for a public issue, or \"nothing\", here: https://github.com/acme/widgets/pull/37",
+            &["advisory", "issue", "nothing"],
+        ),
+        (
+            "**ACTION NEEDED:** reply \"file follow-ups\" to open issues for the 3 items deferred from #39 (...), or \"no follow-ups\", here: acme/widgets#39",
+            &["file follow-ups", "no follow-ups"],
+        ),
+        (
+            "**ACTION NEEDED:** reply \"merge\" to merge #81, or review it first, here: https://github.com/acme/widgets/pull/81",
+            &["merge"],
+        ),
+        (
+            "**ACTION NEEDED:** reply \"merge and deploy\" to merge #81 and push content/v1.4.2, or \"merge\" alone, \
+             or review it first, here: https://github.com/acme/widgets/pull/81",
+            &["merge and deploy", "merge"],
+        ),
+        (
+            "**ACTION NEEDED:** reply \"deploy\" to push content/v1.4.2, or review it first, here: https://github.com/acme/widgets/pull/81",
+            &["deploy"],
+        ),
+        (
+            "**ACTION NEEDED:** reopen #81, then reply \"merge\" to merge it, here: https://github.com/acme/widgets/pull/81",
+            &["merge"],
+        ),
+        (
+            "**ACTION NEEDED:** reply \"advisory\" to open a private security advisory, reply \"issue\" to file a \
+             public issue, or reply \"nothing\" to leave it, here: https://github.com/acme/widgets/pull/37",
+            &["advisory", "issue", "nothing"],
+        ),
+        ("**ACTION NEEDED:** answer \"A\", \"B\", or \"C\"", &["A", "B", "C"]),
+        ("**ACTION NEEDED:** Say \u{201c}ship it\u{201d} or \u{201c}hold\u{201d}", &["ship it", "hold"]),
+        (
+            "**ACTION NEEDED:** reply 'keep' or \u{2018}drop\u{2019} for the user's draft, here: acme/widgets#5",
+            &["keep", "drop"],
+        ),
+        ("**ACTION NEEDED:** reply 'the user's call' or 'skip'", &["the user's call", "skip"]),
+        ("**ACTION NEEDED:** don't reply 'yet', it's \u{2018}pending\u{2019}", &["yet", "pending"]),
+        ("**ACTION NEEDED:** in \"draft\" mode, reply \"go\"", &["go"]),
+        ("**ACTION NEEDED:** replying \"x\" or essay \"y\" does nothing", &[]),
+        ("**ACTION NEEDED:** change \"no reply\" to \"pending\", then reply \"done\" or \"skip\"", &["done", "skip"]),
+        ("**ACTION NEEDED:** set reply_mode \"on\" or auto_reply \"x\", then answer \"ok\"", &["ok"]),
+        ("**ACTION NEEDED:** start the code-mode service, here: `t3cm serve`", &[]),
+        ("**ACTION NEEDED:** reply \"\", \"   \", or \"Merge\" or \"merge\"", &["Merge"]),
+    ];
+    for (line, want) in corpus {
+        assert_eq!(reply_options(line), *want, "{line}");
+    }
+}
+
+#[test]
+fn quoted_text_off_the_action_line_makes_no_button() {
+    let body = "Earlier the user said \"ship it\", and the reviewer asked us to reply \"later\".\n\
+        **ACTION NEEDED:** reply \"merge\" to merge #81, here: https://github.com/acme/widgets/pull/81\n\
+        Notes: \"draft\" mode was off.";
+    assert_eq!(reply_options(body), ["merge"]);
+    let none = "We reply \"merge\" on green.\n**ACTION NEEDED:** review #81 first, here: acme/widgets#81";
+    assert!(reply_options(none).is_empty());
+    let two = "**ACTION NEEDED:** reply \"merge\" to merge #81\n**ACTION NEEDED:** answer \"retry\" or \"skip\" for the flaky check";
+    assert_eq!(reply_options(two), ["merge", "retry", "skip"]);
+    let many: String = (1..=12).map(|n| format!(" \"o{n}\"")).collect();
+    assert_eq!(reply_options(&format!("**ACTION NEEDED:** reply{many}")).len(), 8);
+    let long = format!("**ACTION NEEDED:** reply \"{}\" or \"ok\"", "x".repeat(61));
+    assert_eq!(reply_options(&long), ["ok"]);
+}
+
 #[tokio::test]
 async fn a_gate_to_the_board_becomes_a_card_with_its_reply_buttons() {
     let h = H::new();

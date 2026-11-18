@@ -117,11 +117,13 @@ pub fn parse_remote(url: &str) -> Option<(String, String)> {
     }
 }
 
+const ACTION_MARK: &str = "**ACTION NEEDED:**";
+const REPLY_VERBS: &[&str] = &["reply", "answer", "say"];
+
 pub fn card_text(body: &str) -> String {
-    const MARK: &str = "**ACTION NEEDED:**";
     let line = body
         .lines()
-        .find_map(|l| l.find(MARK).map(|i| l[i + MARK.len()..].trim().to_string()))
+        .find_map(|l| l.find(ACTION_MARK).map(|i| l[i + ACTION_MARK.len()..].trim().to_string()))
         .filter(|l| !l.is_empty())
         .or_else(|| body.lines().map(str::trim).find(|l| !l.is_empty()).map(String::from))
         .unwrap_or_default();
@@ -130,9 +132,36 @@ pub fn card_text(body: &str) -> String {
 
 pub fn reply_options(body: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let action_lines: Vec<&str> =
+        body.lines().filter_map(|l| l.find(ACTION_MARK).map(|i| &l[i + ACTION_MARK.len()..])).collect();
+    if action_lines.is_empty() {
+        reply_phrases(body, &mut out);
+    } else {
+        for line in action_lines {
+            quoted_after_verb(line, &mut out);
+        }
+    }
+    out
+}
+
+fn add_option(out: &mut Vec<String>, opt: &str) {
+    let opt = opt.trim();
+    if out.len() >= MAX_OPTIONS || opt.is_empty() || opt.chars().count() > 60 || opt.contains('\n') {
+        return;
+    }
+    if !out.iter().any(|o| o.eq_ignore_ascii_case(opt)) {
+        out.push(opt.to_string());
+    }
+}
+
+fn after_word_break(s: &str, i: usize) -> bool {
+    !s[..i].chars().next_back().is_some_and(char::is_alphanumeric)
+}
+
+fn reply_phrases(body: &str, out: &mut Vec<String>) {
     for (i, _) in body.char_indices() {
         let Some(rest) = strip_prefix_ci(&body[i..], "reply") else { continue };
-        if body[..i].chars().next_back().is_some_and(char::is_alphanumeric) {
+        if !after_word_break(body, i) {
             continue;
         }
         let rest = rest.trim_start_matches([' ', '\t']);
@@ -145,19 +174,49 @@ pub fn reply_options(body: &str) -> Vec<String> {
             _ => continue,
         };
         let inner = chars.as_str();
-        let Some(end) = inner.find(close) else { continue };
-        let opt = inner[..end].trim();
-        if opt.is_empty() || opt.chars().count() > 60 || opt.contains('\n') {
-            continue;
-        }
-        if !out.iter().any(|o| o.eq_ignore_ascii_case(opt)) {
-            out.push(opt.to_string());
-        }
-        if out.len() >= MAX_OPTIONS {
-            break;
+        if let Some(end) = inner.find(close) {
+            add_option(out, &inner[..end]);
         }
     }
-    out
+}
+
+fn quoted_after_verb(line: &str, out: &mut Vec<String>) {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let is_verb = |i: usize| {
+        !line[..i].chars().next_back().is_some_and(word)
+            && REPLY_VERBS.iter().any(|v| strip_prefix_ci(&line[i..], v).is_some_and(|rest| !rest.starts_with(word)))
+    };
+    let mut armed = false;
+    let mut i = 0;
+    while let Some(c) = line[i..].chars().next() {
+        let from = i + c.len_utf8();
+        let close = match c {
+            '"' => Some(('"', false)),
+            '\u{201c}' => Some(('\u{201d}', false)),
+            '\'' if after_word_break(line, i) => Some(('\'', true)),
+            '\u{2018}' if after_word_break(line, i) => Some(('\u{2019}', true)),
+            _ => None,
+        };
+        let end = close.and_then(|(close, single)| {
+            line[from..]
+                .match_indices(close)
+                .map(|(e, _)| from + e)
+                .find(|&e| !single || !line[e + close.len_utf8()..].starts_with(char::is_alphanumeric))
+                .map(|e| (e, e + close.len_utf8()))
+        });
+        match end {
+            Some((end, next)) => {
+                if armed {
+                    add_option(out, &line[from..end]);
+                }
+                i = next;
+            }
+            None => {
+                armed |= is_verb(i);
+                i = from;
+            }
+        }
+    }
 }
 
 #[derive(Default)]
