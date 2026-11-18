@@ -198,7 +198,7 @@ async fn launch_ticket_maps_the_repo_to_a_project_and_preregisters_the_link() {
     assert_eq!(l["modelSelection"]["model"], "claude-opus-5-5");
     assert_eq!(l["modelSelection"]["options"], json!([{"id": "effort", "value": "high"}]));
     let msg = l["message"].as_str().unwrap();
-    assert!(msg.starts_with("Work https://github.com/Acme/widgets/issues/41 with the cbrip:t3-ticket skill."), "{msg}");
+    assert!(msg.starts_with("Work https://github.com/Acme/widgets/issues/41 with the t3-ticket skill."), "{msg}");
     assert!(msg.contains(r#"wf.join({ parent: "board", label: "widgets#41", role: "ticket" })"#), "{msg}");
     let pending = h.app.store.pending_all().unwrap();
     assert_eq!(pending.len(), 1);

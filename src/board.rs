@@ -210,7 +210,7 @@ fn nonempty(s: Option<String>) -> Option<String> {
 
 pub fn ticket_brief(url: &str, label: &str) -> String {
     format!(
-        "Work {url} with the cbrip:t3-ticket skill.\n\n\
+        "Work {url} with the t3-ticket skill.\n\n\
          ## t3-codemode link\n\
          This thread reports to the t3-codemode board, not to a parent thread. Before anything else, call \
          mcp__t3cm__execute with:\n\

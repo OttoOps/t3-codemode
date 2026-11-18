@@ -188,7 +188,7 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.launchTicket",
             "wf",
-            "Launch a cbrip:t3-ticket thread for a GitHub issue that reports to the t3-codemode board (the root overseer). The T3 project is the one whose workspace origin remote is the issue's repo, unless project (id or title) is given. An unmapped repo or failed launch throws and leaves an error card on the board.",
+            "Launch a t3-ticket thread for a GitHub issue that reports to the t3-codemode board (the root overseer). The T3 project is the one whose workspace origin remote is the issue's repo, unless project (id or title) is given. An unmapped repo or failed launch throws and leaves an error card on the board.",
             "wf.launchTicket(input: { issue: string; project?: string; title?: string; model?: string; effort?: string }): Promise<{ ok: true; label: string; thread: string; link: string | null; projectId: string; title: string }>;",
             obj(
                 json!({"issue": {"type": "string", "description": "https://github.com/<owner>/<repo>/issues/<n> or <owner>/<repo>#<n>"},

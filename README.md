@@ -320,15 +320,15 @@ on a row and **Settle all done** do it by hand.
 Every board route requires `Host` to be `127.0.0.1:<port>` or `localhost:<port>`
 and refuses any other `Origin`; POSTs also need the `X-T3CM-CSRF` header.
 
-### Ticket workflow and the `cbrip:t3-ticket` skill
+### Ticket workflow and the `t3-ticket` skill
 
 `wf.launchTicket({ issue, project?, title?, model?, effort? })` finds the T3
 project whose workspace `origin` remote is the issue's GitHub repo and launches
-a thread that works the issue and reports to the board. Today that thread is
-started with the `cbrip:t3-ticket` skill, which lives in a separate plugin and
-is not part of this repo. Without that skill installed, launched threads do not
-know the workflow, so the board and `wf` are the part of this project that works
-standalone.
+a thread that works the issue and reports to the board. That thread is started
+with the `t3-ticket` skill, which lives in this repo's `skills/` folder and is
+installed as an agent skill, apart from the service. Without that skill
+installed, launched threads do not know the workflow, so the board and `wf` are
+the part of this project that works standalone.
 
 ## Auth
 
