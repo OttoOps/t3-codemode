@@ -166,9 +166,18 @@ echo 'async () => (await t3.thread_list({ allProjects: true, limit: 5 })).thread
 
 ## The workflow skills
 
-Agent skills drive the thread-workflow layer. This repo carries them under
-`skills/`: `t3-workflow` (the link protocol), `t3-ticket`, `t3-worker` and
-`t3-overseer`. They install as agent skills, apart from the service, and
-[#17](https://github.com/OttoOps/t3-codemode/issues/17) tracks publishing them
-with a setup skill. Without them, launched threads do not know the workflow, so
-the board and `wf` are the part of this project that works standalone.
+Agent skills drive the thread-workflow layer. This repo carries five under
+`skills/`: `t3-workflow`, `setup-t3-workflow`, `t3-overseer`, `t3-ticket` and
+`t3-worker`. `t3-workflow` holds the link protocol and routes to the other
+four. They install as agent skills, apart from the service, for Claude Code
+and Codex:
+
+```bash
+npx skills@latest add OttoOps/t3-codemode -g
+```
+
+Then ask your agent once to "set up the T3 workflow". The
+[README](https://github.com/OttoOps/t3-codemode#install-the-workflow-skills)
+covers the manual copy and which skills need which. Without the skills,
+launched threads do not know the workflow, so the board and `wf` are the part
+of this project that works standalone.

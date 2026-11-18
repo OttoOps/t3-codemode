@@ -48,8 +48,8 @@ works the issue and reports to the board. An unmapped repo or a failed launch
 throws and leaves an error card. The launched thread is told to use the
 `t3-ticket` skill, which lives in this repo's `skills/` folder and is installed
 as an agent skill, apart from the service.
-[#17](https://github.com/OttoOps/t3-codemode/issues/17) tracks publishing the
-skills. Without them installed, launched threads do not know the workflow.
+[The workflow skills](getting-started.md#the-workflow-skills) covers installing
+them. Without the skills installed, launched threads do not know the workflow.
 
 ## Settling
 
