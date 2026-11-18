@@ -934,6 +934,29 @@ const ids = () => [...document.getElementById("cards").children].map((c) => c.da
 const answers = () => fetches.filter((f) => /\/(answer|dismiss)$/.test(f.url));
 "##;
 
+fn run_page_async(html: &str, scenario: &str) -> Value {
+    let open = html.find("<script>").unwrap() + "<script>".len();
+    let close = html.rfind("</script>").unwrap();
+    let src = format!(
+        "{}\n{}\nPromise.resolve(({scenario})()).then((v) => {{ globalThis.__out = JSON.stringify(v); }}, (e) => {{ globalThis.__out = JSON.stringify({{ error: String(e) }}); }});",
+        include_str!("support/board_dom.js"),
+        &html[open..close]
+    );
+    let rt = rquickjs::Runtime::new().unwrap();
+    let ctx = rquickjs::Context::full(&rt).unwrap();
+    ctx.with(|ctx| {
+        use rquickjs::CatchResultExt;
+        ctx.eval::<(), _>(src).catch(&ctx).unwrap_or_else(|e| panic!("{e}"));
+    });
+    while rt.is_job_pending() {
+        rt.execute_pending_job().unwrap();
+    }
+    ctx.with(|ctx| {
+        let out: String = ctx.eval("globalThis.__out").unwrap();
+        serde_json::from_str(&out).unwrap()
+    })
+}
+
 fn page_scenario(html: &str, st: &Value, body: &str) -> Value {
     run_page(html, &format!("() => {{\n{PAGE_HELPERS}\nconst base = {st};\n{body}\n}}"))
 }
@@ -1117,6 +1140,254 @@ return { sent: answers().length, live: document.getElementById("live").textConte
     );
     assert_eq!(r["sent"], 0, "{r}");
     assert_eq!(r["live"], "a1 was already resolved. Nothing was sent.", "{r}");
+}
+
+#[tokio::test]
+async fn a_reply_is_not_sent_when_the_card_gets_a_new_handle() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+card("a1").querySelector('[data-opt="1"]').dispatch("click");
+emitState({ ...base, cards: base.cards.map((c) => c.id === "a1" ? { ...c, handle: "m99" } : c) });
+const act = !card("a1").querySelector('[data-part="act"]').hidden;
+const focused = document.activeElement === card("a1");
+advance(6000);
+return { act, focused, sent: answers().length, live: document.getElementById("live").textContent };
+"##,
+    );
+    assert_eq!(r["act"], true, "{r}");
+    assert_eq!(r["focused"], true, "{r}");
+    assert_eq!(r["sent"], 0, "{r}");
+    assert_eq!(r["live"], "a1 was already resolved. Nothing was sent.", "{r}");
+}
+
+#[tokio::test]
+async fn closing_an_action_error_returns_focus_to_the_action_or_the_composer() {
+    let (html, st) = two_gate_page().await;
+    let r = run_page_async(
+        &html,
+        &format!(
+            "async () => {{\n{PAGE_HELPERS}\nconst base = {st};\n{}\n}}",
+            r##"
+emitState(base);
+fetchReply = () => Promise.reject(new Error("settle failed"));
+const composer = document.getElementById("composer");
+const b = document.createElement("button");
+composer.append(b);
+const err = document.getElementById("composer-err");
+const close = document.getElementById("composer-err-close");
+await act(b, "/api/asks/q1/settle");
+const shown = !err.hidden;
+close.focus();
+close.dispatch("click");
+const back = document.activeElement === b;
+await act(b, "/api/asks/q1/settle");
+b.disabled = true;
+close.focus();
+close.dispatch("click");
+const unfocusable = document.activeElement === document.getElementById("issues");
+b.disabled = false;
+await act(b, "/api/asks/q1/settle");
+b.remove();
+close.focus();
+close.dispatch("click");
+return { shown, back, unfocusable, hidden: err.hidden, fallback: document.activeElement === document.getElementById("issues") };
+"##
+        ),
+    );
+    assert_eq!(r["shown"], true, "{r}");
+    assert_eq!(r["back"], true, "{r}");
+    assert_eq!(r["unfocusable"], true, "{r}");
+    assert_eq!(r["hidden"], true, "{r}");
+    assert_eq!(r["fallback"], true, "{r}");
+}
+
+#[tokio::test]
+async fn a_late_message_for_an_old_handle_never_replaces_the_new_one() {
+    let (html, st) = two_gate_page().await;
+    let r = run_page_async(
+        &html,
+        &format!(
+            "async () => {{\n{PAGE_HELPERS}\nconst base = {st};\n{}\n}}",
+            r##"
+const waiting = [];
+fetchReply = () => new Promise((resolve) => waiting.push(resolve));
+const reply = (body) => ({ ok: true, json: async () => ({ body }) });
+const tick = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+emitState(base);
+const c = card("a1");
+const btn = c.querySelector('[data-part="fullbtn"]');
+const pre = c.querySelector('[data-part="full"]').firstChild;
+btn.dispatch("click");
+emitState({ ...base, cards: base.cards.map((x) => x.id === "a1" ? { ...x, handle: "m99" } : x) });
+btn.dispatch("click");
+waiting[1](reply("new body"));
+await tick();
+waiting[0](reply("old body"));
+await tick();
+const shown = pre.textContent;
+btn.dispatch("click");
+btn.dispatch("click");
+return { shown, again: pre.textContent, msgs: fetches.filter((f) => f.url.startsWith("/api/msg/")).map((f) => f.url) };
+"##
+        ),
+    );
+    assert_eq!(r["shown"], "new body", "{r}");
+    assert_eq!(r["again"], "new body", "{r}");
+    assert_eq!(r["msgs"].as_array().unwrap().len(), 2, "{r}");
+    assert_eq!(r["msgs"][1], "/api/msg/m99", "{r}");
+}
+
+#[tokio::test]
+async fn a_card_id_reused_by_a_new_decision_drops_the_old_draft_and_message() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+const c = card("a1");
+c.querySelector('[data-part="replybtn"]').dispatch("click");
+typeKeys("for the old gate");
+c.querySelector('[data-part="fullbtn"]').dispatch("click");
+const reused = { ...base, cards: base.cards.map((x) => x.id === "a1" ? { ...x, at: "2099-01-01T00:00:00Z", handle: "m99" } : x) };
+emitState(reused);
+const after = {
+  same: card("a1") === c,
+  value: c.querySelector("input").value,
+  reply: c.querySelector('[data-part="reply"]').hidden,
+  full: c.querySelector('[data-part="full"]').hidden,
+  expanded: c.querySelector('[data-part="fullbtn"]').getAttribute("aria-expanded"),
+};
+emitState(reused);
+c.querySelector('[data-part="fullbtn"]').dispatch("click");
+return { ...after, kept: c.querySelector("input").value, msgs: fetches.filter((f) => f.url.startsWith("/api/msg/")).map((f) => f.url) };
+"##,
+    );
+    assert_eq!(r["same"], true, "{r}");
+    assert_eq!(r["value"], "", "{r}");
+    assert_eq!(r["reply"], true, "{r}");
+    assert_eq!(r["full"], true, "{r}");
+    assert_eq!(r["expanded"], "false", "{r}");
+    assert_eq!(r["kept"], "", "{r}");
+    assert_eq!(r["msgs"].as_array().unwrap().len(), 2, "{r}");
+    assert_eq!(r["msgs"][1], "/api/msg/m99", "{r}");
+}
+
+#[tokio::test]
+async fn a_sent_reply_does_not_hold_a_new_card_that_reuses_the_id() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+card("a1").querySelector('[data-opt="1"]').dispatch("click");
+advance(5000);
+const sent = answers().length;
+emitState({ ...base, cards: base.cards.map((c) => c.id === "a1" ? { ...c, at: "2099-01-01T00:00:00Z" } : c) });
+return { sent, act: !card("a1").querySelector('[data-part="act"]').hidden };
+"##,
+    );
+    assert_eq!(r["sent"], 1, "{r}");
+    assert_eq!(r["act"], true, "{r}");
+}
+
+#[tokio::test]
+async fn a_restore_that_finishes_while_its_row_is_stale_stays_disabled() {
+    let (html, st) = two_gate_page().await;
+    let r = run_page_async(
+        &html,
+        &format!(
+            "async () => {{\n{PAGE_HELPERS}\nconst base = {st};\n{}\n}}",
+            r##"
+const waiting = [];
+fetchReply = () => new Promise((resolve) => waiting.push(resolve));
+const T = { thread: "th-7", label: "acme/widgets#7", settledAt: "2026-01-01T00:00:00Z" };
+const withT = { ...base, settled: { tickets: [T], asks: [] } };
+emitState(withT);
+const b = q('#settled [data-key="t:th-7"] [data-part="restore"]');
+b.focus();
+b.dispatch("click");
+emitState({ ...base, settled: { tickets: [], asks: [] } });
+waiting[0]({ ok: true, json: async () => ({}) });
+for (let i = 0; i < 5; i++) await Promise.resolve();
+const stale = b.getAttribute("aria-disabled");
+emitState(withT);
+return { stale, back: b.getAttribute("aria-disabled") };
+"##
+        ),
+    );
+    assert_eq!(r["stale"], "true", "{r}");
+    assert_eq!(r["back"], serde_json::Value::Null, "{r}");
+}
+
+#[tokio::test]
+async fn a_settled_row_that_comes_back_can_be_restored_again() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+const T = { thread: "th-7", label: "acme/widgets#7", settledAt: "2026-01-01T00:00:00Z" };
+const withT = { ...base, settled: { tickets: [T], asks: [] } };
+emitState(withT);
+const b = q('#settled [data-key="t:th-7"] [data-part="restore"]');
+b.focus();
+emitState({ ...base, settled: { tickets: [], asks: [] } });
+const stale = b.getAttribute("aria-disabled");
+emitState(withT);
+b.dispatch("click");
+return { stale, after: b.getAttribute("aria-disabled"), posts: fetches.filter((f) => /\/restore$/.test(f.url)).length };
+"##,
+    );
+    assert_eq!(r["stale"], "true", "{r}");
+    assert_eq!(r["posts"], 1, "{r}");
+}
+
+#[tokio::test]
+async fn a_launch_keeps_its_row_when_it_gets_a_thread() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+const P = { ...base.tree[0], thread: null, label: "acme/widgets#9", status: "running", done: false, gate: null, last: null };
+emitState({ ...base, tree: [...base.tree, P] });
+const row = q('#open [data-key="pending:acme/widgets#9"]');
+q("#open").children[0].focus();
+emitState({ ...base, tree: [...base.tree, { ...P, thread: "th-9" }] });
+return {
+  same: q('#open [data-key="th-9"]') === row,
+  gone: row.classList.contains("gone"),
+  held: !q("#new-tix").classList.contains("off"),
+};
+"##,
+    );
+    assert_eq!(r["same"], true, "{r}");
+    assert_eq!(r["gone"], false, "{r}");
+    assert_eq!(r["held"], false, "{r}");
+}
+
+#[tokio::test]
+async fn board_shortcuts_wait_while_the_shortcuts_dialog_is_open() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+const before = document.getElementById("app").dataset.panel;
+document.getElementById("keys").open = true;
+const close = document.getElementById("keys-close");
+for (const key of ["g", "t"]) for (const f of document.listeners.keydown) f({ key, target: close, preventDefault() {} });
+return { before, after: document.getElementById("app").dataset.panel };
+"##,
+    );
+    assert_eq!(r["after"], r["before"], "{r}");
 }
 
 #[tokio::test]

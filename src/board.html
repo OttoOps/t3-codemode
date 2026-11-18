@@ -152,13 +152,13 @@ textarea { resize: none; display: block; }
 .panes {
   display: grid; min-height: 0; min-width: 0; gap: 0;
   grid-template-columns: 460px minmax(0, 1fr) 340px;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, auto) minmax(0, 1fr);
   grid-template-areas: "dec tix cmd" "dec tix act";
 }
 .pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--panel); }
 #p-dec { grid-area: dec; border-right: 1px solid var(--line); }
 #p-tix { grid-area: tix; border-right: 1px solid var(--line); background: var(--canvas); }
-#composer { grid-area: cmd; background: var(--panel); border-bottom: 1px solid var(--line); min-width: 0; }
+#composer { grid-area: cmd; background: var(--panel); border-bottom: 1px solid var(--line); min-width: 0; min-height: 0; overflow-y: auto; }
 #p-act { grid-area: act; }
 #out { order: 1; }
 .ph {
@@ -340,7 +340,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   #p-act { grid-area: tix; align-self: end; height: calc(100% - 40px); z-index: 1; border-right: 1px solid var(--line); }
   #p-act .ph { display: none; }
   .app:not([data-tab="activity"]) #p-act { display: none; }
-  #composer { position: relative; border-bottom: 0; border-top: 1px solid var(--line); z-index: 5; }
+  #composer { position: relative; border-bottom: 0; border-top: 1px solid var(--line); z-index: 5; overflow: visible; }
   .dock { position: absolute; left: 0; right: 0; bottom: 0; background: var(--panel); }
   .dock:focus-within, .dock.show-out { border-top: 1px solid var(--line); }
   #out { order: 0; }
@@ -801,7 +801,7 @@ function sync(list, items, o) {
       have.set(k, fresh);
       el = fresh;
     }
-    if (el) { o.patch(el, it); want.push(el); continue; }
+    if (el) { if (el.classList.contains("stale-item")) unstale(el); o.patch(el, it); want.push(el); continue; }
     if (o.live) {
       el = o.make(it);
       setAttr(el, "data-key", k);
@@ -833,7 +833,20 @@ function sync(list, items, o) {
 function holdStale(el) {
   if (el.classList.contains("stale-item")) return;
   el.classList.add("stale-item");
-  for (const b of el.querySelectorAll("button")) setAttr(b, "aria-disabled", "true");
+  for (const b of el.querySelectorAll("button")) {
+    if (b.getAttribute("aria-disabled") === "true") continue;
+    setAttr(b, "data-stale", "1");
+    setAttr(b, "aria-disabled", "true");
+  }
+}
+
+function unstale(el) {
+  el.classList.remove("stale-item");
+  for (const b of el.querySelectorAll("button")) {
+    if (!b.hasAttribute("data-stale")) continue;
+    setAttr(b, "data-stale", null);
+    setAttr(b, "aria-disabled", null);
+  }
 }
 
 function itemOf(list, el) {
@@ -902,7 +915,7 @@ function makeCard(c) {
     h("span", { class: "what clip", "data-part": "what" }),
     h("button", { class: "btn", type: "button", "data-part": "undo", onclick: () => undo(card.dataset.id) }, "Undo"));
   const input = h("input", { type: "text", "data-part": "input", autocomplete: "off",
-    oninput: (e) => drafts.set(card.dataset.id, { owner: cardInstance(card._card), value: e.target.value }),
+    oninput: (e) => drafts.set(card.dataset.id, { inst: card._card && inst(card._card), value: e.target.value }),
     onkeydown: (e) => {
       if (e.key === "Escape" && !e.target.value) { e.preventDefault(); e.stopPropagation(); closeReply(card); }
     } });
@@ -926,24 +939,25 @@ function blocked(card) {
   return !connected || pending.has(card.dataset.id) || card.classList.contains("stale-item");
 }
 
+function inst(c) { return [c.at, c.ticket || "", c.handle || ""].join("|"); }
+
+function resetCard(card) {
+  card._loaded = null;
+  part(card, "full").hidden = true;
+  part(card, "full").firstChild.textContent = "Loading...";
+  part(card, "q").hidden = false;
+  const fb = part(card, "fullbtn");
+  setAttr(fb, "aria-expanded", "false");
+  setText(fb, "Full message");
+  part(card, "reply").hidden = true;
+  part(card, "input").value = "";
+  part(card, "err").hidden = true;
+}
+
 function optionsSig(c) { return JSON.stringify([c.options, !!c.ticket]); }
 
-function cardInstance(c) { return JSON.stringify([c.id, c.at, c.ticket]); }
-
 function patchCard(card, c) {
-  const old = card._card;
-  if (old && cardInstance(old) !== cardInstance(c)) {
-    part(card, "input").value = "";
-    part(card, "reply").hidden = true;
-  }
-  if (!old || old.handle !== c.handle) {
-    card._loaded = false;
-    part(card, "full").hidden = true;
-    part(card, "full").firstChild.textContent = "Loading...";
-    part(card, "q").hidden = false;
-    setAttr(part(card, "fullbtn"), "aria-expanded", "false");
-    setText(part(card, "fullbtn"), "Full message");
-  }
+  if (card._card && inst(card._card) !== inst(c)) resetCard(card);
   card._card = c;
   setAttr(card, "data-id", c.id);
   setAttr(card, "data-ticket", c.ticket || null);
@@ -997,11 +1011,10 @@ function patchCard(card, c) {
   setAttr(input, "aria-label", "Reply to " + cardLabel(c));
   setAttr(input, "placeholder", c.ticket ? "Reply in your own words" : "This card has no ticket to answer");
   input.disabled = !c.ticket;
-  const d = drafts.get(c.id);
-  if (d && d.owner === cardInstance(c)) {
-    if (input.value !== d.value) input.value = d.value;
-    if (d.value) part(card, "reply").hidden = false;
-  }
+  let d = drafts.get(c.id);
+  if (d && d.inst !== inst(c)) { drafts.delete(c.id); d = null; }
+  if (d && input.value !== d.value) input.value = d.value;
+  if (d && d.value) part(card, "reply").hidden = false;
   setAttr(part(card, "send"), "aria-label", "Send reply to " + cardLabel(c));
   paintSending(card);
 }
@@ -1032,7 +1045,7 @@ function paintSending(card) {
 function startSend(c, kind, text, raw) {
   if (pending.has(c.id)) return;
   const card = cardEl(c.id);
-  const p = { kind, text, raw: raw === undefined ? text : raw, label: c.label || c.id, at: c.at, ticket: c.ticket, sent: false };
+  const p = { kind, text, raw: raw === undefined ? text : raw, label: c.label || c.id, inst: inst(c), sent: false };
   p.timer = setTimeout(() => fire(c.id), SEND_DELAY);
   pending.set(c.id, p);
   if (card) {
@@ -1063,7 +1076,7 @@ async function fire(id) {
   if (!p || p.sent) return;
   const now = state && state.cards.find((c) => c.id === id);
   const why = !connected ? id + " was not sent because the board is offline. Send it again after it reconnects."
-    : !now || now.at !== p.at || now.ticket !== p.ticket ? id + " was already resolved. Nothing was sent." : "";
+    : !now || inst(now) !== p.inst ? id + " was already resolved. Nothing was sent." : "";
   if (why) {
     pending.delete(id);
     const gone = cardEl(id);
@@ -1132,21 +1145,14 @@ function toggleFull(card) {
   part(card, "q").hidden = open;
   setAttr(btn, "aria-expanded", open ? "true" : "false");
   setText(btn, open ? "Hide message" : "Full message");
-  if (!open || card._loaded || !card._card || !card._card.handle) return;
-  card._loaded = true;
+  if (!open || !card._card || !card._card.handle || card._loaded === card._card.handle) return;
+  const hd = card._card.handle;
+  card._loaded = hd;
   const pre = box.firstChild;
   pre.textContent = "Loading...";
-  const handle = card._card.handle;
-  fetch("/api/msg/" + encodeURIComponent(handle))
-    .then(async (r) => {
-      const m = await r.json();
-      if (!card._card || card._card.handle !== handle) return;
-      pre.textContent = r.ok ? m.body : (m.error || "not found");
-    })
-    .catch((e) => {
-      if (!card._card || card._card.handle !== handle) return;
-      pre.textContent = String(e.message || e); card._loaded = false;
-    });
+  fetch("/api/msg/" + encodeURIComponent(hd))
+    .then(async (r) => { const m = await r.json(); if (card._loaded === hd) pre.textContent = r.ok ? m.body : (m.error || "not found"); })
+    .catch((e) => { if (card._loaded !== hd) return; pre.textContent = String(e.message || e); card._loaded = null; });
 }
 
 function goneCard(card) {
@@ -1178,8 +1184,21 @@ function syncCards(cards) {
   const sorted = cards.map((c, i) => [c, i])
     .sort((a, b) => ((KIND_RANK[a[0].kind] ?? 2) - (KIND_RANK[b[0].kind] ?? 2)) || (a[1] - b[1]))
     .map((x) => x[0]);
-  for (const [id, p] of pending) if (p.sent && !cards.some((c) => c.id === id)) pending.delete(id);
+  const refocus = [];
+  for (const [id, p] of pending) {
+    const now = cards.find((c) => c.id === id);
+    if (now && inst(now) === p.inst) continue;
+    if (p.sent) pending.delete(id);
+    else if (now) {
+      const el = cardEl(id);
+      if (el && document.activeElement === part(el, "undo")) refocus.push(el);
+      clearTimeout(p.timer);
+      pending.delete(id);
+      announce(id + " was already resolved. Nothing was sent.");
+    }
+  }
   const held = sync(list, sorted, { key: (c) => c.id, make: makeCard, patch: patchCard, gone: goneCard, live, quiet: firstState });
+  for (const el of refocus) if (el.isConnected) el.focus();
   const urgent = held.filter((c) => FAIL_KINDS.has(c.kind)).length;
   showHeld(p, held, urgent ? urgent + (urgent > 1 ? " blockers" : " blocker") : "");
   emptyState("cards-empty", !cards.length && !items(list).length);
@@ -1356,6 +1375,12 @@ function syncTickets(tree, cards) {
   const open = tree.filter((t) => !t.done).map((t, i) => [t, i]).sort((a, b) => (rank(a[0]) - rank(b[0])) || (a[1] - b[1])).map((x) => x[0]);
   const done = tree.filter((t) => t.done);
   const po = panels.open, pd = panels.done;
+  const ol = $("open");
+  for (const t of open) {
+    if (!t.thread || open.some((u) => !u.thread && u.label === t.label)) continue;
+    const was = ol.querySelector('[data-key="' + CSS.escape("pending:" + t.label) + '"]');
+    if (was && !ol.querySelector('[data-key="' + CSS.escape(t.thread) + '"]')) setAttr(was, "data-key", t.thread);
+  }
   const lo = firstState || isLive(po);
   const heldOpen = sync($("open"), open, {
     key: (t, have) => have.has("pending:" + t.label) ? "pending:" + t.label : t.thread || "pending:" + t.label,
@@ -1601,8 +1626,8 @@ let everConnected = false;
 function render(s) {
   state = s;
   notifyNew(s.cards);
-  const keep = new Map(s.cards.map((c) => [c.id, cardInstance(c)]));
-  for (const [k, d] of drafts) if (keep.get(k) !== d.owner) drafts.delete(k);
+  const keep = new Map(s.cards.map((c) => [c.id, inst(c)]));
+  for (const [k, d] of drafts) if (keep.get(k) !== d.inst) drafts.delete(k);
   syncCards(s.cards);
   syncTickets(s.tree, s.cards);
   syncAsks(s.asks);
@@ -1654,7 +1679,18 @@ function connect() {
   };
 }
 
-const errStrip = () => $("act-err");
+const errFrom = new Map();
+function closeErr(id) {
+  $(id).hidden = true;
+  const b = errFrom.get(id);
+  errFrom.delete(id);
+  if (b && b.isConnected && !b.closest("[hidden]") && b.getAttribute("aria-disabled") !== "true") {
+    b.focus();
+    if (document.activeElement === b) return;
+  }
+  if (id === "composer-err") $($("composer").dataset.mode === "ask" ? "question" : "issues").focus();
+  else { const t = $("tix-tabs").querySelector('[aria-selected="true"]'); if (t) t.focus(); }
+}
 async function act(btn, path) {
   if (btn.getAttribute("aria-disabled") === "true") return;
   btn._busy = true;
@@ -1664,10 +1700,16 @@ async function act(btn, path) {
   error.hidden = true;
   try { await post(path); }
   catch (e) {
+    errFrom.set(errorId, btn);
     setText($(errorId + "-text"), e.message);
     error.hidden = false;
     announce(e.message, true);
-  } finally { btn._busy = false; setAttr(btn, "aria-disabled", null); }
+  } finally {
+    btn._busy = false;
+    const stale = !!btn.closest(".stale-item");
+    setAttr(btn, "data-stale", stale ? "1" : null);
+    setAttr(btn, "aria-disabled", stale ? "true" : null);
+  }
 }
 
 function selectTab(tab, focus) {
@@ -1881,8 +1923,8 @@ function wire() {
     prefs.keys = e.target.checked;
     try { localStorage.setItem("t3board.keys", prefs.keys ? "on" : "off"); } catch (_) {}
   });
-  $("composer-err-close").addEventListener("click", () => { $("composer-err").hidden = true; });
-  $("act-err-close").addEventListener("click", () => { errStrip().hidden = true; });
+  $("composer-err-close").addEventListener("click", () => closeErr("composer-err"));
+  $("act-err-close").addEventListener("click", () => closeErr("act-err"));
   $("settle-all").addEventListener("click", async (e) => {
     const b = e.currentTarget;
     await act(b, "/api/settle-done");

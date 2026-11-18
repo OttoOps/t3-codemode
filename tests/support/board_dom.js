@@ -164,7 +164,8 @@ function advance(ms) {
   fakeNow = end;
 }
 const fetches = [];
-const fetch = (url, opts) => { fetches.push({ url, method: (opts && opts.method) || "GET", body: opts && opts.body }); return new Promise(() => {}); };
+let fetchReply = null;
+const fetch = (url, opts) => { fetches.push({ url, method: (opts && opts.method) || "GET", body: opts && opts.body }); return fetchReply ? fetchReply(url, opts) : new Promise(() => {}); };
 let eventSource = null;
 class EventSource {
   constructor(url) { this.url = url; this.listeners = {}; eventSource = this; }

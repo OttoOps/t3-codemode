@@ -10,17 +10,12 @@ async (page) => {
     const RN = window.Notification;
     if (RN) {
       const W = function (t, o) {
-        const note = new RN(t, o);
-        let pending = true;
-        const timer = setTimeout(() => { pending = false; }, 10000);
-        note.addEventListener("show", () => {
-          if (!pending) return;
-          pending = false;
-          clearTimeout(timer);
-          window.__notes.push(t);
-        }, { once: true });
-        note.addEventListener("error", () => { pending = false; clearTimeout(timer); }, { once: true });
-        return note;
+        const n = new RN(t, o);
+        const rec = { title: t, state: "created" };
+        window.__notes.push(rec);
+        n.addEventListener("show", () => { rec.state = "shown"; });
+        n.addEventListener("error", () => { rec.state = "error"; });
+        return n;
       };
       Object.defineProperty(W, "permission", { get: () => RN.permission });
       W.requestPermission = (...a) => RN.requestPermission(...a);
@@ -88,6 +83,9 @@ async (page) => {
   await page.click("#ask-btn");
   await page.waitForTimeout(800);
   await page.unroute("**/api/ask");
+  await page.fill("#question", "Which gate is oldest?");
+  await page.click("#ask-btn");
+  await page.waitForFunction(() => window.__said.some(([, t]) => t.startsWith("Answer to “Which gate is oldest?”")), null, { timeout: 30000 }).catch(() => {});
   await page.fill("#issues", "acme/widgets#77\nacme/nowhere#3");
   await page.click("#launch-btn");
   await page.waitForTimeout(1500);
@@ -103,6 +101,7 @@ async (page) => {
   r.F3 = {
     said,
     askError: { n: count(/^Ask failed/), alert: said.some(([id, t]) => id === "alert" && /^Ask failed/.test(t)) },
+    askAnswer: { n: said.filter(([id, t]) => id === "live" && t.startsWith("Answer to “Which gate is oldest?”")).length },
     launch: { ok: count(/^Launched widgets#77/), failed: count(/nowhere#3/), shown: await page.evaluate(() => ({ good: document.querySelectorAll("#launch-out .good").length, bad: document.querySelectorAll("#launch-out .bad").length })) },
     cardError: { n: count(/the ticket thread is gone/), alert: said.some(([id, t]) => id === "alert" && /thread is gone/.test(t)) },
     newDecisions: { n: count(/new decision/) },
@@ -117,7 +116,8 @@ async (page) => {
     Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
     document.dispatchEvent(new Event("visibilitychange"));
   });
-  await page.waitForFunction(() => window.__notes.length > 0, null, { timeout: 60000 }).catch(() => {});
-  r.F1 = { notification: { button: notify, cardsBefore, notes: await page.evaluate(() => window.__notes) } };
+  await page.waitForFunction(() => window.__notes.some((n) => n.state === "shown"), null, { timeout: 60000 }).catch(() => {});
+  const notes = await page.evaluate(() => window.__notes);
+  r.F1 = { notification: { button: notify, cardsBefore, notes, shown: notes.some((n) => n.state === "shown") } };
   return r;
 }

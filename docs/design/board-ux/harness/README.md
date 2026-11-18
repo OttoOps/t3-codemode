@@ -30,10 +30,19 @@ PR 2 added the scripts that score the redesign against
 - `gates.js` measures the static gates: U1, U2, U5 to U10, P1 to P3, N1,
   N2 and F4. Run it on the seeded board, and again on a heavy one
   (`BOARD_DEMO_EVERY=1`, left running until it has at least 30 open
-  tickets and 15 decisions).
+  tickets and 15 decisions). The heavy board sends each new gate to a
+  ticket that joined during the run and has no gate yet, so the decision
+  count keeps rising instead of a new gate replacing an old one. U1 records
+  both counts, and a heavy run below 30 tickets or 15 decisions does not
+  count.
 - `stability.js` runs U3 on a fresh board started with
   `BOARD_DEMO_EVERY=1 BOARD_DEMO_CHURN=1`. Churn drains the decision cards
-  within a few minutes, so start the board right before the run.
+  within a few minutes, so start the board right before the run. A page
+  script samples every 20 ms for each whole case, stream cut included: the
+  focused element's position, value and caret, whether focus stays on the
+  same connected node, and what sits under the pointer. Each hover lasts
+  60 s; the card option is answered from a second context at 1 s, and the
+  ticket Settle hover includes a stream cut.
 - `holds.js` runs U4, U11 and F3 on the seeded board, plus two F1 checks: a
   launch with one good and one failing issue, and a browser notification
   for a new decision while the tab is hidden.
