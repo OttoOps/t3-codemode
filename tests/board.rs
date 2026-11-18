@@ -5,6 +5,7 @@ use std::time::Duration;
 use common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::{BOARD, card_text, parse_issue, parse_remote, reply_options};
+use t3_codemode::config::Config;
 use t3_codemode::fake::{project, thread};
 use t3_codemode::server;
 
@@ -463,4 +464,253 @@ async fn the_page_embeds_the_token_and_loads_nothing_external() {
         }
     }
     assert!(!html.contains('\u{2014}'));
+}
+
+fn settle_calls(h: &H, action: &str) -> Vec<Value> {
+    h.fake.organized().into_iter().filter(|o| o["action"] == action).collect()
+}
+
+async fn done_ticket(h: &H, who: &str, label: &str) {
+    join_board(h, who, label).await;
+    h.wf(who, "send", json!({"kind": "handoff", "body": "merged and deployed"})).await;
+}
+
+async fn closed_ask(h: &H, question: &str) -> String {
+    let a = h.app.wf.ask(question).await.unwrap();
+    let thread = a["thread"].as_str().unwrap().to_string();
+    h.fake.update(&thread, json!({"status": "completed"}));
+    h.fake.set_items(&thread, vec![json!({"type": "assistant_message", "position": 1, "text": "all quiet"})]);
+    h.app.wf.check_asks(None).await.unwrap();
+    a["id"].as_str().unwrap().to_string()
+}
+
+fn snapshot(h: &H) -> Value {
+    h.app.wf.snapshot().unwrap()
+}
+
+fn labels(v: &Value) -> Vec<Value> {
+    v.as_array().unwrap().iter().map(|t| t["label"].clone()).collect()
+}
+
+#[tokio::test]
+async fn done_tickets_and_closed_asks_settle_once_the_threshold_passes() {
+    let h = H::new();
+    done_ticket(&h, TICKET, "widgets#41").await;
+    join_board(&h, WORKER, "widgets#42").await;
+    let ask = closed_ask(&h, "What is waiting?").await;
+    h.clock.advance_minutes(24 * 60 - 1);
+    h.app.wf.board_tick().await.unwrap();
+    let st = snapshot(&h);
+    assert_eq!(labels(&st["tree"]), [json!("widgets#42"), json!("widgets#41")]);
+    assert_eq!(st["asks"][0]["id"], ask.as_str());
+    assert_eq!(st["counts"]["settled"], 0);
+    assert!(settle_calls(&h, "settle").is_empty());
+    h.clock.advance_minutes(1);
+    h.app.wf.board_tick().await.unwrap();
+    let st = snapshot(&h);
+    assert_eq!(labels(&st["tree"]), [json!("widgets#42")]);
+    assert_eq!(st["asks"], json!([]));
+    assert_eq!(labels(&st["settled"]["tickets"]), [json!("widgets#41")]);
+    assert_eq!(st["settled"]["tickets"][0]["done"], true);
+    assert!(st["settled"]["tickets"][0]["settledAt"].as_str().unwrap().contains(':'));
+    assert_eq!(st["settled"]["asks"][0]["id"], ask.as_str());
+    assert!(st["settled"]["asks"][0]["settledAt"].is_string());
+    assert_eq!(st["counts"]["settled"], 2);
+    assert_eq!(settle_calls(&h, "settle"), vec![json!({"threadId": TICKET, "action": "settle"})]);
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(settle_calls(&h, "settle").len(), 1);
+    let board = h.wf(BOSS, "board", json!({"parent": BOARD, "all": true})).await;
+    assert_eq!(board["children"][0]["settled"], true);
+    assert_eq!(board["children"][1]["settled"], false);
+}
+
+#[tokio::test]
+async fn a_failed_ask_settles_from_when_it_was_asked() {
+    let h = H::new();
+    let a = h.app.wf.ask("Will this fail?").await.unwrap();
+    h.fake.update(a["thread"].as_str().unwrap(), json!({"status": "failed"}));
+    h.app.wf.check_asks(None).await.unwrap();
+    assert!(h.app.wf.asks().unwrap()[0]["answeredAt"].is_null());
+    h.clock.advance_minutes(24 * 60 + 1);
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(snapshot(&h)["settled"]["asks"][0]["status"], "failed");
+}
+
+#[tokio::test]
+async fn zero_settle_after_hours_turns_auto_settle_off() {
+    let config = Config::from_value(json!({"board": {"settleAfterHours": 0}})).unwrap();
+    let h = H::build(Vec::new(), config);
+    done_ticket(&h, TICKET, "widgets#41").await;
+    closed_ask(&h, "What is waiting?").await;
+    h.clock.advance_minutes(30 * 24 * 60);
+    h.app.wf.board_tick().await.unwrap();
+    let st = snapshot(&h);
+    assert_eq!(labels(&st["tree"]), [json!("widgets#41")]);
+    assert_eq!(st["asks"].as_array().unwrap().len(), 1);
+    assert_eq!(st["counts"]["settled"], 0);
+    assert!(settle_calls(&h, "settle").is_empty());
+}
+
+#[tokio::test]
+async fn a_restored_ticket_is_not_settled_again_at_once() {
+    let h = H::new();
+    done_ticket(&h, TICKET, "widgets#41").await;
+    let ask = closed_ask(&h, "What is waiting?").await;
+    h.clock.advance_minutes(25 * 60);
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(snapshot(&h)["counts"]["settled"], 2);
+    h.app.wf.restore_ticket(TICKET).await.unwrap();
+    h.app.wf.restore_ask(&ask).unwrap();
+    h.clock.advance_minutes(60);
+    h.app.wf.board_tick().await.unwrap();
+    let st = snapshot(&h);
+    assert_eq!(labels(&st["tree"]), [json!("widgets#41")]);
+    assert_eq!(st["asks"][0]["id"], ask.as_str());
+    assert_eq!(st["counts"]["settled"], 0);
+    h.clock.advance_minutes(24 * 60);
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(snapshot(&h)["counts"]["settled"], 2);
+}
+
+#[tokio::test]
+async fn settle_and_restore_work_through_the_routes_and_call_t3() {
+    let s = start(H::new()).await;
+    done_ticket(&s.h, TICKET, "widgets#41").await;
+    let ask = closed_ask(&s.h, "What is waiting?").await;
+    let ticket_settle = format!("/api/tickets/{TICKET}/settle");
+    assert_eq!(s.post(&ticket_settle, json!({}), None, None).await.status(), 403);
+    assert_eq!(s.post(&ticket_settle, json!({}), Some("nope"), None).await.status(), 403);
+    let ask_settle = format!("/api/asks/{ask}/settle");
+    assert_eq!(s.post(&ask_settle, json!({}), None, None).await.status(), 403);
+    assert_eq!(s.post("/api/settle-done", json!({}), None, None).await.status(), 403);
+    assert_eq!(snapshot(&s.h)["counts"]["settled"], 0);
+    assert!(settle_calls(&s.h, "settle").is_empty());
+
+    let r = s.post(&ticket_settle, json!({}), Some(&s.csrf()), Some(&s.base)).await;
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!((body["settled"].clone(), body["t3"]["ok"].clone()), (json!(true), json!(true)));
+    assert_eq!(s.post(&ask_settle, json!({}), Some(&s.csrf()), None).await.status(), 200);
+    let st = snapshot(&s.h);
+    assert_eq!(st["tree"], json!([]));
+    assert_eq!(st["asks"], json!([]));
+    assert_eq!(st["settled"]["tickets"][0]["thread"], TICKET);
+    assert_eq!(st["settled"]["asks"][0]["id"], ask.as_str());
+    assert_eq!(st["counts"]["settled"], 2);
+    assert_eq!(settle_calls(&s.h, "settle"), vec![json!({"threadId": TICKET, "action": "settle"})]);
+    assert_eq!(s.post(&ticket_settle, json!({}), Some(&s.csrf()), None).await.status(), 400);
+
+    let ticket_restore = format!("/api/tickets/{TICKET}/restore");
+    let ask_restore = format!("/api/asks/{ask}/restore");
+    assert_eq!(s.post(&ticket_restore, json!({}), None, None).await.status(), 403);
+    assert_eq!(s.post(&ticket_restore, json!({}), Some(&s.csrf()), None).await.status(), 200);
+    assert_eq!(s.post(&ask_restore, json!({}), Some(&s.csrf()), None).await.status(), 200);
+    let st = snapshot(&s.h);
+    assert_eq!(labels(&st["tree"]), [json!("widgets#41")]);
+    assert_eq!(st["asks"][0]["id"], ask.as_str());
+    assert_eq!(st["counts"]["settled"], 0);
+    assert_eq!(settle_calls(&s.h, "unsettle"), vec![json!({"threadId": TICKET, "action": "unsettle"})]);
+    assert_eq!(s.post(&ticket_restore, json!({}), Some(&s.csrf()), None).await.status(), 400);
+    assert_eq!(s.post(&ask_restore, json!({}), Some(&s.csrf()), None).await.status(), 400);
+    let missing = s.post("/api/tickets/nope/settle", json!({}), Some(&s.csrf()), None).await;
+    assert_eq!(missing.status(), 404);
+    assert_eq!(s.post("/api/asks/q99/settle", json!({}), Some(&s.csrf()), None).await.status(), 404);
+    assert_eq!(s.post("/api/asks/bogus/settle", json!({}), Some(&s.csrf()), None).await.status(), 404);
+}
+
+#[tokio::test]
+async fn open_tickets_and_open_asks_cannot_be_settled() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    let a = s.h.app.wf.ask("Still working?").await.unwrap();
+    let r = s.post(&format!("/api/tickets/{TICKET}/settle"), json!({}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 400);
+    let err: Value = r.json().await.unwrap();
+    assert!(err["error"].as_str().unwrap().contains("only done tickets"), "{err}");
+    let r = s.post(&format!("/api/asks/{}/settle", a["id"].as_str().unwrap()), json!({}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 400);
+    let err: Value = r.json().await.unwrap();
+    assert!(err["error"].as_str().unwrap().contains("only closed asks"), "{err}");
+    let st = snapshot(&s.h);
+    assert_eq!(labels(&st["tree"]), [json!("widgets#41")]);
+    assert_eq!(st["counts"]["settled"], 0);
+    assert!(s.h.fake.organized().is_empty());
+}
+
+#[tokio::test]
+async fn a_t3_error_does_not_fail_settle_or_restore() {
+    let s = start(H::new()).await;
+    done_ticket(&s.h, TICKET, "widgets#41").await;
+    s.h.fake.set_organize_fails(true);
+    let r = s.post(&format!("/api/tickets/{TICKET}/settle"), json!({}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["settled"], true);
+    assert_eq!(body["t3"]["ok"], false);
+    assert!(body["t3"]["error"].as_str().unwrap().contains("unreachable"), "{body}");
+    assert_eq!(snapshot(&s.h)["counts"]["settled"], 1);
+    let r = s.post(&format!("/api/tickets/{TICKET}/restore"), json!({}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap()["t3"]["ok"], false);
+    assert_eq!(snapshot(&s.h)["counts"]["settled"], 0);
+}
+
+#[tokio::test]
+async fn settle_done_settles_every_finished_item_and_returns_counts() {
+    let s = start(H::new()).await;
+    done_ticket(&s.h, TICKET, "widgets#41").await;
+    join_board(&s.h, WORKER, "widgets#42").await;
+    s.h.fake.put(thread("mcp:third", "idle", T0));
+    done_ticket(&s.h, "mcp:third", "widgets#43").await;
+    closed_ask(&s.h, "First?").await;
+    s.h.app.wf.ask("Second?").await.unwrap();
+    assert_eq!(s.post("/api/settle-done", json!({}), None, None).await.status(), 403);
+    let r = s.post("/api/settle-done", json!({}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap(), json!({"tickets": 2, "asks": 1}));
+    let st = snapshot(&s.h);
+    assert_eq!(labels(&st["tree"]), [json!("widgets#42")]);
+    assert_eq!(st["asks"].as_array().unwrap().len(), 1);
+    assert_eq!(st["asks"][0]["status"], "running");
+    assert_eq!(st["counts"]["settled"], 3);
+    assert_eq!(settle_calls(&s.h, "settle").len(), 2);
+    let again = s.post("/api/settle-done", json!({}), Some(&s.csrf()), None).await;
+    assert_eq!(again.json::<Value>().await.unwrap(), json!({"tickets": 0, "asks": 0}));
+}
+
+#[tokio::test]
+async fn settled_items_are_newest_first_and_capped() {
+    let h = H::new();
+    for n in 0..205 {
+        let id = format!("mcp:t{n}");
+        h.fake.put(thread(&id, "idle", T0));
+        done_ticket(&h, &id, &format!("widgets#{n}")).await;
+        h.clock.advance_minutes(1);
+        h.app.wf.settle_ticket(&id).await.unwrap();
+    }
+    for n in 0..205 {
+        closed_ask(&h, &format!("Question {n}?")).await;
+        h.clock.advance_minutes(1);
+        h.app.wf.settle_ask(&format!("q{}", n + 1)).unwrap();
+    }
+    let st = snapshot(&h);
+    assert_eq!(st["settled"]["tickets"].as_array().unwrap().len(), 200);
+    assert_eq!(st["settled"]["asks"].as_array().unwrap().len(), 200);
+    assert_eq!(st["settled"]["tickets"][0]["label"], "widgets#204");
+    assert_eq!(st["settled"]["asks"][0]["id"], "q205");
+    assert_eq!(st["counts"]["settled"], 410);
+    assert_eq!(st["asks"], json!([]));
+}
+
+#[tokio::test]
+async fn links_stored_before_settling_still_load() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#1").await;
+    let ln = h.app.store.link_get(TICKET).unwrap().unwrap();
+    let mut raw = serde_json::to_value(&ln).unwrap();
+    let keys = raw.as_object_mut().unwrap();
+    assert!(keys.remove("settledAt").is_some() && keys.remove("restoredAt").is_some());
+    let old: t3_codemode::store::Link = serde_json::from_value(raw).unwrap();
+    assert_eq!(old, ln);
+    assert_eq!((old.settled_at, old.restored_at), (None, None));
 }

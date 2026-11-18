@@ -61,6 +61,7 @@ pub struct BoardConfig {
     pub ask_poll_secs: u64,
     pub ask_timeout_minutes: u64,
     pub feed: usize,
+    pub settle_after_hours: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -114,7 +115,8 @@ pub fn builtin_defaults() -> Value {
             "runtimeMode": "full-access",
             "askPollSecs": 4,
             "askTimeoutMinutes": 15,
-            "feed": 50
+            "feed": 50,
+            "settleAfterHours": 24
         }
     })
 }

@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS asks (
 "#;
 
 const KEEP_MESSAGES: i64 = 5000;
+const UNSETTLED: &str = "json_extract(data, '$.settledAt') IS NULL";
 
 pub type WaitingRow = (WaitingItem, Option<Value>, Option<(String, Option<String>)>);
 
@@ -66,6 +67,19 @@ pub struct Link {
     pub closed_how: Option<String>,
     pub unread: Vec<String>,
     pub bad_run: Option<String>,
+    #[serde(default)]
+    pub settled_at: Option<String>,
+    #[serde(default)]
+    pub restored_at: Option<String>,
+}
+
+impl Link {
+    pub fn closed_since(&self) -> Option<&str> {
+        match (self.closed_at.as_deref(), self.restored_at.as_deref()) {
+            (Some(c), Some(r)) if r > c => Some(r),
+            (c, _) => c,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -520,11 +534,37 @@ impl Store {
         rows.into_iter().map(|(seq, d)| Ok((seq, serde_json::from_str(&d)?))).collect()
     }
 
+    pub fn ask_get(&self, seq: i64) -> Result<Option<(bool, Value)>> {
+        let row: Option<(bool, String)> = self.with(|c| {
+            c.query_row("SELECT open, data FROM asks WHERE seq = ?1", [seq], |r| Ok((r.get(0)?, r.get(1)?))).optional()
+        })?;
+        row.map(|(open, d)| Ok((open, serde_json::from_str(&d)?))).transpose()
+    }
+
     pub fn asks_open(&self) -> Result<Vec<(i64, Value)>> {
         self.asks_where("WHERE open = 1 ORDER BY seq")
     }
 
-    pub fn asks_recent(&self, limit: usize) -> Result<Vec<(i64, Value)>> {
-        self.asks_where(&format!("ORDER BY seq DESC LIMIT {limit}"))
+    pub fn asks_closed_unsettled(&self) -> Result<Vec<(i64, Value)>> {
+        self.asks_where(&format!("WHERE open = 0 AND {UNSETTLED} ORDER BY seq"))
+    }
+
+    pub fn asks_unsettled(&self, limit: usize) -> Result<Vec<(i64, Value)>> {
+        self.asks_where(&format!(
+            "WHERE {UNSETTLED} ORDER BY COALESCE(json_extract(data, '$.restoredAt'), json_extract(data, '$.at')) DESC, \
+             seq DESC LIMIT {limit}"
+        ))
+    }
+
+    pub fn asks_settled(&self, limit: usize) -> Result<Vec<(i64, Value)>> {
+        self.asks_where(&format!(
+            "WHERE NOT {UNSETTLED} ORDER BY json_extract(data, '$.settledAt') DESC, seq DESC LIMIT {limit}"
+        ))
+    }
+
+    pub fn asks_settled_count(&self) -> Result<usize> {
+        let n: i64 =
+            self.with(|c| c.query_row(&format!("SELECT COUNT(*) FROM asks WHERE NOT {UNSETTLED}"), [], |r| r.get(0)))?;
+        Ok(n as usize)
     }
 }
