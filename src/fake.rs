@@ -11,6 +11,7 @@ struct State {
     threads: BTreeMap<String, Value>,
     items: BTreeMap<String, Vec<Value>>,
     prs: BTreeMap<String, Vec<Value>>,
+    prs_before_list: BTreeMap<String, Vec<Value>>,
     projects: Vec<Value>,
     launched: Vec<Value>,
     organized: Vec<Value>,
@@ -147,6 +148,10 @@ impl FakeT3 {
         self.st().prs.insert(id.into(), prs);
     }
 
+    pub fn set_prs_before_list(&self, id: &str, prs: Vec<Value>) {
+        self.st().prs_before_list.insert(id.into(), prs);
+    }
+
     pub fn set_projects(&self, projects: Vec<Value>) {
         self.st().projects = projects;
     }
@@ -218,6 +223,9 @@ impl FakeT3 {
                     return Err(T3Error::Unavailable("T3 unreachable (fake)".into()));
                 }
                 let id = args["threadId"].as_str().unwrap_or_default();
+                if let Some(prs) = st.prs_before_list.remove(id) {
+                    st.prs.insert(id.into(), prs);
+                }
                 let wanted: Option<Vec<&str>> =
                     args["states"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect());
                 let prs: Vec<Value> = st

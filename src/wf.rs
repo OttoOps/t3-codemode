@@ -294,7 +294,7 @@ impl Wf {
         let cached = self.closed_prs.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned();
         let prs = match cached {
             Some((at, prs))
-                if at == counts && prs.as_array().is_some_and(|a| a.iter().all(|p| p["state"] != "closed")) =>
+                if at == counts && prs.as_array().is_some_and(|a| a.iter().all(|p| p["state"] == "merged")) =>
             {
                 prs
             }

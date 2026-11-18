@@ -1791,3 +1791,16 @@ async fn a_stalled_pr_lookup_gives_up_and_is_retried() {
     h.tick(2).await;
     assert_eq!(worker_pr(&h)["state"], "merged");
 }
+
+#[tokio::test]
+async fn a_pr_that_reopens_between_the_read_and_the_list_is_listed_again() {
+    let h = H::new();
+    ticket_with_worker(&h).await;
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 91, "closed")]);
+    h.fake.set_prs_before_list(WORKER, vec![pull_request("acme/widgets", 91, "open")]);
+    h.tick(1).await;
+    assert_eq!(worker_pr(&h)["state"], "open");
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 91, "merged")]);
+    h.tick(2).await;
+    assert_eq!(worker_pr(&h)["state"], "merged");
+}
