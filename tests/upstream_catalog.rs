@@ -172,19 +172,21 @@ struct U {
     app: Arc<App>,
 }
 
+const FAKE_BIN: &str = env!("CARGO_BIN_EXE_t3cm-fake-mcp");
+
 fn config(secret_path: &std::path::Path, multi_path: &std::path::Path) -> Config {
     Config::from_value(json!({"upstreams": [
         {
             "name": "cbm",
             "transport": "stdio",
-            "stdio": {"command": "/bin/sh", "env": {
+            "stdio": {"command": FAKE_BIN, "env": {
                 "CBM_TOKEN": format!("${{file:{}}}", secret_path.display()),
                 "CBM_MULTI": format!("${{file:{}}}", multi_path.display()),
                 "CBM_QUOTE": format!("${{env:{QUOTE_VAR}}}"),
             }},
             "deny": ["drop_*"]
         },
-        {"name": "gh", "transport": "stdio", "enabled": false, "stdio": {"command": "/bin/sh"}}
+        {"name": "gh", "transport": "stdio", "enabled": false, "stdio": {"command": FAKE_BIN}}
     ]}))
     .unwrap()
 }
@@ -528,7 +530,7 @@ impl t3_codemode::upstream::Connector for Hang {
 async fn a_hung_upstream_does_not_stall_search_or_execute() {
     let dir = tempfile::tempdir().unwrap();
     let config = Config::from_value(json!({"upstreams": [
-        {"name": "slow", "transport": "stdio", "stdio": {"command": "/bin/sh"}}
+        {"name": "slow", "transport": "stdio", "stdio": {"command": FAKE_BIN}}
     ]}))
     .unwrap();
     let manager = Arc::new(UpstreamManager::with_connector(config.upstreams.clone(), Arc::new(Hang)));

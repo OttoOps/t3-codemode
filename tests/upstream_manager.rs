@@ -50,6 +50,8 @@ fn http_up(name: &str) -> Value {
     json!({"name": name, "transport": "http", "http": {"url": "http://127.0.0.1:9/mcp"}})
 }
 
+const SHELL: &str = if cfg!(windows) { "cmd" } else { "sh" };
+
 fn cfg(v: Value) -> UpstreamConfig {
     serde_json::from_value(v).unwrap()
 }
@@ -216,9 +218,8 @@ fn url_references_and_query_credentials_become_secrets() {
 fn a_relative_command_resolves_against_the_configured_cwd() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("bin")).unwrap();
-    let srv = dir.path().join("bin/srv");
-    std::fs::write(&srv, "#!/bin/sh\n").unwrap();
-    std::fs::set_permissions(&srv, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let srv = dir.path().join("bin").join(format!("srv{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(env!("CARGO_BIN_EXE_t3cm-fake-mcp"), &srv).unwrap();
     let up = cfg(json!({"name": "rel", "transport": "stdio",
                         "stdio": {"command": "./bin/srv", "cwd": dir.path().display().to_string()}}));
     let r = resolve(&up).unwrap();
@@ -346,25 +347,27 @@ fn resolves_stdio_command_cwd_and_env() {
     let up = cfg(json!({
         "name": "s",
         "transport": "stdio",
-        "stdio": {"command": "sh", "args": ["-c", "true"], "cwd": "~", "env": {"API_TOKEN": "${env:UPMGR_STDIO_SECRET}", "PLAIN": "1"}}
+        "stdio": {"command": SHELL, "args": ["-c", "true"], "cwd": "~", "env": {"API_TOKEN": "${env:UPMGR_STDIO_SECRET}", "PLAIN": "1"}}
     }));
     let r = resolve(&up).unwrap();
     let ResolvedTransport::Stdio { command, args, env, cwd } = &r.transport else { panic!("stdio") };
-    assert!(command.is_absolute() && command.ends_with("sh"), "{command:?}");
+    assert!(command.is_absolute(), "{command:?}");
+    assert!(command.file_stem().is_some_and(|s| s.eq_ignore_ascii_case(SHELL)), "{command:?}");
     assert_eq!(args, &vec!["-c".to_string(), "true".to_string()]);
-    assert_eq!(cwd.as_deref(), Some(std::path::Path::new(&std::env::var("HOME").unwrap())));
+    assert_eq!(cwd.clone(), t3_codemode::platform::home_dir());
     let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.expose())).collect();
     assert_eq!(env, vec![("API_TOKEN", "stdio-secret-9"), ("PLAIN", "1")]);
     assert_eq!(r.secrets.len(), 1);
 
-    let abs = cfg(json!({"name": "s", "transport": "stdio", "stdio": {"command": "/bin/sh"}}));
+    let abs =
+        cfg(json!({"name": "s", "transport": "stdio", "stdio": {"command": env!("CARGO_BIN_EXE_t3cm-fake-mcp")}}));
     assert!(resolve(&abs).is_ok());
     let missing = cfg(json!({"name": "s", "transport": "stdio", "stdio": {"command": "upmgr-no-such-command"}}));
     let e = resolve(&missing).unwrap_err();
     assert!(matches!(e, UpstreamError::Config(_)));
     assert!(e.message().contains("upmgr-no-such-command"), "{e}");
     let bad_cwd =
-        cfg(json!({"name": "s", "transport": "stdio", "stdio": {"command": "sh", "cwd": "/nonexistent/upmgr"}}));
+        cfg(json!({"name": "s", "transport": "stdio", "stdio": {"command": SHELL, "cwd": "/nonexistent/upmgr"}}));
     let e = resolve(&bad_cwd).unwrap_err();
     assert!(e.message().contains("/nonexistent/upmgr"), "{e}");
 }

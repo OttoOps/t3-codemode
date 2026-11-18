@@ -1,7 +1,7 @@
 #[path = "support/http_server.rs"]
 mod http_server;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -60,8 +60,27 @@ fn unavailable<T>(r: Result<T, UpstreamError>) -> String {
     }
 }
 
+#[cfg(unix)]
 fn alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    let pid = i32::try_from(pid).unwrap();
+    let found = unsafe { libc::kill(pid, 0) } == 0;
+    found || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code);
+        CloseHandle(h);
+        ok != 0 && code == STILL_ACTIVE as u32
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -184,8 +203,8 @@ async fn stdio_env_passthrough_and_redaction() {
     unsafe { std::env::set_var("T3CM_CLIENT_TEST_LEAK", "should-not-pass") };
     let c = stdio(&[("FAKE_TOKEN", TOKEN)]).await;
     assert_eq!(c.call("env", json!({"name": "FAKE_TOKEN"})).await.unwrap(), json!({"value": TOKEN}));
-    let home = std::env::var("HOME").unwrap();
-    assert_eq!(c.call("env", json!({"name": "HOME"})).await.unwrap(), json!({"value": home}));
+    let path = std::env::var("PATH").unwrap();
+    assert_eq!(c.call("env", json!({"name": "PATH"})).await.unwrap(), json!({"value": path}));
     assert_eq!(c.call("env", json!({"name": "T3CM_CLIENT_TEST_LEAK"})).await.unwrap(), json!({"value": null}));
 
     let err = c.call("fail_with_env", json!({"name": "FAKE_TOKEN"})).await.unwrap_err();
@@ -376,7 +395,7 @@ async fn stdio_child_gets_only_the_allowlisted_service_environment() {
     let env = |name: &str| c.call("env", json!({"name": name}));
     assert_eq!(env("UPCLIENT_OTHER_UPSTREAM_TOKEN").await.unwrap(), json!({"value": null}));
     assert_eq!(env("OWN").await.unwrap(), json!({"value": "mine"}));
-    for name in ["PATH", "HOME"] {
+    for name in ["PATH", "HOME", "SYSTEMROOT"].into_iter().filter(|n| std::env::var_os(n).is_some()) {
         assert_eq!(env(name).await.unwrap(), json!({"value": std::env::var(name).unwrap()}), "{name}");
     }
     assert!(t3_codemode::upstream::client_stdio::inherited_env("LC_ALL"));
@@ -424,21 +443,24 @@ async fn stdio_a_flood_of_server_requests_is_survived() {
     assert_eq!(c.call("echo", json!({"after": 1})).await.unwrap(), json!({"echo": {"after": 1}}));
 }
 
-fn children(pid: u32) -> Vec<u32> {
-    std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
-        .unwrap_or_default()
-        .split_whitespace()
-        .filter_map(|p| p.parse().ok())
-        .collect()
+#[cfg(unix)]
+fn wrapper() -> (PathBuf, Vec<String>) {
+    (PathBuf::from("/bin/sh"), vec!["-c".into(), "\"$0\"; :".into(), fake_bin().display().to_string()])
+}
+
+#[cfg(windows)]
+fn wrapper() -> (PathBuf, Vec<String>) {
+    (PathBuf::from("cmd.exe"), vec!["/c".into(), fake_bin().display().to_string()])
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stdio_shutdown_ends_a_wrapped_server_too() {
+    let (command, args) = wrapper();
     let spec = ResolvedUpstream {
         name: NS.into(),
         transport: ResolvedTransport::Stdio {
-            command: PathBuf::from("/bin/sh"),
-            args: vec!["-c".into(), "\"$0\"; :".into(), fake_bin().display().to_string()],
+            command,
+            args,
             env: vec![("FAKE_MCP_IGNORE_EOF".into(), Secret::new("1".into()))],
             cwd: None,
         },
@@ -447,9 +469,9 @@ async fn stdio_shutdown_ends_a_wrapped_server_too() {
     };
     let c = StdioClient::connect(&spec).await.unwrap();
     let shell = c.pid().unwrap();
-    let kids = children(shell);
-    assert_eq!(kids.len(), 1, "{kids:?}");
-    let server = kids[0];
+    let server = c.call("pid", json!({})).await.unwrap()["pid"].as_u64().unwrap() as u32;
+    assert_ne!(server, shell);
+    assert!(alive(server));
     c.shutdown().await;
     assert!(wait_for(|| !alive(server)).await, "the wrapped server outlived shutdown");
     assert!(!alive(shell));

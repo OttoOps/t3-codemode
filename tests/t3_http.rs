@@ -107,7 +107,7 @@ async fn oauth_session_calls_reauth_and_revoke() {
     )
     .unwrap();
     let log = home.path().join("t3.log");
-    let bin = home.path().join("t3");
+    let bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_t3cm-fake-mcp"));
     let store = Arc::new(Store::open(&home.path().join("state")).unwrap());
     let label = t3_codemode::t3_http::instance_label(store.path());
     let list = json!([
@@ -117,17 +117,9 @@ async fn oauth_session_calls_reauth_and_revoke() {
         {"sessionId": "new", "client": {"label": label}, "issuedAt": "2026-11-17T00:00:00.000Z"},
         {"sessionId": "other", "client": {"label": "T3 Code Desktop"}, "issuedAt": "2026-11-16T00:00:00.000Z"}
     ]);
-    std::fs::write(
-        &bin,
-        format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1 $2 $3\" in\n  'auth pairing create') echo 'Pairing created'; echo '{{\"credential\":\"PAIR-CODE\"}}';;\n  'auth session list') echo '{}';;\nesac\n",
-            log.display(),
-            list
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     unsafe {
+        std::env::set_var("FAKE_T3_LOG", &log);
+        std::env::set_var("FAKE_T3_SESSIONS", list.to_string());
         std::env::set_var("T3CODE_HOME", home.path());
         std::env::set_var("T3CM_T3_BIN", &bin);
         std::env::remove_var("T3CM_T3_ORIGIN");
