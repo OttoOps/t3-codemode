@@ -478,7 +478,7 @@ impl Wf {
             .into_iter()
             .map(|m| {
                 json!({"handle": m.handle, "at": local_clock(&m.at), "iso": m.at, "label": label_of(&m.from),
-                       "kind": m.kind, "head": m.head(200)})
+                       "kind": m.kind, "head": truncate_chars(&m.head(usize::MAX), 200)})
             })
             .collect())
     }
@@ -951,7 +951,9 @@ impl Wf {
             v["ticket"] = json!(t.child);
             v["joined"] = json!(true);
             v["last"] = match self.store.msg_last_from(&t.child)? {
-                Some(m) => json!({"handle": m.handle, "kind": m.kind, "head": m.head(140), "at": local_clock(&m.at)}),
+                Some(m) => {
+                    json!({"handle": m.handle, "kind": m.kind, "head": truncate_chars(&m.head(usize::MAX), 140), "at": local_clock(&m.at)})
+                }
                 None => Value::Null,
             };
             out.push(v);
