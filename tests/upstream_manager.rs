@@ -209,8 +209,8 @@ fn url_references_and_query_credentials_become_secrets() {
     let ResolvedTransport::Http { url, .. } = &r.transport else { panic!("http") };
     assert_eq!(url.expose(), "https://example.test/s/url-secret-31/mcp?api_key=query-secret-8&format=json");
     let secrets: Vec<&str> = r.secrets.iter().map(|s| s.expose()).collect();
-    assert!(secrets.contains(&"url-secret-31") && secrets.contains(&"query-secret-8"), "{secrets:?}");
-    assert!(!secrets.contains(&"json"), "{secrets:?}");
+    assert!(secrets.contains(&"url-secret-31") && secrets.contains(&"query-secret-8"));
+    assert!(!secrets.contains(&"json"));
     assert!(!format!("{r:?}").contains("url-secret-31"));
 }
 
