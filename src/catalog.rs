@@ -26,7 +26,7 @@ pub struct Catalog {
 }
 
 const WAKE_RESULT: &str = r#"{ handle: string; delivery: "noted" | "sent" | "queued" | "board"; detail?: string; card?: string; closed?: boolean }"#;
-const CARD: &str = r#"{ id: string; kind: string; label: string | null; ticket: string | null; link: string | null; text: string; handle: string | null; options: string[]; at: string; atLocal: string; resolved?: string; resolution?: string | null; token?: string }"#;
+const CARD: &str = r#"{ id: string; kind: string; label: string | null; ticket: string | null; link: string | null; text: string; handle: string | null; options: string[]; at: string; atLocal: string; resolved?: string; resolution?: string | null; token: string }"#;
 
 fn builtin(name: &str, kind: &'static str, description: &str, sig: &str, input: Value) -> Entry {
     Entry {

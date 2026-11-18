@@ -168,7 +168,7 @@ pub struct CardRef<'a> {
 
 fn same_card(card: &Card, id: &str, want: &CardRef) -> Result<()> {
     let stale_at = want.at.is_some_and(|at| at != card.at);
-    let stale_token = want.token.is_some_and(|t| card.token.as_deref() != Some(t));
+    let stale_token = want.token.is_some_and(|t| t != card.token);
     if stale_at || stale_token {
         bail!("no open board card {id:?} for that decision; a newer decision has that id, so nothing was done");
     }
@@ -192,8 +192,7 @@ pub struct Card {
     pub resolved: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
+    pub token: String,
 }
 
 pub struct NewCard<'a> {
@@ -342,7 +341,7 @@ impl Wf {
             .store
             .waiting_data(BOARD, all)?
             .into_iter()
-            .map(|(w, d, done)| {
+            .map(|(w, d, done, seq)| {
                 let (resolved, resolution) = match done {
                     Some((at, note)) => (Some(local_clock(&at)), note),
                     None => (None, None),
@@ -365,7 +364,7 @@ impl Wf {
                     at: w.at,
                     resolved,
                     resolution,
-                    token: s("token"),
+                    token: seq.to_string(),
                 }
             })
             .collect())
@@ -373,8 +372,7 @@ impl Wf {
 
     pub(crate) fn card_add(&self, c: NewCard) -> Result<String> {
         let options = reply_options(c.body);
-        let data =
-            json!({"kind": c.kind, "ticket": c.ticket, "handle": c.handle, "options": options, "token": random_id()});
+        let data = json!({"kind": c.kind, "ticket": c.ticket, "handle": c.handle, "options": options});
         let id = self.alloc_waiting(
             BOARD,
             &card_text(c.body),

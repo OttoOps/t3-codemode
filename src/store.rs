@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS asks (
 const KEEP_MESSAGES: i64 = 5000;
 const UNSETTLED: &str = "json_extract(data, '$.settledAt') IS NULL";
 
-pub type WaitingRow = (WaitingItem, Option<Value>, Option<(String, Option<String>)>);
+pub type WaitingRow = (WaitingItem, Option<Value>, Option<(String, Option<String>)>, i64);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -451,14 +451,14 @@ impl Store {
     }
 
     pub fn waiting_open_data(&self, owner: &str) -> Result<Vec<(WaitingItem, Option<Value>)>> {
-        Ok(self.waiting_data(owner, false)?.into_iter().map(|(w, d, _)| (w, d)).collect())
+        Ok(self.waiting_data(owner, false)?.into_iter().map(|(w, d, _, _)| (w, d)).collect())
     }
 
     pub fn waiting_data(&self, owner: &str, all: bool) -> Result<Vec<WaitingRow>> {
-        type Row = (WaitingItem, Option<String>, Option<String>, Option<String>);
+        type Row = (WaitingItem, Option<String>, Option<String>, Option<String>, i64);
         let rows: Vec<Row> = self.with(|c| {
             let mut st = c.prepare(
-                "SELECT id, text, from_label, link, opened_at, data, resolved_at, note FROM waiting
+                "SELECT id, text, from_label, link, opened_at, data, resolved_at, note, seq FROM waiting
                  WHERE owner = ?1 AND (?2 OR resolved_at IS NULL) ORDER BY seq",
             )?;
             st.query_map(params![owner, all], |r| {
@@ -467,13 +467,14 @@ impl Store {
                     r.get(5)?,
                     r.get(6)?,
                     r.get(7)?,
+                    r.get(8)?,
                 ))
             })?
             .collect()
         })?;
         Ok(rows
             .into_iter()
-            .map(|(w, d, at, note)| (w, d.and_then(|s| serde_json::from_str(&s).ok()), at.map(|a| (a, note))))
+            .map(|(w, d, at, note, seq)| (w, d.and_then(|s| serde_json::from_str(&s).ok()), at.map(|a| (a, note)), seq))
             .collect())
     }
 
