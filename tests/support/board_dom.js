@@ -16,8 +16,11 @@ class Element extends Node {
     this.dirty = false;
     this._value = "";
     this.sel = null;
+    this.scrollTop = 0;
   }
   get children() { return this.childNodes.filter((n) => n.nodeType === 1); }
+  get firstChild() { return this.childNodes[0] || null; }
+  get nextSibling() { const p = this.parentNode; return p ? p.childNodes[p.childNodes.indexOf(this) + 1] || null : null; }
   get className() { return this.attrs.get("class") || ""; }
   set className(v) { this.attrs.set("class", v); }
   get classList() {
@@ -78,7 +81,10 @@ class Element extends Node {
   addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
   dispatch(type, extra) {
     const ev = Object.assign({ type, target: this, preventDefault() {} }, extra);
-    for (let n = this; n; n = n.parentNode) for (const f of n.listeners[type] || []) f(Object.assign(ev, { currentTarget: n }));
+    for (let n = this; n; n = n.parentNode) {
+      for (const f of n.listeners[type] || []) f(Object.assign(ev, { currentTarget: n }));
+      if (typeof n["on" + type] === "function") n["on" + type](Object.assign(ev, { currentTarget: n }));
+    }
   }
   focus() { if (this.isConnected && !this.disabled) document.activeElement = this; }
   matches(sel) { return sel.split(",").some((s) => matchChain(this, s.trim().split(/\s+/))); }
@@ -137,10 +143,28 @@ document.documentElement.append(document.body);
 document.activeElement = document.body;
 
 const window = globalThis;
+window.addEventListener = () => {};
+const console = { error: (e) => { throw e; }, log: () => {}, warn: () => {} };
 const CSS = { escape: (s) => String(s).replace(/["\\]/g, "\\$&") };
 const setInterval = () => 0;
-const setTimeout = () => 0;
-const fetch = () => new Promise(() => {});
+let fakeNow = 0;
+let timerSeq = 0;
+const timers = [];
+const setTimeout = (f, ms) => { timers.push({ f, at: fakeNow + (ms || 0), id: ++timerSeq }); return timerSeq; };
+const clearTimeout = (id) => { const i = timers.findIndex((t) => t.id === id); if (i >= 0) timers.splice(i, 1); };
+function advance(ms) {
+  const end = fakeNow + ms;
+  for (;;) {
+    timers.sort((a, b) => a.at - b.at || a.id - b.id);
+    if (!timers.length || timers[0].at > end) break;
+    const t = timers.shift();
+    fakeNow = t.at;
+    t.f();
+  }
+  fakeNow = end;
+}
+const fetches = [];
+const fetch = (url, opts) => { fetches.push({ url, method: (opts && opts.method) || "GET", body: opts && opts.body }); return new Promise(() => {}); };
 let eventSource = null;
 class EventSource {
   constructor(url) { this.url = url; this.listeners = {}; eventSource = this; }
