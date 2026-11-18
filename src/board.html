@@ -274,6 +274,32 @@ function ext(href, text) {
   return u ? h("a", { href: u, target: "_blank", rel: "noopener noreferrer" }, text) : null;
 }
 
+function threadLink(href, text) {
+  const a = ext(href, text);
+  const thread = a && /^https:\/\/app\.t3\.codes\/threads\/[A-Za-z0-9._~%-]+\/[A-Za-z0-9._~%-]+$/.test(a.href);
+  if (thread) a.addEventListener("click", (e) => {
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    if (state && state.service && state.service.openLinks === "tab") return;
+    e.preventDefault();
+    openThread(a.href);
+  });
+  return a;
+}
+
+async function openThread(href) {
+  let opened = false;
+  try {
+    const r = await fetch("/api/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-T3CM-CSRF": CSRF },
+      body: JSON.stringify({ link: href }),
+      signal: AbortSignal.timeout(3000),
+    });
+    opened = r.ok && (await r.json()).opened === true;
+  } catch (_) { opened = false; }
+  if (!opened) window.open(href, "_blank", "noopener,noreferrer");
+}
+
 function age(iso) {
   const t = Date.parse(iso);
   if (!t) return "";
@@ -332,7 +358,7 @@ function renderCard(c) {
     oninput: (e) => drafts.set(c.id, e.target.value) });
   const top = h("div", { class: "card-top" },
     h("span", { class: "id" }, c.id),
-    c.label ? (ext(c.link, c.label) || h("span", {}, c.label)) : null,
+    c.label ? (threadLink(c.link, c.label) || h("span", {}, c.label)) : null,
     h("span", { class: "kind " + c.kind }, c.kind),
     h("span", { class: "age", "data-at": c.at, title: c.atLocal }, age(c.at)));
   card.append(top, h("p", { class: "card-text" }, c.text));
@@ -385,7 +411,7 @@ function renderTicket(t) {
     chip(t.status),
     t.gate ? h("span", { class: "gate", title: "gate open" }, "gate: " + t.gate) : null,
     t.joined ? null : h("span", { class: "muted" }, "not joined yet"),
-    h("span", { class: "links" }, prLink(t.pr), ext(t.link, "thread")),
+    h("span", { class: "links" }, prLink(t.pr), threadLink(t.link, "thread")),
     t.done ? actButton("Settle", "/api/tickets/" + encodeURIComponent(t.thread) + "/settle") : null);
   const kids = [row];
   if (t.last && !t.done) kids.push(h("p", { class: "t-last" }, t.last.at + " " + t.last.kind + ": " + t.last.head));
@@ -393,7 +419,7 @@ function renderTicket(t) {
     kids.push(h("ul", { class: "workers" }, t.workers.map((w) =>
       h("li", { class: "w-row" }, h("span", {}, w.label), chip(w.status),
         w.gate ? h("span", { class: "gate" }, "gate: " + w.gate) : null,
-        h("span", { class: "links" }, prLink(w.pr), ext(w.link, "thread"))))));
+        h("span", { class: "links" }, prLink(w.pr), threadLink(w.link, "thread"))))));
   }
   return h("div", { class: "t" }, kids);
 }
@@ -401,7 +427,7 @@ function renderTicket(t) {
 function renderAsk(a) {
   return h("li", {},
     h("div", { class: "t-row" }, h("span", { class: "q" }, a.question), chip(a.status === "answered" ? "done" : a.status === "running" ? "running" : a.status === "waiting" ? "waiting" : "failed"),
-      h("span", { class: "links" }, ext(a.link, "thread")),
+      h("span", { class: "links" }, threadLink(a.link, "thread")),
       isClosedAsk(a) ? actButton("Settle", "/api/asks/" + encodeURIComponent(a.id) + "/settle") : null),
     a.answer ? h("p", { class: "a" }, a.answer) : h("p", { class: "a muted" }, a.status === "running" ? "Working on it..." : a.status));
 }
@@ -410,14 +436,14 @@ function renderSettledTicket(t) {
   return h("li", {},
     h("div", { class: "t-row" }, h("span", { class: "t-label" }, t.label), chip("done"),
       h("span", { class: "muted" }, "settled " + t.settledAt),
-      h("span", { class: "links" }, prLink(t.pr), ext(t.link, "thread")),
+      h("span", { class: "links" }, prLink(t.pr), threadLink(t.link, "thread")),
       actButton("Restore", "/api/tickets/" + encodeURIComponent(t.thread) + "/restore")));
 }
 
 function renderSettledAsk(a) {
   return h("li", {},
     h("div", { class: "t-row" }, h("span", { class: "q" }, a.question),
-      h("span", { class: "links" }, ext(a.link, "thread")),
+      h("span", { class: "links" }, threadLink(a.link, "thread")),
       actButton("Restore", "/api/asks/" + encodeURIComponent(a.id) + "/restore")),
     a.answer ? h("p", { class: "a" }, a.answer) : null);
 }
@@ -571,7 +597,7 @@ document.getElementById("launch").addEventListener("submit", async (e) => {
   try {
     const r = await post("/api/launch", { issues });
     out.replaceChildren(...r.results.map((x) => x.ok
-      ? h("li", { class: "ok-msg" }, "Launched " + x.label + " ", ext(x.link, "thread"))
+      ? h("li", { class: "ok-msg" }, "Launched " + x.label + " ", threadLink(x.link, "thread"))
       : h("li", { class: "err" }, x.issue + ": " + x.error + (x.card ? " (card " + x.card + ")" : ""))));
     if (r.results.every((x) => x.ok)) ta.value = "";
   } catch (err) {

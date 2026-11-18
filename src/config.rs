@@ -62,6 +62,14 @@ pub struct BoardConfig {
     pub ask_timeout_minutes: u64,
     pub feed: usize,
     pub settle_after_hours: u64,
+    pub open_links: OpenLinks,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OpenLinks {
+    Desktop,
+    Tab,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -120,7 +128,8 @@ pub fn builtin_defaults() -> Value {
             "askPollSecs": 4,
             "askTimeoutMinutes": 15,
             "feed": 50,
-            "settleAfterHours": 24
+            "settleAfterHours": 24,
+            "openLinks": "desktop"
         }
     })
 }

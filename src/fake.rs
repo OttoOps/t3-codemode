@@ -41,6 +41,24 @@ impl crate::board::Remotes for FakeRemotes {
     }
 }
 
+#[derive(Default)]
+pub struct FakeDesktop {
+    pub running: std::sync::atomic::AtomicBool,
+    pub opened: Mutex<Vec<String>>,
+}
+
+impl crate::desktop::Desktop for FakeDesktop {
+    fn open<'a>(&'a self, app_link: &'a str) -> BoxFut<'a, bool> {
+        Box::pin(async move {
+            let running = self.running.load(std::sync::atomic::Ordering::SeqCst);
+            if running {
+                self.opened.lock().unwrap().push(app_link.to_string());
+            }
+            running
+        })
+    }
+}
+
 pub fn project(id: &str, root: &str) -> Value {
     json!({"id": id, "title": id, "workspaceRoot": root, "defaultModelSelection": null, "scripts": [],
            "createdAt": "2026-11-01T00:00:00Z", "updatedAt": "2026-11-01T00:00:00Z", "deletedAt": null})

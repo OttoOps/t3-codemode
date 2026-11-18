@@ -273,6 +273,25 @@ async fn restore_ask(State(web): State<Web>, headers: HeaderMap, Path(id): Path<
     }
 }
 
+#[derive(Deserialize)]
+struct OpenBody {
+    link: String,
+}
+
+async fn open_link(State(web): State<Web>, headers: HeaderMap, raw: Bytes) -> Response {
+    if let Some(r) = web.reject(&headers, true) {
+        return r;
+    }
+    let b: OpenBody = match body(&raw) {
+        Ok(b) => b,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    match web.app.open_link(&b.link).await {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
 async fn settle_done(State(web): State<Web>, headers: HeaderMap) -> Response {
     if let Some(r) = web.reject(&headers, true) {
         return r;
@@ -298,5 +317,6 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/asks/{id}/settle", post(settle_ask))
         .route("/api/asks/{id}/restore", post(restore_ask))
         .route("/api/settle-done", post(settle_done))
+        .route("/api/open", post(open_link))
         .with_state(Web { app, port })
 }
