@@ -35,6 +35,19 @@ On Linux the installer picks the static musl build, which runs on any distro.
 glibc build, which needs glibc 2.39 or newer. On a Mac it picks the Mac's own
 architecture, under Rosetta too.
 
+Releases sign the macOS binaries with a Developer ID and notarize them with
+Apple, so Gatekeeper lets them run when a browser download quarantines the
+archive. A bare binary can't carry a stapled ticket, so Gatekeeper fetches the
+notarization ticket online the first time it checks one.
+To check a binary yourself:
+
+```bash
+codesign --verify --strict --verbose=2 ~/.local/bin/t3cm
+spctl --assess --type open --context context:primary-signature --verbose=2 ~/.local/bin/t3cm
+```
+
+The second command should print `source=Notarized Developer ID`.
+
 On macOS, install from a GUI login: launchd loads the agent into your login
 session. Over SSH alone, use `--files-only` and run the `launchctl bootstrap`
 command it prints once you log in.
