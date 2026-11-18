@@ -1804,3 +1804,20 @@ async fn a_pr_that_reopens_between_the_read_and_the_list_is_listed_again() {
     h.tick(2).await;
     assert_eq!(worker_pr(&h)["state"], "merged");
 }
+
+#[tokio::test]
+async fn a_worker_that_finishes_with_an_open_pr_shows_its_merge() {
+    let h = H::new();
+    ticket_with_worker(&h).await;
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 92, "closed")]);
+    h.fake.set_prs_before_list(WORKER, vec![pull_request("acme/widgets", 92, "open")]);
+    h.wf(WORKER, "send", json!({"kind": "handoff", "body": "ready to merge"})).await;
+    assert_eq!(worker_pr(&h)["state"], "open");
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 92, "merged")]);
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(worker_pr(&h)["state"], "merged");
+    let reads = |h: &H| h.fake.calls().iter().filter(|c| *c == "t3_thread_read").count();
+    let before = reads(&h);
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(reads(&h), before);
+}

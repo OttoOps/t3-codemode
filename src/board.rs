@@ -799,7 +799,9 @@ impl Wf {
         }
         for ticket in self.store.children(BOARD, false)?.into_iter().filter(|t| t.settled_at.is_none()) {
             for w in self.store.children(&ticket.child, false)? {
-                if w.closed && self.live_of(&w.child).is_none_or(|l| l["prStale"] == true) {
+                let can_change =
+                    |l: &Value| l["prStale"] == true || l["pr"]["state"] == "open" || l["pr"]["state"] == "closed";
+                if w.closed && self.live_of(&w.child).is_none_or(|l| can_change(&l)) {
                     let _ = self.read_thread(&w.child).await;
                 }
             }
