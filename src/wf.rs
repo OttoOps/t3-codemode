@@ -206,6 +206,7 @@ pub struct Wf {
 }
 
 const MAX_PR_PAGES: usize = 20;
+const PR_LIST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
 type ClosedPrs = ((u64, u64), Value);
 
@@ -297,7 +298,7 @@ impl Wf {
             {
                 prs
             }
-            _ => match self.list_prs(id).await {
+            _ => match tokio::time::timeout(PR_LIST_DEADLINE, self.list_prs(id)).await.ok().flatten() {
                 Some(prs) => {
                     self.closed_prs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.into(), (counts, prs.clone()));
                     prs

@@ -1778,3 +1778,16 @@ async fn worker_prs_are_read_across_every_page() {
     assert_eq!((worker_pr(&h)["number"].clone(), worker_pr(&h)["state"].clone()), (json!(89), json!("merged")));
     assert_eq!(pr_lists(&h), 2);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_stalled_pr_lookup_gives_up_and_is_retried() {
+    let h = H::new();
+    ticket_with_worker(&h).await;
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 90, "merged")]);
+    h.fake.set_delay(Duration::from_secs(3600));
+    h.tick(1).await;
+    assert_eq!(worker_pr(&h), Value::Null);
+    h.fake.set_delay(Duration::ZERO);
+    h.tick(2).await;
+    assert_eq!(worker_pr(&h)["state"], "merged");
+}
