@@ -193,6 +193,8 @@ pub struct Card {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<String>,
     pub token: String,
+    #[serde(skip)]
+    pub seq: i64,
 }
 
 pub struct NewCard<'a> {
@@ -365,6 +367,7 @@ impl Wf {
                     resolved,
                     resolution,
                     token: seq.to_string(),
+                    seq,
                 }
             })
             .collect())
@@ -462,7 +465,7 @@ impl Wf {
         let msg =
             format!("{}\n{}", header("reply", BOARD, &handle, None), capped(&body, &handle, self.config.reply_cap));
         let mut out = self.send_wake(&ticket, &msg, &handle).await?;
-        self.store.waiting_resolve(BOARD, id, Some(&format!("answered: {text}")), &self.now())?;
+        self.store.waiting_resolve_seq(BOARD, card.seq, Some(&format!("answered: {text}")), &self.now())?;
         self.changed();
         out["card"] = json!(id);
         Ok(out)
@@ -480,12 +483,14 @@ impl Wf {
 
     pub async fn dismiss_at(&self, id: &str, want: &CardRef<'_>) -> Result<Value> {
         let _g = self.lock.lock().await;
-        if want.at.is_some() || want.token.is_some() {
-            let card =
-                self.cards()?.into_iter().find(|c| c.id == id).ok_or_else(|| anyhow!("no open board card {id:?}"))?;
-            same_card(&card, id, want)?;
+        let card =
+            self.cards()?.into_iter().find(|c| c.id == id).ok_or_else(|| anyhow!("no open board card {id:?}"))?;
+        same_card(&card, id, want)?;
+        if !self.store.waiting_resolve_seq(BOARD, card.seq, Some("dismissed"), &self.now())? {
+            bail!("no open board card {id:?}");
         }
-        self.dismiss(id)
+        self.changed();
+        Ok(json!({"card": id, "dismissed": true}))
     }
 
     pub fn feed(&self, limit: usize) -> Result<Vec<Value>> {
