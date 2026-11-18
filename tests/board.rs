@@ -552,6 +552,53 @@ async fn zero_settle_after_hours_turns_auto_settle_off() {
 }
 
 #[tokio::test]
+async fn a_ticket_settled_or_archived_in_t3_settles_on_the_board() {
+    let h = H::new();
+    done_ticket(&h, TICKET, "widgets#41").await;
+    done_ticket(&h, WORKER, "widgets#42").await;
+    done_ticket(&h, BOSS, "widgets#43").await;
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(snapshot(&h)["counts"]["settled"], 0);
+    h.fake.update(TICKET, json!({"settled": true, "settledAt": "2026-11-17T12:05:00.123Z"}));
+    h.fake.update(WORKER, json!({"archived": true, "updatedAt": "2026-11-17T12:05:00.000Z"}));
+    h.clock.advance_minutes(10);
+    h.app.wf.board_tick().await.unwrap();
+    let st = snapshot(&h);
+    assert_eq!(labels(&st["tree"]), [json!("widgets#43")]);
+    let mut settled = labels(&st["settled"]["tickets"]);
+    settled.sort_by_key(|v| v.to_string());
+    assert_eq!(settled, [json!("widgets#41"), json!("widgets#42")]);
+    assert!(settle_calls(&h, "settle").is_empty());
+}
+
+#[tokio::test]
+async fn a_ticket_whose_thread_is_gone_settles_on_the_board() {
+    let h = H::new();
+    done_ticket(&h, TICKET, "widgets#41").await;
+    h.fake.remove(TICKET);
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(labels(&snapshot(&h)["settled"]["tickets"]), [json!("widgets#41")]);
+    assert!(settle_calls(&h, "settle").is_empty());
+}
+
+#[tokio::test]
+async fn a_restored_ticket_ignores_a_t3_settle_older_than_the_restore() {
+    let h = H::new();
+    done_ticket(&h, TICKET, "widgets#41").await;
+    h.app.wf.settle_ticket(TICKET).await.unwrap();
+    h.clock.advance_minutes(10);
+    h.fake.set_organize_fails(true);
+    h.app.wf.restore_ticket(TICKET).await.unwrap();
+    h.fake.update(TICKET, json!({"settled": true, "settledAt": "2026-11-17T12:00:00.000Z"}));
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(labels(&snapshot(&h)["tree"]), [json!("widgets#41")]);
+    h.clock.advance_minutes(10);
+    h.fake.update(TICKET, json!({"settledAt": "2026-11-17T12:15:00.000Z"}));
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(labels(&snapshot(&h)["settled"]["tickets"]), [json!("widgets#41")]);
+}
+
+#[tokio::test]
 async fn a_restored_ticket_is_not_settled_again_at_once() {
     let h = H::new();
     done_ticket(&h, TICKET, "widgets#41").await;

@@ -761,11 +761,49 @@ impl Wf {
             let _ = self.read_thread(&t).await;
         }
         self.check_asks(None).await?;
+        self.mirror_t3_settles().await?;
         let hours = self.config.board.settle_after_hours;
         if hours > 0 {
             self.settle_closed(Some(hours as f64 * 60.0)).await?;
         }
         Ok(())
+    }
+
+    async fn mirror_t3_settles(&self) -> Result<usize> {
+        let unsettled: Vec<Link> =
+            self.store.children(BOARD, false)?.into_iter().filter(|l| l.closed && l.settled_at.is_none()).collect();
+        let mut mirrored = 0;
+        for ln in unsettled {
+            let since = match self.read_thread(&ln.child).await {
+                Ok(th) if th["settled"] == true => {
+                    th["settledAt"].as_str().or(th["updatedAt"].as_str()).map(String::from)
+                }
+                Ok(th) if th["archived"] == true => th["updatedAt"].as_str().map(String::from),
+                Ok(_) => continue,
+                Err(e) if e.is_not_found() => None,
+                Err(_) => continue,
+            };
+            let after_restore = match (ln.restored_at.as_deref(), since.as_deref()) {
+                (None, _) | (_, None) => true,
+                (Some(r), Some(s)) => {
+                    matches!((self.mins(Some(s)), self.mins(Some(r))), (Some(a), Some(b)) if a < b)
+                }
+            };
+            if !after_restore {
+                continue;
+            }
+            let _g = self.lock.lock().await;
+            let Some(mut fresh) = self.store.link_get(&ln.child)? else { continue };
+            if fresh.settled_at.is_none() && fresh.restored_at == ln.restored_at {
+                fresh.settled_at = Some(self.now());
+                self.store.link_save(&fresh)?;
+                mirrored += 1;
+            }
+        }
+        if mirrored > 0 {
+            self.changed();
+        }
+        Ok(mirrored)
     }
 
     fn board_ticket(&self, thread: &str) -> Result<Link> {
