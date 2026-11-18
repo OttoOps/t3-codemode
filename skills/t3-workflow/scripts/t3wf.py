@@ -30,6 +30,8 @@ SKILL_DIR = os.path.dirname(HERE)
 SKILLS_DIR = os.path.dirname(SKILL_DIR)
 sys.path.insert(0, HERE)
 
+import slots
+
 PROTOCOL = 2
 ROLE_SKILL = {"overseer": "t3-overseer", "ticket": "t3-ticket", "worker": "t3-worker"}
 UP_KINDS = ("note", "event", "gate", "blocker", "report", "handoff", "closed")
@@ -316,6 +318,10 @@ class FakeT3:
             return self.call("t3_thread_send", threadId=args["thread_id"], message=args["text"], mode="queue")
         if name == "t3_thread_list":
             return {"threads": list(d["threads"].values())}
+        if name == "orchestrator_capabilities":
+            if "capabilities" not in d:
+                raise Fail("T3 unreachable (fake)")
+            return d["capabilities"]
         raise Fail(f"fake T3 has no tool {name}")
 
     def __getattr__(self, name):
@@ -721,7 +727,94 @@ def cmd_adopt(a):
 
 def cmd_check_config(a):
     problems = check_config()
+    try:
+        user_cfg = slots.load_user_config()
+        problems += slots.validate_config(user_cfg, slots.config_path()) if user_cfg else []
+    except slots.ConfigError as e:
+        problems.append(str(e))
+    problems += slots.repo_override(slots.repo_root(a.repo))[1]
     out(problems or "config ok")
+    if problems:
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------- slots
+
+def listed_skills(values):
+    names = []
+    for v in values or []:
+        text = sys.stdin.read() if v == "-" else v
+        names += [n for n in re.split(r"[\s,]+", text) if n]
+    return names
+
+
+class Capabilities:
+    """orchestrator_capabilities through one T3 session, opened on first use."""
+
+    def __init__(self):
+        self.t3 = None
+        self.error = None
+
+    def __call__(self, search):
+        if self.error:
+            raise Fail(self.error)
+        if self.t3 is None:
+            try:
+                self.t3 = t3_session("t3wf-slots").__enter__()
+            except Exception as e:
+                self.error = str(e)
+                raise
+        return self.t3.call("orchestrator_capabilities", search=search)
+
+    def close(self):
+        if self.t3 is not None:
+            with contextlib.suppress(Exception):
+                self.t3.__exit__(None, None, None)
+
+
+@contextlib.contextmanager
+def settings_for(a):
+    caps = None if a.no_t3 else Capabilities()
+    try:
+        yield slots.Settings(slots.repo_root(a.repo), listed_skills(a.skills), caps)
+    finally:
+        if caps:
+            caps.close()
+
+
+def cmd_resolve(a):
+    resolver = slots.Resolver(slots.repo_root(a.repo), listed_skills(a.skills))
+    cands = resolver.candidates(a.name)
+    resolved = resolver.resolve(a.name)
+    if a.json:
+        out(json.dumps({"ref": a.name, "resolved": resolved, "candidates": cands}, indent=1))
+    else:
+        out(([f"{a.name}: not installed" + ("; other matches:" if cands else "")]
+             if resolved["status"] == "missing" else []) +
+            [f"{c['name']}: {c.get('path') or '(listed in this session)'}"
+             f"{' [inline]' if c.get('inline') else ''} ({c['where']})" for c in cands])
+    if resolved["status"] == "missing":
+        sys.exit(1)
+
+
+def cmd_slots(a):
+    with settings_for(a) as st:
+        eff = st.all()
+    problems = st.config_problems + st.repo_problems
+    if a.json:
+        out(json.dumps(dict(eff, problems=problems), indent=1))
+        return
+    out([f"config problem (ignored): {p}" for p in problems] + slots.report_lines(eff))
+
+
+def cmd_doctor(a):
+    with settings_for(a) as st:
+        problems, warnings, eff = slots.doctor(st)
+    if a.json:
+        out(json.dumps({"problems": problems, "warnings": warnings, "settings": eff}, indent=1))
+    else:
+        out(slots.report_lines(eff) + [f"warn: {w}" for w in warnings] + [f"PROBLEM: {p}" for p in problems] +
+            [f"doctor: {len(problems)} problem(s)" if problems else "doctor: ok"])
     if problems:
         sys.exit(1)
 
@@ -1141,7 +1234,24 @@ def build_parser():
             self_req=False)
     s.add_argument("file", nargs="?", default="-")
     s.add_argument("--max-out", type=int, default=6000)
-    cmd("check-config", cmd_check_config, "validate defaults.json and every t3-role.json", self_req=False)
+    s = cmd("check-config", cmd_check_config,
+            "validate defaults.json, every t3-role.json, the user config and the repo's Agent workflow block",
+            self_req=False)
+    s.add_argument("--repo", help="the repository (default: the current directory's)")
+
+    def slot_cmd(name, fn, help_):
+        s = cmd(name, fn, help_, self_req=False)
+        s.add_argument("--repo", help="the repository (default: the current directory's)")
+        s.add_argument("--skills", action="append",
+                       help="skills listed in this session, comma or space separated, or - for stdin")
+        s.add_argument("--json", action="store_true")
+        return s
+
+    s = slot_cmd("resolve", cmd_resolve, "every installed skill a name matches, in search order")
+    s.add_argument("name", help="a bare skill name, or namespace:name")
+    for name, fn, help_ in (("slots", cmd_slots, "the effective slot settings for this repository"),
+                            ("doctor", cmd_doctor, "check every configured skill, model and delivery setting")):
+        slot_cmd(name, fn, help_).add_argument("--no-t3", action="store_true", help="skip the model checks")
     return p
 
 
@@ -1161,7 +1271,7 @@ def main(argv=None):
     except Fail as e:
         print(f"t3wf: {e}", file=sys.stderr)
         return 2
-    if args.cmd not in ("tick", "daemon", "exec", "check-config", "show"):
+    if args.cmd not in ("tick", "daemon", "exec", "check-config", "show", "resolve", "slots", "doctor"):
         lazy_tick()
     return 0
 

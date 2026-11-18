@@ -1,6 +1,6 @@
 ---
 name: t3-workflow
-description: The link protocol under every T3 workflow thread - parent and child links watched by a machine-wide watcher, notes, wakes, gates, nudges, escalation, message handles and code mode, run through the t3wf script. Use when t3-overseer, t3-ticket or t3-worker says to, when a message opens with a [t3wf2 header, when a launch brief carries a "t3-workflow link" block, or when the user asks how the T3 workflow works or about installing t3cm. It is the base the role skills run on, not a role of its own.
+description: The link protocol under every T3 workflow thread - parent and child links watched by a machine-wide watcher, notes, wakes, gates, nudges, escalation, message handles and code mode, run through the t3wf script. Use when t3-overseer, t3-ticket or t3-worker says to, when a message opens with a [t3wf2 header, when a launch brief carries a "t3-workflow link" block, or when the user asks how the T3 workflow works, what its slots (reviewer, passes, delivery, models) are set to, or about installing t3cm. It is the base the role skills run on, not a role of its own.
 ---
 
 Every thread in the T3 workflow is a **node** with at most one parent
@@ -87,6 +87,13 @@ acknowledging. Lines under "Notes since your last wake" are the digest.
 - **escalate** or **report** (about a child): `t3wf peek` it, then reply,
   relaunch, or close the link. At the root, show it to the user as an action
   line.
+
+## Slots
+
+The roles' review, passes, credential renewal, delivery and models are
+**slots**, set per user and per repository. `t3wf slots` prints the
+effective settings and how to run each skill; `t3wf doctor` checks them.
+Config file, `AGENTS.md` keys and skill search: [slots.md](slots.md).
 
 ## What each role supplies
 
