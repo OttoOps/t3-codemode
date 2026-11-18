@@ -73,6 +73,8 @@ pub struct Config {
     pub cpu_budget_ms: u64,
     pub default_timeout_ms: u64,
     pub max_timeout_ms: u64,
+    pub max_concurrent_runs: usize,
+    pub run_queue_ms: u64,
     pub link: LinkParams,
     pub wake: Vec<String>,
     pub body_cap: usize,
@@ -92,6 +94,8 @@ pub fn builtin_defaults() -> Value {
         "cpuBudgetMs": 2000,
         "defaultTimeoutMs": 60000,
         "maxTimeoutMs": 600000,
+        "maxConcurrentRuns": 16,
+        "runQueueMs": 10000,
         "link": {"down": 45, "miss": 2, "stall": 240},
         "wake": ["event", "gate", "blocker", "handoff", "closed", "report", "escalate", "reply"],
         "bodyCap": 1500,
@@ -176,6 +180,9 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        if self.max_concurrent_runs == 0 {
+            bail!("maxConcurrentRuns must be at least 1");
+        }
         self.link.validate().context("link")?;
         if !self.roles.get("overseer").is_some_and(|r| r.children.contains_key("ticket")) {
             bail!("the board needs the overseer role to open ticket links");

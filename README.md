@@ -35,7 +35,8 @@ deploy/install.sh --uninstall  # reverse it (the store is kept)
 ```
 
 The unit (`deploy/t3-codemode.service`) runs `t3cm serve` on `127.0.0.1:47731`
-with `Restart=on-failure`, `LimitNOFILE=1048576` and `MemoryMax=512M`. The
+with `Restart=on-failure`, `LimitNOFILE=1048576`, `MemoryHigh=1G` and
+`MemoryMax=1536M`. The
 installer registers it with:
 
 ```bash
@@ -72,6 +73,7 @@ elsewhere), deep-merged over the built-in defaults. It sets:
 - `deny`: T3 tools scripts may not call (default `t3_project_delete`, `t3_environment_unlink`)
 - `upstreams`: other MCP servers to wrap (see Upstreams below)
 - `watcherIntervalSecs` (60), `cpuBudgetMs` (2000), `defaultTimeoutMs` (60000), `maxTimeoutMs` (600000), `maxHoldMinutes` (30)
+- `maxConcurrentRuns` (16): `execute` and `search` runs allowed at once; more wait up to `runQueueMs` (10000) for a slot, then fail with a retryable busy error. Each run can use up to 64 MB, so the default bounds sandbox memory at 1 GB, under the unit's `MemoryHigh`
 - `link`, `wake`, `bodyCap`, `replyCap`, `digestLines` and per-role `roles` policy for the workflow layer
 - `board`: `ticketModel` (`claude-opus-5-5`), `ticketEffort` (`high`), `askModel` (`claude-haiku-5-5`), `askEffort`, `instanceId` (`claudeAgent`), `runtimeMode` (`full-access`, for launches from the service, which has no thread to inherit a mode from), `askPollSecs`, `askTimeoutMinutes`, `feed` (50), `settleAfterHours` (24; `0` turns auto-settle off)
 

@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use common::*;
 use serde_json::{Value, json};
+use t3_codemode::config::Config;
 use t3_codemode::js::normalize_code;
 use t3_codemode::truncate::{self, MARKER, MAX_CHARS};
 
@@ -247,4 +248,48 @@ async fn search_runs_against_the_catalog() {
     assert_eq!(result(&out), json!(["t3", "mem", "wf"]));
     let out = h.app.search("async () => typeof wf + typeof mem + typeof vars").await;
     assert_eq!(result(&out), json!("undefinedundefinedundefined"));
+}
+
+fn capped(max: usize, queue_ms: u64) -> H {
+    H::build(Vec::new(), Config::from_value(json!({"maxConcurrentRuns": max, "runQueueMs": queue_ms})).unwrap())
+}
+
+const SLOW: &str = "async () => (await t3.call('sleep', { ms: 600 })).ms";
+
+#[tokio::test]
+async fn a_run_past_the_concurrency_cap_fails_busy_after_the_queue_wait() {
+    let h = capped(1, 150);
+    let (slow, fast) = tokio::join!(h.exec(SLOW), async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        h.exec("async () => 1").await
+    });
+    assert_eq!(result(&slow), json!(600));
+    assert!(err_text(&fast).contains("t3cm is busy: 1 runs are in progress"), "{}", fast.text);
+    assert_eq!(result(&h.exec("async () => 2").await), json!(2));
+}
+
+#[tokio::test]
+async fn a_queued_run_starts_when_a_slot_frees() {
+    let h = capped(1, 5000);
+    let (slow, queued, health) = tokio::join!(
+        h.exec(SLOW),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            h.exec("async () => 'next'").await
+        },
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            h.app.health()["runs"].clone()
+        }
+    );
+    assert_eq!(result(&slow), json!(600));
+    assert_eq!(result(&queued), json!("next"));
+    assert_eq!(health, json!({"running": 1, "queued": 1, "max": 1}));
+    assert_eq!(h.app.health()["runs"], json!({"running": 0, "queued": 0, "max": 1}));
+}
+
+#[test]
+fn zero_concurrent_runs_is_rejected() {
+    let e = Config::from_value(json!({"maxConcurrentRuns": 0})).unwrap_err();
+    assert!(format!("{e:#}").contains("maxConcurrentRuns must be at least 1"));
 }

@@ -1,7 +1,9 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::board::{GitRemotes, Remotes};
 use crate::catalog::{Catalog, aliases};
@@ -110,6 +112,8 @@ pub struct App {
     built: RwLock<Built>,
     last_refresh: Mutex<Option<Instant>>,
     started: Instant,
+    runs: Arc<Semaphore>,
+    queued: AtomicUsize,
 }
 
 struct Built {
@@ -193,6 +197,7 @@ impl App {
             store.meta_get(TOOLS_CACHE).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let generation = upstreams.generation();
         let catalog = Arc::new(Catalog::build_with(&cached, &upstreams.cached_tools()));
+        let runs = Arc::new(Semaphore::new(config.max_concurrent_runs));
         Arc::new(App {
             config,
             store,
@@ -204,6 +209,8 @@ impl App {
             built: RwLock::new(Built { catalog, t3_tools: Arc::new(cached), generation }),
             last_refresh: Mutex::new(None),
             started: Instant::now(),
+            runs,
+            queued: AtomicUsize::new(0),
         })
     }
 
@@ -293,6 +300,23 @@ impl App {
         }
     }
 
+    async fn run_slot(&self) -> Result<OwnedSemaphorePermit, String> {
+        if let Ok(p) = self.runs.clone().try_acquire_owned() {
+            return Ok(p);
+        }
+        self.queued.fetch_add(1, Ordering::Relaxed);
+        let wait = Duration::from_millis(self.config.run_queue_ms);
+        let got = tokio::time::timeout(wait, self.runs.clone().acquire_owned()).await;
+        self.queued.fetch_sub(1, Ordering::Relaxed);
+        match got {
+            Ok(Ok(p)) => Ok(p),
+            _ => Err(format!(
+                "t3cm is busy: {} runs are in progress and none finished within {} ms; retry shortly",
+                self.config.max_concurrent_runs, self.config.run_queue_ms
+            )),
+        }
+    }
+
     pub fn session_ns(session: Option<String>, caller: Option<&str>) -> String {
         nonempty(session).unwrap_or_else(|| match caller {
             Some(c) => format!("thread:{c}"),
@@ -315,6 +339,10 @@ impl App {
         let names = serde_json::to_string(&catalog.t3_names).unwrap_or_else(|_| "[]".into());
         let upstreams: Vec<Value> = namespaces.iter().map(|n| json!([n, aliases(&catalog.tools_of(n))])).collect();
         let host = Arc::new(ExecHost { app: self.clone(), caller, ns: ns.clone(), catalog });
+        let _slot = match self.run_slot().await {
+            Ok(p) => p,
+            Err(e) => return error_output(&e, Vec::new(), &globals),
+        };
         let out = sandbox::run(Run {
             js,
             prelude: EXEC_PRELUDE,
@@ -349,6 +377,10 @@ impl App {
             Err(e) => return error_output(&e, Vec::new(), SEARCH_GLOBALS),
         };
         let catalog = self.catalog_for_run().await;
+        let _slot = match self.run_slot().await {
+            Ok(p) => p,
+            Err(e) => return error_output(&e, Vec::new(), SEARCH_GLOBALS),
+        };
         let out = sandbox::run(Run {
             js,
             prelude: SEARCH_PRELUDE,
@@ -396,6 +428,11 @@ impl App {
                 "lastPass": last_pass,
                 "alive": self.wf.watcher_alive(),
                 "intervalSecs": self.config.watcher_interval_secs,
+            },
+            "runs": {
+                "running": self.config.max_concurrent_runs - self.runs.available_permits(),
+                "queued": self.queued.load(Ordering::Relaxed),
+                "max": self.config.max_concurrent_runs,
             },
             "store": self.store.path().display().to_string(),
             "upstreams": self.upstreams.status(),
