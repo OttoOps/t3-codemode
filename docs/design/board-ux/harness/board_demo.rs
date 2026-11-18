@@ -62,6 +62,8 @@ const GATES: &[(&str, &str)] = &[
     ),
 ];
 
+const ASK_ANSWER: &str = "atlas#57 has waited longest: one PR or two for the CSV export.";
+
 fn id(kind: &str, n: usize) -> String {
     format!("mcp:{kind}:{n}")
 }
@@ -269,28 +271,54 @@ impl Demo {
                     Some(l) => l.clone(),
                     None => id("ticket", 1 + (n * 3) % 14),
                 };
-                if self.app.wf.dispatch("send", Some(&t), json!({"kind": "gate", "gate": gate, "body": body})).await.is_ok() {
-                    gated.insert(t.clone());
+                if self
+                    .app
+                    .wf
+                    .dispatch("send", Some(&t), json!({"kind": "gate", "gate": gate, "body": body}))
+                    .await
+                    .is_ok()
+                {
+                    gated.insert(t);
                 }
             }
             if n.is_multiple_of(9) {
                 let label = format!("{}#{}", REPOS[n % REPOS.len()], 500 + n);
                 let me = id("late", n);
-                late.push_back(me.clone());
                 self.put(&me, "running", &label, None);
-                let _ = self
+                if self
                     .app
                     .wf
                     .dispatch("join", Some(&me), json!({"parent": BOARD, "label": label, "role": "ticket"}))
-                    .await;
+                    .await
+                    .is_ok()
+                {
+                    late.push_back(me);
+                }
             }
             if churn && n.is_multiple_of(5) {
                 if let Some(c) = self.app.wf.cards().ok().and_then(|c| c.into_iter().next()) {
                     let _ = self.app.wf.dismiss(&c.id);
                 }
                 if let Some(t) = late.pop_front() {
+                    gated.remove(&t);
                     let _ = self.app.wf.dispatch("send", Some(&t), json!({"kind": "handoff", "body": "merged"})).await;
                 }
+            }
+            let asked: Vec<String> = self
+                .app
+                .wf
+                .asks()
+                .unwrap_or_default()
+                .iter()
+                .filter(|a| a["status"] == "running" && a["question"] != "What merged today?")
+                .filter_map(|a| a["thread"].as_str().map(String::from))
+                .collect();
+            for th in &asked {
+                self.fake.set_items(th, vec![json!({"type": "assistant_message", "text": ASK_ANSWER})]);
+                self.fake.update(th, json!({"status": "idle"}));
+            }
+            if !asked.is_empty() {
+                let _ = self.app.wf.check_asks(None).await;
             }
             let _ = self.app.wf.tick().await;
         }
