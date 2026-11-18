@@ -36,6 +36,7 @@ nudges idle children and escalates. Only the calls change.
 | Moment | In `execute` |
 |---|---|
 | Root thread starts | `await wf.init({ role: "overseer" })` |
+| Ticket starts with no brief link | `await wf.init({ role: "ticket" })` joins the board under the thread's T3 title, or under `label` when you pass one. `root: true` keeps it off the board |
 | Before launching a child | `const { brief } = await wf.openChild({ role: "ticket", label: "widgets#41" })`; paste `brief` at the end of the launch message |
 | Child starts | the `wf.join(...)` line from its brief |
 | Routine progress | `await wf.send({ kind: "note", body: "tests green at d4db97c" })` |
@@ -62,7 +63,9 @@ no ticket message lands in any model's context.
   `await wf.launchTicket({ issue: "https://github.com/o/r/issues/41" })`.
   The service picks the T3 project from the issue's repo, launches a
   t3-ticket thread, and the brief has it join with
-  `wf.join({ parent: "board", label, role: "ticket" })`.
+  `wf.join({ parent: "board", label, role: "ticket" })`. A ticket started
+  in a thread instead runs `wf.init({ role: "ticket" })`, which joins it to
+  the board the same way, labeled from the thread's T3 title.
 - **Answers.** The user clicks a card's button or types an answer, or
   answers in a thread with `wf.answer("a3", "merge")`; the ticket gets one
   `[t3cm reply]` and the card resolves. A ticket's own handoff, a cleared
@@ -76,7 +79,8 @@ Slots have no `wf` route: read them with the `t3wf slots` script, as
 
 ## Per role
 
-**Ticket.** Join from the brief, send gates, blockers and the handoff to the
+**Ticket.** Join from the brief, or `wf.init({ role: "ticket" })` when the
+brief has no link block, send gates, blockers and the handoff to the
 board with `wf.send`, and progress as notes. Resume step: `wf.board()` for
 this work's workers. Hand a worker its next PR's context through shared
 memory instead of pasting it:

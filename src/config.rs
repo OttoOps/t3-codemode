@@ -221,6 +221,10 @@ impl Config {
         }
     }
 
+    pub fn board_oversees(&self, role: &str) -> bool {
+        self.roles.get("overseer").is_some_and(|r| r.children.contains_key(role))
+    }
+
     pub fn link_params(&self, parent_role: &str, child_role: &str) -> Result<LinkParams> {
         self.check_role(parent_role)?;
         let child = self.roles[parent_role]

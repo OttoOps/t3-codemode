@@ -96,9 +96,12 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.init",
             "wf",
-            "Start this thread as a root of a link tree (no parent) with a role: overseer, ticket or worker.",
-            "wf.init(input: { role: string }): Promise<{ thread: string; role: string; root: boolean; watcher: string }>;",
-            obj(json!({"role": {"type": "string"}}), &["role"]),
+            "Start this thread with a role: overseer, ticket or worker. A role the overseer role lists as a child (ticket by default) with no open link joins the board (parent \"board\"), labeled from its T3 title or `label`, so its gates become board cards; root: true keeps it a standalone root. Other roles start as roots.",
+            "wf.init(input: { role: string; label?: string; root?: boolean }): Promise<{ thread: string; role: string; root: boolean; parent?: string; label?: string; watcher: string }>;",
+            obj(
+                json!({"role": {"type": "string"}, "label": {"type": "string"}, "root": {"type": "boolean"}}),
+                &["role"],
+            ),
         ),
         builtin(
             "wf.openChild",

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use t3_codemode::wf::LAST_PASS;
 
 async fn link_ticket_worker(h: &H) -> String {
-    h.wf(TICKET, "init", json!({"role": "ticket"})).await;
+    h.wf(TICKET, "init", json!({"role": "ticket", "root": true})).await;
     let r = h.wf(TICKET, "openChild", json!({"role": "worker", "label": "#41 PR 1/2"})).await;
     let brief = r["brief"].as_str().unwrap().to_string();
     let call = brief.lines().find(|l| l.starts_with("async () => wf.join(")).expect("join call in brief").to_string();
@@ -117,7 +117,7 @@ async fn reply_reaches_the_child_and_a_closed_link_needs_reopen() {
 async fn adopt_moves_children_silently() {
     let h = H::new();
     link_ticket_worker(&h).await;
-    h.wf(BOSS, "init", json!({"role": "ticket"})).await;
+    h.wf(BOSS, "init", json!({"role": "ticket", "root": true})).await;
     let r = h.wf(BOSS, "adopt", json!({"from": TICKET})).await;
     assert_eq!(r["adopted"], json!(["#41 PR 1/2"]));
     assert_eq!(link(&h, WORKER).parent, BOSS);
@@ -274,7 +274,7 @@ async fn a_pending_question_is_reported_once_not_nudged() {
 #[tokio::test]
 async fn a_never_joined_child_is_reported() {
     let h = H::new();
-    h.wf(TICKET, "init", json!({"role": "ticket"})).await;
+    h.wf(TICKET, "init", json!({"role": "ticket", "root": true})).await;
     h.wf(TICKET, "openChild", json!({"role": "worker", "label": "lost"})).await;
     assert!(h.tick(44).await.is_empty());
     assert!(h.tick(46).await.contains(&"report never-joined lost".to_string()));
@@ -401,4 +401,126 @@ async fn wf_state_survives_a_restart() {
     h.reopen();
     let inbox = h.wf(TICKET, "inbox", json!({})).await;
     assert_eq!(inbox[0]["head"], "before restart");
+}
+
+#[tokio::test]
+async fn init_puts_a_ticket_on_the_board_and_its_gate_becomes_a_card() {
+    let h = H::new();
+    h.fake.update(TICKET, json!({"title": "widgets#41: fix the sprockets"}));
+    let out = h.exec_as(TICKET, "async () => wf.init({ role: 'ticket' })").await;
+    let r = result(&out);
+    assert_eq!(r["root"], false);
+    assert_eq!(r["parent"], "board");
+    assert_eq!(r["label"], "widgets#41: fix the sprockets");
+    let ln = link(&h, TICKET);
+    assert_eq!(ln.params.down, 75);
+    assert_eq!(ln.parent, "board");
+    assert_eq!(ln.parent_role.as_deref(), Some("overseer"));
+    assert_eq!(ln.link.as_deref(), Some("https://t3/mcp:ticket"));
+
+    let b = h.wf(BOSS, "board", json!({"parent": "board"})).await;
+    let kids = b["children"].as_array().unwrap();
+    assert_eq!(kids.len(), 1);
+    assert_eq!(kids[0]["thread"], TICKET);
+    assert_eq!(kids[0]["label"], "widgets#41: fix the sprockets");
+
+    let r =
+        h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": "reply \"merge\" to merge #81"})).await;
+    assert_eq!(r["delivery"], "board");
+    assert_eq!(r["card"], "a1");
+    assert_eq!(h.wf(BOSS, "cards", json!({})).await[0]["ticket"], TICKET);
+    assert!(h.sent().is_empty(), "{:?}", h.sent());
+}
+
+#[tokio::test]
+async fn init_takes_a_label_and_a_second_init_keeps_the_link() {
+    let h = H::new();
+    let r = h.wf(TICKET, "init", json!({"role": "ticket", "label": "widgets#41"})).await;
+    assert_eq!(r["label"], "widgets#41");
+    let r = h.wf(TICKET, "init", json!({"role": "ticket"})).await;
+    assert_eq!(r["root"], false);
+    assert_eq!(r["parent"], "board");
+    assert_eq!(r["label"], "widgets#41");
+    assert_eq!(h.wf(BOSS, "board", json!({"parent": "board"})).await["children"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn init_stays_a_root_for_overseers_workers_and_root_true() {
+    let h = H::new();
+    for (me, args) in [
+        (BOSS, json!({"role": "overseer"})),
+        (TICKET, json!({"role": "ticket", "root": true})),
+        (WORKER, json!({"role": "worker"})),
+    ] {
+        let r = h.wf(me, "init", args).await;
+        assert_eq!(r["root"], true, "{r}");
+        assert!(r.get("parent").is_none(), "{r}");
+        assert!(h.app.store.link_get(me).unwrap().is_none());
+    }
+    assert!(h.wf(BOSS, "board", json!({"parent": "board"})).await["children"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn init_of_a_joined_ticket_keeps_its_overseer() {
+    let h = H::new();
+    link_boss_ticket(&h).await;
+    let r = h.wf(TICKET, "init", json!({"role": "ticket"})).await;
+    assert_eq!(r["root"], false);
+    assert_eq!(r["parent"], BOSS);
+    assert_eq!(link(&h, TICKET).parent, BOSS);
+}
+
+#[tokio::test]
+async fn init_leaves_another_launchs_pending_row_alone() {
+    let h = H::new();
+    h.app
+        .store
+        .pending_put(&t3_codemode::store::Pending {
+            parent: "board".into(),
+            label: "widgets#41".into(),
+            role: "ticket".into(),
+            params: t3_codemode::config::LinkParams { down: 75, miss: 2, stall: 480 },
+            at: T0.into(),
+            reported: false,
+            thread: None,
+            link: None,
+        })
+        .unwrap();
+    h.wf(TICKET, "init", json!({"role": "ticket", "label": "widgets#41"})).await;
+    assert_eq!(h.app.store.pending_all().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn init_reopening_a_closed_board_link_drops_its_old_gate() {
+    let h = H::new();
+    h.wf(TICKET, "init", json!({"role": "ticket", "label": "widgets#41"})).await;
+    h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": "reply \"merge\""})).await;
+    let mut ln = link(&h, TICKET);
+    ln.closed = true;
+    h.app.store.link_save(&ln).unwrap();
+    h.wf(TICKET, "init", json!({"role": "ticket"})).await;
+    let ln = link(&h, TICKET);
+    assert!(!ln.closed);
+    assert_eq!(ln.gate, None);
+    assert_eq!(ln.gate_since, None);
+}
+
+#[tokio::test]
+async fn init_with_a_blank_label_falls_back_to_the_title() {
+    let h = H::new();
+    h.fake.update(TICKET, json!({"title": "Fix sprockets"}));
+    let r = h.wf(TICKET, "init", json!({"role": "ticket", "label": "  "})).await;
+    assert_eq!(r["label"], "Fix sprockets");
+}
+
+#[tokio::test]
+async fn init_reopening_a_closed_board_link_forgets_old_reports() {
+    let h = H::new();
+    h.wf(TICKET, "init", json!({"role": "ticket", "label": "widgets#41"})).await;
+    let mut ln = link(&h, TICKET);
+    ln.closed = true;
+    ln.reported = vec!["asks@x".into()];
+    h.app.store.link_save(&ln).unwrap();
+    h.wf(TICKET, "init", json!({"role": "ticket"})).await;
+    assert!(link(&h, TICKET).reported.is_empty());
 }

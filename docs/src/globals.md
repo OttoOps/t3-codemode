@@ -74,16 +74,24 @@ async () => {
 `wf` is the thread-workflow layer. Threads form a tree of links, each between a
 parent and a child, and the service keeps every link and message in its store.
 
-- `wf.init({role})` starts the caller as a root, with no parent.
-  `wf.openChild({role, label})` returns a `brief` block the parent pastes into
+- `wf.init({role, label?, root?})` starts a thread with no parent link. A role
+  that `roles.overseer.children` lists, which is only `ticket` by default, joins
+  the board the way `wf.join({ parent: "board", label, role: "ticket" })` does,
+  under its T3 title or under `label`. The result names `parent: "board"` and
+  the label. `root: true` keeps the thread off the board as a standalone root.
+  Every other role starts as a root. `wf.init` is for a ticket started on its
+  own. A ticket launched from the board runs its brief's `wf.join` call
+  instead, which clears the launch from the board's pending list.
+- `wf.openChild({role, label})` returns a `brief` block the parent pastes into
   the child's launch brief; the child runs the
   `wf.join({parent, label, role, down, miss, stall})` call it contains.
 - `wf.send({kind, body, gate?, wake?})`, kinds `note | event | gate | blocker |
   report | handoff | closed`, to the caller's parent. Returns
   `{handle, delivery}`: `noted`, `sent`, `queued` (the parent is mid-turn, or
   delivery failed; the watcher retries), or `board` when the parent is the
-  board. `gate` also opens a gate, which stops nudges until the sender clears it.
-  `handoff` and `closed` close the link.
+  board, with a `card` id when the message opened a decision card. `gate`
+  also opens a gate, which stops nudges until the sender clears it. `handoff`
+  and `closed` close the link.
 - `wf.reply`, `wf.gate`, `wf.close`, `wf.inbox`, `wf.show`, `wf.board`,
   `wf.adopt` and `wf.sweep` cover the rest of a link's life.
 - `wf.launchTicket`, `wf.cards`, `wf.answer` and `wf.feed` work with the

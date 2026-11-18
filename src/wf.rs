@@ -25,8 +25,11 @@ pub fn waiting_ids() -> Vec<String> {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RoleArgs {
+struct InitArgs {
     role: String,
+    label: Option<String>,
+    #[serde(default)]
+    root: bool,
 }
 
 #[derive(Deserialize)]
@@ -312,7 +315,7 @@ impl Wf {
         }
         let me = caller.filter(|c| !c.is_empty()).ok_or_else(|| anyhow!(NO_CALLER))?;
         match method {
-            "init" => self.init(me, &parse::<RoleArgs>(method, args)?.role).await,
+            "init" => self.init(me, parse(method, args)?).await,
             "openChild" => {
                 let a: OpenChildArgs = parse(method, args)?;
                 self.open_child(me, &a.role, &a.label).await
@@ -348,12 +351,40 @@ impl Wf {
         }
     }
 
-    async fn init(&self, me: &str, role: &str) -> Result<Value> {
-        self.config.check_role(role)?;
-        let _g = self.lock.lock().await;
-        self.store.node_set(me, role, &self.now())?;
-        let root = self.store.link_get(me)?.is_none_or(|l| l.closed);
-        Ok(json!({"thread": me, "role": role, "root": root, "watcher": self.watcher_line()}))
+    async fn init(&self, me: &str, a: InitArgs) -> Result<Value> {
+        self.config.check_role(&a.role)?;
+        let guard = self.lock.lock().await;
+        let open = self.store.link_get(me)?.filter(|l| !l.closed);
+        if !a.root && open.is_none() && self.config.board_oversees(&a.role) {
+            drop(guard);
+            let thread = self.read_thread(me).await.ok();
+            let usable = |l: &str| Some(l.trim().to_string()).filter(|l| !l.is_empty());
+            let label = a
+                .label
+                .as_deref()
+                .and_then(usable)
+                .or_else(|| thread.as_ref().and_then(|t| t["title"].as_str()).and_then(usable))
+                .unwrap_or_else(|| me.to_string());
+            let link_url = thread.as_ref().and_then(|t| t["link"].as_str().map(String::from));
+            let args = JoinArgs {
+                parent: BOARD.into(),
+                label: label.clone(),
+                role: a.role.clone(),
+                down: None,
+                miss: None,
+                stall: None,
+            };
+            let joined = self.bind(me, args, link_url, true).await?;
+            return Ok(json!({"thread": me, "role": a.role, "root": false, "parent": joined["parent"],
+                "label": joined["label"], "watcher": self.watcher_line()}));
+        }
+        self.store.node_set(me, &a.role, &self.now())?;
+        let mut out = json!({"thread": me, "role": a.role, "root": open.is_none(), "watcher": self.watcher_line()});
+        if let Some(l) = open {
+            out["parent"] = json!(l.parent);
+            out["label"] = json!(l.label);
+        }
+        Ok(out)
     }
 
     async fn open_child(&self, me: &str, role: &str, label: &str) -> Result<Value> {
@@ -398,7 +429,15 @@ impl Wf {
     async fn join(&self, me: &str, a: JoinArgs) -> Result<Value> {
         self.config.check_role(&a.role)?;
         let link_url = self.read_thread(me).await.ok().and_then(|t| t["link"].as_str().map(String::from));
+        self.bind(me, a, link_url, false).await
+    }
+
+    async fn bind(&self, me: &str, a: JoinArgs, link_url: Option<String>, auto: bool) -> Result<Value> {
         let _g = self.lock.lock().await;
+        let current = self.store.link_get(me)?;
+        if auto && let Some(l) = current.as_ref().filter(|l| !l.closed) {
+            return Ok(json!({"parent": l.parent, "label": l.label}));
+        }
         let parent_role = self.store.node_role(&a.parent)?;
         let base =
             parent_role.as_deref().and_then(|r| self.config.link_params(r, &a.role).ok()).unwrap_or(self.config.link);
@@ -410,8 +449,10 @@ impl Wf {
         params.validate().map_err(|e| anyhow!("the brief's link numbers are invalid: {e}"))?;
         let now = self.now();
         self.store.node_set(me, &a.role, &now)?;
-        self.store.pending_remove(&a.parent, &a.label)?;
-        let old = self.store.link_get(me)?.filter(|l| l.parent == a.parent);
+        if !auto {
+            self.store.pending_remove(&a.parent, &a.label)?;
+        }
+        let old = current.filter(|l| l.parent == a.parent);
         let ln = Link {
             child: me.into(),
             parent: a.parent.clone(),
@@ -426,9 +467,9 @@ impl Wf {
             last_nudge: None,
             nudges: 0,
             escalated: false,
-            reported: old.as_ref().map(|o| o.reported.clone()).unwrap_or_default(),
-            gate: old.as_ref().and_then(|o| o.gate.clone()),
-            gate_since: old.as_ref().and_then(|o| o.gate_since.clone()),
+            reported: old.as_ref().filter(|_| !auto).map(|o| o.reported.clone()).unwrap_or_default(),
+            gate: old.as_ref().filter(|_| !auto).and_then(|o| o.gate.clone()),
+            gate_since: old.as_ref().filter(|_| !auto).and_then(|o| o.gate_since.clone()),
             closed: false,
             closed_at: None,
             closed_how: None,
