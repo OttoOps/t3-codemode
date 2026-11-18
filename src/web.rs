@@ -75,7 +75,8 @@ fn body<T: DeserializeOwned>(raw: &Bytes) -> Result<T, String> {
 
 fn failed(app: &App, e: anyhow::Error) -> Response {
     let msg = app.t3.redact(format!("{e:#}"));
-    let status = if msg.starts_with("no open board card") { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
+    let missing = ["no open board card", "no board ticket", "no ask"].iter().any(|p| msg.starts_with(p));
+    let status = if missing { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
     error(status, msg)
 }
 
@@ -232,6 +233,56 @@ async fn ask(State(web): State<Web>, headers: HeaderMap, raw: Bytes) -> Response
     }
 }
 
+async fn settle_ticket(State(web): State<Web>, headers: HeaderMap, Path(thread): Path<String>) -> Response {
+    if let Some(r) = web.reject(&headers, true) {
+        return r;
+    }
+    match web.app.wf.settle_ticket(&thread).await {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
+async fn restore_ticket(State(web): State<Web>, headers: HeaderMap, Path(thread): Path<String>) -> Response {
+    if let Some(r) = web.reject(&headers, true) {
+        return r;
+    }
+    match web.app.wf.restore_ticket(&thread).await {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
+async fn settle_ask(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    if let Some(r) = web.reject(&headers, true) {
+        return r;
+    }
+    match web.app.wf.settle_ask(&id) {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
+async fn restore_ask(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    if let Some(r) = web.reject(&headers, true) {
+        return r;
+    }
+    match web.app.wf.restore_ask(&id) {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
+async fn settle_done(State(web): State<Web>, headers: HeaderMap) -> Response {
+    if let Some(r) = web.reject(&headers, true) {
+        return r;
+    }
+    match web.app.wf.settle_closed(None).await {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
 pub fn routes(app: Arc<App>, port: u16) -> Router {
     Router::new()
         .route("/", get(page))
@@ -242,5 +293,10 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/cards/{id}/dismiss", post(dismiss))
         .route("/api/launch", post(launch))
         .route("/api/ask", post(ask))
+        .route("/api/tickets/{thread}/settle", post(settle_ticket))
+        .route("/api/tickets/{thread}/restore", post(restore_ticket))
+        .route("/api/asks/{id}/settle", post(settle_ask))
+        .route("/api/asks/{id}/restore", post(restore_ask))
+        .route("/api/settle-done", post(settle_done))
         .with_state(Web { app, port })
 }
