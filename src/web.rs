@@ -155,6 +155,14 @@ async fn events(State(web): State<Web>, headers: HeaderMap) -> Response {
 #[derive(Deserialize)]
 struct TextBody {
     text: String,
+    #[serde(default)]
+    at: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct AtBody {
+    #[serde(default)]
+    at: Option<String>,
 }
 
 async fn answer(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>, raw: Bytes) -> Response {
@@ -165,17 +173,25 @@ async fn answer(State(web): State<Web>, headers: HeaderMap, Path(id): Path<Strin
         Ok(b) => b,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    match web.app.wf.answer(&id, &b.text).await {
+    match web.app.wf.answer_at(&id, &b.text, b.at.as_deref()).await {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => failed(&web.app, e),
     }
 }
 
-async fn dismiss(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+async fn dismiss(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>, raw: Bytes) -> Response {
     if let Some(r) = web.reject(&headers, true) {
         return r;
     }
-    match web.app.wf.dismiss(&id) {
+    let b: AtBody = if raw.is_empty() {
+        AtBody::default()
+    } else {
+        match body(&raw) {
+            Ok(b) => b,
+            Err(e) => return error(StatusCode::BAD_REQUEST, e),
+        }
+    };
+    match web.app.wf.dismiss_at(&id, b.at.as_deref()).await {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => failed(&web.app, e),
     }
