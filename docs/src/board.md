@@ -2,8 +2,10 @@
 
 The service is the root of the link tree, in place of an LLM overseer thread. A
 fixed virtual node, `board`, always exists, and ticket threads join it with
-`wf.join({ parent: "board", label, role: "ticket" })`. No overseer thread runs,
-so no ticket's messages land in any model's context until someone asks.
+`wf.join({ parent: "board", label, role: "ticket" })`, or with
+`wf.init({ role: "ticket" })` when a thread starts a ticket on its own. No
+overseer thread runs, so no ticket's messages land in any model's context until
+someone asks.
 
 The page is `http://127.0.0.1:47731/` on the default port; use the port you
 gave `--port` or `T3CM_PORT` if you changed it. It is one embedded HTML file with no

@@ -39,6 +39,9 @@ Boss and its page is the waiting list, so this thread only starts the work:
    `**ACTION NEEDED:** answer the tickets' decisions on the board, here: http://127.0.0.1:47731/`,
    then end the turn. Do not open links or watch: the board does both.
 
+A ticket the user starts in its own thread joins the board through its own
+`wf.init({ role: "ticket" })`, so this thread does not launch it.
+
 When the user asks this thread a status question later, answer it from one
 `execute` over `wf.board({ parent: "board", all: true })` and
 `wf.cards({ all: true })`. Everything below this section is the path without

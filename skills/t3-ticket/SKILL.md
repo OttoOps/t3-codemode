@@ -14,7 +14,10 @@ before step 1 and keep its table at hand: each worker is this thread's
 child, and a `t3-overseer` thread, when one launched this thread, is
 its parent. Every message between threads and every escalation goes through
 `t3wf`, and the link watcher does the timekeeping. With no parent, this
-thread is the root and talks to the user itself.
+thread is the root and talks to the user itself. When t3cm is connected,
+run each `t3wf` command in this skill as its `wf` call from t3-workflow's
+`codemode.md`, the handoff included, because `t3wf` cannot see the board
+link that `wf.init` opens.
 
 ## Hard rules
 
@@ -87,7 +90,10 @@ parent (an overseer), three more rules hold:
 
 - While an action line waits on the user, send it up with `t3wf send --kind
   gate --gate <phase> --body '<action line>'`, which opens the gate on the
-  parent link, and `t3wf gate --clear` once the user acts.
+  parent link, and `t3wf gate --clear` once the user acts. Through t3cm,
+  send it with `wf.send({ kind: "gate", gate, body })` and clear it with
+  `wf.gate({ clear: true })`, which reach the board link that `wf.init`
+  opens.
 - Send each action line up as one line, with no steps, commands or logs.
   The detail stays in this thread, where the user opens it from the
   overseer's waiting list.
@@ -97,9 +103,15 @@ parent (an overseer), three more rules hold:
 
 ## 1. Start
 
-1. Join the link protocol: the `t3wf join` line when the message that
-   started this thread has a "t3-workflow link" block, or `t3wf init --role
-   ticket` when it has none. `t3wf whoami` prints this thread's id.
+1. Join the link protocol. When t3cm is connected, run the brief's
+   `wf.join(...)` call when the message that started this thread has a link
+   block, or `wf.init({ role: "ticket" })` when it has none. With the default
+   roles config that puts this thread on the board as a ticket, and the
+   result's `parent` is `"board"`; when it is missing, this thread is a root
+   and talks to the user itself. Add `root: true` only to keep it off the
+   board. Without t3cm, run the `t3wf join` line from the "t3-workflow link"
+   block, or `t3wf init --role ticket` when there is none. `t3wf whoami`
+   prints this thread's id.
 2. `t3_thread_organize` with action `pin`.
 3. `t3_worktree_status`: note the main workspace root and the repo
    (`gh repo view --json nameWithOwner,url`). Worktree removal and branch
