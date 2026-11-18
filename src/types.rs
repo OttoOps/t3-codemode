@@ -63,13 +63,13 @@ pub fn sanitize_identifier(name: &str) -> String {
     out
 }
 
-fn is_identifier(name: &str) -> bool {
+pub fn is_identifier(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with(|c: char| c.is_ascii_digit())
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
-fn property_key(name: &str) -> String {
+pub fn property_key(name: &str) -> String {
     if is_identifier(name) { name.to_string() } else { Value::String(name.to_string()).to_string() }
 }
 

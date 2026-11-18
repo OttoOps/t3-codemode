@@ -1,15 +1,17 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::types::{doc_block, sanitize_identifier, signature};
+use crate::types::{doc_block, is_identifier, property_key, sanitize_identifier, signature};
+use crate::upstream::{T3_NAMESPACE, ToolDef, qualified};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
     pub name: String,
     pub kind: &'static str,
+    pub server: String,
     pub description: String,
     pub signature: String,
     pub input_schema: Value,
@@ -18,6 +20,8 @@ pub struct Entry {
 pub struct Catalog {
     pub entries: Vec<Entry>,
     pub t3_names: BTreeSet<String>,
+    pub upstream_names: BTreeMap<String, BTreeSet<String>>,
+    namespaces: Vec<String>,
     pub json: String,
 }
 
@@ -28,6 +32,7 @@ fn builtin(name: &str, kind: &'static str, description: &str, sig: &str, input: 
     Entry {
         name: name.into(),
         kind,
+        server: kind.into(),
         description: description.into(),
         signature: format!("{}{sig}", doc_block(description, "")),
         input_schema: input,
@@ -236,9 +241,53 @@ pub fn builtins() -> Vec<Entry> {
     ]
 }
 
+const CALL_SIGNATURE: &str = "call(name: string, input?: object): Promise<unknown>;";
+
+fn display_name(ns: &str, tool: &str) -> String {
+    if is_identifier(tool) { format!("{ns}.{tool}") } else { format!("{ns}[{}]", property_key(tool)) }
+}
+
+fn push_member(s: &mut String, signature: &str, display: &str, member: &str) {
+    for line in signature.lines() {
+        s.push_str("  ");
+        match line.strip_prefix(display) {
+            Some(rest) => {
+                s.push_str(member);
+                s.push_str(rest);
+            }
+            None => s.push_str(line),
+        }
+        s.push('\n');
+    }
+}
+
+pub fn aliases(tools: &[&str]) -> Vec<(String, Option<String>)> {
+    let exact: BTreeSet<&str> = tools.iter().copied().collect();
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let sanitized: Vec<String> = tools.iter().map(|t| sanitize_identifier(t)).collect();
+    for (t, a) in tools.iter().zip(&sanitized) {
+        if a != t {
+            *counts.entry(a.clone()).or_default() += 1;
+        }
+    }
+    tools
+        .iter()
+        .zip(sanitized)
+        .map(|(t, a)| {
+            let free = a != *t && counts[&a] == 1 && !exact.contains(a.as_str()) && a != "call";
+            (t.to_string(), free.then_some(a))
+        })
+        .collect()
+}
+
 impl Catalog {
     pub fn build(t3_tools: &[Value]) -> Catalog {
-        let mut entries = Vec::with_capacity(t3_tools.len() + 24);
+        Catalog::build_with(t3_tools, &[])
+    }
+
+    pub fn build_with(t3_tools: &[Value], upstreams: &[(String, Vec<ToolDef>)]) -> Catalog {
+        let upstream_count: usize = upstreams.iter().map(|(_, t)| t.len()).sum();
+        let mut entries = Vec::with_capacity(t3_tools.len() + upstream_count + 24);
         let mut t3_names = BTreeSet::new();
         for tool in t3_tools {
             let Some(name) = tool["name"].as_str() else { continue };
@@ -247,11 +296,50 @@ impl Catalog {
             let display = format!("t3.{}", sanitize_identifier(name));
             let sig = signature(&display, &description, &input, tool.get("outputSchema"));
             t3_names.insert(name.to_string());
-            entries.push(Entry { name: name.into(), kind: "t3", description, signature: sig, input_schema: input });
+            entries.push(Entry {
+                name: name.into(),
+                kind: "t3",
+                server: T3_NAMESPACE.into(),
+                description,
+                signature: sig,
+                input_schema: input,
+            });
+        }
+        let mut upstream_names: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut namespaces = Vec::new();
+        for (ns, tools) in upstreams {
+            if ns == T3_NAMESPACE || upstream_names.contains_key(ns) {
+                continue;
+            }
+            namespaces.push(ns.clone());
+            let names = upstream_names.entry(ns.clone()).or_default();
+            for tool in tools {
+                if !names.insert(tool.name.clone()) {
+                    continue;
+                }
+                let display = display_name(ns, &tool.name);
+                let mut sig = signature(&display, &tool.description, &tool.input_schema, tool.output_schema.as_ref());
+                if tool.name == "call" {
+                    sig.insert_str(doc_block(&tool.description, "").len() + display.len() + 1, "\"call\", ");
+                }
+                entries.push(Entry {
+                    name: qualified(ns, &tool.name),
+                    kind: "mcp",
+                    server: ns.clone(),
+                    description: tool.description.clone(),
+                    signature: sig,
+                    input_schema: tool.input_schema.clone(),
+                });
+            }
         }
         entries.extend(builtins());
         let json = serde_json::to_string(&entries).expect("catalog serializes");
-        Catalog { entries, t3_names, json }
+        Catalog { entries, t3_names, upstream_names, namespaces, json }
+    }
+
+    pub fn tools_of(&self, ns: &str) -> Vec<&str> {
+        let prefix_len = ns.len() + 1;
+        self.entries.iter().filter(|e| e.kind == "mcp" && e.server == ns).map(|e| &e.name[prefix_len..]).collect()
     }
 
     pub fn declarations(&self) -> String {
@@ -263,8 +351,20 @@ impl Catalog {
                 s.push('\n');
             }
         }
-        s.push_str("  call(name: string, input?: object): Promise<unknown>;\n};\n");
-        for e in self.entries.iter().filter(|e| e.kind != "t3") {
+        s.push_str(&format!("  {CALL_SIGNATURE}\n}};\n"));
+        for ns in &self.namespaces {
+            s.push_str(&format!("declare const {ns}: {{\n"));
+            for e in self.entries.iter().filter(|e| e.kind == "mcp" && e.server == *ns) {
+                let tool = &e.name[ns.len() + 1..];
+                if tool == "call" {
+                    continue;
+                }
+                push_member(&mut s, &e.signature, &display_name(ns, tool), &property_key(tool));
+            }
+            s.push_str(&format!("  {CALL_SIGNATURE}\n}};\n"));
+        }
+        s.push_str(&format!("declare const tools: {{\n  {CALL_SIGNATURE}\n}};\n"));
+        for e in self.entries.iter().filter(|e| e.kind != "t3" && e.kind != "mcp") {
             s.push_str(&e.signature);
             s.push('\n');
         }

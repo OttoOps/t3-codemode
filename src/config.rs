@@ -5,6 +5,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::upstream::UpstreamConfig;
+
 pub const UP_KINDS: &[&str] = &["note", "event", "gate", "blocker", "report", "handoff", "closed"];
 pub const CLOSING: &[&str] = &["handoff", "closed"];
 const EXTRA_WAKE_KINDS: &[&str] = &["escalate", "reply"];
@@ -77,6 +79,8 @@ pub struct Config {
     pub digest_lines: usize,
     pub roles: BTreeMap<String, RoleConfig>,
     pub board: BoardConfig,
+    #[serde(default)]
+    pub upstreams: Vec<UpstreamConfig>,
 }
 
 pub fn builtin_defaults() -> Value {
@@ -191,6 +195,7 @@ impl Config {
                 }
             }
         }
+        crate::upstream::config::validate(&self.upstreams).context("upstreams")?;
         Ok(())
     }
 

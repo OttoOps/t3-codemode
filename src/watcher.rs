@@ -11,6 +11,7 @@ pub fn spawn(app: Arc<App>) -> tokio::task::JoinHandle<()> {
         let mut ticker = tokio::time::interval(every);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut catalog_at: Option<Instant> = None;
+        let mut upstreams: Option<tokio::task::JoinHandle<()>> = None;
         loop {
             ticker.tick().await;
             match app.wf.tick().await {
@@ -23,7 +24,11 @@ pub fn spawn(app: Arc<App>) -> tokio::task::JoinHandle<()> {
             }
             if catalog_at.is_none_or(|t| t.elapsed() >= CATALOG_EVERY) {
                 catalog_at = Some(Instant::now());
-                match app.refresh_catalog().await {
+                if upstreams.as_ref().is_none_or(|h| h.is_finished()) {
+                    let app = app.clone();
+                    upstreams = Some(tokio::spawn(async move { app.refresh_upstreams().await }));
+                }
+                match app.refresh_t3_catalog().await {
                     Ok(n) => tracing::debug!(tools = n, "catalog refreshed"),
                     Err(e) => tracing::warn!("catalog refresh failed: {}", app.t3.redact(e)),
                 }
