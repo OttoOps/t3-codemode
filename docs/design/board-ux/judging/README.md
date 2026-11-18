@@ -9,11 +9,11 @@ squashed.
 
 | Round | Judged build | Result | Judged criteria short of the rule | Gates failed or not measured |
 | --- | --- | --- | --- | --- |
-| [1](round-1.md) | `b36808e` | not met | P5, P6, N3, N4 | F1 notification, 15-decision load |
-| [2](round-2.md) | `8c159f5` | not met | N3, N4 | F1 notification, 15-decision load |
-| [3](round-3.md) | `7b0c8c2` | not met | P6, N3 | F1 notification, 15-decision load |
-| [4](round-4.md) | `e50b6d1` | not met | P5, N3 | U3 not measured; F1 notification, 15-decision load |
-| [5](round-5.md) | `6f10d7d` | not met | P6 | P2 failed; F1 notification, 15-decision load |
+| [1](round-1.md) | `b36808e` | not met | P5, P6, N3, N4 | partly measured: U1 (15-decision load), U10 (restore on close), F3 (completed Ask answer), F1 (notification) |
+| [2](round-2.md) | `8c159f5` | not met | N3, N4 | partly measured: U1, U10, F3, F1 as in round 1 |
+| [3](round-3.md) | `7b0c8c2` | not met | P6, N3 | partly measured: U1, U10, F3, F1 as in round 1 |
+| [4](round-4.md) | `e50b6d1` | not met | P5, N3 | U3 not measured; partly measured: U1, U10, F3, F1 as in round 1 |
+| [5](round-5.md) | `6f10d7d` | not met | P6 | P2 failed; partly measured: U1, U10, F3, F1 as in round 1 |
 | [6](round-6.md) | `862f206` | not met | N3 | no gates measured |
 | [7](round-7.md) | `edf2ff3` | met | none | none on the final build |
 
