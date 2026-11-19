@@ -355,14 +355,15 @@ def repo_snapshot(repo):
             data = b"link:" + os.readlink(path).encode()
         else:
             data = path.read_bytes() if path.is_file() else b"special"
-        snap[rel] = hashlib.sha256(data).hexdigest()
+        mode = oct(path.lstat().st_mode & 0o111)
+        snap[rel] = f"{mode}:{hashlib.sha256(data).hexdigest()}"
     return snap
 
 
 def repo_changes(box_root):
     base_file = box_root / "repo-base.json"
     if not base_file.exists():
-        return ["repo-base.json is missing"]
+        raise FileNotFoundError(f"{base_file} is missing, so the repo check cannot tell what changed")
     base = json.loads(base_file.read_text())
     now = repo_snapshot(box_root / "repo")
     return sorted(p for p in base.keys() | now.keys() if base.get(p) != now.get(p))
