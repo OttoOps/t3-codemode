@@ -570,6 +570,12 @@ async fn a_usage_source_with_nothing_left_limits_the_member() {
     u.set_fails(true);
     h.app.store.limit_clear("claude-a").unwrap();
     assert_eq!(pick(&h).await["instanceId"], "claude-a");
+    u.set_fails(false);
+    u.set("claude-a", 0.0, Some(&at(-60)));
+    u.set("claude-b", 0.0, Some(&at(-60)));
+    let r = pick(&h).await;
+    assert!(r["skipped"].as_array().is_none_or(|s| s.is_empty()), "{r}");
+    assert!(mark(&h).await.is_empty());
 }
 
 fn headroom_choice(usage: &[(&str, f64)], credits: &BTreeMap<String, i64>) -> (String, String, BTreeMap<String, i64>) {

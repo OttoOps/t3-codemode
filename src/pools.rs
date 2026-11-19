@@ -392,8 +392,12 @@ impl Wf {
     async fn usage_of(&self, instances: &[String]) -> BTreeMap<String, Usage> {
         let source = self.usage.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(source) = source else { return BTreeMap::new() };
+        let now = self.clock.now();
         match source.usage(instances).await {
-            Ok(u) => u,
+            Ok(u) => u
+                .into_iter()
+                .filter(|(_, u)| u.resets_at.as_deref().and_then(parse_ts).is_none_or(|r| r > now))
+                .collect(),
             Err(e) => {
                 tracing::warn!("usage source did not answer, picking without it: {e:#}");
                 BTreeMap::new()
