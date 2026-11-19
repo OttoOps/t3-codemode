@@ -50,6 +50,21 @@ pub fn state_dir() -> PathBuf {
         .join(APP)
 }
 
+#[cfg(windows)]
+pub fn installed_exe() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join("AppData").join("Local"))
+        .join("Programs")
+        .join(APP)
+        .join("t3cm.exe")
+}
+
+#[cfg(not(windows))]
+pub fn installed_exe() -> PathBuf {
+    home().join(".local").join("bin").join("t3cm")
+}
+
 pub struct Service {
     pub status: &'static str,
     pub start: &'static str,

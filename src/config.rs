@@ -97,6 +97,7 @@ pub struct Config {
     pub upstreams: Vec<UpstreamConfig>,
     #[serde(default)]
     pub pools: BTreeMap<String, PoolConfig>,
+    pub update_check: bool,
 }
 
 pub fn builtin_defaults() -> Value {
@@ -114,6 +115,7 @@ pub fn builtin_defaults() -> Value {
         "bodyCap": 1500,
         "replyCap": 1500,
         "digestLines": 6,
+        "updateCheck": true,
         "roles": {
             "overseer": {"children": {"ticket": {
                 "down": 75, "stall": 480,
