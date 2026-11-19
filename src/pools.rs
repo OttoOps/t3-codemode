@@ -633,15 +633,15 @@ impl Wf {
     pub async fn pools(&self) -> Result<Value> {
         let running = self.running_by_instance().await;
         let limits = self.store.limits()?;
-        let usage = self.usage_of(&self.members().into_iter().collect::<Vec<_>>()).await;
-        let now = self.clock.now();
-        let usage = current(usage, now);
+        let reported = self.usage_of(&self.members().into_iter().collect::<Vec<_>>()).await;
         let mut out = Vec::new();
         for (name, pool) in &self.config.pools {
             let caps = match &running {
                 Ok(_) => self.capabilities(Some(&pool.model)).await,
                 Err(e) => Err(anyhow!("{e:#}")),
             };
+            let now = self.clock.now();
+            let usage = current(reported.clone(), now);
             let error = match &caps {
                 Ok(c) => check_members(name, pool, c).err().map(|e| format!("{e:#}")),
                 Err(e) => Some(format!("T3 did not answer: {e:#}")),
