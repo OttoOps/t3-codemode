@@ -175,8 +175,20 @@ For example:
   to act on. When the action is a command, put the exact command in
   backticks after `here:`. When there is nothing to open or run, end the
   line on the verb phrase.
+- When the user answers by replying, quote each answer they can give after
+  `reply`, `answer` or `say` on the action line, as in the example. The
+  board turns each such quoted answer into a button, up to 8, and drops any
+  answer over 60 characters. Quoted text elsewhere in a message with an
+  action line makes no button. Keep file and branch names out of quotes on
+  that line, or they become buttons too.
 - Context, timings, and evidence come after the action lines.
 - A message that needs nothing from the user carries no marker at all.
+
+Through t3cm, a gate sent to the board can set its card's buttons with
+`wf.send({ kind: "gate", gate, body, options: ["merge", "hold"] })`. A
+thread parent gets only the body, so there the action line carries the
+answers. See
+[codemode.md](codemode.md#the-board-is-the-overseer).
 
 Only the root shows action lines to the user. A thread with a parent sends
 each one up with `--kind gate`, and may also show it in its own thread.

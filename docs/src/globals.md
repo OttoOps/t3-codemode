@@ -85,13 +85,18 @@ parent and a child, and the service keeps every link and message in its store.
 - `wf.openChild({role, label})` returns a `brief` block the parent pastes into
   the child's launch brief; the child runs the
   `wf.join({parent, label, role, down, miss, stall})` call it contains.
-- `wf.send({kind, body, gate?, wake?})`, kinds `note | event | gate | blocker |
-  report | handoff | closed`, to the caller's parent. Returns
+- `wf.send({kind, body, gate?, wake?, options?})`, kinds `note | event | gate |
+  blocker | report | handoff | closed`, to the caller's parent. Returns
   `{handle, delivery}`: `noted`, `sent`, `queued` (the parent is mid-turn, or
   delivery failed; the watcher retries), or `board` when the parent is the
-  board, with a `card` id when the message opened a decision card. `gate`
-  also opens a gate, which stops nudges until the sender clears it. `handoff`
-  and `closed` close the link.
+  board. When the message opened a decision card, the result also carries the
+  `card` id and the card's reply buttons as `options`, plus a `warning` when a
+  gate's card has no buttons. `gate` also opens a gate, which stops nudges
+  until the sender clears it. `handoff` and `closed` close the link.
+- `options`, a list of answers on a `gate`, `blocker` or `report`, sets the
+  board card's buttons in place of the ones parsed from the body. The limits
+  and the parsing rules are in [Reply buttons](board.md#reply-buttons). A bad
+  entry fails the send. A thread parent gets only the body.
 - `wf.reply`, `wf.gate`, `wf.close`, `wf.inbox`, `wf.show`, `wf.board`,
   `wf.adopt` and `wf.sweep` cover the rest of a link's life.
 - `wf.launchTicket`, `wf.cards`, `wf.answer` and `wf.feed` work with the
