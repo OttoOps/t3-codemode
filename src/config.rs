@@ -103,6 +103,7 @@ pub struct Config {
     #[serde(default)]
     pub pools: BTreeMap<String, PoolConfig>,
     pub limit_hold_minutes: u64,
+    pub update_check: bool,
 }
 
 pub fn builtin_defaults() -> Value {
@@ -121,6 +122,7 @@ pub fn builtin_defaults() -> Value {
         "replyCap": 1500,
         "digestLines": 6,
         "limitHoldMinutes": 60,
+        "updateCheck": true,
         "roles": {
             "overseer": {"children": {"ticket": {
                 "down": 75, "stall": 480,

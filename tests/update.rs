@@ -1,0 +1,455 @@
+#![cfg(unix)]
+
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use axum::Router;
+use axum::extract::{Path as UrlPath, State};
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use sha2::{Digest, Sha256};
+use t3_codemode::release::Version;
+use t3_codemode::upgrade::{TARGET, archive_name, archive_stem};
+
+const NEW: &str = "9.9.9";
+
+#[derive(Clone)]
+struct Release {
+    archive: Vec<u8>,
+    name: String,
+    sums: String,
+}
+
+async fn latest() -> Response {
+    (StatusCode::FOUND, [(header::LOCATION, format!("/releases/tag/v{NEW}"))]).into_response()
+}
+
+async fn download(State(r): State<Release>, UrlPath((tag, file)): UrlPath<(String, String)>) -> Response {
+    if tag != format!("v{NEW}") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if file == r.name {
+        r.archive.into_response()
+    } else if file == "SHA256SUMS" {
+        r.sums.into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+fn hex(b: &[u8]) -> String {
+    Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn which(tool: &str) -> PathBuf {
+    let out = Command::new("sh").args(["-c", &format!("command -v {tool}")]).output().unwrap();
+    PathBuf::from(String::from_utf8(out.stdout).unwrap().trim())
+}
+
+struct Env {
+    dir: tempfile::TempDir,
+    bin: PathBuf,
+    url: String,
+}
+
+impl Env {
+    fn path(&self) -> PathBuf {
+        self.dir.path().join("path")
+    }
+
+    fn state(&self) -> PathBuf {
+        self.dir.path().join("state")
+    }
+
+    fn t3cm(&self, args: &[&str]) -> Output {
+        let mut tries = 0;
+        loop {
+            let out = Command::new(&self.bin)
+                .args(args)
+                .env_clear()
+                .env("HOME", self.dir.path())
+                .env("PATH", self.path())
+                .env("T3CM_RELEASES_URL", &self.url)
+                .env("T3CM_STATE_DIR", self.state())
+                .env("T3CM_CONFIG", self.dir.path().join("none.json"))
+                .output();
+            match out {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 50 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                out => return out.unwrap(),
+            }
+        }
+    }
+}
+
+fn fake_archive(dir: &Path, script: &str, unit: Option<&str>) -> (String, Vec<u8>) {
+    let target = TARGET.expect("a release target");
+    let v = Version::parse(NEW).unwrap();
+    let stem = archive_stem(&v, target);
+    let inner = dir.join("pack").join(&stem);
+    std::fs::create_dir_all(&inner).unwrap();
+    let bin = inner.join("t3cm");
+    std::fs::write(&bin, script).unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if let Some(unit) = unit {
+        std::fs::write(inner.join("t3-codemode.service"), unit).unwrap();
+    }
+    let name = archive_name(&v, target);
+    let out = dir.join(&name);
+    let ok = Command::new("tar").arg("-czf").arg(&out).arg("-C").arg(dir.join("pack")).arg(&stem).status().unwrap();
+    assert!(ok.success());
+    (name, std::fs::read(out).unwrap())
+}
+
+fn reports(version: &str) -> String {
+    format!("#!/bin/sh\necho 't3cm {version}'\n")
+}
+
+async fn setup(reported: &str, corrupt: bool) -> Env {
+    serve_release(&reports(reported), None, corrupt, "bin").await
+}
+
+async fn serve_release(script: &str, unit: Option<&str>, corrupt: bool, bin_dir: &str) -> Env {
+    let dir = tempfile::tempdir().unwrap();
+    let (name, archive) = fake_archive(dir.path(), script, unit);
+    let sum = if corrupt { "0".repeat(64) } else { hex(&archive) };
+    let sums = format!("{sum}  {name}\n{}  other.zip\n", "f".repeat(64));
+    let app = Router::new()
+        .route("/releases/latest", get(latest))
+        .route("/releases/download/{tag}/{file}", get(download))
+        .with_state(Release { archive, name, sums });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://127.0.0.1:{}/releases", listener.local_addr().unwrap().port());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let path = dir.path().join("path");
+    std::fs::create_dir_all(&path).unwrap();
+    for tool in ["tar", "gzip"] {
+        std::os::unix::fs::symlink(which(tool), path.join(tool)).unwrap();
+    }
+    let bin_dir = dir.path().join(bin_dir);
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let bin = bin_dir.join("t3cm");
+    std::fs::copy(env!("CARGO_BIN_EXE_t3cm"), &bin).unwrap();
+    Env { dir, bin, url }
+}
+
+fn text(o: &Output) -> String {
+    format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+}
+
+fn leftovers(bin: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(bin.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_reports_the_newer_release_and_caches_it() {
+    let env = setup(NEW, false).await;
+    let (out, cached) = tokio::task::spawn_blocking(move || {
+        let o = env.t3cm(&["update", "--check"]);
+        (o, std::fs::read_to_string(env.state().join("update-check.json")).unwrap_or_default())
+    })
+    .await
+    .unwrap();
+    let t = text(&out);
+    assert!(out.status.success(), "{t}");
+    assert!(t.contains(&format!("{} -> {NEW}", env!("CARGO_PKG_VERSION"))), "{t}");
+    assert!(t.contains(&format!("/releases/tag/v{NEW}")), "{t}");
+    assert!(cached.contains(NEW), "{cached}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_replaces_the_binary_in_place() {
+    let env = setup(NEW, false).await;
+    let (out, after, files) = tokio::task::spawn_blocking(move || {
+        let out = env.t3cm(&["update", "--no-restart", "--port", "9"]);
+        let after = Command::new(&env.bin).arg("--version").output().unwrap();
+        (out, String::from_utf8_lossy(&after.stdout).trim().to_string(), leftovers(&env.bin))
+    })
+    .await
+    .unwrap();
+    let t = text(&out);
+    assert!(out.status.success(), "{t}");
+    assert!(t.contains("Checksum OK") && t.contains("skipped the provenance check"), "{t}");
+    assert!(t.contains(&format!("Installed t3cm {NEW}")), "{t}");
+    assert_eq!(after, format!("t3cm {NEW}"));
+    assert_eq!(files, ["t3cm", "t3cm.old"], "the old binary is kept until a service has run the new one");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_checksum_mismatch_leaves_the_binary_alone() {
+    let env = setup(NEW, true).await;
+    let before = std::fs::read(&env.bin).unwrap();
+    let (out, after, files) = tokio::task::spawn_blocking(move || {
+        let out = env.t3cm(&["update", "--no-restart"]);
+        (out, std::fs::read(&env.bin).unwrap(), leftovers(&env.bin))
+    })
+    .await
+    .unwrap();
+    assert!(!out.status.success());
+    assert!(text(&out).contains("checksum mismatch"), "{}", text(&out));
+    assert!(after == before);
+    assert_eq!(files, ["t3cm"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_binary_that_misreports_its_version_is_refused() {
+    let env = setup("0.0.1", false).await;
+    let before = std::fs::read(&env.bin).unwrap();
+    let (out, after) = tokio::task::spawn_blocking(move || {
+        let out = env.t3cm(&["update", "--no-restart"]);
+        (out, std::fs::read(&env.bin).unwrap())
+    })
+    .await
+    .unwrap();
+    assert!(!out.status.success());
+    assert!(text(&out).contains("not t3cm 9.9.9"), "{}", text(&out));
+    assert!(after == before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unpublished_version_fails_cleanly() {
+    let env = setup(NEW, false).await;
+    let out = tokio::task::spawn_blocking(move || env.t3cm(&["update", "--no-restart", "--version", "v8.0.0"]))
+        .await
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(text(&out).contains("404"), "{}", text(&out));
+}
+
+#[cfg(target_os = "linux")]
+mod service {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const SHIPPED_UNIT: &str = include_str!("../deploy/t3-codemode.service");
+
+    const STUB: &str = r#"#!/bin/sh
+case "$1" in
+  --version) echo 't3cm 9.9.9' ;;
+  serve) exec python3 -c '
+import http.server, json, sys
+port = int(sys.argv[sys.argv.index("--port") + 1])
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        b = json.dumps({"version": "9.9.9"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+' "$@" ;;
+esac
+"#;
+
+    const CRASHES: &str = "#!/bin/sh\ncase \"$1\" in\n  --version) echo 't3cm 9.9.9' ;;\n  serve) exit 1 ;;\nesac\n";
+
+    fn write_exec(path: &Path, body: &str) {
+        use std::io::Write;
+        let mut cp = Command::new("/bin/sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        cp.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
+        assert!(cp.wait().unwrap().success());
+    }
+
+    struct Service {
+        env: Env,
+        port: u16,
+    }
+
+    impl Service {
+        fn fake(&self) -> PathBuf {
+            self.env.dir.path().join("systemd")
+        }
+
+        fn pid(&self) -> Option<i32> {
+            std::fs::read_to_string(self.fake().join("pid")).ok()?.trim().parse().ok()
+        }
+
+        fn restart(&self) {
+            let out = Command::new(self.env.path().join("systemctl")).args(["--user", "restart"]).output().unwrap();
+            assert!(out.status.success(), "{}", text(&out));
+        }
+
+        fn serves(&self, version: &str) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < deadline {
+                if healthz(self.port).as_deref() == Some(version) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            false
+        }
+
+        fn update(&self) -> Output {
+            self.env.t3cm(&["update", "--port", &self.port.to_string()])
+        }
+    }
+
+    impl Drop for Service {
+        fn drop(&mut self) {
+            if let Some(pid) = self.pid() {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+    }
+
+    fn healthz(port: u16) -> Option<String> {
+        use std::io::{Read, Write};
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+        s.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+        write!(s, "GET /healthz HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n").ok()?;
+        let mut body = String::new();
+        s.read_to_string(&mut body).ok()?;
+        let json = body.split("\r\n\r\n").nth(1)?;
+        let v: serde_json::Value = serde_json::from_str(json).ok()?;
+        v["version"].as_str().map(str::to_string)
+    }
+
+    async fn installed(script: &str, unit: Option<&str>) -> Service {
+        let env = serve_release(script, unit, false, ".local/bin").await;
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let fake = env.dir.path().join("systemd");
+        std::fs::create_dir_all(&fake).unwrap();
+        let units = env.dir.path().join(".config/systemd/user");
+        std::fs::create_dir_all(&units).unwrap();
+        std::fs::write(units.join("t3-codemode.service"), SHIPPED_UNIT).unwrap();
+        let home = env.dir.path().display().to_string();
+        let f = fake.display().to_string();
+        write_exec(
+            &fake.join("service"),
+            &format!(
+                "#!/bin/sh\nexport T3CODE_HOME='{home}' T3CM_T3_BIN='{home}/no-t3' T3CM_CONFIG='{home}/none.json' T3CM_NO_UPDATE_CHECK=1\n\
+                 exec '{home}/.local/bin/t3cm' serve --no-watcher --port {port} --state-dir '{f}/state'\n"
+            ),
+        );
+        write_exec(
+            &env.path().join("systemctl"),
+            &format!(
+                r#"#!/bin/sh
+PATH=/usr/bin:/bin
+S='{f}'
+alive() {{ p=$(cat "$S/pid" 2>/dev/null) && [ -d "/proc/$p" ] && [ "$(cut -d' ' -f3 "/proc/$p/stat")" != Z ]; }}
+echo "$*" >> "$S/calls"
+case "$2" in
+  cat) exit 0 ;;
+  is-active) alive ;;
+  show) if alive && [ ! -e "$S/hide-pid" ]; then cat "$S/pid"; else echo 0; fi ;;
+  restart)
+    if alive; then kill "$(cat "$S/pid")"; while alive; do sleep 0.05; done; fi
+    setsid "$S/service" >> "$S/log" 2>&1 < /dev/null &
+    echo $! > "$S/pid" ;;
+  *) exit 0 ;;
+esac
+"#
+            ),
+        );
+        let svc = Service { env, port };
+        svc.restart();
+        assert!(svc.serves(env!("CARGO_PKG_VERSION")), "the fake service never served the current t3cm");
+        svc
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_restarts_the_service_onto_the_new_release() {
+        let changed = SHIPPED_UNIT.replace("Nice=5", "Nice=6");
+        let svc = installed(STUB, Some(&changed)).await;
+        let (out, svc) = tokio::task::spawn_blocking(move || (svc.update(), svc)).await.unwrap();
+        let t = text(&out);
+        assert!(out.status.success(), "{t}");
+        assert!(t.contains(&format!("t3cm updated: {} -> {NEW}", env!("CARGO_PKG_VERSION"))), "{t}");
+        assert_eq!(healthz(svc.port).as_deref(), Some(NEW));
+        assert_eq!(leftovers(&svc.env.bin), ["t3cm"], "the backup goes once the new release serves");
+        let home = svc.env.dir.path();
+        let local = std::fs::read_to_string(home.join(".config/systemd/user/t3-codemode.service")).unwrap();
+        assert_eq!(local, SHIPPED_UNIT, "the updater never writes the unit");
+        let saved = std::fs::read_to_string(svc.env.state().join("t3-codemode.service")).unwrap();
+        assert_eq!(saved, changed);
+        assert!(t.contains("This release changes t3-codemode.service"), "{t}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_release_that_will_not_serve_is_rolled_back() {
+        let svc = installed(CRASHES, None).await;
+        let before = std::fs::read(&svc.env.bin).unwrap();
+        let (out, svc) = tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let out = svc.update();
+            assert!(started.elapsed() < Duration::from_secs(30), "the rollback waited out the health timeout");
+            (out, svc)
+        })
+        .await
+        .unwrap();
+        let t = text(&out);
+        assert!(!out.status.success(), "{t}");
+        assert!(t.contains("the service stopped before it reported 9.9.9"), "{t}");
+        assert!(t.contains(&format!("Rolled back to {}", env!("CARGO_PKG_VERSION"))), "{t}");
+        assert!(svc.serves(env!("CARGO_PKG_VERSION")));
+        assert!(std::fs::read(&svc.env.bin).unwrap() == before);
+        assert_eq!(leftovers(&svc.env.bin), ["t3cm"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_update_is_refused_while_the_service_serves_another_version() {
+        let svc = installed(STUB, None).await;
+        let other = svc.fake().join("service");
+        write_exec(&other, &format!("#!/bin/sh\nexec python3 -c '{}' --port {}\n", OLD_SERVER, svc.port));
+        svc.restart();
+        assert!(svc.serves("0.0.1"));
+        let before = std::fs::read(&svc.env.bin).unwrap();
+        let (out, svc) = tokio::task::spawn_blocking(move || (svc.update(), svc)).await.unwrap();
+        let t = text(&out);
+        assert!(!out.status.success(), "{t}");
+        assert!(t.contains("a t3cm 0.0.1 answers"), "{t}");
+        assert!(std::fs::read(&svc.env.bin).unwrap() == before);
+        assert_eq!(leftovers(&svc.env.bin), ["t3cm"]);
+        let calls = std::fs::read_to_string(svc.fake().join("calls")).unwrap();
+        assert_eq!(calls.matches("restart").count(), 2, "{calls}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_update_is_refused_when_the_service_binary_is_unknown() {
+        let svc = installed(STUB, None).await;
+        std::fs::write(svc.fake().join("hide-pid"), "").unwrap();
+        let before = std::fs::read(&svc.env.bin).unwrap();
+        let (out, svc) = tokio::task::spawn_blocking(move || {
+            (svc.env.t3cm(&["update", "--no-restart", "--port", &svc.port.to_string()]), svc)
+        })
+        .await
+        .unwrap();
+        let t = text(&out);
+        assert!(!out.status.success(), "{t}");
+        assert!(t.contains("could not tell which binary the running service runs"), "{t}");
+        assert!(std::fs::read(&svc.env.bin).unwrap() == before);
+    }
+
+    const OLD_SERVER: &str = r#"
+import http.server, sys
+port = int(sys.argv[sys.argv.index("--port") + 1])
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        b = b"{\"version\": \"0.0.1\"}"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    def log_message(self, *a):
+        pass
+http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
+"#;
+}
