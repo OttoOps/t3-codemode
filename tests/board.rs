@@ -3363,3 +3363,57 @@ return { open, view, posts: posts(), back: { rows: rows(), head: q("#h-new-t").t
     assert_eq!(r["posts"], json!(["/api/new-issues/n1/restore"]), "{r}");
     assert_eq!(r["back"], json!({"rows": ["n1", "n2"], "head": "New issues", "toggle": true}), "{r}");
 }
+
+#[tokio::test]
+async fn the_board_offers_a_newer_release_and_a_reload_after_one() {
+    let s = start(H::new()).await;
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    assert!(st["service"]["update"].is_null(), "no release is known before a check: {st}");
+    s.h.app.wf.set_release(t3_codemode::release::Version::parse("9.9.9").unwrap());
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    let u = &st["service"]["update"];
+    assert_eq!((u["latest"].as_str(), u["available"].as_bool()), (Some("9.9.9"), Some(true)), "{st}");
+    assert!(u["notes"].as_str().unwrap().ends_with("/releases/tag/v9.9.9"), "{u}");
+    let health: Value = s.http.get(format!("{}/healthz", s.base)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(health["update"]["latest"], "9.9.9");
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    assert!(html.contains(&format!("const PAGE_VERSION = \"{}\"", env!("CARGO_PKG_VERSION"))));
+    let scenario = format!(
+        r#"() => {{
+  const base = {st};
+  const $ = (id) => document.getElementById(id);
+  const withUpdate = (latest) => ({{ ...base, service: {{ ...base.service, update: {{ ...base.service.update, latest, available: true }} }} }});
+  const out = {{}};
+  emitState(base);
+  out.offered = !$("upd").hidden && $("upd-text").textContent;
+  $("upd-btn").dispatch("click");
+  out.opened = !$("upd-pop").hidden && $("upd-btn").getAttribute("aria-expanded");
+  out.cmd = $("upd-cmd").textContent;
+  out.notes = $("upd-notes").getAttribute("href");
+  $("upd-hide").dispatch("click");
+  out.hidden = $("upd").hidden && $("upd-pop").hidden;
+  out.stored = localStorage.getItem("t3board.update.hidden");
+  emitState(base);
+  out.stillHidden = $("upd").hidden;
+  emitState(withUpdate("9.9.10"));
+  out.newer = !$("upd").hidden && $("upd-text").textContent;
+  emitState({{ ...base, service: {{ ...base.service, version: "9.9.10", update: null }} }});
+  out.reload = !$("upd").hidden && $("upd-text").textContent;
+  out.go = $("upd-btn").classList.contains("go");
+  emitState({{ ...base, service: {{ ...base.service, update: {{ ...base.service.update, available: false }} }} }});
+  out.current = $("upd").hidden;
+  return out;
+}}"#
+    );
+    let r = run_page(&html, &scenario);
+    assert_eq!(r["offered"], "Update to 9.9.9", "{r}");
+    assert_eq!(r["opened"], "true", "{r}");
+    assert_eq!(r["cmd"], t3_codemode::release::UPDATE_COMMAND, "{r}");
+    assert!(r["notes"].as_str().unwrap().ends_with("/releases/tag/v9.9.9"), "{r}");
+    assert_eq!((r["hidden"].as_bool(), r["stored"].as_str()), (Some(true), Some("9.9.9")), "{r}");
+    assert_eq!(r["stillHidden"], true, "{r}");
+    assert_eq!(r["newer"], "Update to 9.9.10", "{r}");
+    assert_eq!(r["reload"], "Reload for 9.9.10", "{r}");
+    assert_eq!(r["go"], true, "{r}");
+    assert_eq!(r["current"], true, "{r}");
+}
