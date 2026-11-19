@@ -137,8 +137,8 @@ async (page) => {
     r.b[name] = { ...(await page.evaluate(() => ({ same: document.activeElement === window.__kept, connected: window.__kept.isConnected, active: document.activeElement.tagName }))), samples: o.n, samplesLost: o.lost, seen: o.seen };
     await page.keyboard.press("Escape");
   };
-  await keep("ticket thread link", '#open .tk:nth-child(3) [data-part="label"] a', "#tab-open");
-  await keep("worker PR link", '#open .wl [data-part="wpr"] a', null);
+  await keep("ticket thread link", '#open > .tk:nth-child(3 of .tk) [data-part="label"] a', "#tab-open");
+  await keep("worker PR link", '#open .wi a.pr', null);
   await keep("ask Settle", '#asks [data-part="settle"]:not([hidden])', null);
   await keep("settled Restore", '#settled .srow:nth-child(3) [data-part="restore"]', "#tab-settled");
   await page.click("#tab-open");
