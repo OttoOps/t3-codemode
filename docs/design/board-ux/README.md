@@ -6,6 +6,11 @@ layout. This folder holds the first three steps of that issue. PR 2 builds
 the redesign against them and commits its blind-judging scores in
 `judging/`.
 
+[Issue #67](https://github.com/OttoOps/t3-codemode/issues/67) adds a
+readability pass on top: a critique of the shipped board under the live
+load, a Glanceability axis in the rubric, and mockups of the proposed
+direction.
+
 | Path | What it holds |
 | --- | --- |
 | [`review.md`](review.md) | The paired design review of the current board: verdict, findings by area with evidence, what must survive, the functionality inventory, and how the two reviewers settled their disagreements. |
@@ -16,6 +21,9 @@ the redesign against them and commits its blind-judging scores in
 | [`current/`](current/) | Captures of the current board (commit `7e29c9d`) under realistic load, plus `report.json` with the measurements the review cites. |
 | [`harness/`](harness/README.md) | The seeded demo board and the capture scripts, so every capture and measurement here can be rerun. |
 | [`judging/`](judging/README.md) | The blind-judging rounds for the redesign: each round's gates, judged scores with evidence, and letter key. |
+| [`critique.md`](critique.md) | Issue #67: the readability critique under the live load, the task-test baseline, and the proposed direction for the decision card, ticket row and Activity row. |
+| [`live/`](live/README.md) | Issue #67: an anonymized snapshot of the live board, a read-only replay server, the capture script, and the before-stills at 1920, 1366 and 390. |
+| [`mockups/`](mockups/README.md) | Issue #67: a static mockup of the direction under the same load, a component sheet, and the after-stills. |
 
 ## Method
 

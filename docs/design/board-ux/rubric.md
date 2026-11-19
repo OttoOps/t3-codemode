@@ -6,16 +6,27 @@ things into criteria a judge can check: the shortcomings from the
 do well. The redesign ships only when it passes every gate and beats the
 current board on every axis.
 
+[Issue #67](https://github.com/OttoOps/t3-codemode/issues/67) extends it.
+#28's judging passed a board that is hard to read under real use, so the
+[Glanceability](#glanceability) axis adds a live load level, a timed task
+test, and gates for clipped text, state encoding, color meaning, titles,
+times and Activity text. The [critique](critique.md) gives the reasons and
+the current board's values.
+
 ## How judging works
 
 **Fixture.** Every capture and measurement uses the seeded demo board from
 [`harness/`](harness/README.md), with live updates on (`BOARD_DEMO_EVERY=4`)
-unless a test says otherwise. Two load levels:
+unless a test says otherwise. Three load levels:
 
 - *Seeded*: the harness as committed (15 open tickets, 7 decisions, about 45
   Activity lines, 26 settled).
 - *Heavy*: the seeded board left running until it has at least 30 tickets
   and 15 decisions (about nine minutes of live updates, since a ticket arrives every 36 s and a decision every 24 s).
+- *Live*: a snapshot of the real board, anonymized and replayed read-only
+  by [`live/`](live/README.md): 4 decisions, 8 open tickets with 18
+  workers, 50 Activity rows and 19 settled tickets. Glanceability is judged
+  on this load, at 1920x1080, 1366x768 and 390x844.
 
 Viewports: 1440x900, 1280x800 and 1024x768 for desktop; 768x1024 and
 390x844 for narrow. Light and dark.
@@ -45,8 +56,8 @@ and, for the judged appearance criteria, the reference screenshots.
 **Decision rule.** A candidate wins a round when:
 
 - it passes every **gate**;
-- on each of the five axes (Usability, Appearance and polish,
-  Functionality, No slop, Reference fit), its mean judged score across
+- on each of the six axes (Usability, Appearance and polish,
+  Functionality, No slop, Reference fit, Glanceability), its mean judged score across
   judges is higher than the baseline's, and no judged criterion falls below
   the baseline by more than 0.5;
 - on each criterion a still can show (P4, P5, P6, N3, N4, N5, R2 and R4),
@@ -59,6 +70,10 @@ and, for the judged appearance criteria, the reference screenshots.
 If it does not win, the judges' evidence goes into the next iteration and a
 new round runs. The Functionality axis has no judged criteria, so for it
 "beats" means it passes every Functionality gate.
+
+For #67, a candidate also has to pass the task test (G1) on the live load,
+and the issue's owner signs off on the after-screenshots. Agent judging
+alone does not close it.
 
 ## Judged scale
 
@@ -83,7 +98,7 @@ Each judged criterion lists its own anchors. In general:
 | U5 | **Decisions are dense enough to triage.** | Gate | At 1440x900, seeded: at least 5 decision cards fully visible without scrolling the panel, and the median card height is at most 144 px. At 390x844: at least 2.5 cards visible. | Fails: about 4 visible, 156-221 px each. |
 | U6 | **Tickets are dense enough to scan.** | Gate | At 1440x900, seeded: at least 12 open ticket rows, with their note lines, visible in the Tickets panel. Two rows with the same fields have the same height at 1024 and 1440. | Fails: rows vary from 43 to 118 px. |
 | U7 | **Urgent work comes first, and tickets link to their decisions.** | Gate | Blockers and errors sort above gates and reports. In a grayscale capture a judge can still tell a blocker from a gate. Every needs-you ticket row reaches its card in one activation, and the card reaches its row. | Fails: age order only; no link. |
-| U8 | **Replies are safe.** | Gate | With the options reordered in a fixture, none is styled primary. Clicking an option sends no request for at least 5 s; Undo cancels it with no request; otherwise exactly one request is sent. Digit shortcuts never send. | Fails: index-based primary; immediate send. |
+| U8 | **Replies are safe.** | Gate | With the options reordered in a fixture, none is styled primary by its position (G6 styles the answer options above Reply and Dismiss as a group, never one option over another). Clicking an option sends no request for at least 5 s; Undo cancels it with no request; otherwise exactly one request is sent. Digit shortcuts never send. | Fails: index-based primary; immediate send. |
 | U9 | **The keyboard reaches everything.** | Gate | Every item in the functionality inventory works by keyboard alone. Skip links reach each panel and both inputs. Shortcuts do nothing while a field, contenteditable or IME composition has focus, and can be turned off. | Fails: no skip links; Launch at tab stop 218. |
 | U10 | **Narrow widths fall back cleanly.** | Gate | At 768x1024 and 390x844: no horizontal page scroll; one panel at a time; tabs and composer pinned; touch targets at least 44 px; no clipped control at 200% zoom. With the on-screen keyboard open (device or emulated `visualViewport`), the focused input and its submit control stay visible, and closing restores the previous panel and scroll. | Fails: one 6,263 px column. |
 | U11 | **The connection state is honest.** | Gate | Cut the event stream as `harness/cut-stream.js` does, while `/api/state` still succeeds. The header never shows healthy, content is marked stale, reply controls are disabled, and no panel or composer moves (0 px). | Fails: green "T3 connected" under the red banner; content pushed down 35 px. |
@@ -135,3 +150,26 @@ references themselves where a still can show the criterion.
 | R4 | **Status by position first, then a small mark and a word, with a restrained palette.** | `linear-triage.webp`, `buildkite-pipelines.webp`, against the noisier `jira-board.webp` | 1: a chip on everything, many hues. 3: restrained but not structured. 5: queue and position carry most status; a few quiet marks carry the rest. |
 | R5 | **Rows are fixed-height, with age right-aligned and actions in the same place.** | `linear-inbox.webp`, `thunderbird-unified-inbox.webp`, `datadog-oncall-pages.webp` | 1: rows reflow on every change. 3: mostly fixed. 5: a status change swaps a mark, never resizes a row. |
 | R6 | **Detail opens beside or within the item, without a page jump.** | `thunderbird-unified-inbox.webp`, `datadog-oncall-pages.webp`, `slack-channel-thread.webp` | 1: detail pushes the list away. 3: inline disclosure that grows the list. 5: detail in place or beside, with the list position kept. |
+
+## Glanceability
+
+Added for issue #67. Every test runs on the *Live* load at 1920x1080,
+1366x768 and 390x844, dark and light, unless it says otherwise.
+`live/capture.js` records the measured values; the baseline column comes
+from [`live/before/report.json`](live/before/report.json) and the
+[critique](critique.md).
+
+| ID | Criterion | Kind | Test | Baseline |
+| --- | --- | --- | --- | --- |
+| G1 | **What waits on me, and the reply, at a glance.** | Gate | The task test. Three cold readers (Claude Haiku, Sonnet and Opus), each allowed one look at the 1920 dark still and nothing else, name every ticket that waits on the user and the reply each one wants. Pass: each reader names exactly the tickets with an open decision card, with the right reply, and no "maybe" or extra ticket. Record each reader's wall time. The issue's owner also times one cold look at the candidate and at the current board. | Fails: all three found the four asks, but Haiku added a fifth (#67), and Sonnet and Opus could not tell whether #67 waits. 9.2 s, 17.0 s and 14.3 s. |
+| G2 | **No clipped text without an indicator.** | Gate | Every visible element whose text overflows its box ends in an ellipsis or an overflow count (`+3 more`), and its full text is reachable in a tooltip or a disclosure. No text is cut mid-word by a parent's edge. Screen-reader-only text is exempt. | Fails: the worker line (`.wl`) is cut by the row edge with no ellipsis or tooltip at 1366 and 390 (`#647 PR 2/2 gate: transcript-sour`). |
+| G3 | **Every state is distinct without color.** | Gate | `needs you`, `running`, `waiting`, `idle`, `failed` and `done` each have their own shape and word. In grayscale captures of the *Seeded* load, which has failed and waiting workers that the *Live* load lacks, and of the *Live* load, a judge tells all six apart. A ticket's state is the most urgent of its own and its workers' (needs you, then failed, running, waiting, idle, done). | Fails: all 8 open tickets read `idle` while 4 of their 18 workers run; `running` and `idle` share one hollow ring at the same weight. |
+| G4 | **Each color has one meaning.** | Gate | A script lists every rendered text and mark color with the elements that use it. Amber appears only on items with an open decision card and on the Decisions count. Red appears only on failed and blocker items. The accent appears only on links, focus and primary controls. No status hue is used for a heading, a stripe on every card, or a gate that has no open card. Extends P3. | Fails: amber marks `needs you`, every card's stripe and kind dot, and `gate:` text on workers whose gate was already answered. |
+| G5 | **Panels are told apart before they are read.** | Judged | From the 1920 and 1366 stills, blurred to 4 px. 1: every panel has the same surface and weight; the eye has nowhere to land. 3: panels are separable but Decisions does not lead. 5: Decisions reads first, then the tickets that need the user; each panel's job is clear from its shape alone, as in `linear-triage.webp`. | - |
+| G6 | **The answer is the most prominent control on a card.** | Gate | On each decision card that offers answer options, while they are available (not during the Undo window), the options carry the most visual weight of any control (filled, or the highest contrast and area), and Reply, Dismiss and the full-message link are quieter. With several options, all share one style. | Fails: `merge` is an outlined 28 px button with the same weight as the text buttons beside it. |
+| G7 | **Every ticket has a readable title.** | Gate | No ticket, worker or card label shows a raw slug: no `gate:` prefix as a title, no run of `_` between words, no 40- or 64-character hex id. A ticket with no issue title shows its humanized gate or label. | Fails on the board the issue describes (`gate: web#646_owns_the_next_deploy/...`, anonymized); the live snapshot shows raw `gate: windows-signing` and `gate: transcript-source` slugs as row text. |
+| G8 | **One time convention.** | Gate | Every visible time uses one form: relative age (`36m`, `1h 32m`), with the absolute local time in a tooltip. The time zone shows at most once, in the header. | Fails: absolute `15:54` sits beside `1 h 32 min` in the same row; Activity shows clock times only. |
+| G9 | **Activity shows the substance.** | Gate | No Activity row's visible text starts with `event:` or `note:` or shows a hash longer than 7 characters. Consecutive rows for the same ticket or PR collapse into one group with a count, which expands in place. At 1366 the first 40 visible characters of every row's message line are message text. | Fails: 19 of the 50 rows start with `event:`, 23 show a hash of 8 or more characters, five consecutive rows are `#56 PR 1/4`, and the label column clips to `t3-codem...`. |
+| G10 | **Space goes to content.** | Gate | An empty Answers area is at most one line (40 px) under Ask; Activity takes the rest of the column. A ticket list shorter than its panel leaves no reserved empty block above Activity or Launch. | Fails: at 1920 the empty Answers area takes about 290 px, so Activity gets 461 of the column's 1,040 px; Decisions and Tickets each leave about 480 px empty below their last item. |
+| G11 | **All text meets AA.** | Gate | Every visible text, secondary and placeholder text included, is at least 4.5:1 against its rendered background in both themes, and 3:1 for 18 px+ bold text and for borders and focus rings. Extends P1 to all text. | Text passes (lowest 5.38:1). Fails for lines: `--line` dividers and borders are 1.27 to 1.38:1 in light and 1.89 to 2.13:1 in dark, and stale text at 0.55 opacity would be 2.50:1. |
+
