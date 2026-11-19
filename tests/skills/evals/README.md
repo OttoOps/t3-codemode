@@ -8,7 +8,7 @@ The eval sets for the skills in `skills/`, in the format Anthropic's
 | `<skill>/triggers.json` | Trigger evals: `{"query", "should_trigger"}` items, plus `form` (`plain` or `brief`) on each should-trigger item and `env: "plain"` on a prompt that runs outside T3 Code. |
 | `<skill>/evals.json` | Behavior evals for the roles and setup: skill-creator's `evals.json` shape, with a `checks` list that matches `expectations` one to one, and the `setup` the sandbox needs. |
 | `live.py` | The live runner. |
-| `stub_t3_mcp.py`, `fake_gh.py` | The stub T3 MCP server and the fake `gh` a sandbox runs with. |
+| `stub_t3_mcp.py`, `fake_gh.py`, `guard_hook.py` | The stub T3 MCP server, the fake `gh` and the PreToolUse guard a sandbox runs with. |
 
 The sets live here rather than in each skill's folder because
 `npx skills add` copies a skill's whole folder onto the user's machine, and
@@ -39,10 +39,11 @@ gets its own sandbox under `--out` (a temporary folder by default):
   with `insteadOf` to a local bare repo, and `GIT_ALLOW_PROTOCOL=file`, so no
   fetch or push leaves the machine.
 
-The sandbox redirects the run; it is not an OS jail. A behavior run whose tool
-calls name the real `~/.claude`, `~/.agents`, `~/.codex` or `~/.t3`, or a
-local server port, is marked invalid and fails, and so is a run that ended
-without a result.
+A PreToolUse hook (`guard_hook.py`) refuses, before it runs, any tool call
+that names the real `~/.claude`, `~/.agents`, `~/.codex` or `~/.t3`, a local
+server port, or a network client such as `curl`. It matches what a call
+names, so it is a guard, not an OS jail. A behavior run that ended without a
+result, or with an error, makes its eval fail.
 
 Auth comes from `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in the
 environment. `claude setup-token` prints a token for the second.
