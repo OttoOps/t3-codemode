@@ -23,7 +23,7 @@
           "text": "model worker"
         },
         {
-          "text": "\\A[^?]*review[^?]{0,400}\\?"
+          "text": "\\A[^?]*review(?:(?!model|pass|deliver|credential)[^?]){0,400}\\?"
         },
         {
           "bash": "setup_workflow\\.py.*write",

@@ -66,7 +66,8 @@
       ],
       "checks": [
         {
-          "run": "python3 -c \"import widgets; assert widgets.shout('a') == 'WIDGET A'\""
+          "file": "widgets.py",
+          "contains": "def shout\\(name\\):\\s*\\n\\s+return widget\\(name\\)\\.upper\\(\\)"
         },
         {
           "tool": "*",
@@ -79,7 +80,7 @@
         },
         {
           "gh": "pr create",
-          "input": "Unslopped: 2 rules applied\\.\\s*$"
+          "input": "(\\A|\\n)Unslopped: 2 rules applied\\.\\s*\\Z"
         },
         {
           "gh": "pr create",

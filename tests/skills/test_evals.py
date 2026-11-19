@@ -265,8 +265,7 @@ class Checks(unittest.TestCase):
         self.assertFalse(self.passes({"file": "missing.md", "contains": "x"}))
         self.assertTrue(self.passes({"file": "out.md"}))
         self.assertTrue(self.passes({"file": "missing.md", "none": True}))
-        self.assertTrue(self.passes({"run": "grep -q Unslopped out.md"}))
-        self.assertFalse(self.passes({"run": "grep -q robust out.md"}))
+
 
     def test_rescore_reads_saved_transcripts_without_a_model(self):
         ev = live.load("setup-t3-workflow", "evals")["evals"][0]

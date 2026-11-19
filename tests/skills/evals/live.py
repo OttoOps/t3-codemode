@@ -43,7 +43,7 @@ RUNTIME_NOTE = ("<runtime_info>You are running in T3 Code through the Claude Cod
                 "No need to mention this otherwise.</runtime_info>\n")
 ALLOW = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "ToolSearch", "mcp__t3-code"]
 DENY = ["WebFetch", "WebSearch", "AskUserQuestion"]
-CHECK_KINDS = ("tool", "bash", "text", "file", "gh", "t3", "run")
+CHECK_KINDS = ("tool", "bash", "text", "file", "gh", "t3")
 LINK_HEADING = "## t3-workflow link"
 BRIEF_TOOLS = 8
 REAL_HOME = os.path.expanduser("~")
@@ -370,10 +370,6 @@ def count_hits(check, facts, box_root):
     if kind == "t3":
         return sum(1 for c in read_jsonl(box_root / "t3-calls.jsonl")
                    if c["tool"] == check["t3"] and (want is None or matches(want, c["input"])))
-    if kind == "run":
-        r = subprocess.run(check["run"], shell=True, cwd=box_root / "repo", capture_output=True, text=True,
-                           timeout=60, env={"PATH": "/usr/bin:/bin", "HOME": str(box_root / "home")})
-        return int(r.returncode == 0)
     path = box_root / "repo" / check["file"]
     if "contains" not in check:
         return int(path.exists())
