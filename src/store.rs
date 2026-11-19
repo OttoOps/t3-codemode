@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -38,9 +39,18 @@ CREATE TABLE IF NOT EXISTS asks (
 CREATE TABLE IF NOT EXISTS merge_waits (
   repo TEXT NOT NULL, pr INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (repo, pr));
 CREATE TABLE IF NOT EXISTS contexts (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS pool_members (
+  pool TEXT NOT NULL, instance TEXT NOT NULL, credit INTEGER NOT NULL, PRIMARY KEY (pool, instance));
+CREATE TABLE IF NOT EXISTS instance_limits (instance TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS pool_picks (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, pool TEXT NOT NULL, instance TEXT NOT NULL, at TEXT NOT NULL,
+  handle TEXT, data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS pool_picks_pool ON pool_picks (pool, seq);
+CREATE INDEX IF NOT EXISTS pool_picks_handle ON pool_picks (handle) WHERE handle IS NOT NULL;
 "#;
 
 const KEEP_MESSAGES: i64 = 5000;
+const KEEP_PICKS: i64 = 2000;
 const UNSETTLED: &str = "json_extract(data, '$.settledAt') IS NULL";
 
 pub type WaitingRow = (WaitingItem, Option<Value>, Option<(String, Option<String>)>, i64);
@@ -130,6 +140,31 @@ pub struct MergeWait {
     pub label: Option<String>,
     pub merge_state: String,
     pub at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Limit {
+    pub until: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PickRecord {
+    pub pool: String,
+    pub instance_id: String,
+    pub model: String,
+    pub strategy: String,
+    pub reason: String,
+    pub skipped: Value,
+    pub at: String,
+    #[serde(default)]
+    pub handle: Option<String>,
+    #[serde(default)]
+    pub thread: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -707,5 +742,104 @@ impl Store {
 
     pub fn context_delete(&self, id: &str) -> Result<bool> {
         Ok(self.with(|c| c.execute("DELETE FROM contexts WHERE id = ?1", [id]))? > 0)
+    }
+
+    pub fn limit_set(&self, instance: &str, limit: &Limit) -> Result<()> {
+        let s = serde_json::to_string(limit)?;
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO instance_limits (instance, data) VALUES (?1, ?2)
+                 ON CONFLICT (instance) DO UPDATE SET data = excluded.data",
+                params![instance, s],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn limit_clear(&self, instance: &str) -> Result<bool> {
+        Ok(self.with(|c| c.execute("DELETE FROM instance_limits WHERE instance = ?1", [instance]))? > 0)
+    }
+
+    pub fn limits(&self) -> Result<BTreeMap<String, Limit>> {
+        let rows: Vec<(String, String)> = self.with(|c| {
+            let mut st = c.prepare("SELECT instance, data FROM instance_limits ORDER BY instance")?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+        })?;
+        rows.into_iter().map(|(k, v)| Ok((k, serde_json::from_str(&v)?))).collect()
+    }
+
+    pub fn pool_credits(&self, pool: &str) -> Result<BTreeMap<String, i64>> {
+        let rows: Vec<(String, i64)> = self.with(|c| {
+            let mut st = c.prepare("SELECT instance, credit FROM pool_members WHERE pool = ?1")?;
+            st.query_map([pool], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+        })?;
+        Ok(rows.into_iter().collect())
+    }
+
+    pub fn pool_credits_put(&self, pool: &str, credits: &BTreeMap<String, i64>) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction()?;
+        for (instance, credit) in credits {
+            tx.execute(
+                "INSERT INTO pool_members (pool, instance, credit) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (pool, instance) DO UPDATE SET credit = excluded.credit",
+                params![pool, instance, credit],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn pick_add(&self, p: &PickRecord) -> Result<i64> {
+        let s = serde_json::to_string(p)?;
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO pool_picks (pool, instance, at, handle, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![p.pool, p.instance_id, p.at, p.handle, s],
+            )?;
+            let seq = c.last_insert_rowid();
+            if seq % 100 == 0 {
+                c.execute("DELETE FROM pool_picks WHERE seq <= ?1", [seq - KEEP_PICKS])?;
+            }
+            Ok(seq)
+        })
+    }
+
+    pub fn pick_launched(&self, seq: i64, handle: Option<&str>, thread: &str) -> Result<()> {
+        let raw: Option<String> =
+            self.with(|c| c.query_row("SELECT data FROM pool_picks WHERE seq = ?1", [seq], |r| r.get(0)).optional())?;
+        let Some(raw) = raw else { return Ok(()) };
+        let mut p: PickRecord = serde_json::from_str(&raw)?;
+        p.handle = handle.map(String::from);
+        p.thread = Some(thread.to_string());
+        let s = serde_json::to_string(&p)?;
+        self.with(|c| {
+            c.execute("UPDATE pool_picks SET handle = ?2, data = ?3 WHERE seq = ?1", params![seq, handle, s])
+        })?;
+        Ok(())
+    }
+
+    pub fn picks(&self, pool: &str, limit: usize) -> Result<Vec<PickRecord>> {
+        let raws: Vec<String> = self.with(|c| {
+            let mut st = c.prepare("SELECT data FROM pool_picks WHERE pool = ?1 ORDER BY seq DESC LIMIT ?2")?;
+            st.query_map(params![pool, limit as i64], |r| r.get(0))?.collect()
+        })?;
+        raws.iter().map(|s| Ok(serde_json::from_str(s)?)).collect()
+    }
+
+    pub fn pick_by_handle(&self, handle: &str) -> Result<Option<PickRecord>> {
+        let raw: Option<String> = self.with(|c| {
+            c.query_row("SELECT data FROM pool_picks WHERE handle = ?1", [handle], |r| r.get(0)).optional()
+        })?;
+        Ok(raw.map(|s| serde_json::from_str(&s)).transpose()?)
+    }
+
+    pub fn pick_stats(&self, pool: &str) -> Result<BTreeMap<String, (u64, Option<String>)>> {
+        let rows: Vec<(String, i64, Option<String>)> = self.with(|c| {
+            let mut st =
+                c.prepare("SELECT instance, COUNT(*), MAX(at) FROM pool_picks WHERE pool = ?1 GROUP BY instance")?;
+            st.query_map([pool], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect()
+        })?;
+        Ok(rows.into_iter().map(|(i, n, at)| (i, (n.max(0) as u64, at))).collect())
     }
 }

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::clock::{local_clock, parse_ts};
+use crate::pools::Picked;
 use crate::store::{Link, Pending};
 use crate::t3::{BoxFut, truncate_chars};
 use crate::wf::{ACTIVE, ENDED_BADLY, WATCHER, Wf, capped, count, header};
@@ -756,10 +757,16 @@ impl Wf {
                     let status = if done.iter().any(|d| d == t) { "done" } else { chip(live.as_ref()) };
                     (label_of(t), live.unwrap_or(Value::Null)["title"].clone(), status)
                 });
-                let v = json!({"handle": m.handle, "at": local_clock(&m.at), "iso": m.at, "label": label_of(&m.from),
+                let mut v = json!({"handle": m.handle, "at": local_clock(&m.at), "iso": m.at, "label": label_of(&m.from),
                        "kind": m.kind, "head": truncate_chars(&m.head(usize::MAX), 200), "ticket": ticket,
                        "ticketLabel": parent.as_ref().map(|p| &p.0), "ticketTitle": parent.as_ref().map(|p| &p.1),
                        "ticketStatus": parent.as_ref().map(|p| p.2)});
+                if m.from == BOARD
+                    && let Ok(Some(p)) = self.store.pick_by_handle(&m.handle)
+                {
+                    v["instanceId"] = json!(p.instance_id);
+                    v["reason"] = json!(p.reason);
+                }
                 self.placed(v, ticket.as_deref())
             })
             .collect())
@@ -820,6 +827,35 @@ impl Wf {
         Ok(None)
     }
 
+    async fn pool_pick(&self, model: Option<&str>, effort: Option<&str>) -> Result<Option<Picked>> {
+        let Some(name) = &self.config.board.pool else { return Ok(None) };
+        let pool = self.pool(name)?;
+        if let Some(m) = model.filter(|m| *m != pool.model) {
+            bail!("board.pool {name} runs {}; launch without a model, or unset board.pool to launch {m}", pool.model);
+        }
+        if let Some(e) = effort.filter(|e| Some(*e) != pool.effort.as_deref()) {
+            bail!(
+                "board.pool {name} runs effort {}; launch without an effort, or unset board.pool to launch effort {e}",
+                pool.effort.as_deref().unwrap_or("default")
+            );
+        }
+        Ok(Some(self.pick(name).await?))
+    }
+
+    fn note_pool_launch(&self, out: &mut Value, picked: &Picked, what: &str, thread: &str) {
+        out["instanceId"] = json!(picked.instance_id);
+        out["reason"] = json!(picked.reason);
+        let body = format!("{what} launched {}", picked.summary());
+        let recorded = self
+            .store
+            .msg_new(BOARD, BOARD, "note", &body, &self.now())
+            .and_then(|handle| self.store.pick_launched(picked.seq, Some(&handle), thread));
+        if let Err(e) = recorded {
+            tracing::warn!("{what} launched on {}, but recording the pick failed: {e:#}", picked.instance_id);
+            out["warning"] = json!(format!("launched, but recording the pick failed: {e:#}"));
+        }
+    }
+
     fn model_selection(&self, model: &str, effort: Option<&str>) -> Value {
         let mut m = json!({"instanceId": self.config.board.instance_id, "model": model});
         if let Some(e) = effort {
@@ -851,6 +887,8 @@ impl Wf {
         let label = issue.label();
         self.ensure_not_on_board(&label)?;
         let wanted = nonempty(a.project);
+        let model_arg = nonempty(a.model);
+        let effort_arg = nonempty(a.effort);
         let project = match self.find_project(&issue, wanted.as_deref()).await? {
             Some(p) => p,
             None => {
@@ -870,6 +908,10 @@ impl Wf {
         if let Some(repo) = repo {
             self.remember_project(&project_id, &project["title"], Some(repo));
         }
+        let picked = match self.pool_pick(model_arg.as_deref(), effort_arg.as_deref()).await {
+            Ok(p) => p,
+            Err(e) => return self.launch_failed(&label, &format!("Cannot launch {label}: {e:#}")),
+        };
         let params = self.config.link_params("overseer", "ticket")?;
         {
             let _g = self.lock.lock().await;
@@ -888,11 +930,17 @@ impl Wf {
         self.changed();
         let b = &self.config.board;
         let title = format!("{label}: {}", nonempty(a.title).unwrap_or_else(|| issue.url()));
-        let effort = nonempty(a.effort).or_else(|| b.ticket_effort.clone());
+        let selection = match &picked {
+            Some(p) => p.model_selection.clone(),
+            None => {
+                let effort = effort_arg.or_else(|| b.ticket_effort.clone());
+                self.model_selection(&model_arg.unwrap_or_else(|| b.ticket_model.clone()), effort.as_deref())
+            }
+        };
         let mut input = json!({
             "projectId": project_id,
             "title": title,
-            "modelSelection": self.model_selection(&nonempty(a.model).unwrap_or_else(|| b.ticket_model.clone()), effort.as_deref()),
+            "modelSelection": selection,
             "message": ticket_brief(&issue.url(), &label),
             "clientRequestId": format!("t3cm-board-{}", random_id()),
         });
@@ -925,8 +973,12 @@ impl Wf {
             }
         }
         self.note_live(&thread, &json!({"status": r["status"], "link": link, "title": title, "projectId": project_id}));
+        let mut out = json!({"ok": true, "label": label, "thread": thread, "link": link, "projectId": project_id, "title": title});
+        if let Some(p) = &picked {
+            self.note_pool_launch(&mut out, p, &label, &thread);
+        }
         self.changed();
-        Ok(json!({"ok": true, "label": label, "thread": thread, "link": link, "projectId": project_id, "title": title}))
+        Ok(out)
     }
 
     pub async fn ask(&self, question: &str) -> Result<Value> {
@@ -938,10 +990,22 @@ impl Wf {
             bail!("the question is over {MAX_TEXT} chars");
         }
         let b = &self.config.board;
+        let picked = match self.pool_pick(None, None).await {
+            Ok(p) => p,
+            Err(e) => {
+                let text = format!("Cannot ask the board question: {e:#}");
+                let card = self.launch_failed("ask", &text)?;
+                bail!("{text} (recorded as board card {})", card["card"]);
+            }
+        };
+        let selection = match &picked {
+            Some(p) => p.model_selection.clone(),
+            None => self.model_selection(&b.ask_model, b.ask_effort.as_deref()),
+        };
         let mut input = json!({
             "scratch": true,
             "title": format!("Board question: {}", truncate_chars(&q.split_whitespace().collect::<Vec<_>>().join(" "), 50)),
-            "modelSelection": self.model_selection(&b.ask_model, b.ask_effort.as_deref()),
+            "modelSelection": selection,
             "message": ask_brief(q),
             "clientRequestId": format!("t3cm-ask-{}", random_id()),
         });
@@ -953,8 +1017,12 @@ impl Wf {
         let data = json!({"question": q, "thread": thread, "link": r["link"], "status": "running",
                           "answer": null, "at": self.now(), "answeredAt": null, "archived": false});
         let seq = self.store.ask_insert(thread, &data)?;
+        let mut out = ask_view(seq, &data);
+        if let Some(p) = &picked {
+            self.note_pool_launch(&mut out, p, "Board question", thread);
+        }
         self.changed();
-        Ok(ask_view(seq, &data))
+        Ok(out)
     }
 
     async fn last_answer(&self, thread: &str) -> Result<(Value, Option<String>)> {

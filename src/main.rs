@@ -176,6 +176,12 @@ async fn warm_up(app: Arc<App>, t3: Arc<HttpT3>) {
         Ok(n) => tracing::info!(tools = n, "T3 catalog loaded"),
         Err(e) => tracing::warn!("T3 catalog not loaded yet: {e}"),
     }
+    if let Err(e) = app.wf.check_pools().await {
+        tracing::error!(
+            "pools: {}; every pick from the pool fails until the config is fixed",
+            app.t3.redact(format!("{e:#}"))
+        );
+    }
 }
 
 #[cfg(unix)]

@@ -5,6 +5,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::pools::PoolConfig;
 use crate::upstream::UpstreamConfig;
 
 pub const UP_KINDS: &[&str] = &["note", "event", "gate", "blocker", "report", "handoff", "closed"];
@@ -53,6 +54,8 @@ pub struct RoleConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BoardConfig {
     pub instance_id: String,
+    #[serde(default)]
+    pub pool: Option<String>,
     pub ticket_model: String,
     pub ticket_effort: Option<String>,
     pub ask_model: String,
@@ -92,6 +95,8 @@ pub struct Config {
     pub board: BoardConfig,
     #[serde(default)]
     pub upstreams: Vec<UpstreamConfig>,
+    #[serde(default)]
+    pub pools: BTreeMap<String, PoolConfig>,
 }
 
 pub fn builtin_defaults() -> Value {
@@ -120,6 +125,7 @@ pub fn builtin_defaults() -> Value {
         },
         "board": {
             "instanceId": "claudeAgent",
+            "pool": null,
             "ticketModel": "claude-opus-5-5",
             "ticketEffort": "high",
             "askModel": "claude-haiku-5-5",
@@ -178,6 +184,12 @@ impl Config {
         if !over.is_null() {
             merge(&mut v, over);
         }
+        if let Some(pools) = v.get("pools") {
+            let pools = pools.as_object().ok_or_else(|| anyhow!("pools must be an object of named pools"))?;
+            for (name, raw) in pools {
+                crate::pools::check_value(name, raw)?;
+            }
+        }
         let cfg: Config = serde_json::from_value(v)?;
         cfg.validate()?;
         Ok(cfg)
@@ -209,6 +221,17 @@ impl Config {
             }
         }
         crate::upstream::config::validate(&self.upstreams).context("upstreams")?;
+        for (name, pool) in &self.pools {
+            if name.trim().is_empty() {
+                bail!("a pool needs a name");
+            }
+            pool.validate().with_context(|| format!("pool {name}"))?;
+        }
+        if let Some(p) = &self.board.pool
+            && !self.pools.contains_key(p)
+        {
+            bail!("board.pool names {p:?}, which is not in pools");
+        }
         Ok(())
     }
 

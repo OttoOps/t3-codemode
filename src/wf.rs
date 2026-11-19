@@ -122,6 +122,12 @@ struct FeedArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PickArgs {
+    pool: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AdoptArgs {
     from: String,
 }
@@ -209,6 +215,7 @@ pub struct Wf {
     pub(crate) known_projects: Mutex<HashMap<String, Value>>,
     pub(crate) changes: tokio::sync::broadcast::Sender<()>,
     pub(crate) asks_lock: tokio::sync::Mutex<()>,
+    pub(crate) pool_lock: tokio::sync::Mutex<()>,
 }
 
 const MAX_PR_PAGES: usize = 20;
@@ -248,6 +255,7 @@ impl Wf {
             known_projects: Mutex::new(HashMap::new()),
             changes: tokio::sync::broadcast::channel(64).0,
             asks_lock: tokio::sync::Mutex::new(()),
+            pool_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -342,7 +350,7 @@ impl Wf {
 
     pub async fn dispatch(&self, method: &str, caller: Option<&str>, args: Value) -> Result<Value> {
         let out = self.dispatch_inner(method, caller, args).await;
-        if out.is_ok() && !matches!(method, "show" | "inbox" | "board" | "cards" | "feed" | "waiting.list") {
+        if out.is_ok() && !matches!(method, "show" | "inbox" | "board" | "cards" | "feed" | "waiting.list" | "pools") {
             self.changed();
         }
         out
@@ -362,6 +370,11 @@ impl Wf {
             "answer" => {
                 let a: AnswerArgs = parse(method, args)?;
                 return self.answer(&a.id, &a.text).await;
+            }
+            "pick" => return Ok(serde_json::to_value(self.pick(&parse::<PickArgs>(method, args)?.pool).await?)?),
+            "pools" => {
+                parse::<Empty>(method, args)?;
+                return self.pools().await;
             }
             "merge" => return self.merge(caller.filter(|c| !c.is_empty()), parse::<MergeArgs>(method, args)?).await,
             "launchTicket" => {

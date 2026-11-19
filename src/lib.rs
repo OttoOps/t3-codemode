@@ -12,6 +12,7 @@ pub mod js;
 pub mod mcp;
 pub mod merge;
 pub mod platform;
+pub mod pools;
 pub mod sandbox;
 pub mod server;
 pub mod store;
