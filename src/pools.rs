@@ -155,6 +155,10 @@ impl State {
     }
 }
 
+fn current(usage: BTreeMap<String, Usage>, now: Timestamp) -> BTreeMap<String, Usage> {
+    usage.into_iter().filter(|(_, u)| u.resets_at.as_deref().and_then(parse_ts).is_none_or(|r| r > now)).collect()
+}
+
 fn active_limit<'a>(limits: &'a BTreeMap<String, Limit>, id: &str, now: Timestamp) -> Option<&'a Limit> {
     limits.get(id).filter(|l| parse_ts(&l.until).is_some_and(|u| u > now))
 }
@@ -392,12 +396,8 @@ impl Wf {
     async fn usage_of(&self, instances: &[String]) -> BTreeMap<String, Usage> {
         let source = self.usage.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(source) = source else { return BTreeMap::new() };
-        let now = self.clock.now();
         match source.usage(instances).await {
-            Ok(u) => u
-                .into_iter()
-                .filter(|(_, u)| u.resets_at.as_deref().and_then(parse_ts).is_none_or(|r| r > now))
-                .collect(),
+            Ok(u) => u,
             Err(e) => {
                 tracing::warn!("usage source did not answer, picking without it: {e:#}");
                 BTreeMap::new()
@@ -477,6 +477,7 @@ impl Wf {
         let limits = self.store.limits()?;
         let credits = self.store.pool_credits(name)?;
         let now = self.clock.now();
+        let usage = current(usage, now);
         let c = choose(&Inputs {
             name,
             pool,
@@ -599,8 +600,9 @@ impl Wf {
             }
         }
         let ids: Vec<String> = members.iter().cloned().collect();
+        let usage = self.usage_of(&ids).await;
         let now = self.clock.now();
-        for (id, u) in self.usage_of(&ids).await {
+        for (id, u) in current(usage, now) {
             if let Some(until) = u.resets_at.filter(|r| u.left <= 0.0 && parse_ts(r).is_some_and(|r| r > now)) {
                 let reason = Some("the usage source reports no usage left".to_string());
                 keep(id, Limit { until, reason, at: iso(now), thread: None });
@@ -633,6 +635,7 @@ impl Wf {
         let limits = self.store.limits()?;
         let usage = self.usage_of(&self.members().into_iter().collect::<Vec<_>>()).await;
         let now = self.clock.now();
+        let usage = current(usage, now);
         let mut out = Vec::new();
         for (name, pool) in &self.config.pools {
             let caps = match &running {
