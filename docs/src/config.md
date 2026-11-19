@@ -177,6 +177,12 @@ The workflow skills do that for each launch when their `model worker` or
 [A pool on a model line](https://github.com/OttoOps/t3-codemode/blob/main/skills/t3-workflow/slots.md#a-pool-on-a-model-line).
 Pools are per T3 environment, since instance ids belong to one T3 server.
 
+### Updates
+
+| Key | Default | Does |
+|---|---|---|
+| `updateCheck` | `true` | Check GitHub for a newer release: the service every 12 hours, the CLI at most once a day. `false` turns off the CLI notice, the board's update button and the service's checks; `t3cm update` still works. See [Update](getting-started.md#update). |
+
 ### Upstreams
 
 `upstreams` lists other MCP servers to wrap. It has its own page:
@@ -193,6 +199,8 @@ Pools are per T3 environment, since instance ids belong to one T3 server.
 | `T3CM_T3_ORIGIN` | T3's origin, when `server-runtime.json` has the wrong one |
 | `T3CODE_HOME` | T3's home directory (default `~/.t3`) |
 | `T3CM_TZ` | Time zone for times the board and `wf` show (default `America/Denver`; an unknown zone falls back to UTC) |
+| `T3CM_NO_UPDATE_CHECK` | Any value but `0` or `false` turns the release checks off, like `updateCheck: false`. `CI` does the same. |
+| `T3CM_RELEASES_URL` | Where `t3cm update` and the checks look for releases (default `https://github.com/OttoOps/t3-codemode/releases`); https, or plain http on `127.0.0.1` or `localhost` only. The installers read it too. |
 | `RUST_LOG` | Log level |
 
 ## State
@@ -201,7 +209,8 @@ State lives in SQLite at `store.db` in the state directory above
 (`--state-dir` or `T3CM_STATE_DIR` override it). It holds the T3 session, `mem`
 and `vars`, the workflow links and messages, the board's cards and feed, pool
 member credits, limits and pick history, and the cached T3 catalog for when T3
-is down. Everything survives restarts.
+is down. Everything survives restarts. Next to it, `update-check.json` holds
+the latest release the last check found and when.
 
 On Linux and macOS the directory is `0700` and the database `0600`. On Windows
 t3cm sets no ACL of its own: the store relies on the per-user ACL that
