@@ -157,7 +157,7 @@ exact reset times.
 
 | Key | Default | Does |
 |---|---|---|
-| `limitHoldMinutes` | `60` | How long a member stays limited after a limit stop whose reset time T3 does not show |
+| `limitHoldMinutes` | `60` | How long a member stays limited after a limit stop whose reset time T3 does not show, from 1 to 10080 (a week) |
 
 A stop with a later reset extends a member's mark, and one with an earlier
 reset leaves it as it is. The
