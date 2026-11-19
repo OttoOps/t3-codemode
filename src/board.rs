@@ -17,6 +17,9 @@ const DONE_SHOWN: usize = 20;
 const ASKS_SHOWN: usize = 8;
 const SETTLED_SHOWN: usize = 200;
 const MAX_OPTIONS: usize = 8;
+const MAX_OPTION_CHARS: usize = 60;
+const NO_BUTTONS: &str = "this gate's card has no reply buttons, so the user must type an answer; \
+    send it again with options: [\"<answer>\", ...], or quote each answer after reply on its **ACTION NEEDED:** line";
 const MAX_TEXT: usize = 2000;
 const ANSWER_CAP: usize = 1500;
 const PROJECT_RETRY_MINS: f64 = 30.0;
@@ -145,14 +148,47 @@ pub fn reply_options(body: &str) -> Vec<String> {
     out
 }
 
+fn option_fault(out: &[String], opt: &str) -> Option<&'static str> {
+    if opt.is_empty() {
+        Some("is empty")
+    } else if opt.contains('\n') {
+        Some("runs onto a second line")
+    } else if opt.chars().count() > MAX_OPTION_CHARS {
+        Some("is over 60 characters")
+    } else if out.iter().any(|o| o.to_lowercase() == opt.to_lowercase()) {
+        Some("repeats an earlier option")
+    } else {
+        None
+    }
+}
+
 fn add_option(out: &mut Vec<String>, opt: &str) {
     let opt = opt.trim();
-    if out.len() >= MAX_OPTIONS || opt.is_empty() || opt.chars().count() > 60 || opt.contains('\n') {
-        return;
-    }
-    if !out.iter().any(|o| o.eq_ignore_ascii_case(opt)) {
+    if out.len() < MAX_OPTIONS && option_fault(out, opt).is_none() {
         out.push(opt.to_string());
     }
+}
+
+pub fn checked_options(opts: &[String]) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    let mut faults = Vec::new();
+    for (i, opt) in opts.iter().enumerate() {
+        let opt = opt.trim();
+        match option_fault(&out, opt) {
+            Some(why) => faults.push(format!("options[{i}] {} {why}", json!(opt))),
+            None => out.push(opt.to_string()),
+        }
+    }
+    if opts.len() > MAX_OPTIONS {
+        faults.push(format!("{} options given, and a card shows at most {MAX_OPTIONS}", opts.len()));
+    }
+    if !faults.is_empty() {
+        bail!(
+            "wf.send: {}; each option is one line of 1 to {MAX_OPTION_CHARS} characters, unique ignoring case",
+            faults.join("; ")
+        );
+    }
+    Ok(out)
 }
 
 fn after_word_break(s: &str, i: usize) -> bool {
@@ -264,6 +300,7 @@ pub struct NewCard<'a> {
     pub link: Option<&'a str>,
     pub body: &'a str,
     pub handle: Option<&'a str>,
+    pub options: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -556,7 +593,7 @@ impl Wf {
     }
 
     pub(crate) fn card_add(&self, c: NewCard) -> Result<String> {
-        let options = reply_options(c.body);
+        let options = c.options.unwrap_or_else(|| reply_options(c.body));
         let data = json!({"kind": c.kind, "ticket": c.ticket, "handle": c.handle, "options": options});
         let id = self.alloc_waiting(
             BOARD,
@@ -586,24 +623,23 @@ impl Wf {
         self.resolve_cards(|c| c.ticket.as_deref() == Some(ticket), note)
     }
 
-    pub(crate) fn board_card(
-        &self,
-        kind: &str,
-        label: &str,
-        ticket: Option<&str>,
-        link: Option<&str>,
-        handle: &str,
-        body: &str,
-    ) -> Result<String> {
-        if kind == "gate"
-            && let Some(t) = ticket
+    pub(crate) fn board_card(&self, c: NewCard) -> Result<String> {
+        if c.kind == "gate"
+            && let Some(t) = c.ticket
         {
-            self.resolve_cards(|c| c.kind == "gate" && c.ticket.as_deref() == Some(t), "superseded by a newer gate")?;
+            self.resolve_cards(|o| o.kind == "gate" && o.ticket.as_deref() == Some(t), "superseded by a newer gate")?;
         }
-        self.card_add(NewCard { kind, label: Some(label), ticket, link, body, handle: Some(handle) })
+        self.card_add(c)
     }
 
-    pub(crate) fn board_receive(&self, ln: &Link, kind: &str, handle: &str, body: &str) -> Result<Value> {
+    pub(crate) fn board_receive(
+        &self,
+        ln: &Link,
+        kind: &str,
+        handle: &str,
+        body: &str,
+        options: Option<Vec<String>>,
+    ) -> Result<Value> {
         if ln.closed {
             self.resolve_ticket_cards(&ln.child, "ticket finished")?;
             self.changed();
@@ -611,9 +647,22 @@ impl Wf {
                 "detail": "the board marks this ticket done"}));
         }
         if CARD_KINDS.contains(&kind) {
-            let id = self.board_card(kind, &ln.label, Some(&ln.child), ln.link.as_deref(), handle, body)?;
-            return Ok(json!({"handle": handle, "delivery": "board", "card": id,
-                "detail": format!("on the user's board as {id}; the answer arrives here as a [t3cm reply]")}));
+            let options = options.unwrap_or_else(|| reply_options(body));
+            let id = self.board_card(NewCard {
+                kind,
+                label: Some(&ln.label),
+                ticket: Some(&ln.child),
+                link: ln.link.as_deref(),
+                body,
+                handle: Some(handle),
+                options: Some(options.clone()),
+            })?;
+            let mut out = json!({"handle": handle, "delivery": "board", "card": id, "options": options,
+                "detail": format!("on the user's board as {id}; the answer arrives here as a [t3cm reply]")});
+            if kind == "gate" && options.is_empty() {
+                out["warning"] = json!(NO_BUTTONS);
+            }
+            return Ok(out);
         }
         self.changed();
         Ok(json!({"handle": handle, "delivery": "noted", "detail": "on the board's activity feed"}))
@@ -787,6 +836,7 @@ impl Wf {
             link: None,
             body: text,
             handle: None,
+            options: None,
         })?;
         Ok(json!({"ok": false, "label": label, "error": text, "card": card}))
     }
