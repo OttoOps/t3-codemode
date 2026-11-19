@@ -1,0 +1,61 @@
+[
+  {
+    "query": "work issues 12, 14 and 19 in parallel and keep an eye on all three for me",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "be my ticket boss for #42 and #57",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "start these at the same time: https://github.com/acme/widgets/issues/42 https://github.com/acme/widgets/issues/57",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "I've got four bugs to clear today, 101, 102, 104 and 107. Run them side by side and keep one list of what you need from me.",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "launch ticket threads for 42 and 43 and watch them from here",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "can you oversee issues 8 and 9 in parallel?",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "work on issue 42",
+    "should_trigger": false
+  },
+  {
+    "query": "work issues 12 and 14, one after the other",
+    "should_trigger": false
+  },
+  {
+    "query": "what's the status of issues 12, 14 and 19?",
+    "should_trigger": false
+  },
+  {
+    "query": "list the open issues labeled bug in acme/widgets",
+    "should_trigger": false
+  },
+  {
+    "query": "close issues 12 and 14, they're duplicates of 9",
+    "should_trigger": false
+  },
+  {
+    "query": "work issues 12 and 14 in parallel",
+    "should_trigger": false,
+    "env": "plain"
+  },
+  {
+    "query": "Work https://github.com/acme/widgets/issues/57 with the t3-ticket skill.\n\n## t3-workflow link\nThis thread is a child on a t3-workflow link. Before anything else, invoke the t3-workflow skill and run:\nt3wf join --parent thread-boss --label 'widgets#57' --role ticket --down 240 --miss 2 --stall 480 --protocol 2\n",
+    "should_trigger": false
+  }
+]

@@ -1,0 +1,39 @@
+{
+  "skill_name": "setup-t3-workflow",
+  "evals": [
+    {
+      "id": 1,
+      "name": "interview-starts-with-review",
+      "prompt": "Set up the T3 workflow for me.",
+      "expected_output": "Runs the setup script's detect step, then asks about the review slot first and writes nothing until the user answers.",
+      "files": [],
+      "expectations": [
+        "Runs the setup script's detect step",
+        "Shows the current setting of each slot, the worker model included",
+        "Asks about the reviewer first",
+        "Writes no config before the user answers",
+        "Edits no file"
+      ],
+      "checks": [
+        {
+          "bash": "setup_workflow\\.py.*detect"
+        },
+        {
+          "text": "model worker"
+        },
+        {
+          "text": "review"
+        },
+        {
+          "bash": "setup_workflow\\.py.*write",
+          "none": true
+        },
+        {
+          "tool": "Edit",
+          "none": true
+        }
+      ],
+      "setup": {}
+    }
+  ]
+}
