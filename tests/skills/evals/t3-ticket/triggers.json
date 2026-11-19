@@ -1,0 +1,75 @@
+[
+  {
+    "query": "work on issue 533",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "pick up #42 and ship it",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "Can you take https://github.com/acme/widgets/issues/88 from start to merged? Split it into PRs however makes sense.",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "start on the issues we filed this morning, 12 and then 14, one after the other",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "have a new thread work on that issue about the flaky retry test, it's #61",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "work: add a --quiet flag to the CLI so it stops printing progress bars, and get it merged",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "Work https://github.com/acme/widgets/issues/57 with the t3-ticket skill.\n\n## t3-workflow link\nThis thread is a child on a t3-workflow link. Before anything else, invoke the t3-workflow skill and run:\nt3wf join --parent thread-boss --label 'widgets#57' --role ticket --down 240 --miss 2 --stall 480 --protocol 2\n",
+    "should_trigger": true,
+    "form": "brief"
+  },
+  {
+    "query": "Work https://github.com/acme/widgets/issues/57.\n\n## t3-workflow link\nThis thread is a child on a t3-workflow link. Before anything else, invoke the t3-workflow skill and run:\nt3wf join --parent thread-boss --label 'widgets#57' --role ticket --down 240 --miss 2 --stall 480 --protocol 2\n",
+    "should_trigger": true,
+    "form": "brief"
+  },
+  {
+    "query": "what's the status of issue 42?",
+    "should_trigger": false
+  },
+  {
+    "query": "summarize issue #88 for me in three bullets",
+    "should_trigger": false
+  },
+  {
+    "query": "add the bug label to issue 61",
+    "should_trigger": false
+  },
+  {
+    "query": "close issue 14, the last release fixed it",
+    "should_trigger": false
+  },
+  {
+    "query": "reply to the last comment on issue 42 and say we'll look at it next week",
+    "should_trigger": false
+  },
+  {
+    "query": "work on issue 533",
+    "should_trigger": false,
+    "env": "plain"
+  },
+  {
+    "query": "work issues 12, 14 and 19 in parallel and keep an eye on all three for me",
+    "should_trigger": false
+  },
+  {
+    "query": "# #42: Add a --quiet flag to the widget CLI\n\nIssue: https://github.com/acme/widgets/issues/42\nPR 1 of 2: feat: add a --quiet flag\nAcceptance: `widgets --quiet build` prints nothing on success\nBranch: feat/42-quiet-flag\nDelivery: merge. The orchestrator merges and deploys; you\nnever merge, tag, or deploy.\nLater PRs (out of scope): feat: document the --quiet flag in the README\nPasses: none\n\n## Previous handoff\nnone\n\n## t3-workflow link\nThis thread is a child on a t3-workflow link. Before anything else, invoke the t3-workflow skill and run:\nt3wf join --parent thread-ticket --label '#42 PR 1/2' --role worker --down 45 --miss 2 --stall 240 --protocol 2\n\n## Repo rules\nFollow AGENTS.md, CLAUDE.md, CONTRIBUTING.md, README.md and docs/agents/ in\nthis repo. They set the identity, commit trailers, tests, version bump, and\ndone-checks, and they outrank this brief.\nIdentity: the user's own: Eval User <eval-user@example.invalid>, gh login eval-user.\nChecks: python3 -m unittest discover -s tests.\nPR format: no format set by the repo. Write\nthe description through the Publishing section of the procedure.\n\n## Procedure\nInvoke the t3-worker skill and follow the t3-worker procedure\ninline, in this thread, from step 1.\n",
+    "should_trigger": false
+  }
+]

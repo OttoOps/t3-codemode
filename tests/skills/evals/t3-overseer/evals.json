@@ -1,0 +1,69 @@
+{
+  "skill_name": "t3-overseer",
+  "evals": [
+    {
+      "id": 1,
+      "name": "approve-before-launch",
+      "prompt": "Work issues 42 and 43 at the same time, and keep watch over both for me.",
+      "expected_output": "Joins as the overseer root, reads both issues, maps them to the project, and asks the user to approve starting them before launching any ticket thread.",
+      "files": [],
+      "expectations": [
+        "Joins the workflow as the overseer root",
+        "Reads issue 43 with gh",
+        "Asks the user to approve starting the issues",
+        "Launches no ticket thread before approval",
+        "Edits no repository file itself",
+        "Commits nothing"
+      ],
+      "checks": [
+        {
+          "bash": "t3wf\\.py.*init.*--role overseer"
+        },
+        {
+          "gh": "issue view 43"
+        },
+        {
+          "text": "approve starting these issues"
+        },
+        {
+          "t3": "t3_thread_launch",
+          "none": true
+        },
+        {
+          "tool": "Edit",
+          "none": true
+        },
+        {
+          "bash": "git commit",
+          "none": true
+        }
+      ],
+      "setup": {
+        "issues": {
+          "42": {
+            "number": 42,
+            "title": "Add a --quiet flag to the widget CLI",
+            "state": "OPEN",
+            "body": "The CLI prints progress for every widget it builds. Add a --quiet flag that suppresses the progress output, document it in the README, and cover it with a test.",
+            "labels": [],
+            "assignees": [],
+            "milestone": null,
+            "comments": [],
+            "url": "https://github.com/acme/widgets/issues/42"
+          },
+          "43": {
+            "number": 43,
+            "title": "Widget names should be trimmed",
+            "state": "OPEN",
+            "body": "widget(' a ') returns 'widget  a '. Trim the name first.",
+            "labels": [],
+            "assignees": [],
+            "milestone": null,
+            "comments": [],
+            "url": "https://github.com/acme/widgets/issues/43"
+          }
+        }
+      }
+    }
+  ]
+}

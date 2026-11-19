@@ -1,0 +1,58 @@
+{
+  "skill_name": "t3-ticket",
+  "evals": [
+    {
+      "id": 1,
+      "name": "split-before-launch",
+      "prompt": "Work on issue 42 and ship it.",
+      "expected_output": "Joins the workflow as a root ticket, reads the issue, and shows a PR split for approval without launching a worker or touching the code.",
+      "files": [],
+      "expectations": [
+        "Joins the workflow as a root ticket thread",
+        "Reads issue 42 with gh",
+        "Shows the PR split under an action line asking the user to approve it",
+        "Launches no worker thread before the split is approved",
+        "Edits no repository file itself",
+        "Commits nothing"
+      ],
+      "checks": [
+        {
+          "bash": "t3wf\\.py.*init.*--role ticket"
+        },
+        {
+          "gh": "issue view 42"
+        },
+        {
+          "text": "approve this PR split"
+        },
+        {
+          "t3": "t3_thread_launch",
+          "none": true
+        },
+        {
+          "tool": "Edit",
+          "none": true
+        },
+        {
+          "bash": "git commit",
+          "none": true
+        }
+      ],
+      "setup": {
+        "issues": {
+          "42": {
+            "number": 42,
+            "title": "Add a --quiet flag to the widget CLI",
+            "state": "OPEN",
+            "body": "The CLI prints progress for every widget it builds. Add a --quiet flag that suppresses the progress output, document it in the README, and cover it with a test.",
+            "labels": [],
+            "assignees": [],
+            "milestone": null,
+            "comments": [],
+            "url": "https://github.com/acme/widgets/issues/42"
+          }
+        }
+      }
+    }
+  ]
+}

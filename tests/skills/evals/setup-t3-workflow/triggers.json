@@ -1,0 +1,57 @@
+[
+  {
+    "query": "set up the T3 workflow",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "change the reviewer the workers run before they open a PR",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "use a different model for workers, sonnet is fine for them",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "add a cleanup pass that runs on every PR description the workers write",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "I want deploys to go out with tags after the merge; configure that for the ticket threads",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "the ticket thread said there's no T3 workflow config yet, let's fix that",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "workers keep stalling on an expired AWS SSO session; have them renew the credential themselves",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "how does the T3 workflow's link protocol work?",
+    "should_trigger": false
+  },
+  {
+    "query": "install t3cm",
+    "should_trigger": false
+  },
+  {
+    "query": "set up a GitHub Actions workflow that runs the tests on every PR",
+    "should_trigger": false
+  },
+  {
+    "query": "switch this thread to sonnet",
+    "should_trigger": false
+  },
+  {
+    "query": "work on issue 42",
+    "should_trigger": false
+  }
+]
