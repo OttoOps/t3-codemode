@@ -277,7 +277,7 @@ async fn launch_ticket_maps_the_repo_to_a_project_and_preregisters_the_link() {
     let tree = h.app.wf.tree().unwrap();
     assert_eq!(tree[0]["joined"], false);
     assert_eq!(tree[0]["status"], "running");
-    assert_eq!(tree[0]["repo"], "Acme/widgets");
+    assert_eq!(tree[0]["repo"], "acme/WIDGETS");
     assert_eq!(tree[0]["project"], json!({"id": "p-widgets", "title": "p-widgets"}));
     assert_eq!(tree[0]["title"], "widgets#41: Fix the grader");
     let again = h.exec("async () => wf.launchTicket({ issue: 'Acme/widgets#41' })").await;
@@ -1937,6 +1937,7 @@ async fn the_state_carries_each_tickets_repo_project_and_title() {
     let again = snapshot(&h);
     assert_eq!(by_label(&again["tree"], "gadgets#7")["repo"], "acme/gadgets");
     assert_eq!(by_label(&again["tree"], "widgets#41")["repo"], "acme/widgets");
+    assert_eq!(by_label(&again["tree"], "widgets#41")["title"], "widgets#41: Fix the grader");
 }
 
 const FILTER_HELPERS: &str = r##"
@@ -2088,8 +2089,10 @@ const before = { hidden: $$("hidden-new").hidden };
 const a3 = { ...s0.cards[1], id: "a3", at: "2026-11-17T12:30:00Z", kind: "blocker", token: "t-a3" };
 emitState({ ...s0, cards: [...s0.cards, a3] });
 const after = { hidden: $$("hidden-new").hidden, text: $$("hidden-new").textContent, urgent: $$("hidden-new").getAttribute("data-urgent"), cards: ids(), n: $$("n-cards").textContent };
+emitState({ ...s0, cards: [s0.cards[0], { ...s0.cards[1], token: "t-new" }, a3] });
+const replaced = $$("hidden-new").textContent;
 $$("hidden-new").dispatch("click");
-return { before, after, shown: ids(), still: $$("hidden-new").hidden };
+return { before, after, replaced, shown: ids(), still: $$("hidden-new").hidden };
 "##,
     );
     assert_eq!(r["before"]["hidden"], true, "{r}");
@@ -2098,6 +2101,7 @@ return { before, after, shown: ids(), still: $$("hidden-new").hidden };
         json!({"hidden": false, "text": "1 hidden", "urgent": "1", "cards": ["a1"], "n": "1/3"}),
         "{r}"
     );
+    assert_eq!(r["replaced"], "2 hidden", "{r}");
     assert_eq!(r["shown"], json!(["a3", "a1", "a2"]), "{r}");
     assert_eq!(r["still"], true, "{r}");
 }
@@ -2110,7 +2114,8 @@ async fn status_and_kind_filters_pick_tickets_and_cards() {
         &st,
         r##"
 const a3 = { ...s0.cards[0], id: "a3", kind: "blocker", token: "t-a3" };
-const s1 = { ...s0, cards: [...s0.cards, a3], tree: s0.tree.map((t) => t.thread === W ? { ...t, done: true, status: "done", gate: null } : t) };
+const old = { handle: "m94", at: "08:00 MST", iso: "2026-11-17T15:00:00Z", label: "gizmos#5", kind: "note", head: "merged", ticket: "th-old", ticketStatus: "done", repo: null, project: null };
+const s1 = { ...s0, cards: [...s0.cards, a3], feed: [...s0.feed, old], tree: s0.tree.map((t) => t.thread === W ? { ...t, done: true, status: "done", gate: null } : t) };
 emitState(s1);
 pick("statuses", "done");
 const done = view();
@@ -2129,6 +2134,7 @@ return { done, blocked, gates };
     assert_eq!(r["done"]["open"], json!([]), "{r}");
     assert_eq!(r["done"]["done"], json!([w]), "{r}");
     assert_eq!(r["done"]["settled"], json!(["t:th-s"]), "{r}");
+    assert_eq!(r["done"]["feed"], json!(["m92", "m94"]), "{r}");
     assert_eq!(r["blocked"]["cards"], json!(["a3", "a1"]), "{r}");
     assert_eq!(r["blocked"]["open"], json!([t]), "{r}");
     assert_eq!(r["blocked"]["feed"], json!(["m91"]), "{r}");

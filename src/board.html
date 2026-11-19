@@ -1288,7 +1288,7 @@ function filtering() {
 
 function projectKey(it) {
   if (!it) return "";
-  return it.repo || (it.project && (it.project.title || it.project.id)) || "";
+  return (it.repo || (it.project && (it.project.title || it.project.id)) || "").toLowerCase();
 }
 
 function phaseOf(t, cards) {
@@ -1328,7 +1328,9 @@ function cardDesc(c, ctx) {
 
 function feedDesc(f, ctx) {
   const t = f.ticket && (ctx.tix.get(f.ticket) || ctx.settled.get(f.ticket));
-  return { project: projectKey(f) || projectKey(t), phase: ticketPhase(f.ticket, ctx),
+  const s = f.ticketStatus;
+  const known = s === "done" ? "done" : s === "failed" || s === "gone" ? "blocked" : s === "waiting" ? "waiting" : s ? "running" : null;
+  return { project: projectKey(f) || projectKey(t), phase: ticketPhase(f.ticket, ctx) || known,
     text: [f.label, f.kind, f.head, ...placeText(f), f.ticketLabel, f.ticketTitle, t && t.label, t && t.title] };
 }
 
@@ -1362,7 +1364,7 @@ function shown(n, total, blankZero) {
   return blankZero && !total ? "" : String(total);
 }
 
-const cardSeen = (c) => c.id + "@" + c.at;
+const cardSeen = (c) => c.id + "@" + inst(c);
 
 function projectValues() {
   const m = new Map();
