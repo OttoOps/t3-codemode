@@ -1306,6 +1306,7 @@ impl Wf {
         let feed = self.feed(self.config.board.feed)?;
         let asks = self.asks()?;
         let (settled, settled_total) = self.settled()?;
+        let contexts = self.contexts()?;
         let t3 = self.t3.status();
         let last = self.store.meta_get(crate::wf::LAST_PASS)?;
         let open = tree.iter().filter(|t| t["done"] == false).count();
@@ -1316,6 +1317,7 @@ impl Wf {
             "feed": feed,
             "asks": asks,
             "settled": settled,
+            "contexts": contexts,
             "counts": {"cards": cards.len(), "tickets": open, "running": running, "settled": settled_total},
             "service": {
                 "version": env!("CARGO_PKG_VERSION"),

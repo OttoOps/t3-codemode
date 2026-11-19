@@ -142,6 +142,13 @@ document.body = new Element("body");
 document.documentElement.append(document.body);
 document.activeElement = document.body;
 
+const storage = new Map(Object.entries(globalThis.__storage || {}));
+const localStorage = {
+  getItem: (k) => storage.has(k) ? storage.get(k) : null,
+  setItem: (k, v) => { storage.set(k, String(v)); },
+  removeItem: (k) => { storage.delete(k); },
+};
+
 const window = globalThis;
 window.addEventListener = () => {};
 const console = { error: (e) => { throw e; }, log: () => {}, warn: () => {} };
@@ -164,7 +171,7 @@ function advance(ms) {
   fakeNow = end;
 }
 const fetches = [];
-let fetchReply = null;
+let fetchReply = globalThis.__fetchReply || null;
 const fetch = (url, opts) => { fetches.push({ url, method: (opts && opts.method) || "GET", body: opts && opts.body }); return fetchReply ? fetchReply(url, opts) : new Promise(() => {}); };
 let eventSource = null;
 class EventSource {

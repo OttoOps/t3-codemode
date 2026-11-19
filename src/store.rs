@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS asks (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL, open INTEGER NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS merge_waits (
   repo TEXT NOT NULL, pr INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (repo, pr));
+CREATE TABLE IF NOT EXISTS contexts (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 "#;
 
 const KEEP_MESSAGES: i64 = 5000;
@@ -147,6 +148,38 @@ pub struct WaitingItem {
     pub from: Option<String>,
     pub link: Option<String>,
     pub at: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSpec {
+    #[serde(default)]
+    pub projects: Vec<String>,
+    #[serde(default)]
+    pub statuses: Vec<String>,
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardContext {
+    pub id: String,
+    pub name: String,
+    pub spec: ContextSpec,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContextPut {
+    Created(BoardContext),
+    Updated(BoardContext),
+    NameTaken(String),
+    Full,
+    Missing,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -619,5 +652,60 @@ impl Store {
         let n: i64 =
             self.with(|c| c.query_row(&format!("SELECT COUNT(*) FROM asks WHERE NOT {UNSETTLED}"), [], |r| r.get(0)))?;
         Ok(n as usize)
+    }
+
+    fn contexts_in(c: &Connection) -> rusqlite::Result<Vec<BoardContext>> {
+        let mut st = c.prepare("SELECT data FROM contexts")?;
+        let raws: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        let mut all: Vec<BoardContext> = raws.iter().filter_map(|s| serde_json::from_str(s).ok()).collect();
+        all.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.id.cmp(&b.id)));
+        Ok(all)
+    }
+
+    pub fn contexts_all(&self) -> Result<Vec<BoardContext>> {
+        self.with(Self::contexts_in)
+    }
+
+    pub fn context_put(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        spec: Option<&ContextSpec>,
+        at: &str,
+        max: usize,
+    ) -> Result<ContextPut> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let all = Self::contexts_in(&tx)?;
+        let old = all.iter().find(|c| c.id == id);
+        let (name, spec) = match (old, name, spec) {
+            (_, Some(n), Some(s)) => (n.to_string(), s.clone()),
+            (Some(o), n, s) => (n.unwrap_or(&o.name).to_string(), s.unwrap_or(&o.spec).clone()),
+            (None, _, _) => return Ok(ContextPut::Missing),
+        };
+        let lower = name.to_lowercase();
+        if let Some(other) = all.iter().find(|c| c.id != id && c.name.to_lowercase() == lower) {
+            return Ok(ContextPut::NameTaken(other.name.clone()));
+        }
+        if old.is_none() && all.len() >= max {
+            return Ok(ContextPut::Full);
+        }
+        let saved = BoardContext {
+            id: id.to_string(),
+            name,
+            spec,
+            created_at: old.map_or(at, |o| &o.created_at).to_string(),
+            updated_at: at.to_string(),
+        };
+        tx.execute(
+            "INSERT INTO contexts (id, data) VALUES (?1, ?2) ON CONFLICT (id) DO UPDATE SET data = excluded.data",
+            params![saved.id, serde_json::to_string(&saved)?],
+        )?;
+        tx.commit()?;
+        Ok(if old.is_some() { ContextPut::Updated(saved) } else { ContextPut::Created(saved) })
+    }
+
+    pub fn context_delete(&self, id: &str) -> Result<bool> {
+        Ok(self.with(|c| c.execute("DELETE FROM contexts WHERE id = ?1", [id]))? > 0)
     }
 }

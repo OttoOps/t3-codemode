@@ -96,8 +96,31 @@ Settled section at once.
   shortcuts are on.
 
 While a filter is on, each count reads visible/total. A new card the filter
-hides shows up as "N hidden", and clicking it clears the filter. The page keeps
-no filter across a reload.
+hides shows up as "N hidden", and clicking it clears the filter.
+
+### Contexts
+
+A context is a named filter: a set of projects, statuses and card kinds, plus a
+search if you want one. The service stores contexts, so every browser that
+opens the board sees the same ones, and a change made in one browser reaches the
+others as it happens.
+
+The **Context** menu at the start of the filter bar switches between them.
+Picking one applies its filter. **All** clears every filter, and so do **Clear
+filters** and the "N hidden" button. The same menu edits contexts:
+
+- **Save filter as a new context** names the filter you have on.
+- **Save filter to** a context replaces its filter with the one you have on. A
+  context whose filter you changed reads "(edited)" until you save or switch.
+- **Rename** and **Delete** act on the context you are in. Delete asks for a
+  second click.
+
+Each browser remembers its own context and comes back to it after a reload. If
+that context was deleted, the page falls back to All. A context changed in
+another browser applies here too.
+
+While a context is on, a browser notification goes out only for a new card
+inside it. A card outside it still counts toward "N hidden".
 
 ## From a thread
 
@@ -145,7 +168,7 @@ hand.
 | Route | Does |
 |---|---|
 | `GET /` | The page, with a per-process CSRF token embedded |
-| `GET /api/state` | `{cards, tree, feed, asks, settled, counts, service}`; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title` |
+| `GET /api/state` | `{cards, tree, feed, asks, settled, contexts, counts, service}`; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title` |
 | `GET /api/events` | SSE: a `state` event on every change |
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it |
@@ -155,8 +178,11 @@ hand.
 | `POST /api/tickets/{thread}/settle`, `/restore` | Settle a done ticket, or bring a settled one back (400 if open, or not settled) |
 | `POST /api/asks/{id}/settle`, `/restore` | The same for a closed ask; `id` is `q<n>` |
 | `POST /api/settle-done` | Settle every done ticket and closed ask; returns `{tickets, asks}` counts |
+| `GET /api/contexts` | `{contexts: [...]}`, sorted by name; each is `{id, name, spec, createdAt, updatedAt}`, and `spec` is `{projects, statuses, kinds, q?}` |
+| `PUT /api/contexts/{id}` `{name, spec}` | Create the context (201) or replace its name and filter (200). Leave out `spec` to rename an existing context, or `name` to change only its filter; either form needs the context to exist (404 if it does not). `id` is 1 to 64 letters, digits, `-` or `_`. Names are unique ignoring case (409), at most 60 characters, and never "All". Statuses are `running`, `waiting`, `blocked` and `done`, and kinds are the card kinds. The board keeps at most 100 contexts |
+| `DELETE /api/contexts/{id}` | Delete the context (404 if there is none) |
 | `POST /api/open` `{link}` | Open a T3 thread link in the running Windows desktop app (on Windows, or from WSL); returns `{opened}`, and the page opens a new tab when it is `false` (400 for a link that is not a T3 thread) |
 
 Every board route requires `Host` to be `127.0.0.1:<port>` or
-`localhost:<port>` and refuses any other `Origin`. POSTs also need the
-`X-T3CM-CSRF` header, which the page reads from its embedded token.
+`localhost:<port>` and refuses any other `Origin`. POST, PUT and DELETE also
+need the `X-T3CM-CSRF` header, which the page reads from its embedded token.
