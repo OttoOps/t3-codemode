@@ -651,6 +651,213 @@
     }
    }
   },
+  "1366-light": {
+   "viewport": [
+    1366,
+    768
+   ],
+   "scrollHeight": 768,
+   "clipped": [
+    {
+     "text": "get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "q",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "reply \"merge\" to merge #17 PR 5/6 #63 (skills install guide in the README), or r",
+     "cls": "q",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "done#2 PR 1/4done#2 PR 2/5done#2 PR 3/5done#2 PR 4/5done#2 PR 5/5",
+     "cls": "wl",
+     "ellipsis": false,
+     "hasTitle": false,
+     "how": "overflow"
+    },
+    {
+     "text": "done#2 PR 4/5",
+     "cls": "wi",
+     "ellipsis": false,
+     "hasTitle": false,
+     "how": "cut-by-parent"
+    },
+    {
+     "text": "done#17 PR 1/6done#17 PR 2/6done#17 PR 3/6done#17 PR 4/6idle#17 PR 5/6gate: merg",
+     "cls": "wl",
+     "ellipsis": false,
+     "hasTitle": false,
+     "how": "overflow"
+    },
+    {
+     "text": "done#17 PR 4/6",
+     "cls": "wi",
+     "ellipsis": false,
+     "hasTitle": false,
+     "how": "cut-by-parent"
+    },
+    {
+     "text": "17:24 reply: You chose \"sections\": build the transcript from each section's head",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "done#647 PR 1/2running#647 PR 2/2gate: transcript-source",
+     "cls": "wl",
+     "ellipsis": false,
+     "hasTitle": false,
+     "how": "overflow"
+    },
+    {
+     "text": "running#647 PR 2/2gate: transcript-source",
+     "cls": "wi",
+     "ellipsis": false,
+     "hasTitle": false,
+     "how": "cut-by-parent"
+    },
+    {
+     "text": "17:20 note: PR 1/2 handed off and cleaned up; PR 2/2 worker launched on feat/648",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "17:16 note: PR 1/2 open for review while checks run: https://github.com/OttoOps/",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "17:23 gate: reply \"approve\" to approve the 2-PR split for #67 (docs critique, th",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 2/2 built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-p",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 handed off and cleaned up; PR 2/2 worker launched on feat/648-page-build-",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the work",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its ban",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "t3-codemode#55",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 open for review while checks run: https://github.com/OttoOps/t3-codemode/",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "event: PR 1/2 opened: #66 https://github.com/OttoOps/t3-codemode/pull/66, head 0",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#654 rebase-merged (99cffc899); deploy/v2.6.66 pushed 17:07 MST carrying #651/#6",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#646 fix cover",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "event: Follow-up PR opened: #654 https://github.com/acme/web/pull/654, head 3e8d",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 23,
+   "clippedNoTitle": 6,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "14px",
+    "12px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 80,
+     "left": 0,
+     "width": 459,
+     "height": 688,
+     "scrollHeight": 688
+    },
+    "open": {
+     "top": 80,
+     "left": 460,
+     "width": 565,
+     "height": 688,
+     "scrollHeight": 688
+    },
+    "feed": {
+     "top": 572,
+     "left": 1026,
+     "width": 340,
+     "height": 196,
+     "scrollHeight": 1200
+    }
+   }
+  },
   "390-dark": {
    "viewport": [
     390,
@@ -879,6 +1086,516 @@
    }
   },
   "390-dark-activity": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "#648 PR 2/2",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 2/2 built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-p",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 handed off and cleaned up; PR 2/2 worker launched on feat/648-page-build-",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the work",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its ban",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "t3-codemode#55",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 open for review while checks run: https://github.com/OttoOps/t3-codemode/",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#55 PR 1/2",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "event: PR 1/2 opened: #66 https://github.com/OttoOps/t3-codemode/pull/66, head 0",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#654 rebase-merged (99cffc899); deploy/v2.6.66 pushed 17:07 MST carrying #651/#6",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#646 fix cover",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "event: Follow-up PR opened: #654 https://github.com/acme/web/pull/654, head 3e8d",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "HOLD all web deploys: main (with #651 + #653) would null the launch page's banne",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#646 fix cover",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "event: PR 1/1 updated: #653, head f280174ee (remote confirmed; GitHub PR head st",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#646 fix cover",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "event: PR 1/1 opened: #653 https://github.com/acme/web/pull/653, head 390604428 ",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#646 fix cover",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#646 fix committed (390604428): image set, og.png removed, seeder reconcile prov",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#56 PR 1/4",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "event: PR 1/4 updated: #65, head cc9af534e849ca731d2cc42d736d82d3cf93aa1a. CodeR",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#56 PR 1/4",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "event: PR 1/4 updated: #65, head 6900c903f0b3c9729d6b96ef6e8426011204b555. CodeR",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#56 PR 1/4",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#65: CodeRabbit marked both inline findings addressed in 0d14802; required check",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#56 PR 1/4",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "event: PR 1/4 updated: #65, head d940b1f (full sha via gh). CodeRabbit's summary",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#56 PR 1/4",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "event: PR 1/4 updated: #65, head 0d14802ed4ff8d0c6dbac051b25d4edf3f3ab9cd. Fixed",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#59 PR 1/2",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#64: CodeRabbit approved, no actionable comments. Linux checks green; macOS and ",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#647 PR 1/2",
+     "cls": "who clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#652 head 886b34cc8: CodeRabbit's re-review generated no actionable comments. Th",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 34,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "open": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "feed": {
+     "top": 92,
+     "left": 0,
+     "width": 390,
+     "height": 640,
+     "scrollHeight": 1600
+    }
+   }
+  },
+  "390-light": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "q",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "reply \"merge\" to merge #17 PR 5/6 #63 (skills install guide in the README), or r",
+     "cls": "q",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 2,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "14px",
+    "12px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 92,
+     "left": 0,
+     "width": 390,
+     "height": 640,
+     "scrollHeight": 848
+    },
+    "open": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "feed": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    }
+   },
+   "tabs": [
+    "Decisions 4",
+    "Tickets 8",
+    "Activity"
+   ]
+  },
+  "390-light-decisions-4": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "q",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "reply \"merge\" to merge #17 PR 5/6 #63 (skills install guide in the README), or r",
+     "cls": "q",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 2,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "14px",
+    "12px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 92,
+     "left": 0,
+     "width": 390,
+     "height": 640,
+     "scrollHeight": 848
+    },
+    "open": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "feed": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    }
+   }
+  },
+  "390-light-tickets-8": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "done#2 PR 1/4done#2 PR 2/5done#2 PR 3/5done#2 PR 4/5done#2 PR 5/5",
+     "cls": "wl",
+     "ellipsis": false,
+     "hasTitle": false,
+     "how": "overflow"
+    },
+    {
+     "text": "done#2 PR 3/5",
+     "cls": "wi",
+     "ellipsis": false,
+     "hasTitle": false,
+     "how": "cut-by-parent"
+    },
+    {
+     "text": "done#17 PR 1/6done#17 PR 2/6done#17 PR 3/6done#17 PR 4/6idle#17 PR 5/6gate: merg",
+     "cls": "wl",
+     "ellipsis": false,
+     "hasTitle": false,
+     "how": "overflow"
+    },
+    {
+     "text": "done#17 PR 3/6",
+     "cls": "wi",
+     "ellipsis": false,
+     "hasTitle": false,
+     "how": "cut-by-parent"
+    },
+    {
+     "text": "17:24 reply: You chose \"sections\": build the transcript from each section's head",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "done#647 PR 1/2running#647 PR 2/2gate: transcript-source",
+     "cls": "wl",
+     "ellipsis": false,
+     "hasTitle": false,
+     "how": "overflow"
+    },
+    {
+     "text": "running#647 PR 2/2gate: transcript-source",
+     "cls": "wi",
+     "ellipsis": false,
+     "hasTitle": false,
+     "how": "cut-by-parent"
+    },
+    {
+     "text": "17:20 note: PR 1/2 handed off and cleaned up; PR 2/2 worker launched on feat/648",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 8,
+   "clippedNoTitle": 6,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "14px",
+    "12px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "open": {
+     "top": 92,
+     "left": 0,
+     "width": 390,
+     "height": 640,
+     "scrollHeight": 856
+    },
+    "feed": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    }
+   }
+  },
+  "390-light-activity": {
    "viewport": [
     390,
     844

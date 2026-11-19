@@ -21,7 +21,8 @@ The board scores 19/40 on Nielsen's heuristics.
   [`live/`](live/README.md) anonymizes that snapshot and replays it
   read-only, because this repository is public and the live board names a
   private one.
-  All stills are at 1920x1080, 1366x768 and 390x844, in [`live/before/`](live/before/).
+  All stills are at 1920x1080, 1366x768 and 390x844, in dark and light, in
+  [`live/before/`](live/before/).
 - **Critique.** The `impeccable` critique ran as two isolated agents. A
   Claude Opus design review read the code and the stills. A detector pass
   ran `impeccable detect`, injected its overlay into the replay, and
