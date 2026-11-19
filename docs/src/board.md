@@ -14,18 +14,49 @@ each new card while the tab is hidden.
 
 ## What the page shows
 
-- **Decision cards.** Gates, blockers, reports and the watcher's escalations
-  each become a card, with a button for each answer the message offers, as
-  [Reply buttons](#reply-buttons) describes.
+The page has three panels under a header that counts the cards waiting on you
+and the threads running. Only the lists scroll.
+
+- **Needs you.** Gates, blockers, reports and the watcher's escalations each
+  become a card, blockers first. A card opens with the ask itself ("Merge
+  #64"), then the ticket, its issue title and how long the card has waited.
+  Its answers are the filled buttons, as [Reply buttons](#reply-buttons)
+  describes, followed by a link to the PR or issue the message names and the
+  quieter Reply, Dismiss and full-message controls. The ticket label jumps to
+  the ticket's row.
   Answering a card sends the ticket one reply and resolves the card. A ticket
   that clears its gate, or sends a newer `gate` message, resolves its older
   gate cards, and its handoff resolves all of its open cards.
-- **The ticket tree,** with each thread's live status.
-- **The activity feed.** Notes and events from tickets, the latest
-  `board.feed` (50) of them.
-- **A launch box** for GitHub issue URLs. Each one becomes a ticket thread.
-- **An ask box.** A question starts a short-lived Haiku thread that reads the
-  board, writes its answer onto the page, and then gets archived.
+- **Tickets,** in Open, Done and Settled tabs, grouped by state. A ticket
+  takes the most urgent state of its own thread and its workers, so a ticket
+  whose worker runs reads running:
+
+  | Mark | State |
+  |---|---|
+  | filled diamond | needs you: it has an open card |
+  | cross | failed, or blocked |
+  | half-filled ring | running |
+  | dashed ring | waiting |
+  | hollow ring | idle |
+  | check | done |
+
+  Amber marks only the tickets with an open card. A row shows the ticket label,
+  its issue title (or its gate in words when there is no title), and, for a
+  ticket that needs you, a `Reply "merge"` link to its card. Other rows show
+  the last message, and a gate already answered reads "Answered: ...", or "Dismissed: ..." when you dismissed its card. The
+  workers sit at the end of the row, with finished ones folded into a count
+  that expands.
+- **Activity.** Notes and events from tickets, the latest `board.feed` (50)
+  of them, under the ticket and worker that sent them. Runs from the same
+  sender fold into one row that expands. The board drops kind prefixes and
+  `Publishing:` tails, and shortens hashes to 7 characters and GitHub links to
+  `#65`.
+- **Launch and Ask,** pinned above Activity. Launch takes GitHub issue URLs and
+  makes each one a ticket thread. A question in Ask starts a short-lived Haiku
+  thread that reads the board, writes its answer under Ask, and then gets
+  archived.
+
+Times show as ages (`36m`, `1h 32m`); hover one for the local time.
 
 A `handoff` or `closed` message marks a ticket done.
 
@@ -88,7 +119,7 @@ Settled section at once.
 - **Project, Status and Card kind** are multi-select dropdowns. Type in one to
   narrow its list, and Enter toggles the first value left. A project is the
   ticket's `owner/repo`, or its T3 project's title when the repo is not known.
-  Status is running, waiting on me, blocked or done. Card kind narrows only the
+  Status is running, needs you, blocked or done. Card kind narrows only the
   cards.
 - **Search** narrows the page while you type, with no Enter. Every word must
   appear somewhere in the ticket label, the issue title or number, the repo, or
@@ -158,7 +189,7 @@ It works the other way too. A done ticket whose thread you settle or archive in
 T3, or whose thread is gone, settles on the board at the next watcher pass. A
 ticket you restored on the board ignores a T3 settle older than the restore.
 
-The page's collapsed **Settled** section keeps them, with a filter and a
+The **Settled** tab keeps them, with a filter and a
 **Restore** button on each one. Restoring a ticket sends `unsettle` and
 restarts its settle clock. **Settle** on a row and **Settle all done** do it by
 hand.
@@ -168,7 +199,7 @@ hand.
 | Route | Does |
 |---|---|
 | `GET /` | The page, with a per-process CSRF token embedded |
-| `GET /api/state` | `{cards, tree, feed, asks, settled, contexts, counts, service}`; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title` |
+| `GET /api/state` | `{cards, tree, feed, asks, settled, contexts, counts, service}`; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt` |
 | `GET /api/events` | SSE: a `state` event on every change |
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it |
