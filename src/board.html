@@ -7,50 +7,54 @@
 <title>t3 board</title>
 <style>
 :root {
-  --canvas: #f6f6f3;
+  --canvas: #f3f3ef;
   --panel: #ffffff;
-  --panel-2: #eeeee9;
-  --line: #dcdcd5;
-  --field: #8c9096;
-  --ink: #1d1f22;
-  --ink-2: #555a60;
+  --panel-2: #f7f7f4;
+  --raise: #ffffff;
+  --line: #83878d;
+  --field: #7d8187;
+  --ink: #1b1d20;
+  --ink-2: #565b62;
+  --ink-3: #61666d;
   --accent: #2f5bd3;
   --accent-ink: #ffffff;
   --accent-soft: #e4ebfb;
   --go: #2f5bd3;
   --go-ink: #ffffff;
   --go-hover: #2549b0;
-  --neutral: #4f555c;
   --need: #8a4f00;
-  --need-rule: #c27a12;
-  --need-soft: #fbf0dd;
+  --need-fill: #f2b450;
+  --need-fill-ink: #2a1a00;
   --fail: #a52a22;
   --fail-soft: #fbe5e3;
   --done: #24663d;
+  --needs-you-surface: #fbf7ef;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --canvas: #121417;
-    --panel: #1d2024;
-    --panel-2: #262a2f;
-    --line: #464c54;
+    --canvas: #0f1113;
+    --panel: #181b1f;
+    --panel-2: #1d2125;
+    --raise: #22262b;
+    --line: #6e747c;
     --field: #7d848c;
-    --ink: #e7e8ea;
-    --ink-2: #a3a8b0;
-    --accent: #7c9cf5;
+    --ink: #eceef0;
+    --ink-2: #a9aeb5;
+    --ink-3: #9198a0;
+    --accent: #86a5f7;
     --accent-ink: #0f1420;
     --accent-soft: #232c45;
-    --go: #3b62d6;
+    --go: #4268dc;
     --go-ink: #ffffff;
-    --go-hover: #2c50bd;
-    --neutral: #b4b9c0;
-    --need: #e8ac55;
-    --need-rule: #e8ac55;
-    --need-soft: #3a2e1b;
-    --fail: #f08a80;
+    --go-hover: #3a5fd0;
+    --need: #f0b45e;
+    --need-fill: #f0b45e;
+    --need-fill-ink: #1f1400;
+    --fail: #f2948a;
     --fail-soft: #3d2221;
-    --done: #79c995;
+    --done: #7fcf9b;
+    --needs-you-surface: #1c1a17;
   }
 }
 * { box-sizing: border-box; }
@@ -86,77 +90,92 @@ ol, ul { list-style: none; }
 .skip a:focus { position: static; }
 
 .btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
-  height: 28px; padding: 0 8px; border-radius: 6px; cursor: pointer; white-space: nowrap;
-  border: 1px solid var(--field); background: var(--panel); color: var(--ink);
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  height: 28px; padding: 0 12px; border-radius: 4px; cursor: pointer; white-space: nowrap;
+  border: 1px solid var(--field); background: transparent; color: var(--ink);
   font-size: 13px; line-height: 18px; font-weight: 500;
   transition: background 120ms ease-out, border-color 120ms ease-out;
 }
 .btn:hover { background: var(--panel-2); }
+.btn svg { width: 16px; height: 16px; flex: none; }
 .btn[aria-disabled="true"], .btn:disabled { cursor: default; opacity: 0.55; }
-.btn[aria-disabled="true"]:hover, .btn:disabled:hover { background: var(--panel); }
-.btn.go { background: var(--go); border-color: var(--go); color: var(--go-ink); font-weight: 600; }
-.btn.go:hover { background: var(--go-hover); border-color: var(--go-hover); }
-.btn.quiet { border-color: transparent; background: transparent; color: var(--ink-2); }
-.btn.quiet:hover { color: var(--ink); border-color: var(--line); }
+.btn[aria-disabled="true"]:hover, .btn:disabled:hover { background: transparent; }
+.btn.go, .btn.answer { background: var(--go); border-color: var(--go); color: var(--go-ink); font-weight: 600; }
+.btn.go:hover, .btn.answer:hover { background: var(--go-hover); border-color: var(--go-hover); }
+.btn.go[aria-disabled="true"]:hover, .btn.answer[aria-disabled="true"]:hover { background: var(--go); }
+.btn.answer { height: 28px; padding: 0 12px; font-size: 14px; line-height: 20px; }
+.btn.ic { width: 28px; padding: 0; justify-content: center; }
+.btn.ic::before {
+  content: ""; width: 12px; height: 12px; background: currentColor;
+  -webkit-mask: var(--chev) center / contain no-repeat; mask: var(--chev) center / contain no-repeat;
+  --chev: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5l3.5 3.5 3.5-3.5' fill='none' stroke='%23000' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+.btn.ic[aria-expanded="true"]::before { transform: rotate(180deg); }
+.btn.quiet { border-color: transparent; background: transparent; color: var(--ink-2); padding: 0 8px; }
+.btn.quiet:hover { color: var(--ink); background: var(--panel-2); }
 .linkish {
   border: 0; background: none; padding: 0; cursor: pointer; color: var(--accent);
   font: inherit; text-align: left;
 }
 .linkish:hover, .linkish:focus-visible { text-decoration: underline; text-underline-offset: 2px; }
 input[type=text], input[type=search], textarea {
-  width: 100%; min-width: 0; background: var(--panel); color: var(--ink);
+  width: 100%; min-width: 0; background: var(--canvas); color: var(--ink);
   border: 1px solid var(--field); border-radius: 6px; padding: 4px 8px;
   font-size: 14px; line-height: 20px;
 }
 input[type=text], input[type=search] { height: 32px; }
 input[type=text]:focus, input[type=search]:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
-input::placeholder, textarea::placeholder { color: var(--ink-2); opacity: 1; }
+input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 textarea { resize: none; display: block; }
 
 .mark { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; line-height: 16px; font-weight: 600; white-space: nowrap; }
 .mark::before {
-  content: ""; width: 8px; height: 8px; flex: none; border-radius: 50%;
-  border: 2px solid currentColor; box-sizing: border-box;
+  content: ""; width: 12px; height: 12px; flex: none; background: currentColor;
+  -webkit-mask: var(--shape) center / contain no-repeat; mask: var(--shape) center / contain no-repeat;
 }
-.r-neutral { color: var(--neutral); }
-.r-need { color: var(--need); }
-.r-need::before { background: currentColor; }
-.r-fail { color: var(--fail); }
-.r-fail::before { background: currentColor; border-radius: 1px; }
-.r-done { color: var(--done); }
-.r-done::before { background: currentColor; }
+.s-need { color: var(--need); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M6 .8 11.2 6 6 11.2.8 6z'/%3E%3C/svg%3E"); }
+.s-fail { color: var(--fail); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2 2l8 8M10 2l-8 8' stroke='%23000' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.s-run { color: var(--ink); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4.6' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3Cpath d='M6 1.4a4.6 4.6 0 0 1 0 9.2z'/%3E%3C/svg%3E"); }
+.s-wait { color: var(--ink-2); font-weight: 500; --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4.6' fill='none' stroke='%23000' stroke-width='1.8' stroke-dasharray='1.8 2.2'/%3E%3C/svg%3E"); }
+.s-idle { color: var(--ink-2); font-weight: 500; --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4.4' fill='none' stroke='%23000' stroke-width='1.4'/%3E%3C/svg%3E"); }
+.s-done { color: var(--done); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M1.5 6.5l3 3 6-7' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+.pill {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 20px; padding: 0 8px;
+  border-radius: 4px; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-2);
+}
+.pill.on { background: var(--need-fill); color: var(--need-fill-ink); }
+.pill:empty { display: none; }
 
 .app {
   height: 100vh; height: 100dvh; display: grid;
-  grid-template-rows: 40px auto minmax(0, 1fr);
+  grid-template-rows: 48px auto minmax(0, 1fr);
 }
 .top {
   display: flex; align-items: center; gap: 16px; min-width: 0;
-  padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--panel);
+  padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--panel);
 }
 .top h1 { font-size: 16px; line-height: 20px; font-weight: 600; white-space: nowrap; }
 .conn { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; color: var(--ink-2); font-size: 13px; }
-.conn .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--neutral); }
+.conn .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--ink-2); }
 .conn .dot.ok { background: var(--done); }
 .conn .dot.warn { background: transparent; border: 2px solid var(--fail); }
 .conn .dot.bad { background: var(--fail); border-radius: 1px; }
 .conn .facts { display: flex; gap: 8px; min-width: 0; }
-.conn .sep { color: var(--line); }
 .stale .conn { color: var(--fail); }
-.counts { display: flex; gap: 12px; font-size: 13px; color: var(--ink-2); white-space: nowrap; }
+.counts { display: flex; align-items: center; gap: 16px; font-size: 13px; color: var(--ink-2); white-space: nowrap; }
 .counts b { color: var(--ink); font-weight: 600; }
-.counts .need b { color: var(--need); }
-.top .tools { display: flex; gap: 4px; }
+.counts .needc { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); font-weight: 600; }
+.top .tools { display: flex; gap: 8px; }
 
 .fbar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0;
-  padding: 4px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
+  padding: 4px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
 }
-.fbar #filter-q { flex: 0 1 280px; }
+.fbar #filter-q { flex: 0 1 280px; height: 28px; font-size: 13px; line-height: 18px; }
 .facets { display: flex; gap: 4px; flex-wrap: wrap; }
 .facet { position: relative; }
-.fbtn[aria-expanded="true"] { background: var(--panel-2); }
+.fbtn { border-color: transparent; color: var(--ink-2); padding: 0 8px; }
+.fbtn[aria-expanded="true"] { background: var(--panel-2); color: var(--ink); }
 .fbtn[data-on] { border-color: var(--accent); color: var(--accent); }
 .fpop {
   position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; width: 260px; max-height: 320px; overflow-y: auto;
@@ -181,22 +200,22 @@ textarea { resize: none; display: block; }
 
 .panes {
   display: grid; min-height: 0; min-width: 0; gap: 0;
-  grid-template-columns: 460px minmax(0, 1fr) 340px;
+  grid-template-columns: 440px minmax(0, 1fr) 380px;
   grid-template-rows: minmax(0, auto) minmax(0, 1fr);
   grid-template-areas: "dec tix cmd" "dec tix act";
 }
 .pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--panel); }
-#p-dec { grid-area: dec; border-right: 1px solid var(--line); }
-#p-tix { grid-area: tix; border-right: 1px solid var(--line); background: var(--canvas); }
+#p-dec { grid-area: dec; border-right: 1px solid var(--line); background: var(--needs-you-surface); }
+#p-tix { grid-area: tix; border-right: 1px solid var(--line); }
 #composer { grid-area: cmd; background: var(--panel); border-bottom: 1px solid var(--line); min-width: 0; min-height: 0; overflow-y: auto; }
 #p-act { grid-area: act; }
 #out { order: 1; }
 .ph {
-  height: 40px; flex: none; display: flex; align-items: center; gap: 8px;
-  padding: 0 12px; border-bottom: 1px solid var(--line); min-width: 0;
+  height: 48px; flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 0 16px; border-bottom: 1px solid var(--line); min-width: 0;
 }
-.ph h2 { font-size: 14px; line-height: 20px; font-weight: 600; white-space: nowrap; }
-.ph h2 .n { color: var(--ink-2); font-weight: 400; margin-left: 4px; }
+.ph h2 { font-size: 16px; line-height: 20px; font-weight: 600; white-space: nowrap; display: flex; align-items: center; gap: 8px; }
+.ph h2 .n { color: var(--ink-2); font-size: 13px; font-weight: 500; }
 .newslot { margin-left: auto; flex: none; min-width: 88px; display: flex; justify-content: flex-end; }
 .newbtn {
   height: 24px; padding: 0 8px; border-radius: 6px; cursor: pointer; font-size: 12px; line-height: 16px; font-weight: 600;
@@ -206,99 +225,118 @@ textarea { resize: none; display: block; }
 .newbtn.off { visibility: hidden; }
 .body { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
-.empty { padding: 16px 12px; color: var(--ink-2); font-size: 13px; line-height: 18px; }
+.empty { padding: 16px; color: var(--ink-2); font-size: 13px; line-height: 18px; }
 .body > .empty, .tp > .empty { position: absolute; left: 0; right: 0; top: 0; }
 .tp > .sub ~ .empty { top: 48px; }
 .empty[hidden] { display: none; }
-.stale .list, .stale .rows, .stale #feed { opacity: 0.55; }
+.stale .list, .stale .rows, .stale #feed { opacity: 0.8; }
 
-#cards { padding: 8px; display: flex; flex-direction: column; gap: 8px; background: var(--canvas); }
+#cards { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
 .card {
-  flex: none; background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--line);
-  border-radius: 6px; padding: 8px 12px; display: grid; gap: 4px; min-width: 0;
+  flex: none; background: var(--raise); border: 1px solid var(--line);
+  border-radius: 4px; padding: 12px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0;
 }
-.card.k-fail { border-left-color: var(--fail); }
-.card.k-need { border-left-color: var(--need-rule); }
+.card.k-fail { border-color: var(--fail); }
 .card:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-.ch { display: flex; align-items: center; gap: 8px; height: 20px; min-width: 0; font-size: 13px; line-height: 18px; color: var(--ink-2); }
-.ch .cid { color: var(--ink-2); font-size: 12px; }
-.ch .lbl, .ch .lbl a, .tl a { font-weight: 600; color: var(--ink); }
-.ch .end { margin-left: auto; display: flex; gap: 8px; align-items: center; flex: none; }
-.ch .end .linkish { font-size: 13px; }
 .q {
-  font-weight: 500; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  font-weight: 600; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   overflow: hidden; overflow-wrap: anywhere;
 }
-.act { display: flex; align-items: center; gap: 8px; min-height: 32px; flex-wrap: wrap; padding-top: 4px; }
-.act .btn { height: 28px; }
-.act .tail { margin-left: auto; display: flex; gap: 4px; }
-.sending { display: flex; align-items: center; gap: 8px; min-height: 32px; padding-top: 4px; font-size: 13px; line-height: 18px; min-width: 0; }
+.q .kw { display: inline-flex; vertical-align: -2px; margin-right: 4px; font-size: 14px; line-height: 20px; }
+.q .kw.s-report { color: var(--ink-2); }
+.q .kw.s-report::before { display: none; }
+.ctx { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 13px; line-height: 18px; color: var(--ink-2); }
+.ctx .lbl { color: var(--ink); font-weight: 500; flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx .lbl:disabled { cursor: default; text-decoration: none; }
+.ctx .ttl { flex: 1 1 auto; }
+.ctx .age { margin-left: auto; flex: none; }
+.detail { color: var(--ink-2); font-size: 13px; line-height: 18px; }
+.act { display: flex; align-items: center; gap: 8px; min-height: 32px; flex-wrap: wrap; min-width: 0; margin-top: 4px; }
+.act .opts { display: flex; flex-wrap: wrap; gap: 8px; }
+.act .rev { font-size: 13px; line-height: 18px; white-space: nowrap; }
+.act .tail { margin-left: auto; display: flex; align-items: center; gap: 0; }
+.act .tail .mono { font-size: 12px; }
+.sending { display: flex; align-items: center; gap: 8px; min-height: 32px; margin-top: 4px; font-size: 13px; line-height: 18px; font-weight: 600; min-width: 0; }
 .sending .what { flex: 1 1 auto; }
-.sending .btn { margin-left: auto; }
-.reply { display: flex; gap: 8px; padding-top: 4px; }
+.sending .btn { margin-left: auto; height: 32px; border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.reply { display: flex; gap: 8px; }
 .reply[hidden], .fullbox[hidden], .card .err[hidden] { display: none; }
+.fullbox { display: grid; gap: 8px; }
 .fullbox pre {
   white-space: pre-wrap; overflow-wrap: anywhere; font: 400 14px/20px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   margin: 0; max-height: 240px; overflow: auto;
 }
 .card .err, .perr { color: var(--fail); font-size: 13px; line-height: 18px; }
-.stale-item { opacity: 0.6; }
+.stale-item { opacity: 0.8; }
 .gone {
   color: var(--ink-2); font-size: 13px; line-height: 18px; display: flex; align-items: center; gap: 8px;
   border-style: dashed; background: transparent;
 }
-.card.gone { border-left-width: 1px; border-left-style: dashed; align-content: center; }
+.card.gone { align-content: center; }
 .arrive { animation: arrive 1.2s ease-out; }
 @keyframes arrive { from { background-color: var(--accent-soft); } }
 
-.tabs { display: flex; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.tabs { display: flex; align-self: stretch; gap: 16px; margin-left: 16px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .tab {
-  height: 28px; padding: 0 8px; border: 1px solid transparent; border-radius: 6px; background: none; cursor: pointer;
-  color: var(--ink-2); font-size: 13px; line-height: 18px; font-weight: 500; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; border-top: 2px solid transparent; border-bottom: 2px solid transparent;
+  background: none; cursor: pointer; color: var(--ink-2); font-size: 13px; line-height: 18px; font-weight: 500; white-space: nowrap;
 }
-.tab:hover { color: var(--ink); background: var(--panel-2); }
-.tab[aria-selected="true"] { color: var(--ink); border-color: var(--line); background: var(--panel); font-weight: 600; }
-.tab .n { color: var(--ink-2); font-weight: 400; margin-left: 4px; }
+.tab:hover { color: var(--ink); }
+.tab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
+.tab .n { color: var(--ink-2); font-weight: 500; }
 .tp { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .tp[hidden] { display: none; }
 .sub {
-  flex: none; display: flex; align-items: center; gap: 8px; height: 48px; padding: 0 12px;
-  border-bottom: 1px solid var(--line); background: var(--canvas);
+  flex: none; display: flex; align-items: center; gap: 8px; height: 48px; padding: 0 16px;
+  border-bottom: 1px solid var(--line); background: var(--panel-2);
 }
 .sub .meta { flex: 1 1 auto; }
-.rows { background: var(--panel); }
-.tk { border-bottom: 1px solid var(--line); border-left: 3px solid transparent; }
-.tk.need { border-left-color: var(--need-rule); }
-.tk.fail { border-left-color: var(--fail); }
+.tk { border-bottom: 1px solid var(--line); }
 .tk:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
-.tr {
-  display: grid; align-items: center; column-gap: 8px; row-gap: 0; padding: 0 12px 0 8px;
-  grid-template-columns: 84px minmax(0, 1fr) 112px 40px; grid-template-rows: 32px;
+.tgroup {
+  display: flex; align-items: center; gap: 8px; padding: 4px 16px; font-size: 12px; line-height: 16px; font-weight: 600;
+  color: var(--ink); background: var(--panel-2);
 }
-.tr.with-note { grid-template-rows: 28px 18px; padding-bottom: 4px; }
-.tr.with-note.with-wk { grid-template-rows: 28px 18px 18px; padding-bottom: 0; }
-.tr .tn { grid-column: 2 / -1; grid-row: 2; display: flex; gap: 8px; min-width: 0; align-items: center; }
-.tr .tn .needs { flex: none; }
-.wl { grid-column: 2 / -1; grid-row: 3; display: flex; gap: 24px; min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; font-size: 13px; line-height: 18px; white-space: nowrap; }
-.wi { display: inline-flex; gap: 4px; align-items: center; flex: none; }
-.wi .mark { font-weight: 400; }
-.wi .sep::before { content: "\00b7"; color: var(--ink-2); margin-right: 4px; }
+.tgroup .num { color: var(--ink-2); font-weight: 500; }
+.tr {
+  display: grid; column-gap: 8px; row-gap: 0; padding: 8px 16px; align-items: baseline;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+}
+.tr .mk { align-self: center; grid-row: 1; }
+.tr .mk .mark::before { width: 14px; height: 14px; }
+.tr .t1 { display: flex; gap: 8px; align-items: baseline; min-width: 0; line-height: 18px; }
+.tr .tl { font-weight: 600; flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tr .tl a { color: var(--ink); }
+.tr .ttl { color: var(--ink); flex: 0 1 auto; }
+.tr .tag { font-size: 12px; line-height: 16px; color: var(--ink-2); white-space: nowrap; flex: none; }
+.tr .pr { font-size: 13px; line-height: 18px; white-space: nowrap; flex: none; }
+.tr .tn { grid-column: 2 / -1; display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.tr .tn[hidden] { display: none; }
+.tr .needs { flex: none; font-weight: 600; color: var(--need); }
 .tr .needs.r-fail { color: var(--fail); }
-.tr .lc { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.tr .tl { font-weight: 600; flex: 0 1 auto; }
-.tr .tag { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--need); white-space: nowrap; }
-.tr .tag.quiet { color: var(--ink-2); font-weight: 400; }
-.tr .needs { font-size: 13px; white-space: nowrap; color: var(--need); font-weight: 600; }
-.tr .pr, .tr .th, .tr .tm { font-size: 13px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tr .tm { color: var(--ink-2); text-align: right; }
-.done-rows .tr { grid-template-columns: 84px minmax(0, 1fr) 112px 40px 64px; }
-.tk.gone { min-height: 32px; padding: 0 12px; display: flex; align-items: center; }
-.srow { display: grid; grid-template-columns: minmax(0, 1fr) 112px 72px; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-bottom: 1px solid var(--line); }
-.srow.ask { grid-template-columns: minmax(0, 1fr) 48px 72px; height: 50px; align-content: center; row-gap: 0; }
+.tr .needs.r-report { color: var(--accent); }
+.tr .note { flex: 1 1 0; min-width: 96px; }
+.ws { display: inline-flex; flex: none; align-items: baseline; gap: 12px; font-size: 13px; line-height: 18px; color: var(--ink-2); white-space: nowrap; }
+.ws[hidden] { display: none; }
+.wl { display: contents; }
+.wi { display: inline-flex; gap: 4px; align-items: center; white-space: nowrap; }
+.wi .mark { font-weight: 500; }
+.wi a { color: var(--ink-2); }
+.wi a.pr { color: var(--accent); }
+.wdone { display: inline-flex; align-items: center; gap: 4px; color: var(--ink-2); }
+.wmore { font-size: 13px; line-height: 18px; }
+.tk.wopen .tn { flex-wrap: wrap; }
+.tk.wopen .ws { flex: 1 1 100%; flex-wrap: wrap; white-space: normal; row-gap: 4px; }
+.tr .side { display: flex; align-items: baseline; gap: 8px; justify-content: flex-end; }
+.tr .tm { color: var(--ink-2); font-size: 13px; line-height: 18px; text-align: right; white-space: nowrap; min-width: 48px; }
+.tk.gone { min-height: 48px; padding: 0 16px; display: flex; align-items: center; }
+.srow { display: grid; grid-template-columns: minmax(0, 1fr) 112px 72px; align-items: center; gap: 8px; min-height: 48px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+.srow.ask { grid-template-columns: minmax(0, 1fr) 48px 72px; align-content: center; row-gap: 0; }
 .srow.ask .meta { grid-column: 1 / -1; }
+.srow .tl { font-weight: 600; }
 .srow .when { color: var(--ink-2); font-size: 13px; }
 .srow:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
-.srow.gone { height: 32px; border-bottom: 1px dashed var(--line); }
+.srow.gone { border-bottom: 1px dashed var(--line); }
 
 #composer { display: flex; flex-direction: column; }
 @media (min-width: 1200px) and (max-height: 700px) {
@@ -307,13 +345,16 @@ textarea { resize: none; display: block; }
 }
 .dock { display: flex; flex-direction: column; min-height: 0; }
 .mode { display: none; }
-.form { padding: 0 12px 12px; display: grid; gap: 8px; }
-.form .ph { padding: 0; margin: 0 0 4px; border-bottom: 0; height: 40px; }
-.form .row { display: flex; gap: 8px; align-items: center; }
-.form .row .meta { flex: 1 1 auto; }
-#issues { height: 72px; }
+.forms { display: grid; gap: 12px; padding: 12px 16px; }
+.form { display: grid; gap: 4px; }
+.form .ph { padding: 0; margin: 0; border-bottom: 0; height: auto; }
+.form .ph h2 { font-size: 13px; line-height: 18px; }
+.form .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
+.form .hint { grid-column: 1 / -1; }
+#issues { height: 52px; }
 #launch .btn, #ask .btn { height: 32px; padding: 0 12px; }
-#out { height: 28vh; min-height: 120px; overflow-y: auto; border-top: 1px solid var(--line); padding: 8px 12px; display: grid; align-content: start; gap: 8px; background: var(--canvas); }
+#out { max-height: 40vh; overflow-y: auto; border-top: 1px solid var(--line); padding: 8px 16px; display: grid; align-content: start; gap: 8px; background: var(--panel-2); }
+#composer:not(.has-out) #out { display: none; }
 #out .oh { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--ink-2); }
 #launch-out li { font-size: 13px; line-height: 18px; display: flex; gap: 8px; min-width: 0; }
 #launch-out .bad { color: var(--fail); }
@@ -325,41 +366,53 @@ textarea { resize: none; display: block; }
 .ask .ah { display: flex; align-items: center; gap: 8px; height: 24px; min-width: 0; }
 .ask .ah .btn { margin-left: auto; }
 .ask .aa {
-  font-size: 13px; line-height: 18px; height: 36px; white-space: pre-wrap; overflow: hidden; overflow-wrap: anywhere;
+  font-size: 13px; line-height: 18px; max-height: 36px; white-space: pre-wrap; overflow: hidden; overflow-wrap: anywhere;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
 }
-.ask.open .aa { height: auto; display: block; }
+.ask.open .aa { max-height: none; display: block; }
 .ask .aa.wait { color: var(--ink-2); }
 .ask .btn { height: 24px; }
 .ask:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-#feed li {
-  display: grid; grid-template-columns: 40px 88px minmax(0, 1fr); gap: 8px; height: 24px; align-items: center;
-  padding: 0 12px; font-size: 13px; line-height: 18px;
-}
-#feed time { color: var(--ink-2); }
-#feed .who { font-weight: 600; }
+#feed > li { padding: 8px 16px; }
 #feed li:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+.f1 { display: flex; gap: 8px; align-items: baseline; min-width: 0; font-size: 13px; line-height: 18px; }
+.f1 .who { font-weight: 600; color: var(--ink); flex: none; max-width: 60%; }
+.f1 .fsub { color: var(--ink-2); }
+.f1 .age { margin-left: auto; color: var(--ink-2); flex: none; }
+.msg {
+  margin-top: 4px; font-size: 13px; line-height: 18px; color: var(--ink); overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
+.more { margin-top: 4px; font-size: 12px; line-height: 16px; }
+.earlier { margin-top: 8px; padding-left: 12px; border-left: 2px solid var(--line); display: grid; gap: 8px; }
+.earlier .msg { margin-top: 0; color: var(--ink-2); }
 
 .mtabs { display: none; }
 .err-strip {
   position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; display: flex; gap: 8px; align-items: center;
-  padding: 4px 12px; background: var(--fail-soft); color: var(--fail); font-size: 13px; line-height: 18px;
+  padding: 4px 16px; background: var(--fail-soft); color: var(--fail); font-size: 13px; line-height: 18px;
   border-top: 1px solid var(--fail);
 }
 .err-strip[hidden] { display: none; }
 .err-strip span { flex: 1 1 auto; }
 .mid-only, .phone-only, .short { display: none !important; }
 
-dialog { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); padding: 16px; max-width: 420px; }
+dialog { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); padding: 16px; max-width: 420px; }
 dialog::backdrop { background: rgb(0 0 0 / 0.4); }
-dialog h2 { font-size: 14px; line-height: 20px; font-weight: 600; margin-bottom: 8px; }
+dialog h2 { font-size: 16px; line-height: 20px; font-weight: 600; margin-bottom: 8px; }
 dialog dl { display: grid; grid-template-columns: 88px 1fr; gap: 4px 12px; margin: 0 0 12px; font-size: 13px; line-height: 18px; }
 dialog dt { font-family: var(--mono); font-size: 12px; }
 dialog dd { margin: 0; color: var(--ink-2); }
 dialog .row { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
 kbd { font-family: var(--mono); font-size: 12px; }
 
+@media (max-width: 1439px) {
+  .panes { grid-template-columns: 400px minmax(0, 1fr) 340px; }
+}
+@media (max-width: 1279px) {
+  .panes { grid-template-columns: 360px minmax(0, 1fr) 320px; }
+}
 @media (max-width: 1199px) {
   .panes {
     grid-template-columns: 44fr 56fr;
@@ -367,7 +420,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
     grid-template-areas: "dec tix" "cmd cmd";
   }
   .mid-only { display: revert !important; }
-  #p-act { grid-area: tix; align-self: end; height: calc(100% - 40px); z-index: 1; border-right: 1px solid var(--line); }
+  #p-act { grid-area: tix; align-self: end; height: calc(100% - 48px); z-index: 1; border-right: 1px solid var(--line); }
   #p-act .ph { display: none; }
   .app:not([data-tab="activity"]) #p-act { display: none; }
   #composer { position: relative; border-bottom: 0; border-top: 1px solid var(--line); z-index: 5; overflow: visible; }
@@ -375,11 +428,10 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .dock:focus-within, .dock.show-out { border-top: 1px solid var(--line); }
   #out { order: 0; }
   .mode { display: flex; gap: 0; flex: none; }
-  .mode .btn { border-radius: 0; }
+  .mode .btn { border-radius: 0; color: var(--ink-2); }
   .mode .btn:first-child { border-radius: 6px 0 0 6px; }
   .mode .btn:last-child { border-radius: 0 6px 6px 0; border-left: 0; }
   .mode .btn[aria-pressed="true"] { background: var(--panel-2); color: var(--ink); font-weight: 600; }
-  .mode .btn[aria-pressed="false"] { color: var(--ink-2); }
   .forms { display: flex; align-items: flex-end; gap: 8px; padding: 12px; }
   .form { padding: 0; flex: 1 1 auto; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
   .form .ph, .form .hint { display: none; }
@@ -389,16 +441,18 @@ kbd { font-family: var(--mono); font-size: 12px; }
   #issues:focus { height: 128px; }
   #out { display: none; height: auto; max-height: 40vh; min-height: 0; border-top: 0; border-bottom: 1px solid var(--line); }
   .dock:focus-within #out, .dock.show-out #out { display: grid; }
+  #composer:not(.has-out) .dock #out { display: none; }
 }
 @media (max-width: 899px) {
-  .app { grid-template-rows: 44px auto minmax(0, 1fr); }
-  .fbar #filter-q { flex: 1 1 100%; height: 44px; }
+  .app { grid-template-rows: 48px auto minmax(0, 1fr); }
+  .fbar { padding: 4px 12px; }
+  .fbar #filter-q { flex: 1 1 100%; height: 44px; font-size: 16px; }
   .fopt { min-height: 44px; }
   .fbar { position: relative; }
   .facet { position: static; }
   .fpop { left: 12px; right: 12px; width: auto; top: calc(100% - 4px); }
-  .top { gap: 8px; }
-  .counts, #keys-btn, .conn .facts { display: none !important; }
+  .top { gap: 8px; padding: 0 12px; }
+  .counts .runc, #keys-btn, .conn .facts, .needc .w, .tools .btn .w { display: none !important; }
   .short { display: inline !important; }
   .panes {
     grid-template-columns: minmax(0, 1fr);
@@ -414,40 +468,39 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .app:not([data-panel="tickets"]) #p-tix,
   .app:not([data-panel="activity"]) #p-act { display: none; }
   #p-tix .ph h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  #p-tix .tabs { margin-left: 0; }
   .mtabs {
     grid-area: nav; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
     border-top: 1px solid var(--line); background: var(--panel);
   }
   .mtab {
-    border: 0; background: none; cursor: pointer; color: var(--ink-2); font-size: 13px; line-height: 18px;
-    font-weight: 500; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0; min-height: 44px;
+    border: 0; border-top: 2px solid transparent; background: none; cursor: pointer; color: var(--ink-2); font-size: 13px; line-height: 18px;
+    font-weight: 500; display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px;
     min-width: 0; overflow: hidden; white-space: nowrap;
   }
-  .mtab[aria-selected="true"] { color: var(--accent); font-weight: 600; box-shadow: none; border-top: 2px solid var(--accent); }
+  .mtab[aria-selected="true"] { color: var(--ink); font-weight: 600; border-top-color: var(--ink); }
   .btn, .tab, .linkish, .mode .btn { min-height: 44px; min-width: 44px; }
-  .ch a, .tr a, .wl a, .ask a, .srow a { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; }
-  .ch { flex-wrap: wrap; height: auto; row-gap: 0; column-gap: 4px; }
-  .card { padding-left: 0; }
-  .card > :not(.ch) { margin-left: 12px; }
-  .ch .cid { padding: 0 0 0 12px; justify-content: flex-start; text-align: left; }
-  .ch .end { padding-left: 12px; }
-  .ch .end { margin-left: 0; width: 100%; gap: 16px; }
-  .ch .end .age { margin-left: auto; }
-  .act .tail { gap: 8px; }
-  .tr.with-note { grid-template-rows: 44px 18px; }
-  .tr.with-note.with-wk { grid-template-rows: 44px 18px 44px; }
-  .wl { line-height: 44px; }
+  .btn, .mode .btn { padding: 0 8px; }
+  .btn.answer { padding: 0 12px; white-space: normal; text-align: center; }
+  .act .opts { min-width: 0; max-width: 100%; }
+  .ph { padding: 0 12px; }
+  .ctx a, .tr a, .ws a, .ask a, .srow a, .act a, .fullbox a { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; }
+  .tr .tn, .tr .t1, .ws { align-items: center; }
+  .ctx { align-items: center; }
+  #cards { padding: 8px; gap: 8px; }
+  .card { padding: 12px; }
+  .act .tail { gap: 0; }
+  .tr { padding: 8px 12px; }
+  .tr .t1 { flex-wrap: wrap; row-gap: 0; }
+  .tr .ttl { flex-basis: 100%; }
+  .tr .tn { flex-wrap: wrap; align-items: center; row-gap: 0; }
+  .tr .note { flex-basis: 100%; }
   .ask .ah { height: 44px; }
   .newbtn { height: 44px; }
-  .ph { height: 48px; }
-  .newslot { min-width: 72px; }
-  .tr { grid-template-columns: 16px minmax(0, 1fr) auto; grid-template-rows: 44px; }
-  .tr .st .w, .tr .tm { display: none; }
-  .tr .st { justify-self: center; }
-  .done-rows .tr { grid-template-columns: 16px minmax(0, 1fr) auto auto; }
-  .srow { grid-template-columns: minmax(0, 1fr) auto; height: 48px; }
+  .newslot { min-width: 0; }
+  .srow { grid-template-columns: minmax(0, 1fr) auto; }
   .srow .pr { display: none; }
-  .srow.ask { grid-template-columns: minmax(0, 1fr) auto auto; height: 64px; }
+  .srow.ask { grid-template-columns: minmax(0, 1fr) auto auto; }
   input[type=text], input[type=search], textarea { font-size: 16px; }
   #ask input[type=text] { height: 44px; }
   #issues { height: 44px; padding-top: 8px; }
@@ -457,11 +510,8 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .app.kb .dock { position: fixed; left: 0; right: 0; bottom: var(--kb, 0px); }
   .app.sheet .dock { position: fixed; top: var(--vvtop, 0px); bottom: auto; height: var(--vvh, 100%); justify-content: flex-end; }
   .app.sheet #out { max-height: none; flex: 1 1 auto; }
-  #feed li { grid-template-columns: 40px 72px minmax(0, 1fr); height: 32px; }
+  #feed > li { padding: 8px 12px; }
   .sending, .act { min-height: 44px; }
-}
-@media (max-width: 359px) {
-  .counts { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before { transition: none !important; animation: none !important; }
@@ -470,7 +520,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
 </head>
 <body>
 <nav class="skip" aria-label="Skip links">
-  <a href="#cards" data-jump="decisions">Skip to Decisions</a>
+  <a href="#cards" data-jump="decisions">Skip to Needs you</a>
   <a href="#issues" data-jump="launch">Skip to Launch</a>
   <a href="#question" data-jump="ask">Skip to Ask</a>
   <a href="#open" data-jump="tickets">Skip to Tickets</a>
@@ -486,8 +536,8 @@ kbd { font-family: var(--mono); font-size: 12px; }
   </div>
   <span class="counts num" id="counts"></span>
   <span class="tools">
-    <button class="btn quiet" type="button" id="notify" hidden>Notify me</button>
-    <button class="btn quiet" type="button" id="keys-btn" aria-haspopup="dialog" >Shortcuts</button>
+    <button class="btn" type="button" id="notify" hidden><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 11V7a4 4 0 0 1 8 0v4l1 1.5H3z"/><path d="M6.5 14h3"/></svg><span class="w" id="notify-text">Notify me</span></button>
+    <button class="btn" type="button" id="keys-btn" aria-haspopup="dialog"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4 7h1M7 7h2M11 7h1M5 9.5h6"/></svg><span class="w">Shortcuts</span></button>
   </span>
 </header>
 <div class="fbar" id="fbar" role="search" aria-label="Filter the board">
@@ -503,11 +553,11 @@ kbd { font-family: var(--mono); font-size: 12px; }
 <main class="panes" id="main">
   <section class="pane" id="p-dec" aria-labelledby="h-dec">
     <div class="ph">
-      <h2 id="h-dec">Decisions<span class="n num" id="n-cards"></span></h2>
+      <h2 id="h-dec">Needs you<span class="pill num" id="n-cards"></span></h2>
       <span class="newslot"><button class="newbtn off" type="button" id="new-cards" tabindex="-1" aria-hidden="true"></button></span>
     </div>
     <div class="body">
-      <div class="scroll list" id="cards" aria-label="Decisions" aria-busy="true"></div>
+      <div class="scroll list" id="cards" aria-label="Needs you" aria-busy="true"></div>
       <p class="empty" id="cards-empty" data-empty="Nothing needs you right now.">Loading decisions...</p>
     </div>
   </section>
@@ -562,7 +612,6 @@ kbd { font-family: var(--mono); font-size: 12px; }
         <ul id="launch-out" aria-label="Launch results"></ul>
         <p class="oh" id="asks-h">Answers</p>
         <ul id="asks" aria-labelledby="asks-h"></ul>
-        <p class="empty" id="asks-empty">No answers yet. Type a question in Ask.</p>
       </div>
       <div class="forms">
         <div class="mode" role="group" aria-label="Composer">
@@ -572,10 +621,10 @@ kbd { font-family: var(--mono); font-size: 12px; }
         <form class="form" id="launch" aria-labelledby="h-launch">
           <div class="ph"><h2 id="h-launch">Launch tickets</h2></div>
           <label class="sr" for="issues">GitHub issues to launch, one per line</label>
-          <textarea id="issues" placeholder="owner/repo#41 or an issue URL" aria-describedby="launch-hint"></textarea>
           <div class="row">
-            <span class="meta hint" id="launch-hint">One issue per line. Ctrl+Enter launches.</span>
+            <textarea id="issues" placeholder="owner/repo#41 or an issue URL, one per line" aria-describedby="launch-hint"></textarea>
             <button class="btn go" type="submit" id="launch-btn">Launch</button>
+            <span class="meta hint" id="launch-hint">Ctrl+Enter launches.</span>
           </div>
         </form>
         <form class="form" id="ask" aria-labelledby="h-ask">
@@ -589,7 +638,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
     </div>
   </section>
   <nav class="mtabs" role="tablist" aria-label="Panels" id="mtabs">
-    <button class="mtab" role="tab" type="button" data-panel="decisions" aria-selected="true" aria-controls="p-dec">Decisions<span class="num" id="m-cards"></span></button>
+    <button class="mtab" role="tab" type="button" data-panel="decisions" aria-selected="true" aria-controls="p-dec">Needs you<span class="pill num" id="m-cards"></span></button>
     <button class="mtab" role="tab" type="button" data-panel="tickets" aria-selected="false" aria-controls="p-tix" tabindex="-1">Tickets<span class="num" id="m-tix"></span></button>
     <button class="mtab" role="tab" type="button" data-panel="activity" aria-selected="false" aria-controls="p-act" tabindex="-1">Activity<span class="num" id="m-feed"></span></button>
   </nav>
@@ -601,7 +650,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   <h2 id="keys-h">Keyboard shortcuts</h2>
   <dl>
     <dt>j / k</dt><dd>Next or previous card or row</dd>
-    <dt>g d, g t, g a</dt><dd>Go to Decisions, Tickets, Activity</dd>
+    <dt>g d, g t, g a</dt><dd>Go to Needs you, Tickets, Activity</dd>
     <dt>l</dt><dd>Focus Launch</dd>
     <dt>/</dt><dd>Focus Ask</dd>
     <dt>f</dt><dd>Focus search; Esc clears it</dd>
@@ -660,10 +709,6 @@ function setAttr(el, k, v) {
 
 function plain(s) {
   return String(s || "").replace(/\*\*ACTION NEEDED:\*\*\s*/g, "").replace(/\*\*|__|`/g, "");
-}
-
-function brief(s) {
-  return plain(s).replace(/https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/(?:pull|issues)\/(\d+)[^\s,;)]*/g, "$1#$2");
 }
 
 function clock(s) {
@@ -728,10 +773,102 @@ function age(iso) {
   if (!t) return "";
   const m = Math.max(0, Math.round((Date.now() - t) / 60000));
   if (m < 1) return "now";
-  if (m < 60) return m + " min";
+  if (m < 60) return m + "m";
   const hrs = Math.floor(m / 60);
-  if (hrs < 48) return hrs + " h " + (m % 60) + " min";
-  return Math.floor(hrs / 24) + " d";
+  if (hrs < 48) return hrs + "h " + (m % 60) + "m";
+  return Math.floor(hrs / 24) + "d";
+}
+
+function stamp(iso) {
+  const t = Date.parse(iso);
+  if (!t) return null;
+  const d = new Date(t);
+  const two = (n) => String(n).padStart(2, "0");
+  let tz = "";
+  try { tz = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" }).formatToParts(d).find((p) => p.type === "timeZoneName").value; } catch (_) { tz = ""; }
+  return d.getFullYear() + "-" + two(d.getMonth() + 1) + "-" + two(d.getDate()) + " " + two(d.getHours()) + ":" + two(d.getMinutes()) + (tz ? " " + tz : "");
+}
+
+function paintAge(el, iso, local) {
+  if (Date.parse(iso)) {
+    setText(el, age(iso));
+    setAttr(el, "data-at", iso);
+    setAttr(el, "title", stamp(iso) || local || null);
+  } else {
+    setText(el, local ? clock(local) : "");
+    setAttr(el, "data-at", null);
+    setAttr(el, "title", local || null);
+  }
+}
+
+const cap = (s) => s ? s[0].toUpperCase() + s.slice(1) : s;
+
+function tidy(s, sub) {
+  let t = plain(s).replace(/\s*Publishing:.*$/s, "");
+  t = t.replace(/https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(?:pull|issues)\/(\d+)[^\s,;)]*/g, "#$1");
+  t = t.replace(/\b(?=[0-9a-f]*[a-f])([0-9a-f]{7})[0-9a-f]{1,33}\b/g, "$1");
+  t = t.replace(/((?:\b(?:head|commit|from|at|sha)\s+|\()\d{7})\d{1,33}\b/gi, "$1");
+  const pr = sub && /PR \d+\/\d+/.exec(sub);
+  if (pr) t = t.replace(new RegExp("^" + pr[0].replace("/", "\\/") + "\\s+"), "");
+  t = t.replace(/(#\d+),? \1\b/g, "$1").replace(/\s+/g, " ").trim();
+  t = t.replace(/\.\.\.$/, "…");
+  return /^[a-z]+(?:\s|:|,|$)/.test(t) ? cap(t) : t;
+}
+
+function actionOf(text) {
+  const raw = String(text || "");
+  const i = raw.indexOf("**ACTION NEEDED:**");
+  return i < 0 ? { pre: "", line: raw } : { pre: raw.slice(0, i), line: raw.slice(i) };
+}
+
+function linkOf(raw) {
+  const m = /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(pull|issues)\/(\d+)[^\s,;)`]*/.exec(String(raw || ""));
+  if (m) return { href: m[0].replace(/[.]+$/, ""), text: (m[1] === "pull" ? "Review #" : "Open #") + m[2] };
+  const u = /https?:\/\/[^\s,;)`]+/.exec(String(raw || ""));
+  return u ? { href: u[0].replace(/[.]+$/, ""), text: "Open link" } : null;
+}
+
+function parseAsk(c) {
+  const { pre, line } = actionOf(c.text);
+  const code = [];
+  const keep = (t) => t.replace(/`([^`]+)`/g, (_, x) => "\uE000" + (code.push(x) - 1) + "\uE001");
+  const back = (t) => t.replace(/\uE000(\d+)\uE001/g, (_, i) => code[+i]);
+  let s = plain(keep(line.replace(/ here:\s*`(https?:\/\/[^`]+)`/, " here: $1").replace(/,? here:\s*(`[^`]+`)/, ": $1"))).replace(/\s+/g, " ").trim();
+  let detail = tidy(keep(pre));
+  const here = /^(.*?),? here: https?:\/\/\S+?(?:\s*\.)?(?:\s+(.*))?$/s.exec(s);
+  if (here) { s = here[1]; if (here[2]) detail = (detail ? detail + " " : "") + tidy(here[2]); }
+  const opts = c.options || [];
+  if (opts.length === 1) {
+    const one = /^reply "[^"]+" to (.+)$/s.exec(s);
+    if (one) s = one[1];
+  }
+  s = s.replace(/,? (?:or review it first|or reply with changes)$/, "");
+  if (c.label && s.startsWith(c.label + " ")) s = s.slice(c.label.length + 1);
+  return { ask: back(tidy(s)), detail: back(detail), link: linkOf(line) };
+}
+
+function answeredText(head) {
+  const p = parseAsk({ text: head, options: [""] });
+  const t = p.ask.replace(/^Reply "[^"]+" to /, "");
+  return /^[A-Z][a-z]/.test(t) ? t[0].toLowerCase() + t.slice(1) : t;
+}
+
+function humanize(slug) {
+  return cap(String(slug || "").replace(/^gate:\s*/, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim());
+}
+
+function titleOf(t) {
+  const raw = String((t && t.title) || "").trim();
+  const bare = raw.replace(/^\S*#\d+:\s*/, "");
+  if (bare && bare !== t.label && !/^https?:\/\/\S+$/.test(bare)) return bare;
+  return t && t.gate ? humanize(t.gate) : "";
+}
+
+function shortLabel(w, t) {
+  const l = String(w.label || "");
+  if (t && t.label && l.startsWith(t.label + " ")) return l.slice(t.label.length + 1);
+  const n = t && /#(\d+)$/.exec(t.label || "");
+  return n && l.startsWith("#" + n[1] + " ") ? l.slice(n[1].length + 2) : l;
 }
 
 async function post(path, body) {
@@ -762,16 +899,47 @@ function announce(text, urgent) {
 
 const KIND_RANK = { blocker: 0, error: 0, escalate: 0, gate: 1, report: 2 };
 const FAIL_KINDS = new Set(["blocker", "error", "escalate"]);
-const roleOfKind = (k) => FAIL_KINDS.has(k) ? "fail" : k === "gate" ? "need" : "neutral";
-const roleOfStatus = (s) => s === "waiting" ? "need" : s === "failed" || s === "gone" ? "fail" : s === "done" ? "done" : "neutral";
+const KIND_WORD = { blocker: "Blocked:", error: "Error:", escalate: "Escalated:", report: "Report:" };
+const WORDS = { need: "needs you", fail: "failed", run: "running", wait: "waiting", idle: "idle", done: "done" };
+const GROUPS = { need: "Needs you", fail: "Failed", run: "Running", wait: "Waiting", idle: "Idle", done: "Done" };
+const ORDER = ["need", "fail", "run", "wait", "idle", "done"];
 
-function mark(role, word, extra) {
-  return h("span", { class: "mark r-" + role + (extra ? " " + extra : "") }, h("span", { class: "w" }, word));
+function ownState(s) {
+  if (s === "failed" || s === "gone") return "fail";
+  if (s === "running" || s === "launching") return "run";
+  if (s === "waiting") return "wait";
+  return s === "done" ? "done" : "idle";
 }
 
-function setMark(el, role, word) {
-  setAttr(el, "class", "mark r-" + role + " st");
-  setText(el.firstChild, word);
+function workerState(w, cards) {
+  if (w.done) return "done";
+  const s = ownState(w.status);
+  if (s === "idle" && w.gate && cards.some((c) => c.kind === "gate")) return "need";
+  return s;
+}
+
+function ticketState(t, cards) {
+  if (cards.length) return "need";
+  if (t.done) return "done";
+  const all = [ownState(t.status), ...(t.workers || []).filter((w) => !w.done).map((w) => workerState(w, cards))];
+  for (const k of ["fail", "run", "wait"]) if (all.includes(k)) return k;
+  return "idle";
+}
+
+function markOf(state, cards) {
+  return state === "need" && cards.some((c) => FAIL_KINDS.has(c.kind)) ? "fail" : state;
+}
+
+function mark(state, word) {
+  return h("span", { class: "mark s-" + state }, word ? h("span", { class: "w" }, word) : null);
+}
+
+function setMark(el, state, word) {
+  setAttr(el, "class", "mark s-" + state);
+  if (word !== undefined) {
+    if (!el.firstChild) el.append(h("span", { class: "w" }));
+    setText(el.firstChild, word);
+  }
 }
 
 const panels = {};
@@ -949,22 +1117,30 @@ function cardLabel(c) {
   return c.label ? c.id + " " + c.label : c.id;
 }
 
-function cardRole(c) { return roleOfKind(c.kind); }
-
 function quote(s) { return "“" + s + "”"; }
+
+function ticketOfCard(c) {
+  return c.ticket && state ? state.tree.find((t) => t.thread === c.ticket) || null : null;
+}
 
 function makeCard(c) {
   const card = h("article", { class: "card", "data-id": c.id });
-  const head = h("div", { class: "ch" },
-    h("button", { class: "linkish cid mono", type: "button", "data-part": "id", onclick: () => jumpToTicket(card.dataset.ticket) }, c.id),
-    h("span", { class: "lbl clip", "data-part": "lbl" }),
-    mark("neutral", c.kind),
-    h("span", { class: "end" },
-      h("button", { class: "linkish", type: "button", "data-part": "fullbtn", "aria-expanded": "false",
-        onclick: () => toggleFull(card) }, "Full message"),
-      h("span", { class: "age num", "data-part": "age" })));
-  const q = h("p", { class: "q", "data-part": "q", id: "q-" + c.id });
-  const act = h("div", { class: "act", "data-part": "act" });
+  const q = h("p", { class: "q", "data-part": "q", id: "q-" + c.id },
+    h("span", { class: "kw", "data-part": "kw", hidden: true }), h("span", { "data-part": "ask" }));
+  const ctx = h("p", { class: "ctx" },
+    h("button", { class: "linkish lbl", type: "button", "data-part": "id", onclick: () => jumpToTicket(card.dataset.ticket) }),
+    h("span", { class: "ttl clip", "data-part": "ttl" }),
+    h("span", { class: "age num", "data-part": "age" }));
+  const detail = h("p", { class: "detail clip", "data-part": "detail", hidden: true });
+  const act = h("div", { class: "act", "data-part": "act" },
+    h("span", { class: "opts", "data-part": "opts" }),
+    h("span", { "data-part": "rev" }),
+    h("span", { class: "tail" },
+      h("button", { class: "btn quiet", type: "button", "data-part": "replybtn", onclick: () => openReply(card) }, "Reply"),
+      h("button", { class: "btn quiet", type: "button", "data-part": "dismiss",
+        onclick: () => { if (!blocked(card)) startSend(card._card, "dismiss", ""); } }, "Dismiss"),
+      h("button", { class: "btn quiet ic", type: "button", "data-part": "fullbtn", "aria-expanded": "false",
+        onclick: () => toggleFull(card) })));
   const sending = h("div", { class: "sending", "data-part": "sending", hidden: true },
     h("span", { class: "what clip", "data-part": "what" }),
     h("button", { class: "btn", type: "button", "data-part": "undo", onclick: () => undo(card.dataset.id) }, "Undo"));
@@ -981,9 +1157,9 @@ function makeCard(c) {
     input,
     h("button", { class: "btn", type: "submit", "data-part": "send" }, "Send"));
   const pre = h("pre", {}, "Loading...");
-  const full = h("div", { class: "fullbox", "data-part": "full", hidden: true }, pre);
+  const full = h("div", { class: "fullbox", "data-part": "full", hidden: true }, pre, h("p", { class: "meta", "data-part": "th" }));
   const err = h("p", { class: "err", "data-part": "err", hidden: true });
-  card.append(head, q, act, sending, form, full, err);
+  card.append(q, ctx, detail, act, sending, form, full, err);
   return card;
 }
 
@@ -1000,9 +1176,7 @@ function resetCard(card) {
   part(card, "full").hidden = true;
   part(card, "full").firstChild.textContent = "Loading...";
   part(card, "q").hidden = false;
-  const fb = part(card, "fullbtn");
-  setAttr(fb, "aria-expanded", "false");
-  setText(fb, "Full message");
+  setAttr(part(card, "fullbtn"), "aria-expanded", "false");
   part(card, "reply").hidden = true;
   part(card, "input").value = "";
   part(card, "err").hidden = true;
@@ -1022,43 +1196,54 @@ function patchCard(card, c) {
   setAttr(card, "data-kind", c.kind);
   setAttr(card, "aria-labelledby", "q-" + c.id);
   setAttr(card, "aria-describedby", null);
-  const role = cardRole(c);
-  setAttr(card, "class", "card" + (role === "fail" ? " k-fail" : role === "need" ? " k-need" : "") +
-    (card.classList.contains("arrive") ? " arrive" : ""));
+  const fail = FAIL_KINDS.has(c.kind);
+  setAttr(card, "class", "card k-" + (fail ? "fail" : c.kind) + (card.classList.contains("arrive") ? " arrive" : ""));
+  const t = ticketOfCard(c);
   const idb = part(card, "id");
-  setText(idb, c.id);
+  setText(idb, c.label || "no ticket");
   setAttr(idb, "aria-label", c.ticket ? "Show " + (c.label || "the ticket") + " in Tickets, card " + c.id : "Card " + c.id + " has no ticket");
   setAttr(idb, "title", c.ticket ? "Show " + (c.label || "the ticket") + " in Tickets" : null);
   idb.disabled = !c.ticket;
-  const lbl = part(card, "lbl");
-  if (c.label && safeUrl(c.link)) setLink(lbl, c.link, c.label, "Open thread " + c.label + " for " + c.id);
-  else plainText(lbl, c.label || "no ticket");
-  const k = card.querySelector(".ch .mark");
-  setAttr(k, "class", "mark r-" + role);
-  setText(k.firstChild, c.kind);
+  const ttl = part(card, "ttl");
+  const title = t ? titleOf(t) : "";
+  setText(ttl, title);
+  setAttr(ttl, "title", title || null);
   const fb = part(card, "fullbtn");
   fb.hidden = !c.handle;
-  setAttr(fb, "aria-label", "Full message for " + c.id);
+  setAttr(fb, "aria-label", "Full message for " + cardLabel(c));
+  setAttr(fb, "title", "Full message");
   const ag = part(card, "age");
-  setText(ag, age(c.at));
-  setAttr(ag, "data-at", c.at);
-  setAttr(ag, "title", c.atLocal || null);
+  paintAge(ag, c.at, c.atLocal);
+  const p = parseAsk(c);
+  const kw = part(card, "kw");
+  const word = KIND_WORD[c.kind];
+  kw.hidden = !word;
+  if (word) {
+    setMark(kw, fail ? "fail" : "report", word);
+    kw.classList.add("kw");
+  }
+  setText(part(card, "ask"), p.ask);
   const q = part(card, "q");
-  setText(q, brief(c.text));
   setAttr(q, "title", plain(c.text));
   setAttr(q, "id", "q-" + c.id);
-  const act = part(card, "act");
+  const det = part(card, "detail");
+  det.hidden = !p.detail;
+  setText(det, p.detail);
+  setAttr(det, "title", p.detail || null);
+  const rev = part(card, "rev");
+  if (p.link) setLink(rev, p.link.href, p.link.text, p.link.text + " for " + cardLabel(c));
+  else if (rev.firstChild) rev.replaceChildren();
+  if (rev.firstChild) setAttr(rev.firstChild, "class", "rev");
+  const th = part(card, "th");
+  if (safeUrl(c.link)) setLink(th, c.link, "Open the thread", "Open thread " + (c.label || "") + " for " + c.id);
+  else if (th.firstChild) th.replaceChildren();
+  const opts = part(card, "opts");
   const sig = optionsSig(c);
-  if (act.getAttribute("data-sig") !== sig) {
-    setAttr(act, "data-sig", sig);
-    const opts = c.ticket ? c.options.map((o, i) => h("button", { class: "btn", type: "button", "data-opt": String(i + 1),
+  if (opts.getAttribute("data-sig") !== sig) {
+    setAttr(opts, "data-sig", sig);
+    opts.replaceChildren(...(c.ticket ? c.options.map((o, i) => h("button", { class: "btn answer", type: "button", "data-opt": String(i + 1),
       "aria-label": o + ", reply to " + cardLabel(c),
-      onclick: (e) => { if (!blocked(card)) startSend(card._card, "answer", o); else e.preventDefault(); } }, o)) : [];
-    act.replaceChildren(...opts,
-      h("span", { class: "tail" },
-        h("button", { class: "btn quiet", type: "button", "data-part": "replybtn", onclick: () => openReply(card) }, "Reply"),
-        h("button", { class: "btn quiet", type: "button", "data-part": "dismiss",
-          onclick: () => { if (!blocked(card)) startSend(card._card, "dismiss", ""); } }, "Dismiss")));
+      onclick: (e) => { if (!blocked(card)) startSend(card._card, "answer", o); else e.preventDefault(); } }, o)) : []));
   }
   const rb = part(card, "replybtn");
   setAttr(rb, "aria-label", "Reply in your own words to " + cardLabel(c));
@@ -1084,7 +1269,7 @@ function paintSending(card) {
   const box = part(card, "sending");
   const off = !connected || card.classList.contains("stale-item");
   for (const b of act.querySelectorAll("button")) {
-    if (b.dataset.part === "replybtn") continue;
+    if (b.dataset.part === "replybtn" || b.dataset.part === "fullbtn") continue;
     setAttr(b, "aria-disabled", off ? "true" : null);
   }
   setAttr(part(card, "send"), "aria-disabled", off ? "true" : null);
@@ -1204,7 +1389,6 @@ function toggleFull(card) {
   box.hidden = !open;
   part(card, "q").hidden = open;
   setAttr(btn, "aria-expanded", open ? "true" : "false");
-  setText(btn, open ? "Hide message" : "Full message");
   if (!open || !card._card || !card._card.handle || card._loaded === card._card.handle) return;
   const hd = card._card.handle;
   card._loaded = hd;
@@ -1240,13 +1424,17 @@ function emptyState(id, show, filtered) {
   if (msg) setText(el, msg);
 }
 
+function sortCards(cards) {
+  return cards.map((c, i) => [c, i])
+    .sort((a, b) => ((KIND_RANK[a[0].kind] ?? 2) - (KIND_RANK[b[0].kind] ?? 2)) || (a[1] - b[1]))
+    .map((x) => x[0]);
+}
+
 function syncCards(cards, all) {
   const list = $("cards");
   const p = panels.cards;
   const live = firstState || isLive(p);
-  const sorted = cards.map((c, i) => [c, i])
-    .sort((a, b) => ((KIND_RANK[a[0].kind] ?? 2) - (KIND_RANK[b[0].kind] ?? 2)) || (a[1] - b[1]))
-    .map((x) => x[0]);
+  const sorted = sortCards(cards);
   const refocus = [];
   for (const [id, p] of pending) {
     const now = all.find((c) => c.id === id);
@@ -1276,10 +1464,11 @@ function needsOf(cards) {
     if (!m.has(c.ticket)) m.set(c.ticket, []);
     m.get(c.ticket).push(c);
   }
+  for (const [k, v] of m) m.set(k, sortCards(v));
   return m;
 }
 
-const PHASES = [["running", "running"], ["waiting", "waiting on me"], ["blocked", "blocked"], ["done", "done"]];
+const PHASES = [["running", "running"], ["waiting", "needs you"], ["blocked", "blocked"], ["done", "done"]];
 const CARD_KINDS = ["gate", "blocker", "report", "escalate"];
 const FACETS = [
   { key: "projects", name: "Project", values: projectValues },
@@ -1318,9 +1507,8 @@ function projectKey(it) {
 
 function phaseOf(t, cards) {
   if (t.done) return "done";
-  if (t.status === "failed" || t.status === "gone" || cards.some((c) => FAIL_KINDS.has(c.kind))) return "blocked";
-  if (cards.length || t.status === "waiting" || t.gate) return "waiting";
-  return "running";
+  if (cards.some((c) => FAIL_KINDS.has(c.kind)) || ticketState(t, []) === "fail") return cards.length ? ["blocked", "waiting"] : "blocked";
+  return cards.length ? "waiting" : "running";
 }
 
 function filterCtx(s) {
@@ -1366,7 +1554,7 @@ function settledDesc(it) {
 
 function matches(d, f = filter) {
   const has = (set, v) => !set.size || (v !== null && v !== undefined && set.has(v));
-  if (!has(f.projects, d.project) || !has(f.statuses, d.phase)) return false;
+  if (!has(f.projects, d.project) || ![].concat(d.phase ?? null).some((p) => has(f.statuses, p))) return false;
   if (d.kind !== undefined && !has(f.kinds, d.kind)) return false;
   const terms = f.q.toLowerCase().split(/\s+/).filter(Boolean);
   if (!terms.length) return true;
@@ -1857,41 +2045,42 @@ function prText(pr) {
 }
 
 function makeRow() {
-  const st = mark("neutral", "");
-  st.classList.add("st");
-  const lc = h("span", { class: "lc" },
-    h("span", { class: "tl clip", "data-part": "label" }),
-    h("span", { class: "tag", "data-part": "gate" }),
-    h("span", { class: "tag quiet", "data-part": "nj", hidden: true }, "not joined yet"));
-  const row = h("div", { class: "tr" }, st, lc,
-    h("span", { class: "pr", "data-part": "pr" }),
-    h("span", { class: "tm num", "data-part": "tm" }));
-  return row;
+  return h("div", { class: "tr" },
+    h("span", { class: "mk" }, mark("idle")),
+    h("div", { class: "t1" },
+      h("span", { class: "tl", "data-part": "label" }),
+      h("span", { class: "ttl clip", "data-part": "title" }),
+      h("span", { class: "tag", "data-part": "nj", hidden: true }, "not joined yet")),
+    h("span", { class: "side" }, h("span", { class: "pr", "data-part": "pr" }), h("span", { class: "tm num", "data-part": "tm" })));
 }
 
-function patchRow(row, t, cards) {
-  const role = roleOfStatus(t.status);
-  setMark(row.querySelector(".st"), role, t.status);
+function lastAt(t, cards) {
+  if (cards.length) return { iso: cards[0].at, local: cards[0].atLocal };
+  const all = [t, ...(t.workers || [])].filter((x) => Date.parse(x.upAt));
+  if (all.length) {
+    const top = all.reduce((a, b) => Date.parse(b.upAt) > Date.parse(a.upAt) ? b : a);
+    return { iso: top.upAt, local: top.lastUp };
+  }
+  return { iso: null, local: t.lastUp };
+}
+
+function patchRow(row, t, cards, st) {
+  const mk = row.querySelector(".mk");
+  setMark(mk.firstChild, markOf(st, cards));
+  setAttr(mk, "title", WORDS[st]);
   const lab = part(row, "label");
   if (safeUrl(t.link)) setLink(lab, t.link, t.label, "Open thread " + t.label);
   else plainText(lab, t.label);
   setAttr(lab, "title", t.label);
-  const g = part(row, "gate");
-  setText(g, t.gate && !(cards && cards.length) ? "gate: " + t.gate : "");
-  const n = part(row, "needs");
-  if (n && cards && cards.length) {
-    n.hidden = false;
-    const ids = cards.map((c) => c.id);
-    setText(n, "needs you - " + ids[0] + (ids.length > 1 ? " +" + (ids.length - 1) : ""));
-    setAttr(n, "class", "linkish needs" + (cards.some((c) => FAIL_KINDS.has(c.kind)) ? " r-fail" : ""));
-    setAttr(n, "aria-label", "Go to card " + ids[0] + " for " + t.label);
-    n.onclick = () => jumpToCard(ids[0]);
-  } else if (n) n.hidden = true;
+  const title = titleOf(t);
+  const ttl = part(row, "title");
+  setText(ttl, title);
+  setAttr(ttl, "title", title || null);
   part(row, "nj").hidden = t.joined !== false;
   const prt = prText(t.pr);
-  setLink(part(row, "pr"), t.pr && t.pr.url, prt, prt ? prt + " for " + t.label : null);
-  const tm = part(row, "tm");
-  if (tm) setText(tm, t.lastUp ? clock(t.lastUp) : "");
+  setLink(part(row, "pr"), t.pr && t.pr.url, prt && prt.slice(3), prt ? prt + " for " + t.label : null);
+  const at = lastAt(t, cards);
+  paintAge(part(row, "tm"), at.iso, at.local);
 }
 
 function makeTicket() {
@@ -1899,89 +2088,157 @@ function makeTicket() {
   row.append(
     h("div", { class: "tn meta" },
       h("button", { class: "linkish needs", type: "button", "data-part": "needs", hidden: true }),
-      h("span", { class: "clip", "data-part": "note" })),
-    h("div", { class: "wl", "data-part": "workers" }));
-  return h("div", { class: "tk", role: "listitem" }, row);
-}
-
-function shortLabel(w, t) {
-  const l = w.label || "";
-  return t.label && l.startsWith(t.label + " ") ? l.slice(t.label.length + 1) : l;
+      h("span", { class: "note clip", "data-part": "note" }),
+      h("span", { class: "ws", "data-part": "ws" },
+        h("span", { class: "wl", "data-part": "workers" }),
+        h("button", { class: "linkish wmore", type: "button", "data-part": "wmore", "aria-expanded": "false", hidden: true }),
+        h("button", { class: "linkish wdone", type: "button", "data-part": "wdone", "aria-expanded": "false", hidden: true }, mark("done"), h("span", {})))));
+  const el = h("div", { class: "tk", role: "listitem" }, row);
+  const more = part(el, "wmore");
+  const done = part(el, "wdone");
+  const flip = (btn, other) => {
+    el._wopen = !el._wopen;
+    el._wtoggle = true;
+    if (el._t) patchTicket(el, el._t, el._ctx);
+    el._wtoggle = false;
+    if (btn.hidden && !other.hidden) other.focus();
+  };
+  more.addEventListener("click", () => flip(more, done));
+  done.addEventListener("click", () => flip(done, more));
+  return el;
 }
 
 function makeWorker() {
-  return h("span", { class: "wi" }, mark("neutral", ""), h("span", { "data-part": "wth" }), h("span", { class: "tag", "data-part": "wgate" }), h("span", { "data-part": "wpr" }));
+  return h("span", { class: "wi" }, mark("idle"), h("span", { "data-part": "wth" }), h("span", { "data-part": "wpr" }));
 }
 
-function patchWorker(el, w, t) {
-  const m = el.firstChild;
-  setAttr(m, "class", "mark r-" + roleOfStatus(w.status));
-  setText(m.firstChild, w.status);
+function patchWorker(el, w, t, cards) {
+  const st = workerState(w, cards);
+  setMark(el.firstChild, st);
+  const prt = prText(w.pr);
+  setAttr(el, "title", w.label + ", " + WORDS[st] + (prt ? ", " + prt : ""));
   const name = shortLabel(w, t);
   const th = part(el, "wth");
-  if (safeUrl(w.link)) setLink(th, w.link, name, "Open worker thread " + w.label);
+  if (safeUrl(w.link)) setLink(th, w.link, name, "Open worker thread " + w.label + ", " + WORDS[st]);
   else plainText(th, name);
-  const g = part(el, "wgate");
-  setText(g, w.gate ? "gate: " + w.gate : "");
-  g.hidden = !w.gate;
-  const prt = prText(w.pr);
   const same = !!(w.pr && t.pr && w.pr.url && w.pr.url === t.pr.url);
   const wpr = part(el, "wpr");
-  setLink(wpr, same ? null : w.pr && w.pr.url, prt && prt.slice(3), prt ? prt + " for " + w.label : null);
-  setAttr(wpr, "class", same || !prt ? null : "sep");
+  setLink(wpr, same ? null : w.pr && w.pr.url, prt && "#" + w.pr.number, prt ? prt + " for " + w.label : null);
+  if (wpr.firstChild) setAttr(wpr.firstChild, "class", "pr");
 }
+
+function needsLink(cards) {
+  const c = cards[0];
+  const more = cards.length > 1 ? " +" + (cards.length - 1) : "";
+  if (FAIL_KINDS.has(c.kind)) return { text: "Blocked" + more, cls: " r-fail" };
+  if (c.kind === "report") return { text: "Report" + more, cls: " r-report" };
+  const opts = c.options || [];
+  const word = !c.ticket ? "Open" : opts.length === 1 ? "Reply " + quote(opts[0]) : opts.length > 1 ? "Choose" : "Reply";
+  return { text: word + more, cls: "" };
+}
+
+function noteOf(t) {
+  if (!t.last) return t.joined === false ? "Launched, waiting for the thread to join" : "No messages yet";
+  if (t.last.kind === "gate") return (t.last.dismissed ? "Dismissed: " : "Answered: ") + answeredText(t.last.head);
+  return tidy(t.last.head);
+}
+
+const WORKERS_SHOWN = 1;
 
 function patchTicket(el, t, ctx) {
   const cards = ctx.needs.get(t.thread) || [];
-  const fail = t.status === "failed" || t.status === "gone" || cards.some((c) => FAIL_KINDS.has(c.kind));
-  const need = !fail && (cards.length > 0 || t.status === "waiting" || !!t.gate);
-  setAttr(el, "class", "tk" + (fail ? " fail" : need ? " need" : "") + (el.classList.contains("arrive") ? " arrive" : ""));
+  const st = ticketState(t, cards);
+  el._t = t;
+  el._ctx = ctx;
+  setAttr(el, "class", "tk" + (el._wopen ? " wopen" : "") + (el.classList.contains("arrive") ? " arrive" : ""));
   setAttr(el, "data-thread", t.thread || null);
-  setAttr(el, "aria-label", t.label + ", " + t.status + (need ? ", needs you" : ""));
-  patchRow(el.firstChild, t, cards);
+  setAttr(el, "data-state", st);
+  setAttr(el, "aria-label", t.label + ", " + WORDS[st]);
+  const row = el.querySelector(".tr");
+  patchRow(row, t, cards, st);
+  const needs = part(el, "needs");
   const note = part(el, "note");
   const line = note.parentNode;
-  el.firstChild.classList.toggle("with-note", !ctx.done);
-  el.firstChild.classList.toggle("with-wk", !ctx.done);
   line.hidden = !!ctx.done;
   if (!ctx.done) {
-    let text = "";
-    let title = null;
     if (cards.length) {
-      text = cards[0].kind + (t.gate && cards[0].kind === "gate" ? ": " + t.gate : "") + "  " + age(cards[0].at);
-    } else if (t.last) {
-      text = clock(t.last.at) + "  " + t.last.kind + ": " + plain(t.last.head);
-      title = clock(t.last.at) + " " + t.last.kind + ": " + plain(t.last.head);
-    } else text = t.joined === false ? "launched, waiting for the thread to join" : "no messages yet";
-    setText(note, text);
-    setAttr(note, "title", title);
+      const nl = needsLink(cards);
+      needs.hidden = false;
+      setText(needs, nl.text);
+      setAttr(needs, "class", "linkish needs" + nl.cls);
+      setAttr(needs, "aria-label", nl.text + ": go to card " + cards[0].id + " for " + t.label);
+      needs.onclick = () => jumpToCard(cards[0].id);
+      const ask = parseAsk(cards[0]).ask;
+      setText(note, ask);
+      setAttr(note, "title", ask);
+    } else {
+      needs.hidden = true;
+      setText(note, noteOf(t));
+      setAttr(note, "title", t.last ? plain(t.last.head) : null);
+    }
   }
-  const wk = part(el, "workers");
   const ws = ctx.done ? [] : t.workers || [];
-  wk.hidden = !!ctx.done;
-  sync(wk, ws, {
+  const live = ws.filter((w) => !w.done);
+  const fin = ws.filter((w) => w.done);
+  const extra = Math.max(0, live.length - WORKERS_SHOWN);
+  if (!extra && !fin.length) el._wopen = false;
+  const rank = (w) => ORDER.indexOf(workerState(w, cards));
+  const shown = el._wopen ? ws : [...live].sort((a, b) => rank(a) - rank(b)).slice(0, WORKERS_SHOWN);
+  part(el, "ws").hidden = !ws.length;
+  sync(part(el, "workers"), shown, {
     key: (w) => w.thread || w.label,
     make: makeWorker,
-    patch: (we, w) => patchWorker(we, w, t),
+    patch: (we, w) => patchWorker(we, w, t, cards),
     gone: (we) => {
       const wd = we.getBoundingClientRect ? we.getBoundingClientRect().width : 0;
       we.className = "wi gone";
       if (wd && we.style) we.style.width = wd + "px";
       we.replaceChildren();
     },
-    live: ctx.live,
+    live: ctx.live || !!el._wtoggle,
     quiet: true,
     rove: false,
   });
+  const more = part(el, "wmore");
+  more.hidden = el._wopen ? !(extra || fin.length) : !extra;
+  setText(more, el._wopen ? "Less" : "+" + extra + (extra === 1 ? " worker" : " workers"));
+  setAttr(more, "aria-expanded", el._wopen ? "true" : "false");
+  setAttr(more, "aria-label", (el._wopen ? "Show fewer workers for " : "Show all " + ws.length + " workers for ") + t.label);
+  setAttr(more, "title", ws.map((w) => w.label + " " + WORDS[workerState(w, cards)]).join(", "));
+  const wd = part(el, "wdone");
+  wd.hidden = !fin.length || !!el._wopen;
+  if (fin.length) {
+    setText(wd.children[1], fin.length + " done");
+    setAttr(wd, "title", fin.map((w) => w.label).join(", ") + " done");
+    setAttr(wd, "aria-label", "Show the " + fin.length + " finished workers for " + t.label);
+  }
   if (ctx.done) {
-    const row = el.firstChild;
-    let b = row.querySelector('[data-part="settle"]');
+    const side = row.querySelector(".side");
+    let b = side.querySelector('[data-part="settle"]');
     if (!b) {
       b = h("button", { class: "btn", type: "button", "data-part": "settle" }, "Settle");
       b.addEventListener("click", () => act(b, "/api/tickets/" + encodeURIComponent(el.dataset.thread) + "/settle"));
-      row.append(b);
+      side.append(b);
     }
     setAttr(b, "aria-label", "Settle " + t.label);
+  }
+}
+
+function dropGroups(list) {
+  for (const g of list.querySelectorAll(".tgroup")) g.remove();
+}
+
+function paintGroups(list) {
+  dropGroups(list);
+  const all = items(list).filter((el) => !el.classList.contains("gone") && el.dataset.state);
+  const n = {};
+  for (const el of all) n[el.dataset.state] = (n[el.dataset.state] || 0) + 1;
+  let prev = null;
+  for (const el of all) {
+    const st = el.dataset.state;
+    if (st === prev) continue;
+    prev = st;
+    list.insertBefore(h("div", { class: "tgroup", "aria-hidden": "true" }, mark(st), GROUPS[st], h("span", { class: "num" }, String(n[st]))), el);
   }
 }
 
@@ -2001,9 +2258,13 @@ function goneTicket(el, msg) {
 
 function syncTickets(tree, cards, all) {
   const needs = needsOf(cards);
-  const RANK = { blocked: 0, waiting: 1, running: 2 };
-  const rank = (t) => RANK[phaseOf(t, needs.get(t.thread) || [])];
-  const open = tree.filter((t) => !t.done).map((t, i) => [t, i]).sort((a, b) => (rank(a[0]) - rank(b[0])) || (a[1] - b[1])).map((x) => x[0]);
+  const cardRank = new Map(sortCards(cards).map((c, i) => [c.id, i]));
+  const rank = (t) => {
+    const cs = needs.get(t.thread) || [];
+    return [ORDER.indexOf(ticketState(t, cs)), cs.length ? Math.min(...cs.map((c) => cardRank.get(c.id))) : 0];
+  };
+  const open = tree.filter((t) => !t.done).map((t, i) => [t, i, rank(t)])
+    .sort((a, b) => (a[2][0] - b[2][0]) || (a[2][1] - b[2][1]) || (a[1] - b[1])).map((x) => x[0]);
   const done = tree.filter((t) => t.done);
   const allOpen = all.filter((t) => !t.done);
   const allDone = all.filter((t) => t.done);
@@ -2015,6 +2276,7 @@ function syncTickets(tree, cards, all) {
     if (was && !ol.querySelector('[data-key="' + CSS.escape(t.thread) + '"]')) setAttr(was, "data-key", t.thread);
   }
   const lo = firstState || isLive(po);
+  if (lo) dropGroups(ol);
   const heldOpen = sync($("open"), open, {
     key: (t) => t.thread || "pending:" + t.label,
     make: makeTicket,
@@ -2035,6 +2297,7 @@ function syncTickets(tree, cards, all) {
     live: ld,
     quiet: firstState || refiltering,
   });
+  if (lo) paintGroups($("open"));
   po.heldList = heldOpen;
   pd.heldList = heldDone;
   emptyState("open-empty", !open.length && !items($("open")).length, allOpen.length ? "No open tickets match the filter." : null);
@@ -2042,7 +2305,7 @@ function syncTickets(tree, cards, all) {
   de.hidden = done.length > 0 || items($("done")).length > 0;
   setText(de, allDone.length ? "No finished tickets match the filter." : "No finished tickets waiting to be settled.");
   setText($("n-open"), shown(open.length, allOpen.length));
-  setText($("n-done"), shown(done.length, allDone.length, true));
+  setText($("n-done"), shown(done.length, allDone.length));
   $("settle-all").hidden = !(allDone.length > 0 || state.asks.some(isClosedAsk));
 }
 
@@ -2058,15 +2321,15 @@ function showTicketsHeld() {
 const isClosedAsk = (a) => a.status !== "running" && a.status !== "waiting";
 
 function askRole(a) {
-  return a.status === "answered" ? ["done", "answered"] : a.status === "running" ? ["neutral", "running"]
-    : a.status === "waiting" ? ["need", "waiting"] : ["fail", a.status || "failed"];
+  return a.status === "answered" ? ["done", "answered"] : a.status === "running" ? ["run", "running"]
+    : a.status === "waiting" ? ["wait", "waiting"] : ["fail", a.status || "failed"];
 }
 
 function makeAsk() {
   const el = h("li", { class: "ask" },
     h("span", { class: "aq", "data-part": "q" }),
     h("div", { class: "ah" },
-      mark("neutral", ""),
+      mark("idle", ""),
       h("span", { "data-part": "th" }),
       h("button", { class: "btn", type: "button", "data-part": "settle", hidden: true }, "Settle")),
     h("p", { class: "aa", "data-part": "a" }),
@@ -2079,9 +2342,7 @@ function patchAsk(el, a) {
   setText(q, a.question);
   setAttr(q, "title", a.question);
   const [role, word] = askRole(a);
-  const m = el.querySelector(".mark");
-  setAttr(m, "class", "mark r-" + role);
-  setText(m.firstChild, word);
+  setMark(el.querySelector(".mark"), role, word);
   setLink(part(el, "th"), a.link, "thread", "Open thread for the question " + quote(a.question));
   const s = part(el, "settle");
   s.hidden = !isClosedAsk(a);
@@ -2106,6 +2367,11 @@ function patchAsk(el, a) {
   setAttr(more, "aria-label", "Show all of the answer to " + quote(a.question));
 }
 
+function paintOut() {
+  const c = $("composer");
+  c.classList.toggle("has-out", !!$("launch-out").firstChild || items($("asks")).length > 0);
+}
+
 function syncAsks(asks) {
   const p = panels.out;
   const live = firstState || isLive(p);
@@ -2117,7 +2383,9 @@ function syncAsks(asks) {
   }
   sync($("asks"), asks, { key: (a) => a.id, make: makeAsk, patch: patchAsk, live, quiet: firstState || refiltering,
     gone: (el) => goneRow(el, "ask gone meta", "Settled") });
-  $("asks-empty").hidden = asks.length > 0 || items($("asks")).length > 0;
+  const any = asks.length > 0 || items($("asks")).length > 0;
+  $("asks-h").hidden = !any;
+  paintOut();
 }
 
 function settledItems(s) {
@@ -2132,7 +2400,7 @@ function settledItems(s) {
 function makeSettled(it) {
   if (it.kind === "t") {
     return h("div", { class: "srow", role: "listitem" },
-      h("span", { class: "lc clip" }, h("span", { class: "tl", "data-part": "label" }), " ", h("span", { class: "when", "data-part": "when" })),
+      h("span", { class: "lc clip" }, h("span", { class: "tl", "data-part": "label" }), " ", h("span", { class: "when" }, "settled ", h("span", { class: "num", "data-part": "when" }))),
       h("span", { class: "pr meta clip", "data-part": "pr" }),
       h("button", { class: "btn", type: "button", "data-part": "restore" }, "Restore"));
   }
@@ -2151,7 +2419,7 @@ function patchSettled(el, it) {
     const lab = part(el, "label");
     if (safeUrl(t.link)) setLink(lab, t.link, t.label, "Open thread " + t.label);
     else plainText(lab, t.label);
-    setText(part(el, "when"), "settled " + clock(t.settledAt));
+    paintAge(part(el, "when"), t.settledIso, t.settledAt);
     const prt = prText(t.pr);
     setLink(part(el, "pr"), t.pr && t.pr.url, prt, prt ? prt + " for " + t.label : null);
     setAttr(r, "aria-label", "Restore " + t.label);
@@ -2184,25 +2452,98 @@ function syncSettled(s, force) {
   setText($("n-settled"), shown(list.length, s.counts.settled, true));
 }
 
+const openGroups = new Set();
+
+function whoOf(f) {
+  let ticket = f.ticketLabel || null;
+  if (!ticket) {
+    const m = /^#(\d+)\b/.exec(f.label || "");
+    const pool = state ? [...state.tree, ...state.settled.tickets] : [];
+    const t = m && pool.find((x) => new RegExp("#" + m[1] + "$").test(x.label || ""));
+    ticket = t ? t.label : f.label;
+  }
+  const sub = f.label && f.label !== ticket ? shortLabel({ label: f.label }, { label: ticket }) : "";
+  return { ticket, sub };
+}
+
+function feedGroups(feed) {
+  const out = [];
+  for (const f of feed) {
+    const g = out[out.length - 1];
+    if (g && g.label === f.label && g.ticket === f.ticket) g.rows.push(f);
+    else out.push({ label: f.label, ticket: f.ticket, rows: [f] });
+  }
+  return out;
+}
+
+const feedKey = (f) => f.handle || (f.iso + f.label + f.head);
+
+function makeFeedRow() {
+  return h("li", {},
+    h("div", { class: "f1" },
+      h("span", { class: "who clip", "data-part": "who" }),
+      h("span", { class: "fsub clip", "data-part": "sub" }),
+      h("time", { class: "age num", "data-part": "at" })),
+    h("p", { class: "msg", "data-part": "head" }),
+    h("button", { class: "linkish more", type: "button", "data-part": "more", "aria-expanded": "false", hidden: true }),
+    h("ol", { class: "earlier", "data-part": "earlier", hidden: true }));
+}
+
+function paintFeedLine(el, f, sub) {
+  const t = part(el, "at");
+  paintAge(t, f.iso, f.at);
+  setAttr(t, "datetime", f.iso || null);
+  const hd = part(el, "head");
+  const text = tidy(f.head, sub);
+  setText(hd, text);
+  setAttr(hd, "title", plain(f.head));
+}
+
+function patchFeed(el, g) {
+  const f = g.rows[0];
+  const { ticket, sub } = whoOf(f);
+  const who = part(el, "who");
+  setText(who, ticket);
+  setAttr(who, "title", ticket);
+  const sb = part(el, "sub");
+  setText(sb, sub);
+  setAttr(sb, "title", sub || null);
+  paintFeedLine(el, f, sub);
+  const keys = g.rows.map(feedKey);
+  const open = keys.some((k) => openGroups.has(k));
+  const more = part(el, "more");
+  const n = g.rows.length - 1;
+  more.hidden = !n;
+  if (n) {
+    const from = sub || ticket;
+    setText(more, open ? "Hide " + n + " earlier" : "+ " + n + " earlier from " + from);
+    setAttr(more, "aria-expanded", open ? "true" : "false");
+    setAttr(more, "aria-label", (open ? "Hide " : "Show ") + n + " earlier from " + from);
+    more.onclick = () => {
+      const was = keys.some((k) => openGroups.has(k));
+      for (const k of keys) { if (was) openGroups.delete(k); else openGroups.add(k); }
+      patchFeed(el, g);
+    };
+  }
+  const box = part(el, "earlier");
+  box.hidden = !(open && n);
+  if (open && n) {
+    box.replaceChildren(...g.rows.slice(1).map((r) => {
+      const li = h("li", {}, h("div", { class: "f1" }, h("time", { class: "age num", "data-part": "at" })), h("p", { class: "msg", "data-part": "head" }));
+      paintFeedLine(li, r, sub);
+      return li;
+    }));
+  } else if (box.firstChild) box.replaceChildren();
+}
+
 function syncFeed(feed, all) {
   const p = panels.feed;
   const live = firstState || isLive(p);
-  const held = sync($("feed"), feed, {
-    key: (f) => f.handle || (f.iso + f.label + f.head),
-    make: () => h("li", {}, h("time", { class: "num", "data-part": "at" }), h("span", { class: "who clip", "data-part": "who" }), h("span", { class: "clip", "data-part": "head" })),
-    patch: (el, f) => {
-      const t = part(el, "at");
-      setText(t, clock(f.at));
-      setAttr(t, "datetime", f.iso);
-      setAttr(t, "title", f.iso);
-      const who = part(el, "who");
-      setText(who, f.label);
-      setAttr(who, "title", f.label);
-      const hd = part(el, "head");
-      const text = (f.kind && f.kind !== "note" ? f.kind + ": " : "") + plain(f.head);
-      setText(hd, text);
-      setAttr(hd, "title", text);
-    },
+  const groups = feedGroups(feed);
+  const held = sync($("feed"), groups, {
+    key: (g) => feedKey(g.rows[0]),
+    make: makeFeedRow,
+    patch: patchFeed,
     gone: () => {},
     live,
     quiet: firstState || refiltering,
@@ -2253,12 +2594,30 @@ function paintService(s) {
   let cls = "ok";
   if (!svc.t3.connected) { cls = "bad"; facts.push("T3 not connected" + (svc.t3.lastError ? ": " + svc.t3.lastError : "")); }
   else facts.push("T3 connected");
-  if (!svc.watcher.alive) { if (cls === "ok") cls = "warn"; facts.push("checks stopped" + (svc.watcher.lastPass ? " at " + clock(svc.watcher.lastPass) : "")); }
-  else if (svc.watcher.lastPass) facts.push("checked " + clock(svc.watcher.lastPass) + (zone ? " " + zone : ""));
+  const passAt = svc.watcher.lastPassAt;
+  const pass = Date.parse(passAt) ? age(passAt) : svc.watcher.lastPass ? clock(svc.watcher.lastPass) : "";
+  const ago = pass && pass !== "now" && Date.parse(passAt) ? pass + " ago" : pass === "now" ? "just now" : pass;
+  if (!svc.watcher.alive) { if (cls === "ok") cls = "warn"; facts.push("checks stopped" + (ago ? " " + ago : "")); }
+  else if (ago) facts.push("checked " + ago);
   dot.className = "dot " + cls;
   setText(text, facts.join(" · "));
   setText(short, cls === "ok" ? "Live" : cls === "warn" ? "Checks stopped" : "T3 not connected");
-  $("svc").title = svc.tokenExpiresAt ? "T3 token expires " + svc.tokenExpiresAt : "";
+  const tips = [];
+  if (Date.parse(passAt)) tips.push("Last check " + stamp(passAt));
+  else if (svc.watcher.lastPass) tips.push("Last check " + svc.watcher.lastPass);
+  if (svc.tokenExpiresAt) tips.push("T3 token expires " + svc.tokenExpiresAt);
+  if (zone) tips.push("Times are " + zone);
+  $("svc").title = tips.join(". ");
+}
+
+function runningIn(tree) {
+  let n = 0;
+  for (const t of tree) {
+    if (t.done) continue;
+    if (ownState(t.status) === "run") n++;
+    for (const w of t.workers || []) if (!w.done && ownState(w.status) === "run") n++;
+  }
+  return n;
 }
 
 let lastStateClock = "";
@@ -2289,17 +2648,28 @@ function render(s) {
   const seen = new Set(v.cards.map((c) => c.id));
   paintFilterBar(filtering() ? s.cards.filter((c) => !seen.has(c.id) && !hiddenBase.has(cardSeen(c))) : []);
   const openShown = v.tree.filter((t) => !t.done).length;
-  const running = v.tree.filter((t) => t.status === "running").length;
-  setText($("n-cards"), shown(v.cards.length, s.cards.length));
-  setText($("m-cards"), s.cards.length ? " " + shown(v.cards.length, s.cards.length) : "");
+  const runAll = runningIn(s.tree);
+  const running = runningIn(v.tree);
+  const nc = $("n-cards");
+  setText(nc, shown(v.cards.length, s.cards.length));
+  nc.classList.toggle("on", v.cards.length > 0);
+  const mc = $("m-cards");
+  setText(mc, shown(v.cards.length, s.cards.length));
+  mc.classList.toggle("on", v.cards.length > 0);
   setText($("m-tix"), " " + shown(openShown, s.counts.tickets));
   setText($("m-feed"), "");
   const c = $("counts");
   if (!c.firstChild) {
-    c.append(h("span", {}, h("b", {}), h("span", { class: "w" }, " running")));
+    c.append(
+      h("span", { class: "needc" }, h("span", { class: "pill num" }), h("span", { class: "w" }, "need you")),
+      h("span", { class: "runc" }, h("b", {}), h("span", { class: "w" }, " running")));
   }
-  setText(c.children[0].firstChild, shown(running, s.counts.running));
-  setAttr(c, "aria-label", filtering() ? running + " of " + s.counts.running + " running tickets match the filter" : s.counts.running + " tickets running");
+  const pill = c.children[0].firstChild;
+  setText(pill, shown(v.cards.length, s.cards.length));
+  pill.classList.toggle("on", v.cards.length > 0);
+  setText(c.children[1].firstChild, shown(running, runAll));
+  setAttr(c, "aria-label", (filtering() ? v.cards.length + " of " + s.cards.length : s.cards.length) + " need you, " +
+    (filtering() ? running + " of " + runAll : runAll) + " threads running");
   paintService(s);
   document.title = (s.counts.cards ? "(" + s.counts.cards + ") " : "") + "t3 board";
   firstState = false;
@@ -2624,7 +2994,9 @@ function wire() {
     const paint = () => {
       const p = Notification.permission;
       n.hidden = false;
-      setText(n, p === "granted" ? "Notifications on" : p === "denied" ? "Notifications blocked" : "Notify me");
+      const word = p === "granted" ? "Notifications on" : p === "denied" ? "Notifications blocked" : "Notify me";
+      setText($("notify-text"), word);
+      setAttr(n, "aria-label", word);
       setAttr(n, "aria-disabled", p === "default" ? null : "true");
       setAttr(n, "title", p === "default" ? "Show a browser notification for each new decision while this tab is hidden" : null);
     };
@@ -2686,7 +3058,7 @@ async function onLaunch(e) {
   } catch (err) {
     out.replaceChildren(h("li", { class: "oh" }, "Launch results"), h("li", { class: "bad" }, err.message));
     announce("Launch failed: " + err.message, true);
-  } finally { btn.disabled = false; setText(btn, "Launch"); }
+  } finally { btn.disabled = false; setText(btn, "Launch"); paintOut(); }
 }
 
 async function onAsk(e) {
@@ -2705,7 +3077,7 @@ async function onAsk(e) {
   } catch (err) {
     announce("Ask failed: " + err.message, true);
     $("launch-out").replaceChildren(h("li", { class: "oh" }, "Ask"), h("li", { class: "bad" }, "Ask failed: " + err.message));
-  } finally { btn.disabled = false; }
+  } finally { btn.disabled = false; paintOut(); }
 }
 
 document.addEventListener("focusin", (e) => {
@@ -2715,6 +3087,7 @@ document.addEventListener("focusin", (e) => {
 
 setInterval(() => {
   for (const el of document.querySelectorAll("[data-at]")) if (el.dataset.at) el.textContent = age(el.dataset.at);
+  if (state) paintService(state);
 }, 30000);
 
 wire();

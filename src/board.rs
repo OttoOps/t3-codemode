@@ -1230,6 +1230,7 @@ impl Wf {
             "gate": if ln.closed { None } else { ln.gate.clone() },
             "link": web_link(ln.link.clone().or_else(|| live["link"].as_str().map(String::from))),
             "pr": live["pr"], "done": ln.closed, "closedHow": ln.closed_how, "lastUp": local_clock(&ln.last_up),
+            "upAt": ln.last_up,
         })
     }
 
@@ -1242,6 +1243,7 @@ impl Wf {
             .map(|l| {
                 let mut v = self.node_view(l);
                 v["settledAt"] = json!(l.settled_at.as_deref().map(local_clock));
+                v["settledIso"] = json!(l.settled_at);
                 v
             })
             .collect())
@@ -1254,6 +1256,7 @@ impl Wf {
         closed.sort_by(|a, b| b.closed_since().cmp(&a.closed_since()));
         closed.truncate(DONE_SHOWN);
         let mut out = Vec::new();
+        let mut dismissed: Option<Vec<String>> = None;
         for t in open.iter().chain(closed.iter()) {
             let mut v = self.node_view(t);
             let workers: Vec<Value> = self.store.children(&t.child, false)?.iter().map(|w| self.node_view(w)).collect();
@@ -1262,7 +1265,22 @@ impl Wf {
             v["joined"] = json!(true);
             v["last"] = match self.store.msg_last_from(&t.child)? {
                 Some(m) => {
-                    json!({"handle": m.handle, "kind": m.kind, "head": truncate_chars(&m.head(usize::MAX), 140), "at": local_clock(&m.at)})
+                    let mut last = json!({"handle": m.handle, "kind": m.kind, "head": truncate_chars(&m.head(usize::MAX), 140), "at": local_clock(&m.at)});
+                    if m.kind == "gate" {
+                        if dismissed.is_none() {
+                            dismissed = Some(
+                                self.cards_with(true)?
+                                    .into_iter()
+                                    .filter(|c| c.resolution.as_deref() == Some("dismissed"))
+                                    .filter_map(|c| c.handle)
+                                    .collect(),
+                            );
+                        }
+                        if dismissed.as_ref().is_some_and(|d| d.contains(&m.handle)) {
+                            last["dismissed"] = json!(true);
+                        }
+                    }
+                    last
                 }
                 None => Value::Null,
             };
@@ -1280,7 +1298,7 @@ impl Wf {
                 "t3Status": live["status"], "gate": null,
                 "link": web_link(p.link.clone().or_else(|| live["link"].as_str().map(String::from))),
                 "pr": live["pr"], "done": false, "closedHow": null, "joined": false, "workers": [],
-                "lastUp": local_clock(&p.at), "last": null,
+                "lastUp": local_clock(&p.at), "upAt": p.at, "last": null,
             }));
         }
         out.splice(open.len()..open.len(), pending);
@@ -1323,7 +1341,7 @@ impl Wf {
                 "version": env!("CARGO_PKG_VERSION"),
                 "t3": {"connected": t3.connected, "lastError": t3.last_error},
                 "tokenExpiresAt": t3.token_expires_at.as_deref().map(local_clock_date),
-                "watcher": {"lastPass": last.as_deref().map(local_clock), "alive": self.watcher_alive()},
+                "watcher": {"lastPass": last.as_deref().map(local_clock), "lastPassAt": last, "alive": self.watcher_alive()},
                 "openLinks": self.config.board.open_links,
             },
         }))

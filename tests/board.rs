@@ -620,7 +620,11 @@ async fn the_page_embeds_the_token_and_loads_nothing_external() {
     assert!(html.contains(&format!("const CSRF = \"{}\";", s.csrf())));
     assert!(!html.contains("{{CSRF}}"));
     let lower = html.to_lowercase();
-    for tag in ["<script", "<link", "<img", "<iframe", "@import", "url("] {
+    let css = &lower[lower.find("<style>").unwrap()..lower.find("</style>").unwrap()];
+    for (i, _) in css.match_indices("url(") {
+        assert!(css[i..].starts_with("url(\"data:"), "external load: {}", &css[i..i + 40]);
+    }
+    for tag in ["<script", "<link", "<img", "<iframe", "@import"] {
         for (i, _) in lower.match_indices(tag) {
             let end = lower[i..].find('>').map(|e| i + e).unwrap_or(lower.len());
             let t = &lower[i..end];
@@ -1144,7 +1148,7 @@ async fn the_page_is_a_fixed_shell_with_panels_tabs_and_skip_links() {
         r#"id="new-feed""#,
         r#"aria-live="polite""#,
         r#"role="alert""#,
-        "Skip to Decisions",
+        "Skip to Needs you",
         "Skip to Launch",
         "Skip to Ask",
         "Skip to Tickets",
@@ -1153,6 +1157,7 @@ async fn the_page_is_a_fixed_shell_with_panels_tabs_and_skip_links() {
     ] {
         assert!(html.contains(needle), "missing {needle}");
     }
+    assert!(html.find("Skip to Needs you").unwrap() < html.find("Skip to Launch").unwrap());
     assert!(html.find("Skip to Ask").unwrap() < html.find("Skip to Tickets").unwrap());
     for banned in ["gradient", "btn primary", "backdrop-filter", "requestPermission();\n}, { once: true }"] {
         assert!(!html.contains(banned), "found {banned}");
@@ -1549,7 +1554,7 @@ async fn a_pending_launch_row_is_not_given_to_one_of_two_threads_with_its_label(
 const P = { ...base.tree[0], thread: null, label: "acme/widgets#9", status: "running", done: false, gate: null, last: null };
 emitState({ ...base, tree: [...base.tree, P] });
 const row = q('#open [data-key="pending:acme/widgets#9"]');
-q("#open").children[0].focus();
+q("#open .tk").focus();
 emitState({ ...base, tree: [...base.tree, { ...P, thread: "th-9" }, { ...P, thread: "th-10" }] });
 return { key: row.getAttribute("data-key"), gone: row.classList.contains("gone") };
 "##,
@@ -1600,7 +1605,7 @@ async fn a_launch_keeps_its_row_when_it_gets_a_thread() {
 const P = { ...base.tree[0], thread: null, label: "acme/widgets#9", status: "running", done: false, gate: null, last: null };
 emitState({ ...base, tree: [...base.tree, P] });
 const row = q('#open [data-key="pending:acme/widgets#9"]');
-q("#open").children[0].focus();
+q("#open .tk").focus();
 emitState({ ...base, tree: [...base.tree, { ...P, thread: "th-9" }] });
 return {
   same: q('#open [data-key="th-9"]') === row,
@@ -1652,7 +1657,7 @@ return {
 };
 "##,
     );
-    assert_eq!(r["classes"], json!(["btn"]), "{r}");
+    assert_eq!(r["classes"], json!(["btn answer"]), "{r}");
     assert_eq!(r["names"][0], "merge, reply to a1 widgets#41", "{r}");
     assert_eq!(r["names"][3], "merge and deploy, reply to a2 widgets#42", "{r}");
     assert_eq!(r["focused"], "merge and deploy", "{r}");
@@ -1675,7 +1680,7 @@ const noted = base.tree.map((t) => t.thread === T ? {{ ...t, last: {{ handle: "m
 emitState({{ ...base, cards: [], tree: noted }});
 const kept = row("open").querySelector('[data-part="label"]') === label;
 const note = row("open").querySelector('[data-part="note"]').textContent;
-q("#open").children.find((el) => el.dataset.thread !== T).focus();
+q("#open").children.find((el) => el.dataset.key && el.dataset.thread !== T).focus();
 const done = noted.map((t) => t.thread === T ? {{ ...t, done: true, status: "done" }} : t);
 emitState({{ ...base, cards: [], tree: done }});
 return {{
@@ -1689,7 +1694,7 @@ return {{
         ),
     );
     assert_eq!(r["kept"], true, "{r}");
-    assert_eq!(r["note"], "10:15  note: build green", "{r}");
+    assert_eq!(r["note"], "Build green", "{r}");
     assert_eq!(r["placeholder"], "widgets#41 finished and moved to Done", "{r}");
     assert_eq!(r["inDone"], true, "{r}");
     assert_eq!(r["settle"], "Settle widgets#41", "{r}");
@@ -1713,7 +1718,7 @@ return {{ text: needs.textContent, hidden: needs.hidden, toCard, back: document.
 "##
         ),
     );
-    assert_eq!(r["text"], "needs you - a1", "{r}");
+    assert_eq!(r["text"], "Choose", "{r}");
     assert_eq!(r["hidden"], false, "{r}");
     assert_eq!(r["toCard"], "a1", "{r}");
     assert_eq!(r["back"], TICKET, "{r}");
@@ -1969,7 +1974,7 @@ async fn the_state_carries_each_tickets_repo_project_and_title() {
 
 const FILTER_HELPERS: &str = r##"
 const $$ = (id) => document.getElementById(id);
-const keysOf = (id) => [...$$(id).children].filter((e) => !e.classList.contains("gone")).map((e) => e.dataset.key);
+const keysOf = (id) => [...$$(id).children].filter((e) => e.dataset.key && !e.classList.contains("gone")).map((e) => e.dataset.key);
 const facet = (key) => q('[data-facet="' + key + '"]');
 const pick = (key, val) => {
   if (facet(key).querySelector('[data-part="fpop"]').hidden) facet(key).querySelector('[data-part="fbtn"]').dispatch("click");
@@ -2038,7 +2043,7 @@ return { all, opts, found, one, two, after: view(), btn: facet("projects").query
     let t = json!(TICKET);
     let w = json!(WORKER);
     assert_eq!(r["all"]["cards"], json!(["a1", "a2"]), "{r}");
-    assert_eq!(r["all"]["n"], json!(["2", "2", "", "2", "2"]), "{r}");
+    assert_eq!(r["all"]["n"], json!(["2", "2", "0", "2", "2"]), "{r}");
     assert_eq!(r["opts"], json!(["acme/gadgets", "acme/widgets"]), "{r}");
     assert_eq!(r["found"], json!(["acme/gadgets"]), "{r}");
     assert_eq!(r["one"]["cards"], json!(["a1"]), "{r}");
@@ -2152,9 +2157,16 @@ pick("statuses", "done");
 pick("statuses", "blocked");
 const blocked = view();
 pick("statuses", "blocked");
+pick("statuses", "waiting");
+const needs = view();
+pick("statuses", "waiting");
 pick("kinds", "gate");
 const gates = view();
-return { done, blocked, gates };
+pick("kinds", "gate");
+emitState({ ...s1, cards: s0.cards, tree: s1.tree.map((x) => x.thread === T ? { ...x, status: "failed" } : x) });
+pick("statuses", "blocked");
+const failedGate = view();
+return { done, blocked, needs, gates, failedGate };
 "##,
     );
     let t = json!(TICKET);
@@ -2167,8 +2179,14 @@ return { done, blocked, gates };
     assert_eq!(r["blocked"]["cards"], json!(["a3", "a1"]), "{r}");
     assert_eq!(r["blocked"]["open"], json!([t]), "{r}");
     assert_eq!(r["blocked"]["feed"], json!(["m91"]), "{r}");
+    assert_eq!(
+        (&r["needs"]["cards"], &r["needs"]["open"]),
+        (&json!(["a3", "a1"]), &json!([t])),
+        "a blocked ticket with cards also needs you: {r}"
+    );
     assert_eq!(r["gates"]["cards"], json!(["a1", "a2"]), "{r}");
     assert_eq!(r["gates"]["open"], json!([t]), "{r}");
+    assert_eq!(r["failedGate"]["open"], json!([t]), "a failed ticket with only a gate is still blocked: {r}");
 }
 
 #[tokio::test]
@@ -2547,7 +2565,7 @@ return { before, lonely, live, one, two, edited, acts, all, loose, cleared: { bt
     assert_eq!(r["edited"], "Context: Gadget gates (edited)", "{r}");
     assert_eq!(r["acts"], json!(["new", "update", "rename", "delete"]), "{r}");
     assert_eq!(r["all"]["cards"], json!(["a1", "a2"]), "{r}");
-    assert_eq!(r["all"]["n"], json!(["2", "2", "", "2", "2"]), "{r}");
+    assert_eq!(r["all"]["n"], json!(["2", "2", "0", "2", "2"]), "{r}");
     assert_eq!(
         (&r["all"]["btn"], &r["all"]["stored"], &r["all"]["q"]),
         (&json!("Context: All"), &Value::Null, &json!(""))
@@ -2826,4 +2844,315 @@ return { early, cards: ids(), btn: ctxBtn().textContent, stored: stored() };
     assert_eq!(r["early"], json!({"stored": "c1", "btn": "Context: All"}), "{r}");
     assert_eq!(r["cards"], json!(["a1"]), "{r}");
     assert_eq!((&r["btn"], &r["stored"]), (&json!("Context: Widgets"), &json!("c1")), "{r}");
+}
+
+#[tokio::test]
+async fn the_state_carries_iso_times_for_relative_ages() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#41").await;
+    h.wf(TICKET, "send", json!({"kind": "note", "body": "tests green"})).await;
+    let st = snapshot(&h);
+    let t = by_label(&st["tree"], "widgets#41");
+    assert!(t["upAt"].as_str().is_some_and(|s| s.ends_with('Z') && s.contains('T')), "{t}");
+}
+
+#[tokio::test]
+async fn a_dismissed_gate_is_marked_on_the_ticket_last_message() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#41").await;
+    h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": GATE})).await;
+    let last = |h: &H| by_label(&snapshot(h)["tree"], "widgets#41")["last"].clone();
+    assert!(last(&h).get("dismissed").is_none(), "{}", last(&h));
+    let id = cards(&h)[0]["id"].as_str().unwrap().to_string();
+    h.app.wf.dismiss(&id).unwrap();
+    assert_eq!(last(&h)["dismissed"], true, "{}", last(&h));
+}
+
+const ROWS: &str = r##"
+const W = (label, status, extra) => ({ thread: "w-" + label, label, status, done: status === "done", gate: null, pr: null, link: null, lastUp: "10:00 MST", ...extra });
+const T = (label, extra) => ({ thread: "t-" + label, ticket: "t-" + label, label, status: "idle", done: false, gate: null, pr: null, link: null, joined: true, lastUp: "10:00 MST", last: null, workers: [], ...extra });
+const row = (label) => q('#open [data-thread="t-' + label + '"]');
+const groups = () => [...document.getElementById("open").children].filter((e) => e.classList.contains("tgroup")).map((g) => g.textContent);
+"##;
+
+#[tokio::test]
+async fn ticket_state_comes_from_its_workers_and_rows_group_by_state() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"{ROWS}
+const c1 = {{ ...base.cards[0], ticket: "t-acme/a#1", label: "acme/a#1" }};
+const tree = [
+  T("acme/d#4", {{ workers: [W("#4 PR 1/1", "idle")] }}),
+  T("acme/b#2", {{ workers: [W("#2 PR 1/2", "done"), W("#2 PR 2/2", "running")] }}),
+  T("acme/c#3", {{ workers: [W("#3 PR 1/1", "failed")] }}),
+  T("acme/a#1", {{ gate: "merge", workers: [W("#1 PR 1/1", "idle", {{ gate: "merge" }})] }}),
+  T("acme/e#5", {{ workers: [W("#5 PR 1/1", "waiting")] }}),
+];
+emitState({{ ...base, cards: [c1], tree, counts: {{ ...base.counts, cards: 1, running: 0 }} }});
+const keys = [...document.getElementById("open").children].filter((e) => e.dataset.key).map((e) => e.dataset.key);
+return {{
+  keys, groups: groups(),
+  states: keys.map((k) => q('#open [data-key="' + k + '"]').dataset.state),
+  marks: ["acme/a#1", "acme/b#2"].map((l) => row(l).querySelector(".mk .mark").className),
+  worker: row("acme/a#1").querySelector(".wi .mark").className,
+  running: q("#counts").children[1].firstChild.textContent,
+  need: q("#counts").children[0].firstChild.textContent,
+  lead: (() => {{
+    emitState({{ ...base, cards: [c1, {{ ...base.cards[1], id: "a9", kind: "blocker", ticket: "t-acme/a#1", label: "acme/a#1" }}], tree, counts: {{ ...base.counts, cards: 2, running: 0 }} }});
+    return row("acme/a#1").querySelector('[data-part="needs"]').textContent;
+  }})(),
+}};
+"##
+        ),
+    );
+    assert_eq!(r["keys"], json!(["t-acme/a#1", "t-acme/c#3", "t-acme/b#2", "t-acme/e#5", "t-acme/d#4"]), "{r}");
+    assert_eq!(r["states"], json!(["need", "fail", "run", "wait", "idle"]), "{r}");
+    assert_eq!(r["lead"], "Blocked +1", "a newer blocker leads the row like it leads the cards: {r}");
+    assert_eq!(r["groups"], json!(["Needs you1", "Failed1", "Running1", "Waiting1", "Idle1"]), "{r}");
+    assert_eq!(r["marks"], json!(["mark s-need", "mark s-run"]), "{r}");
+    assert_eq!(r["worker"], "mark s-need", "{r}");
+    assert_eq!((&r["running"], &r["need"]), (&json!("1"), &json!("1")), "{r}");
+}
+
+#[tokio::test]
+async fn rows_show_a_readable_title_and_say_when_a_gate_was_answered() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"{ROWS}
+const tree = [
+  T("acme/a#1", {{ title: "acme/a#1: Fix the grader" }}),
+  T("acme/b#2", {{ gate: "acme/api#86_owns_the_next_deploy" }}),
+  T("acme/c#3", {{ title: "acme/c#3: https://github.com/acme/c/issues/3", gate: "windows-signing",
+    last: {{ kind: "gate", head: '**ACTION NEEDED:** reply "approve" to approve the 2-PR split, or reply with changes, here: https://github.com/acme/c/issues/3', at: "10:00 MST" }} }}),
+  T("acme/e#5", {{ last: {{ kind: "gate", dismissed: true, head: '**ACTION NEEDED:** reply "merge" to merge #12, here: https://github.com/acme/e/pull/12', at: "10:00 MST" }} }}),
+  T("acme/d#4", {{ last: {{ kind: "event", head: "PR 1/2 opened: https://github.com/acme/d/pull/9, head 0123456789abcdef0123 Publishing: template", at: "10:00 MST" }} }}),
+];
+emitState({{ ...base, cards: [], tree }});
+const text = (l, p) => row(l).querySelector('[data-part="' + p + '"]').textContent;
+return {{
+  titles: ["acme/a#1", "acme/b#2", "acme/c#3"].map((l) => text(l, "title")),
+  answered: text("acme/c#3", "note"),
+  dismissed: text("acme/e#5", "note"),
+  needsHidden: row("acme/c#3").querySelector('[data-part="needs"]').hidden,
+  state: row("acme/c#3").dataset.state,
+  note: text("acme/d#4", "note"),
+}};
+"##
+        ),
+    );
+    assert_eq!(r["titles"], json!(["Fix the grader", "Acme/api#86 owns the next deploy", "Windows signing"]), "{r}");
+    assert_eq!(r["answered"], "Answered: approve the 2-PR split", "{r}");
+    assert_eq!(r["dismissed"], "Dismissed: merge #12", "{r}");
+    assert_eq!((&r["needsHidden"], &r["state"]), (&json!(true), &json!("idle")), "{r}");
+    assert_eq!(r["note"], "PR 1/2 opened: #9, head 0123456", "{r}");
+}
+
+#[tokio::test]
+async fn a_card_leads_with_the_ask_and_keeps_the_context_below_it() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+const one = { ...base.cards[0], options: ["merge"], text: 'reply "merge" to merge #64, or review it first, here: https://github.com/o/widgets/pull/64 . Verified: approved at 905fcaa7d21dfe19.' };
+const blocker = { ...base.cards[1], kind: "blocker", options: [], text: base.cards[1].label + " worker cannot reach the registry; fix the token, here: https://github.com/o/widgets/actions/runs/7" };
+emitState({ ...base, cards: [one, blocker] });
+const p = (id, part) => card(id).querySelector('[data-part="' + part + '"]');
+const out = {
+  order: ids(),
+  ask: [p("a1", "ask").textContent, p("a2", "ask").textContent],
+  word: [p("a1", "kw").hidden, p("a2", "kw").textContent],
+  detail: p("a1", "detail").textContent,
+  review: p("a1", "rev").textContent,
+  open: p("a2", "rev").textContent,
+  cls: card("a2").className,
+  title: p("a1", "q").getAttribute("title").slice(0, 13),
+  label: p("a1", "id").textContent,
+};
+emitState({ ...base, cards: [{ ...one, text: 'reopen #81, then reply "merge" to merge it, here: https://github.com/o/widgets/pull/81' }] });
+out.then = p("a1", "ask").textContent;
+emitState({ ...base, cards: [{ ...one, options: [], text: "**ACTION NEEDED:** start the code-mode service, here: `t3cm serve`, then reply once it is healthy" }] });
+out.cmd = p("a1", "ask").textContent;
+emitState({ ...base, cards: [{ ...one, text: 'reply "merge" to merge #81, here: `https://github.com/o/widgets/pull/81`.' }] });
+const rev = p("a1", "rev").querySelector("a");
+out.href = rev && rev.getAttribute("href");
+emitState({ ...base, cards: [{ ...one, options: [], text: "Restart job 12345678 after the fix" }] });
+out.num = p("a1", "ask").textContent;
+emitState({ ...base, cards: [{ ...one, options: [], text: "Rebase head 390604428 (390604428) onto main" }] });
+out.digits = p("a1", "ask").textContent;
+emitState({ ...base, cards: [{ ...one, options: [], text: "**ACTION NEEDED:** run the check here: npm test" }] });
+out.bare = p("a1", "ask").textContent;
+emitState({ ...base, cards: [{ ...one, options: [], text: "**ACTION NEEDED:** run `printf '%s' deadbeef0123` on the host" }] });
+out.code = p("a1", "ask").textContent;
+return out;
+"##,
+    );
+    assert_eq!(r["order"], json!(["a2", "a1"]), "{r}");
+    assert_eq!(r["ask"], json!(["Merge #64", "Worker cannot reach the registry; fix the token"]), "{r}");
+    assert_eq!(r["word"], json!([true, "Blocked:"]), "{r}");
+    assert_eq!(r["detail"], "Verified: approved at 905fcaa.", "{r}");
+    assert_eq!((&r["review"], &r["open"]), (&json!("Review #64"), &json!("Open link")), "{r}");
+    assert_eq!(r["cls"], "card k-fail", "{r}");
+    assert_eq!(r["title"], "reply \"merge\"", "{r}");
+    assert_eq!(r["label"], "widgets#41", "{r}");
+    assert_eq!(r["then"], "Reopen #81, then reply \"merge\" to merge it", "{r}");
+    assert_eq!(r["cmd"], "Start the code-mode service: t3cm serve, then reply once it is healthy", "{r}");
+    assert_eq!(r["href"], "https://github.com/o/widgets/pull/81", "{r}");
+    assert_eq!(r["num"], "Restart job 12345678 after the fix", "{r}");
+    assert_eq!(r["digits"], "Rebase head 3906044 (3906044) onto main", "{r}");
+    assert_eq!(r["bare"], "Run the check here: npm test", "{r}");
+    assert_eq!(r["code"], "Run printf '%s' deadbeef0123 on the host", "inline code keeps its hex: {r}");
+}
+
+#[tokio::test]
+async fn activity_groups_runs_and_shows_the_message_without_its_kind() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+const F = (n, label, kind, head) => ({ handle: "m" + n, at: "10:0" + n + " MST", iso: "2026-11-17T17:0" + n + ":00Z", label, kind, head, ticket: null, ticketLabel: "acme/w#7", ticketTitle: null });
+const feed = [
+  F(5, "#7 PR 3/3", "event", "PR 3/3 updated: #12, head 4f2a9c1e0b9d3d6a1f00c2b7e1a8d55e2c9f0a11. Fixed both findings"),
+  F(4, "#7 PR 3/3", "note", "#12: review requested changes"),
+  F(3, "#7 PR 3/3", "event", "PR 3/3 opened: https://github.com/acme/w/pull/12, head 1c0ffee Publishing: template filled"),
+  F(2, "acme/w#7", "note", "split approved"),
+];
+emitState({ ...base, feed });
+const li = () => [...document.getElementById("feed").children];
+const first = li()[0];
+const before = { rows: li().map((e) => e.dataset.key), who: first.querySelector(".who").textContent, sub: first.querySelector(".fsub").textContent,
+  msg: first.querySelector(".msg").textContent, more: first.querySelector(".more").textContent, earlier: first.querySelector(".earlier").hidden };
+first.querySelector(".more").dispatch("click");
+const open = [...first.querySelector(".earlier").children].map((e) => e.querySelector(".msg").textContent);
+emitState({ ...base, feed });
+const kept = { still: !first.querySelector(".earlier").hidden, toggle: first.querySelector(".more").getAttribute("aria-expanded") };
+emitState({ ...base, feed: feed.filter((f) => f.handle !== "m3") });
+kept.evicted = !first.querySelector(".earlier").hidden;
+emitState({ ...base, feed: [feed[0], { ...feed[1], ticket: "t-x", ticketLabel: "acme/x#7" }] });
+return { before, open, ...kept, split: li().length };
+"##,
+    );
+    assert_eq!(r["before"]["rows"], json!(["m5", "m2"]), "{r}");
+    assert_eq!((&r["before"]["who"], &r["before"]["sub"]), (&json!("acme/w#7"), &json!("PR 3/3")), "{r}");
+    assert_eq!(r["before"]["msg"], "Updated: #12, head 4f2a9c1. Fixed both findings", "{r}");
+    assert_eq!(r["before"]["more"], "+ 2 earlier from PR 3/3", "{r}");
+    assert_eq!(r["before"]["earlier"], true, "{r}");
+    assert_eq!(r["open"], json!(["#12: review requested changes", "Opened: #12, head 1c0ffee"]), "{r}");
+    assert_eq!((&r["still"], &r["toggle"]), (&json!(true), &json!("true")), "{r}");
+    assert_eq!(r["split"], 2, "same worker label on another ticket must not fold: {r}");
+    assert_eq!(r["evicted"], true, "an open group stays open when its oldest row leaves the feed: {r}");
+}
+
+#[tokio::test]
+async fn an_age_tooltip_names_the_zone_its_clock_reads_in() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"{ROWS}
+const tree = [T("acme/a#1", {{ status: "running", lastUp: "16:21 MST", upAt: "2026-11-18T23:21:00Z" }}), T("acme/b#2", {{ lastUp: "16:00 MST" }})];
+const tip = () => row("acme/a#1").querySelector('[data-part="tm"]').getAttribute("title");
+globalThis.Intl = {{ DateTimeFormat: function () {{ return {{ formatToParts: () => [{{ type: "hour", value: "23" }}, {{ type: "timeZoneName", value: "UTC" }}] }}; }} }};
+emitState({{ ...base, cards: [], tree }});
+const browser = tip();
+delete globalThis.Intl;
+emitState({{ ...base, cards: [], tree: [{{ ...tree[0], upAt: "2026-11-18T23:22:00Z" }}, tree[1]] }});
+return {{ browser, bare: tip() }};
+"##
+        ),
+    );
+    let browser = r["browser"].as_str().unwrap_or_default();
+    assert!(browser.ends_with(" UTC"), "the label names the browser zone the time is read in: {r}");
+    let bare = r["bare"].as_str().unwrap_or_default();
+    assert!(!bare.contains("MST") && !bare.contains("UTC"), "no zone label without Intl: {r}");
+}
+
+#[tokio::test]
+async fn the_check_age_in_the_header_keeps_counting() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+const t0 = Date.parse("2026-11-19T17:00:00Z");
+Date.now = () => t0;
+const service = { ...base.service, watcher: { ...base.service.watcher, alive: true, lastPassAt: "2026-11-19T17:00:00Z" } };
+emitState({ ...base, service });
+const fresh = document.getElementById("svc-text").textContent;
+Date.now = () => t0 + 5 * 60000;
+for (const f of intervals) f();
+return { fresh, later: document.getElementById("svc-text").textContent };
+"##,
+    );
+    assert!(r["fresh"].as_str().unwrap_or_default().contains("checked just now"), "{r}");
+    assert!(r["later"].as_str().unwrap_or_default().contains("checked 5m ago"), "the timer repaints the age: {r}");
+}
+
+#[tokio::test]
+async fn group_headings_wait_while_the_ticket_list_is_held() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"{ROWS}
+const tree = [T("acme/a#1", {{ status: "running" }}), T("acme/b#2", {{ status: "running" }})];
+emitState({{ ...base, cards: [], tree }});
+const shape = () => [...document.getElementById("open").children].map((e) => e.dataset.key || e.textContent);
+const before = shape();
+row("acme/b#2").focus();
+const c1 = {{ ...base.cards[0], ticket: "t-acme/a#1", label: "acme/a#1" }};
+emitState({{ ...base, cards: [c1], tree }});
+const held = shape();
+document.activeElement = document.body;
+emitState({{ ...base, cards: [c1], tree }});
+return {{ before, held, live: shape() }};
+"##
+        ),
+    );
+    assert_eq!(r["held"], r["before"], "{r}");
+    assert_eq!(r["live"], json!(["Needs you1", "t-acme/a#1", "Running1", "t-acme/b#2"]), "{r}");
+}
+
+#[tokio::test]
+async fn done_workers_fold_into_a_count_that_expands() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"{ROWS}
+const tree = [T("acme/b#2", {{ workers: [W("#2 PR 1/4", "done"), W("#2 PR 2/4", "done"), W("#2 PR 3/4", "idle"), W("#2 PR 4/4", "running")] }})];
+emitState({{ ...base, cards: [], tree }});
+const shown = () => [...row("acme/b#2").querySelectorAll(".wl .wi")].map((w) => w.textContent);
+const more = row("acme/b#2").querySelector('[data-part="wmore"]');
+const done = row("acme/b#2").querySelector('[data-part="wdone"]');
+const before = {{ shown: shown(), more: more.textContent, done: done.textContent }};
+more.dispatch("click");
+const after = {{ shown: shown(), less: more.textContent, expanded: more.getAttribute("aria-expanded"), doneHidden: done.hidden }};
+more.dispatch("click");
+done.dispatch("click");
+const viaDone = shown().length;
+const focusMoved = document.activeElement === more;
+more.dispatch("click");
+return {{ before, after, viaDone, focusMoved, focusStays: document.activeElement === more && !more.hidden }};
+"##
+        ),
+    );
+    assert_eq!(r["before"], json!({"shown": ["PR 4/4"], "more": "+1 worker", "done": "2 done"}), "{r}");
+    assert_eq!(
+        r["after"],
+        json!({"shown": ["PR 1/4", "PR 2/4", "PR 3/4", "PR 4/4"], "less": "Less", "expanded": "true", "doneHidden": true}),
+        "{r}"
+    );
+    assert_eq!(r["viaDone"], 4, "{r}");
+    assert_eq!((&r["focusMoved"], &r["focusStays"]), (&json!(true), &json!(true)), "{r}");
 }
