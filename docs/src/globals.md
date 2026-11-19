@@ -101,6 +101,14 @@ parent and a child, and the service keeps every link and message in its store.
   `wf.adopt` and `wf.sweep` cover the rest of a link's life.
 - `wf.launchTicket`, `wf.cards`, `wf.answer` and `wf.feed` work with the
   [board](board.md).
+- `wf.issue({ url, title?, note? })` reports a GitHub issue the calling thread
+  just filed. The board lists it under [new issues](board.md#new-issues) with
+  the filing thread and the time. The call needs the caller's thread id but no
+  parent link, so any thread can make it. It returns `{ added, message, issue }`.
+  When the issue is already on the list, dismissed or not, or already has a
+  board ticket, the call adds nothing. Its result then has `added: false`, a
+  `reason` of `reported` or `ticket`, the existing `issue` or `ticket`, and a
+  `message` that says which.
 - `wf.pick({ pool })` picks a member of a configured [pool](config.md#pools)
   for one launch and returns `{ pool, instanceId, model, options, reason,
   skipped, modelSelection }`. Pass `modelSelection` to `t3_thread_launch`.

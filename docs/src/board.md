@@ -164,6 +164,7 @@ inside it. A card outside it still counts toward "N hidden".
 | `wf.answer(id, text)` | Answer a card for the user, the same as a button on the page |
 | `wf.feed({ limit? })` | The latest notes and events, each with its `ticket`, `ticketLabel`, `ticketTitle`, `ticketStatus`, `repo` and `project` |
 | `wf.board({ parent: "board", all: true })` | Every ticket on the board, with live status |
+| `wf.issue({ url, title?, note? })` | Put an issue this thread just filed on the [new issues](#new-issues) list |
 
 ```js
 async () => (await wf.cards()).map(c => `${c.id} ${c.label}: ${c.options.join(" | ")}`)
@@ -183,6 +184,31 @@ provider instance from that pool in place of `board.instanceId`. The result
 carries `instanceId` and `reason`, and the feed entry for the launch carries
 the same two fields. When no member of the pool can run, the launch fails,
 leaves an error card that names the pool, and launches nothing.
+
+## New issues
+
+A thread that files a GitHub issue reports it with `wf.issue`, and the board
+keeps it on a list of new issues until someone acts on it. Each entry records
+the issue's URL, `repo` and `number`, and the `title` and `note` the thread
+passed. It also records the filing `thread`, with its T3 `threadLink` and
+`threadTitle`, and `at`, the time the thread reported it. An entry's id looks
+like `n3`, and the list survives restarts. If T3 can't give the thread's link
+and title when the issue is reported, the entry keeps them empty. The next
+report of that issue fills them in.
+
+An issue goes on the list once. Reporting it again, from any thread, changes
+nothing. Neither does reporting an issue that already has a board ticket, open,
+done or still waiting to join. The board matches tickets by their `repo#n`
+label, ignoring case. The label leaves out the owner, so an issue in another
+owner's repo of the same name counts as having that ticket.
+
+- **Launch** runs `wf.launchTicket` for the entry's issue, with its title as
+  the ticket's title. When the launch succeeds, the entry leaves the list and
+  the ticket shows under Tickets. A launch that fails leaves the entry in
+  place and an error card, as any failed launch does. Launching the same issue
+  from the Launch tickets box also takes its entry off the list.
+- **Dismiss** takes an entry off the list without touching GitHub. Dismissed
+  entries stay in the store, and **Restore** puts one back.
 
 ## Settling
 
@@ -207,7 +233,7 @@ hand.
 | Route | Does |
 |---|---|
 | `GET /` | The page, with a per-process CSRF token embedded |
-| `GET /api/state` | `{cards, tree, feed, asks, settled, contexts, counts, service}`; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt` |
+| `GET /api/state` | `{cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, counts, service}`, with `counts.newIssues`; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt` |
 | `GET /api/events` | SSE: a `state` event on every change |
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it |
@@ -216,6 +242,9 @@ hand.
 | `POST /api/ask` `{question}` | Ask a scratch thread about the board |
 | `POST /api/tickets/{thread}/settle`, `/restore` | Settle a done ticket, or bring a settled one back (400 if open, or not settled) |
 | `POST /api/asks/{id}/settle`, `/restore` | The same for a closed ask; `id` is `q<n>` |
+| `GET /api/new-issues` | `{issues, dismissed}`, newest first; an issue that has a board ticket is in neither |
+| `POST /api/new-issues/{id}/launch` | Launch a ticket for the entry, as `POST /api/launch` does for one issue; the result adds `id` (404 for no such entry) |
+| `POST /api/new-issues/{id}/dismiss`, `/restore` | Dismiss the entry, or bring a dismissed one back (400 if already dismissed, or not dismissed) |
 | `POST /api/settle-done` | Settle every done ticket and closed ask; returns `{tickets, asks}` counts |
 | `GET /api/contexts` | `{contexts: [...]}`, sorted by name; each is `{id, name, spec, createdAt, updatedAt}`, and `spec` is `{projects, statuses, kinds, q?}` |
 | `PUT /api/contexts/{id}` `{name, spec}` | Create the context (201) or replace its name and filter (200). Leave out `spec` to rename an existing context, or `name` to change only its filter; either form needs the context to exist (404 if it does not). `id` is 1 to 64 letters, digits, `-` or `_`. Names are unique ignoring case (409), at most 60 characters, and never "All". Statuses are `running`, `waiting`, `blocked` and `done`, and kinds are the card kinds. The board keeps at most 100 contexts |
