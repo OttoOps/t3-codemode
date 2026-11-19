@@ -1,0 +1,1155 @@
+{
+ "cards": [
+  {
+   "id": "b6",
+   "kind": "gate",
+   "label": "t3-codemode#2",
+   "ticket": "thread-e3a060d6c67e",
+   "link": "https://t3.example/threads/thread-515e54d0a8d5",
+   "text": "get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath) per the checklist, then reply \"windows ready\" and I launch the Windows signing PR, here: https://github.com/OttoOps/t3-codemode/issues/51",
+   "handle": "m616",
+   "options": [
+    "windows ready"
+   ],
+   "at": "2026-11-18T22:54:29Z",
+   "atLocal": "15:54 MST",
+   "token": "118"
+  },
+  {
+   "id": "c5",
+   "kind": "gate",
+   "label": "t3-codemode#17",
+   "ticket": "thread-04d98505c36b",
+   "link": "https://t3.example/threads/thread-24a7adb669b5",
+   "text": "reply \"merge\" to merge #17 PR 5/6 #63 (skills install guide in the README), or review it first, here: https://github.com/OttoOps/t3-codemode/pull/63 . Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the matrix and deploy jobs skipped).",
+   "handle": "m668",
+   "options": [
+    "merge"
+   ],
+   "at": "2026-11-18T23:21:32Z",
+   "atLocal": "16:21 MST",
+   "token": "126"
+  },
+  {
+   "id": "c6",
+   "kind": "gate",
+   "label": "t3-codemode#59",
+   "ticket": "thread-b7319108b8ee",
+   "link": "https://t3.example/threads/thread-742662e45e6f",
+   "text": "reply \"merge\" to merge #64, or review it first, here: https://github.com/OttoOps/t3-codemode/pull/64",
+   "handle": "m674",
+   "options": [
+    "merge"
+   ],
+   "at": "2026-11-18T23:31:05Z",
+   "atLocal": "16:31 MST",
+   "token": "127"
+  },
+  {
+   "id": "c8",
+   "kind": "gate",
+   "label": "t3-codemode#56",
+   "ticket": "thread-cd8896e65d18",
+   "link": "https://t3.example/threads/thread-91cbcec60561",
+   "text": "reply \"merge\" to merge #65 (rebase through the merge queue), or review it first, here: https://github.com/OttoOps/t3-codemode/pull/65",
+   "handle": "m685",
+   "options": [
+    "merge"
+   ],
+   "at": "2026-11-18T23:50:10Z",
+   "atLocal": "16:50 MST",
+   "token": "129"
+  }
+ ],
+ "tree": [
+  {
+   "thread": "thread-e3a060d6c67e",
+   "label": "t3-codemode#2",
+   "status": "idle",
+   "t3Status": "completed",
+   "gate": "windows-signing",
+   "link": "https://t3.example/threads/thread-515e54d0a8d5",
+   "pr": null,
+   "done": false,
+   "closedHow": null,
+   "lastUp": "15:54 MST",
+   "workers": [
+    {
+     "thread": "thread-e6ea4db3842e",
+     "label": "#2 PR 1/4",
+     "status": "done",
+     "t3Status": null,
+     "gate": null,
+     "link": "https://t3.example/threads/thread-b925aa4a5dd2",
+     "pr": null,
+     "done": true,
+     "closedHow": "handoff",
+     "lastUp": "23:58 MST"
+    },
+    {
+     "thread": "thread-6acc60bfed59",
+     "label": "#2 PR 2/5",
+     "status": "done",
+     "t3Status": null,
+     "gate": null,
+     "link": "https://t3.example/threads/thread-1cfb3300628d",
+     "pr": null,
+     "done": true,
+     "closedHow": "handoff",
+     "lastUp": "00:21 MST"
+    },
+    {
+     "thread": "thread-45a2dde634b9",
+     "label": "#2 PR 3/5",
+     "status": "done",
+     "t3Status": null,
+     "gate": null,
+     "link": "https://t3.example/threads/thread-184f6d776dbb",
+     "pr": null,
+     "done": true,
+     "closedHow": "handoff",
+     "lastUp": "02:35 MST"
+    },
+    {
+     "thread": "thread-a36966150854",
+     "label": "#2 PR 4/5",
+     "status": "done",
+     "t3Status": null,
+     "gate": null,
+     "link": "https://t3.example/threads/thread-0e1aa644de1b",
+     "pr": null,
+     "done": true,
+     "closedHow": "handoff",
+     "lastUp": "07:46 MST"
+    },
+    {
+     "thread": "thread-ae0cd36937bd",
+     "label": "#2 PR 5/5",
+     "status": "done",
+     "t3Status": "running",
+     "gate": null,
+     "link": "https://t3.example/threads/thread-fe78f8bc374f",
+     "pr": null,
+     "done": true,
+     "closedHow": "handoff",
+     "lastUp": "15:53 MST"
+    }
+   ],
+   "ticket": "thread-e3a060d6c67e",
+   "joined": true,
+   "last": {
+    "handle": "m616",
+    "kind": "gate",
+    "head": "**ACTION NEEDED:** get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath) per the checklist, then reply \"windows r...",
+    "at": "15:54 MST"
+   }
+  },
+  {
+   "thread": "thread-04d98505c36b",
+   "label": "t3-codemode#17",
+   "status": "idle",
+   "t3Status": "completed",
+   "gate": "merge",
+   "link": "https://t3.example/threads/thread-24a7adb669b5",
+   "pr": null,
+   "done": false,
+   "closedHow": null,
+   "lastUp": "16:21 MST",
+   "workers": [
+    {
+     "thread": "thread-b6d9dc4ce38c",
+     "label": "#17 PR 1/6",
+     "status": "done",
+     "t3Status": null,
+     "gate": null,
+     "link": "https://t3.example/threads/thread-8cbd62c40461",
+     "pr": null,
+     "done": true,
+     "closedHow": "handoff",
+     "lastUp": "23:40 MST"
+    },
+    {
+     "thread": "thread-8e2839e81910",
+     "label": "#17 PR 2/6",
+     "status": "done",
+     "t3Status": null,
+     "gate": null,
+     "link": "https://t3.example/threads/thread-b8dc9a1696ca",
+     "pr": null,
+     "done": true,
+     "closedHow": "handoff",
+     "lastUp": "00:19 MST"
+    },
+    {
+     "thread": "thread-32095b7dee1d",
+     "label": "#17 PR 3/6",
+     "status": "done",
+     "t3Status": null,
+     "gate": null,
+     "link": "https://t3.example/threads/thread-8071cde602ea",
+     "pr": null,
+     "done": true,
+     "closedHow": "handoff",
+     "lastUp": "01:35 MST"
+    },
+    {
+     "thread": "thread-22a9c0ad39ed",
+     "label": "#17 PR 4/6",
+     "status": "done",
+     "t3Status": "running",
+     "gate": null,
+     "link": "https://t3.example/threads/thread-07eca36d7f19",
+     "pr": null,
+     "done": true,
+     "closedHow": "handoff",
+     "lastUp": "15:53 MST"
+    },
+    {
+     "thread": "thread-d578d769ac28",
+     "label": "#17 PR 5/6",
+     "status": "idle",
+     "t3Status": "completed",
+     "gate": "merge",
+     "link": "https://t3.example/threads/thread-1838783fd9f2",
+     "pr": {
+      "number": 63,
+      "url": "https://github.com/OttoOps/t3-codemode/pull/63",
+      "state": "open",
+      "repository": "ottoops/t3-codemode"
+     },
+     "done": false,
+     "closedHow": null,
+     "lastUp": "16:21 MST"
+    }
+   ],
+   "ticket": "thread-04d98505c36b",
+   "joined": true,
+   "last": {
+    "handle": "m668",
+    "kind": "gate",
+    "head": "**ACTION NEEDED:** reply \"merge\" to merge #17 PR 5/6 #63 (skills install guide in the README), or review it first, here: https://github.com/...",
+    "at": "16:21 MST"
+   }
+  },
+  {
+   "thread": "thread-eb081b99ac8f",
+   "label": "web#647",
+   "status": "idle",
+   "t3Status": "completed",
+   "gate": null,
+   "link": "https://t3.example/threads/thread-d957e6b55403",
+   "pr": null,
+   "done": false,
+   "closedHow": null,
+   "lastUp": "17:21 MST",
+   "workers": [
+    {
+     "thread": "thread-17ec76b4aef7",
+     "label": "#647 PR 1/2",
+     "status": "done",
+     "t3Status": "interrupted",
+     "gate": null,
+     "link": "https://t3.example/threads/thread-e2779dc6bdc4",
+     "pr": null,
+     "done": true,
+     "closedHow": "handoff",
+     "lastUp": "17:18 MST"
+    },
+    {
+     "thread": "thread-e0ac4dfdfbe6",
+     "label": "#647 PR 2/2",
+     "status": "running",
+     "t3Status": "running",
+     "gate": "transcript-source",
+     "link": "https://t3.example/threads/thread-ef99b56c0fc2",
+     "pr": null,
+     "done": false,
+     "closedHow": null,
+     "lastUp": "17:21 MST"
+    }
+   ],
+   "ticket": "thread-eb081b99ac8f",
+   "joined": true,
+   "last": {
+    "handle": "m714",
+    "kind": "reply",
+    "head": "You chose \"sections\": build the transcript from each section's heading lines (tags stripped, whitespace collapsed), grouped by section. Say i...",
+    "at": "17:24 MST"
+   }
+  },
+  {
+   "thread": "thread-ad28a8000b9b",
+   "label": "web#648",
+   "status": "idle",
+   "t3Status": "completed",
+   "gate": null,
+   "link": "https://t3.example/threads/thread-42b95b22f2d7",
+   "pr": null,
+   "done": false,
+   "closedHow": null,
+   "lastUp": "17:20 MST",
+   "workers": [
+    {
+     "thread": "thread-1cfed3189432",
+     "label": "#648 PR 1/2",
+     "status": "done",
+     "t3Status": "completed",
+     "gate": null,
+     "link": "https://t3.example/threads/thread-4baaf1716367",
+     "pr": null,
+     "done": true,
+     "closedHow": "handoff",
+     "lastUp": "17:19 MST"
+    },
+    {
+     "thread": "thread-714a6e908ec3",
+     "label": "#648 PR 2/2",
+     "status": "running",
+     "t3Status": "running",
+     "gate": null,
+     "link": "https://t3.example/threads/thread-180f77d50160",
+     "pr": null,
+     "done": false,
+     "closedHow": null,
+     "lastUp": "17:25 MST"
+    }
+   ],
+   "ticket": "thread-ad28a8000b9b",
+   "joined": true,
+   "last": {
+    "handle": "m709",
+    "kind": "note",
+    "head": "PR 1/2 handed off and cleaned up; PR 2/2 worker launched on feat/648-page-build-checks",
+    "at": "17:20 MST"
+   }
+  },
+  {
+   "thread": "thread-9626382a95f2",
+   "label": "t3-codemode#55",
+   "status": "idle",
+   "t3Status": "completed",
+   "gate": null,
+   "link": "https://t3.example/threads/thread-e2a420daaf7b",
+   "pr": null,
+   "done": false,
+   "closedHow": null,
+   "lastUp": "17:16 MST",
+   "workers": [
+    {
+     "thread": "thread-8ee5a42082f5",
+     "label": "#55 PR 1/2",
+     "status": "running",
+     "t3Status": "running",
+     "gate": null,
+     "link": "https://t3.example/threads/thread-4d95915ddad8",
+     "pr": {
+      "number": 66,
+      "url": "https://github.com/OttoOps/t3-codemode/pull/66",
+      "state": "open",
+      "repository": "ottoops/t3-codemode"
+     },
+     "done": false,
+     "closedHow": null,
+     "lastUp": "17:16 MST"
+    }
+   ],
+   "ticket": "thread-9626382a95f2",
+   "joined": true,
+   "last": {
+    "handle": "m698",
+    "kind": "note",
+    "head": "PR 1/2 open for review while checks run: https://github.com/OttoOps/t3-codemode/pull/66 (head 00caefa)",
+    "at": "17:16 MST"
+   }
+  },
+  {
+   "thread": "thread-cd8896e65d18",
+   "label": "t3-codemode#56",
+   "status": "idle",
+   "t3Status": "completed",
+   "gate": "merge",
+   "link": "https://t3.example/threads/thread-91cbcec60561",
+   "pr": null,
+   "done": false,
+   "closedHow": null,
+   "lastUp": "16:50 MST",
+   "workers": [
+    {
+     "thread": "thread-a1d886e2e79c",
+     "label": "#56 PR 1/4",
+     "status": "idle",
+     "t3Status": "completed",
+     "gate": "merge",
+     "link": "https://t3.example/threads/thread-5975cab1787a",
+     "pr": {
+      "number": 65,
+      "url": "https://github.com/OttoOps/t3-codemode/pull/65",
+      "state": "open",
+      "repository": "ottoops/t3-codemode"
+     },
+     "done": false,
+     "closedHow": null,
+     "lastUp": "16:50 MST"
+    }
+   ],
+   "ticket": "thread-cd8896e65d18",
+   "joined": true,
+   "last": {
+    "handle": "m685",
+    "kind": "gate",
+    "head": "**ACTION NEEDED:** reply \"merge\" to merge #65 (rebase through the merge queue), or review it first, here: https://github.com/OttoOps/t3-code...",
+    "at": "16:50 MST"
+   }
+  },
+  {
+   "thread": "thread-b7319108b8ee",
+   "label": "t3-codemode#59",
+   "status": "idle",
+   "t3Status": "completed",
+   "gate": "merge",
+   "link": "https://t3.example/threads/thread-742662e45e6f",
+   "pr": null,
+   "done": false,
+   "closedHow": null,
+   "lastUp": "16:31 MST",
+   "workers": [
+    {
+     "thread": "thread-43eb3622f8cb",
+     "label": "#59 PR 1/2",
+     "status": "idle",
+     "t3Status": "completed",
+     "gate": "merge",
+     "link": "https://t3.example/threads/thread-d04df0ed3394",
+     "pr": {
+      "number": 64,
+      "url": "https://github.com/OttoOps/t3-codemode/pull/64",
+      "state": "open",
+      "repository": "ottoops/t3-codemode"
+     },
+     "done": false,
+     "closedHow": null,
+     "lastUp": "16:30 MST"
+    }
+   ],
+   "ticket": "thread-b7319108b8ee",
+   "joined": true,
+   "last": {
+    "handle": "m674",
+    "kind": "gate",
+    "head": "**ACTION NEEDED:** reply \"merge\" to merge #64, or review it first, here: https://github.com/OttoOps/t3-codemode/pull/64",
+    "at": "16:31 MST"
+   }
+  },
+  {
+   "thread": "thread-090c1aeff387",
+   "label": "t3-codemode#67",
+   "status": "idle",
+   "t3Status": "completed",
+   "gate": null,
+   "link": "https://t3.example/threads/thread-b3aca772d90b",
+   "pr": null,
+   "done": false,
+   "closedHow": null,
+   "lastUp": "17:23 MST",
+   "workers": [
+    {
+     "thread": "thread-f82bdb41ef4b",
+     "label": "#67 PR 1/2",
+     "status": "running",
+     "t3Status": "running",
+     "gate": null,
+     "link": "https://t3.example/threads/thread-3f4de60e5e81",
+     "pr": null,
+     "done": false,
+     "closedHow": null,
+     "lastUp": "17:25 MST"
+    }
+   ],
+   "ticket": "thread-090c1aeff387",
+   "joined": true,
+   "last": {
+    "handle": "m712",
+    "kind": "gate",
+    "head": "reply \"approve\" to approve the 2-PR split for #67 (docs critique, then the build), or reply with changes, here: https://github.com/OttoOps/t...",
+    "at": "17:23 MST"
+   }
+  }
+ ],
+ "feed": [
+  {
+   "handle": "m716",
+   "at": "17:25 MST",
+   "iso": "2026-11-19T00:25:22Z",
+   "label": "#648 PR 2/2",
+   "kind": "note",
+   "head": "PR 2/2 built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-page/add-section-guide; npm test 1976 pass, npm run build green. Starting sol-loop."
+  },
+  {
+   "handle": "m709",
+   "at": "17:20 MST",
+   "iso": "2026-11-19T00:20:23Z",
+   "label": "web#648",
+   "kind": "note",
+   "head": "PR 1/2 handed off and cleaned up; PR 2/2 worker launched on feat/648-page-build-checks"
+  },
+  {
+   "handle": "m706",
+   "at": "17:19 MST",
+   "iso": "2026-11-19T00:19:26Z",
+   "label": "web#647",
+   "kind": "note",
+   "head": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned, issue commented. PR 2/2 worker launched on feat/647-search-index."
+  },
+  {
+   "handle": "m704",
+   "at": "17:18 MST",
+   "iso": "2026-11-19T00:18:56Z",
+   "label": "web#648",
+   "kind": "note",
+   "head": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the worker's handoff before PR 2/2"
+  },
+  {
+   "handle": "m702",
+   "at": "17:18 MST",
+   "iso": "2026-11-19T00:18:47Z",
+   "label": "web#646",
+   "kind": "note",
+   "head": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its banner; release notes stay live. Deploy hold lifted."
+  },
+  {
+   "handle": "m698",
+   "at": "17:16 MST",
+   "iso": "2026-11-19T00:16:08Z",
+   "label": "t3-codemode#55",
+   "kind": "note",
+   "head": "PR 1/2 open for review while checks run: https://github.com/OttoOps/t3-codemode/pull/66 (head 00caefa)"
+  },
+  {
+   "handle": "m697",
+   "at": "17:16 MST",
+   "iso": "2026-11-19T00:16:00Z",
+   "label": "#55 PR 1/2",
+   "kind": "event",
+   "head": "PR 1/2 opened: #66 https://github.com/OttoOps/t3-codemode/pull/66, head 00caefa Publishing: filled .github/PULL_REQUEST_TEMPLATE.md (repo names no PR skill); voice skill ran with voice-check...."
+  },
+  {
+   "handle": "m694",
+   "at": "17:08 MST",
+   "iso": "2026-11-19T00:08:14Z",
+   "label": "web#646",
+   "kind": "note",
+   "head": "#654 rebase-merged (99cffc899); deploy/v2.6.66 pushed 17:07 MST carrying #651/#653/#654; deploy hold lifted once it succeeds"
+  },
+  {
+   "handle": "m690",
+   "at": "16:59 MST",
+   "iso": "2026-11-18T23:59:59Z",
+   "label": "#646 fix cover",
+   "kind": "event",
+   "head": "Follow-up PR opened: #654 https://github.com/acme/web/pull/654, head 3e8d9d750 (follow-up of #653). Refs #646 #648. Contents: meta.json \"banner\": \"launch-2026-11\"; body.md lead iframe droppe..."
+  },
+  {
+   "handle": "m688",
+   "at": "16:55 MST",
+   "iso": "2026-11-18T23:55:43Z",
+   "label": "web#646",
+   "kind": "note",
+   "head": "HOLD all web deploys: main (with #651 + #653) would null the launch page's banner on boot and blank the live launch page. Fix PR in progress on fix/646-launch-banner-field; web#646 pushes the next deploy/ t..."
+  },
+  {
+   "handle": "m686",
+   "at": "16:52 MST",
+   "iso": "2026-11-18T23:52:36Z",
+   "label": "#646 fix cover",
+   "kind": "event",
+   "head": "PR 1/1 updated: #653, head f280174ee (remote confirmed; GitHub PR head still catching up from 390604428). Change: hero is now 1600x1600 square, fill = hero.jpg border mean (252,244,237) ~#fcf4ec, card..."
+  },
+  {
+   "handle": "m682",
+   "at": "16:47 MST",
+   "iso": "2026-11-18T23:47:00Z",
+   "label": "#646 fix cover",
+   "kind": "event",
+   "head": "PR 1/1 opened: #653 https://github.com/acme/web/pull/653, head 390604428 Publishing: pr skill template; voice pass (voice-check OK, no hard violations); unslop pass, every rule checked ..."
+  },
+  {
+   "handle": "m681",
+   "at": "16:44 MST",
+   "iso": "2026-11-18T23:44:49Z",
+   "label": "#646 fix cover",
+   "kind": "note",
+   "head": "#646 fix committed (390604428): image set, og.png removed, seeder reconcile proven on staging (cover-updated). npm test 1961/1961, build OK. Featured slot crops the 3:2 banner (object-fit cover, t..."
+  },
+  {
+   "handle": "m676",
+   "at": "16:38 MST",
+   "iso": "2026-11-18T23:38:47Z",
+   "label": "#56 PR 1/4",
+   "kind": "event",
+   "head": "PR 1/4 updated: #65, head cc9af534e849ca731d2cc42d736d82d3cf93aa1a. CodeRabbit follow-up: a worker that finished while its PR was open (or closed) kept that state on the board. board_tick now re-reads..."
+  },
+  {
+   "handle": "m675",
+   "at": "16:34 MST",
+   "iso": "2026-11-18T23:34:45Z",
+   "label": "#56 PR 1/4",
+   "kind": "event",
+   "head": "PR 1/4 updated: #65, head 6900c903f0b3c9729d6b96ef6e8426011204b555. CodeRabbit minor: a PR that reopened between t3_thread_read and the list call got cached as open under stale counts. Cache reuse is ..."
+  },
+  {
+   "handle": "m672",
+   "at": "16:30 MST",
+   "iso": "2026-11-18T23:30:18Z",
+   "label": "#56 PR 1/4",
+   "kind": "note",
+   "head": "#65: CodeRabbit marked both inline findings addressed in 0d14802; required check passed on 0d14802. Waiting on checks and CodeRabbit review for head d940b1f."
+  },
+  {
+   "handle": "m671",
+   "at": "16:29 MST",
+   "iso": "2026-11-18T23:29:58Z",
+   "label": "#56 PR 1/4",
+   "kind": "event",
+   "head": "PR 1/4 updated: #65, head d940b1f (full sha via gh). CodeRabbit's summary flagged a retained reliability concern (Medium, inferred): a stalled list_thread_pull_requests under the shared wf lock had no..."
+  },
+  {
+   "handle": "m670",
+   "at": "16:27 MST",
+   "iso": "2026-11-18T23:27:35Z",
+   "label": "#56 PR 1/4",
+   "kind": "event",
+   "head": "PR 1/4 updated: #65, head 0d14802ed4ff8d0c6dbac051b25d4edf3f3ab9cd. Fixed two CodeRabbit minors: list_thread_pull_requests now follows nextCursor (cap 20 pages), and a cached list holding a closed PR ..."
+  },
+  {
+   "handle": "m669",
+   "at": "16:23 MST",
+   "iso": "2026-11-18T23:23:14Z",
+   "label": "#59 PR 1/2",
+   "kind": "note",
+   "head": "#64: CodeRabbit approved, no actionable comments. Linux checks green; macOS and Windows still running."
+  },
+  {
+   "handle": "m666",
+   "at": "16:21 MST",
+   "iso": "2026-11-18T23:21:19Z",
+   "label": "#647 PR 1/2",
+   "kind": "note",
+   "head": "#652 head 886b34cc8: CodeRabbit's re-review generated no actionable comments. Thread r4622151434 still shows unresolved (not resolved by CodeRabbit), and merge state is BLOCKED on the ruleset's review..."
+  },
+  {
+   "handle": "m665",
+   "at": "16:20 MST",
+   "iso": "2026-11-18T23:20:29Z",
+   "label": "#17 PR 5/6",
+   "kind": "event",
+   "head": "PR 5/6 updated: #63, head 905fcaa7d21dfe1978040c8cec2f6f56b63f3c17. CodeRabbit requested changes on 997522b (3 minor findings, all valid): README now says the skills need T3 Code (t3_thread_launch), t..."
+  },
+  {
+   "handle": "m662",
+   "at": "16:19 MST",
+   "iso": "2026-11-18T23:19:08Z",
+   "label": "t3-codemode#56",
+   "kind": "note",
+   "head": "PR 1/4 opened: https://github.com/OttoOps/t3-codemode/pull/65 (head f837a84), checks running"
+  },
+  {
+   "handle": "m661",
+   "at": "16:19 MST",
+   "iso": "2026-11-18T23:19:01Z",
+   "label": "#56 PR 1/4",
+   "kind": "event",
+   "head": "PR 1/4 opened: #65 https://github.com/OttoOps/t3-codemode/pull/65, head f837a8436e3f6353a8b34231f9916a3195a41ec3 Publishing: filled .github/PULL_REQUEST_TEMPLATE.md (no format skill named by the repo)..."
+  },
+  {
+   "handle": "m658",
+   "at": "16:17 MST",
+   "iso": "2026-11-18T23:17:45Z",
+   "label": "#59 PR 1/2",
+   "kind": "event",
+   "head": "PR 1/2 opened: #64 https://github.com/OttoOps/t3-codemode/pull/64, head e718a8e Publishing: pr skill template (Summary/Evidence/Merge Danger) for the PR body; docs/src/board.md \"Reply buttons\" section..."
+  },
+  {
+   "handle": "m655",
+   "at": "16:16 MST",
+   "iso": "2026-11-18T23:16:10Z",
+   "label": "web#647",
+   "kind": "note",
+   "head": "#652 head moved to 886b34c (CodeRabbit lastmod edge, now documented as best estimate); merge card c1 is stale, new one follows when checks pass."
+  },
+  {
+   "handle": "m654",
+   "at": "16:16 MST",
+   "iso": "2026-11-18T23:16:07Z",
+   "label": "#647 PR 1/2",
+   "kind": "event",
+   "head": "PR 1/2 updated: #652, head 886b34cc8 (ready-to-merge for 9df37f4aa is stale). CodeRabbit raised a second lastmod edge (section added to an already-published page keeps the older page date). The basel..."
+  },
+  {
+   "handle": "m653",
+   "at": "16:15 MST",
+   "iso": "2026-11-18T23:15:48Z",
+   "label": "web#646",
+   "kind": "note",
+   "head": "deploy/v2.6.65 Succeeded; prod done-when checks all pass; waiting on worker handoff"
+  },
+  {
+   "handle": "m651",
+   "at": "16:14 MST",
+   "iso": "2026-11-18T23:14:35Z",
+   "label": "#17 PR 5/6",
+   "kind": "event",
+   "head": "PR 5/6 opened: #63 https://github.com/OttoOps/t3-codemode/pull/63, head 997522b9c216701a2749eb1511c2b7a789231628 Publishing: format = .github/PULL_REQUEST_TEMPLATE.md (no repo-named format skill); REA..."
+  },
+  {
+   "handle": "m650",
+   "at": "16:13 MST",
+   "iso": "2026-11-18T23:13:50Z",
+   "label": "#647 PR 1/2",
+   "kind": "note",
+   "head": "#652: CodeRabbit verified the lastmod change but keeps the finding open over the unpublish-clears-date gap. Declined on the thread (needs a never-cleared column, a schema change outside #647; gap d..."
+  },
+  {
+   "handle": "m649",
+   "at": "16:12 MST",
+   "iso": "2026-11-18T23:12:01Z",
+   "label": "#59 PR 1/2",
+   "kind": "note",
+   "head": "#59 PR 1/2 built and committed (cc6691f): action-line parser, corpus tests, board.md rule; all checks green. Starting sol-loop review."
+  },
+  {
+   "handle": "m648",
+   "at": "16:11 MST",
+   "iso": "2026-11-18T23:11:45Z",
+   "label": "#647 PR 1/2",
+   "kind": "note",
+   "head": "#652 head 9df37f4aa: CodeRabbit started a re-review, merge state BLOCKED while its check runs. Hold the merge until it finishes; I will confirm or resend ready-to-merge."
+  },
+  {
+   "handle": "m647",
+   "at": "16:10 MST",
+   "iso": "2026-11-18T23:10:55Z",
+   "label": "#56 PR 1/4",
+   "kind": "note",
+   "head": "#56 PR 1/4 built (f87a18d), checks green; starting sol-loop review"
+  },
+  {
+   "handle": "m646",
+   "at": "16:10 MST",
+   "iso": "2026-11-18T23:10:21Z",
+   "label": "#17 PR 5/6",
+   "kind": "note",
+   "head": "PR 5/6 built at e8e332f (README skills install + docs/getting-started, board.md); npx skills and manual routes verified in scratch HOMEs; starting sol-loop"
+  },
+  {
+   "handle": "m641",
+   "at": "16:09 MST",
+   "iso": "2026-11-18T23:09:08Z",
+   "label": "#648 PR 1/2",
+   "kind": "event",
+   "head": "PR 1/2 updated: #651, head 0ebaaf1bc2f2dbae81db9a4fafeb21fde94b2916. Fixed CodeRabbit's two backfill findings (one thread): migration 0044 now backfills the leading blocks liftHeroBanner lifts (single/..."
+  },
+  {
+   "handle": "m640",
+   "at": "16:08 MST",
+   "iso": "2026-11-18T23:08:25Z",
+   "label": "web#647",
+   "kind": "note",
+   "head": "#652 head moved to 9df37f4 (CodeRabbit follow-up); earlier merge card b9 is stale, new one follows when checks pass."
+  },
+  {
+   "handle": "m639",
+   "at": "16:08 MST",
+   "iso": "2026-11-18T23:08:22Z",
+   "label": "#647 PR 1/2",
+   "kind": "event",
+   "head": "PR 1/2 updated: #652, head 9df37f4aa. The earlier ready-to-merge (f9c260340) is stale. CodeRabbit follow-up: lastmod is now the earliest known page release (min of pages.publishedAt and the ear..."
+  },
+  {
+   "handle": "m636",
+   "at": "16:05 MST",
+   "iso": "2026-11-18T23:05:01Z",
+   "label": "web#646",
+   "kind": "note",
+   "head": "#650 merged (b8c23b727); deploy/v2.6.65 pushed 16:04 MST, DeployPipeline running; deploy watch every 5 min"
+  },
+  {
+   "handle": "m635",
+   "at": "16:04 MST",
+   "iso": "2026-11-18T23:04:29Z",
+   "label": "#647 PR 1/2",
+   "kind": "event",
+   "head": "PR 1/2 updated: #652, head f9c260340. Fixed CodeRabbit's one finding: Sitemap lastmod now comes from the page's pages.publishedAt (Google: date the page last changed), with the post..."
+  },
+  {
+   "handle": "m633",
+   "at": "16:02 MST",
+   "iso": "2026-11-18T23:02:55Z",
+   "label": "t3-codemode#59",
+   "kind": "note",
+   "head": "split approved and posted to #59; PR 1/2 worker launched (fix/59-gate-line-options)"
+  },
+  {
+   "handle": "m629",
+   "at": "15:59 MST",
+   "iso": "2026-11-18T22:59:20Z",
+   "label": "#647 PR 1/2",
+   "kind": "event",
+   "head": "PR 1/2 opened: #652 https://github.com/acme/web/pull/652, head 28e3901b6 Publishing: pr skill template filled (Summary/Evidence/Merge Danger); voice pass with voice-check.py OK (PR body..."
+  },
+  {
+   "handle": "m625",
+   "at": "15:57 MST",
+   "iso": "2026-11-18T22:57:49Z",
+   "label": "t3-codemode#56",
+   "kind": "note",
+   "head": "split posted to #56 and issue assigned; PR 1/4 worker launched (fix/56-pr-state-any-state)"
+  },
+  {
+   "handle": "m623",
+   "at": "15:56 MST",
+   "iso": "2026-11-18T22:56:53Z",
+   "label": "t3-codemode#56",
+   "kind": "note",
+   "head": "split approved; posting it to #56 and launching PR 1/4"
+  },
+  {
+   "handle": "m620",
+   "at": "15:56 MST",
+   "iso": "2026-11-18T22:56:16Z",
+   "label": "#648 PR 1/2",
+   "kind": "event",
+   "head": "PR 1/2 opened: #651 https://github.com/acme/web/pull/651, head c276689af2d3225676f22b8c6558cfaae2242fc3 Publishing: pr skill template filled; voice pass on the PR description and ADR-00..."
+  },
+  {
+   "handle": "m617",
+   "at": "15:55 MST",
+   "iso": "2026-11-18T22:55:20Z",
+   "label": "#55 PR 1/2",
+   "kind": "note",
+   "head": "PR 1/2 built at e2ef657: filters, search, hidden indicator, repo/project in /api/state; fmt, clippy, tests green (72 board tests). Starting sol-loop review."
+  },
+  {
+   "handle": "m615",
+   "at": "15:54 MST",
+   "iso": "2026-11-18T22:54:07Z",
+   "label": "t3-codemode#17",
+   "kind": "note",
+   "head": "PR 4 wrapped up: handoff stored, worktree and branch removed, #17 comment posted (issuecomment-6994014793). PR 5/6 worker launched on docs/17-skills-install. The t3api.py token findings are already tr..."
+  },
+  {
+   "handle": "m611",
+   "at": "15:53 MST",
+   "iso": "2026-11-18T22:53:12Z",
+   "label": "t3-codemode#4",
+   "kind": "note",
+   "head": "#4 delivered: both PRs merged (#22, #37), site live at https://ottoops.com/t3-codemode/, worktrees cleaned, closing comment posted. Waiting only on the redaction-leak tracking answer before handoff."
+  },
+  {
+   "handle": "m603",
+   "at": "15:51 MST",
+   "iso": "2026-11-18T22:51:54Z",
+   "label": "t3-codemode#17",
+   "kind": "note",
+   "head": "#40 merged at d545a9a (12:27 MST). PR 4/6 worker handing off; PR 5/6 next."
+  },
+  {
+   "handle": "m594",
+   "at": "15:49 MST",
+   "iso": "2026-11-18T22:49:20Z",
+   "label": "#648 PR 1/2",
+   "kind": "note",
+   "head": "PR 1/2 built and committed at 4c3bb948d: npm test 1962/1962, npm run build ok, Postgres release/seed/admin suites green locally; starting sol-loop review"
+  },
+  {
+   "handle": "m593",
+   "at": "15:44 MST",
+   "iso": "2026-11-18T22:44:18Z",
+   "label": "#646 PR 1/1",
+   "kind": "event",
+   "head": "PR 1/1 opened: #650 https://github.com/acme/web/pull/650, head c67d3f6f6 Publishing: pr skill template; voice pass (voice-check.py: no hard violations; short-sentence share 31% comes fr..."
+  },
+  {
+   "handle": "m592",
+   "at": "15:40 MST",
+   "iso": "2026-11-18T22:40:45Z",
+   "label": "#646 PR 1/1",
+   "kind": "note",
+   "head": "Built: banner-only render + test, launch seed + og.png; npm test, test:seed-pages, build pass. Verifying locally next."
+  }
+ ],
+ "asks": [],
+ "settled": {
+  "tickets": [
+   {
+    "thread": "thread-9f3a55631919",
+    "label": "web#646",
+    "status": "done",
+    "t3Status": "completed",
+    "gate": null,
+    "link": "https://t3.example/threads/thread-bbe81145819d",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "17:19 MST",
+    "settledAt": "17:20 MST"
+   },
+   {
+    "thread": "thread-db395c4b2937",
+    "label": "t3-codemode#4",
+    "status": "done",
+    "t3Status": "completed",
+    "gate": null,
+    "link": "https://t3.example/threads/thread-fc6ca9a62f5a",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "15:56 MST",
+    "settledAt": "15:57 MST"
+   },
+   {
+    "thread": "thread-d7ccde75974e",
+    "label": "t3-codemode#19",
+    "status": "done",
+    "t3Status": "completed",
+    "gate": null,
+    "link": "https://t3.example/threads/thread-7e3b149ada9f",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "15:57 MST",
+    "settledAt": "15:57 MST"
+   },
+   {
+    "thread": "thread-0484c4105cd4",
+    "label": "t3-codemode#28",
+    "status": "done",
+    "t3Status": "completed",
+    "gate": null,
+    "link": "https://t3.example/threads/thread-137088c8dff7",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "15:52 MST",
+    "settledAt": "15:52 MST"
+   },
+   {
+    "thread": "thread-cb9246ea73d4",
+    "label": "t3-codemode#18",
+    "status": "done",
+    "t3Status": null,
+    "gate": null,
+    "link": "https://t3.example/threads/thread-fa24fdea5b6c",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "00:13 MST",
+    "settledAt": "01:05 MST"
+   },
+   {
+    "thread": "thread-b12a6744ca54",
+    "label": "t3-codemode#16",
+    "status": "done",
+    "t3Status": null,
+    "gate": null,
+    "link": "https://t3.example/threads/thread-6845f88f957c",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "00:18 MST",
+    "settledAt": "01:04 MST"
+   },
+   {
+    "thread": "thread-9951fe6dda0c",
+    "label": "lint-audit#3",
+    "status": "done",
+    "t3Status": null,
+    "gate": null,
+    "link": "https://t3.example/threads/thread-83a88ce9d31b",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "14:16 MST",
+    "settledAt": "00:06 MST"
+   },
+   {
+    "thread": "thread-69865e5310f2",
+    "label": "lint-audit#5",
+    "status": "done",
+    "t3Status": null,
+    "gate": null,
+    "link": "https://t3.example/threads/thread-64dee7bcb4db",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "14:06 MST",
+    "settledAt": "00:06 MST"
+   },
+   {
+    "thread": "thread-cd4a10972dd2",
+    "label": "lint-audit#7",
+    "status": "done",
+    "t3Status": null,
+    "gate": null,
+    "link": "https://t3.example/threads/thread-c810aefdd346",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "14:06 MST",
+    "settledAt": "00:06 MST"
+   },
+   {
+    "thread": "thread-0ab15f6192ec",
+    "label": "lint-audit#4",
+    "status": "done",
+    "t3Status": null,
+    "gate": null,
+    "link": "https://t3.example/threads/thread-e707e7c1eb7f",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "14:06 MST",
+    "settledAt": "00:06 MST"
+   },
+   {
+    "thread": "thread-e66c5f52600a",
+    "label": "lint-audit#6",
+    "status": "done",
+    "t3Status": null,
+    "gate": null,
+    "link": "https://t3.example/threads/thread-a4574f2323a3",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "14:05 MST",
+    "settledAt": "00:06 MST"
+   },
+   {
+    "thread": "thread-00c5b472f5c6",
+    "label": "lint-audit#9",
+    "status": "done",
+    "t3Status": null,
+    "gate": null,
+    "link": "https://t3.example/threads/thread-c7eecf99fefb",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "14:03 MST",
+    "settledAt": "00:06 MST"
+   },
+   {
+    "thread": "thread-9c1517c242d2",
+    "label": "lint-audit#10",
+    "status": "done",
+    "t3Status": null,
+    "gate": null,
+    "link": "https://t3.example/threads/thread-20ad7f88e482",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "14:04 MST",
+    "settledAt": "00:06 MST"
+   },
+   {
+    "thread": "thread-231907046f85",
+    "label": "lint-audit#8",
+    "status": "done",
+    "t3Status": null,
+    "gate": null,
+    "link": "https://t3.example/threads/thread-7c3c5c25e1b9",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "14:03 MST",
+    "settledAt": "00:06 MST"
+   },
+   {
+    "thread": "thread-79585c7fb2e6",
+    "label": "lint-audit#2",
+    "status": "done",
+    "t3Status": null,
+    "gate": null,
+    "link": "https://t3.example/threads/thread-029d07c5db9d",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "14:03 MST",
+    "settledAt": "00:06 MST"
+   },
+   {
+    "thread": "thread-5c3a4b555a0c",
+    "label": "acme-plugins#91",
+    "status": "done",
+    "t3Status": null,
+    "gate": null,
+    "link": "https://t3.example/threads/thread-46ce5e8f5b7f",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "22:41 MST",
+    "settledAt": "00:05 MST"
+   },
+   {
+    "thread": "thread-2d2cb31305ec",
+    "label": "t3-codemode#21",
+    "status": "done",
+    "t3Status": null,
+    "gate": null,
+    "link": "https://t3.example/threads/thread-2fda7c30dcba",
+    "pr": null,
+    "done": true,
+    "closedHow": "handoff",
+    "lastUp": "23:16 MST",
+    "settledAt": "00:05 MST"
+   }
+  ],
+  "asks": [
+   {
+    "question": "Which tickets finished, and which decisions did each one raise before finishing? One line per ticket.",
+    "thread": "thread-ced8706851b2",
+    "link": "https://t3.example/threads/thread-e6f374f673a4",
+    "status": "answered",
+    "answer": "All nine tickets finished (status `handoff`). Each raised merge-approval gates and, for some, a blocker. The \"superseded\" gates were re-asked for the same PR, so the count overstates distinct decisions.\n\n- [lint-audit#2](https://t3.example/threads/thread-029d07c5db9d): 3 merge gates, no blocker\n- [lint-audit#3](https://t3.example/threads/thread-83a88ce9d31b): 4 merge gates, no blocker\n- [lint-audit#4](https://t3.example/threads/thread-e707e7c1eb7f): 3 merge gates, 1 blocker (Swift adapter #14 lost its merge)\n- [lint-audit#5](https://t3.example/threads/thread-64dee7bcb4db): 3 merge gates, no blocker\n- [lint-audit#6](https://t3.example/threads/thread-a4574f2323a3): 3 merge gates, 1 blocker (fourth merge race)\n- [lint-audit#9](https://t3.example/threads/thread-c7eecf99fefb): 3 merge gates, 1 blocker (#18 lost its merge)\n- [lint-audit#8](https://app.t3.codes/thre...",
+    "at": "2026-11-17T21:22:29Z",
+    "answeredAt": "2026-11-17T21:23:11Z",
+    "archived": true,
+    "settledAt": "2026-11-18T21:23:11Z",
+    "id": "q2",
+    "seq": 2,
+    "atLocal": "14:22 MST"
+   },
+   {
+    "question": "Which tickets finished, and which decisions did each one raise before finishing? One line per ticket.",
+    "thread": "thread-a9b75cc6de89",
+    "link": "https://t3.example/threads/thread-1c82208ab8e2",
+    "status": "answered",
+    "answer": "None of the tickets is confirmed finished. `wf.board({ parent: \"board\" })` returned no children, so I worked from `wf.feed()`, which covers the lint-audit issues #2 to #10 and may not be the t3-codemode board itself.\nSeven tickets have their last PR merged but no close event yet: #3 (PR 3/3, #40), #5 (#26), #6 (#25), #7 (#24), #8 (#22), #9 (#23), #10 (#20). Each is waiting on its worker handoff.\n#2 and #4 are still running, with PR 2/2 launched after PR 1/2 handed off.\n`wf.cards()` is empty, and the feed records no decision raised by any ticket. The only approvals on record are yours: the split approvals (#5, #6, #9, #10 at 13:58 MST, #3 scope C) and the merge approvals.",
+    "at": "2026-11-17T21:18:24Z",
+    "answeredAt": "2026-11-17T21:18:55Z",
+    "archived": true,
+    "settledAt": "2026-11-18T21:19:26Z",
+    "id": "q1",
+    "seq": 1,
+    "atLocal": "14:18 MST"
+   }
+  ]
+ },
+ "counts": {
+  "cards": 4,
+  "tickets": 8,
+  "running": 0,
+  "settled": 19
+ },
+ "service": {
+  "version": "0.3.0",
+  "t3": {
+   "connected": true,
+   "lastError": null
+  },
+  "tokenExpiresAt": "2026-12-17 12:38 MST",
+  "watcher": {
+   "lastPass": "17:26 MST",
+   "alive": true
+  },
+  "openLinks": "desktop"
+ }
+}
