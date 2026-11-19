@@ -66,6 +66,14 @@ no ticket message lands in any model's context.
   `wf.join({ parent: "board", label, role: "ticket" })`. A ticket started
   in a thread instead runs `wf.init({ role: "ticket" })`, which joins it to
   the board the same way, labeled from the thread's T3 title.
+- **Buttons.** A `gate`, `blocker` or `report` with
+  `options: ["merge", "hold"]` gets exactly those buttons, each one line of
+  1 to 60 characters, no two the same ignoring case, at most 8; a bad entry
+  fails the send. Without `options`, the buttons are the quoted answers after
+  the first `reply`, `answer` or `say` on each `**ACTION NEEDED:**` line,
+  and a body with no action line gets one button per `reply "X"` anywhere
+  in it. A send that opens a card returns its buttons as `options`, and a gate with
+  none also returns a `warning`: send it again with `options`.
 - **Answers.** The user clicks a card's button or types an answer, or
   answers in a thread with `wf.answer("a3", "merge")`; the ticket gets one
   `[t3cm reply]` and the card resolves. A ticket's own handoff, a cleared

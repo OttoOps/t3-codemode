@@ -91,9 +91,13 @@ parent (an overseer), three more rules hold:
 - While an action line waits on the user, send it up with `t3wf send --kind
   gate --gate <phase> --body '<action line>'`, which opens the gate on the
   parent link, and `t3wf gate --clear` once the user acts. Through t3cm,
-  send it with `wf.send({ kind: "gate", gate, body })` and clear it with
-  `wf.gate({ clear: true })`, which reach the board link that `wf.init`
-  opens.
+  send it with `wf.send({ kind: "gate", gate, body, options })` and clear
+  it with `wf.gate({ clear: true })`, which reach the board link that
+  `wf.init` opens. `options` lists the answers the user can click, such as
+  `["merge and deploy", "merge"]`. Without it, the board makes a button of
+  each quoted answer after `reply` on the action line. When the send comes
+  back with a `warning`, the card has no buttons: send it again with
+  `options`.
 - Send each action line up as one line, with no steps, commands or logs.
   The detail stays in this thread, where the user opens it from the
   overseer's waiting list.

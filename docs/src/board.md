@@ -31,6 +31,25 @@ A `handoff` or `closed` message marks a ticket done.
 
 ## Reply buttons
 
+A `gate`, `blocker` or `report` sent with `options` gets exactly those
+buttons, and the board does not read the body for them:
+
+```js
+async () => wf.send({
+  kind: "gate", gate: "merge",
+  body: '**ACTION NEEDED:** reply "merge" to merge #81, or "hold" to wait, here: https://github.com/acme/widgets/pull/81',
+  options: ["merge", "hold"],
+})
+```
+
+Each option must be a single line of 1 to 60 characters once trimmed, no two
+may match ignoring case, and a send carries at most 8. A send that breaks any
+of these fails, names each bad entry by its index, and leaves no card. A
+`note`, `event`, `handoff` or `closed` send with `options` fails too. A send
+with an empty list gets a card with no buttons.
+
+Without `options`, the board reads the buttons from the body.
+
 When a message has an `**ACTION NEEDED:**` line, its buttons come from that
 line alone, or from each such line when it has several. A quoted phrase
 elsewhere in the message never becomes a button. On an action line, each quoted
@@ -53,6 +72,12 @@ in it.
 The board trims each answer and drops one that runs past 60 characters or onto
 a second line. Answers that differ only in case share one button, and a card
 shows at most 8.
+
+A send that opens a card returns that card's buttons as `options`, so the
+sender sees what the user will see. A gate whose card has no buttons also
+returns a `warning`: the user can still type an answer, but the sender should
+send it again with `options`, or quote each answer after `reply` on its action
+line.
 
 ## Filtering the page
 
