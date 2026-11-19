@@ -301,6 +301,7 @@ class Checks(unittest.TestCase):
                  ({"command": "curl -s http://127.0.0.1:3773/mcp"}, 2),
                  ({"command": "wget https://example.com"}, 2),
                  ({"file_path": str(self.root / "home" / ".claude" / "x")}, 0),
+                 ({"command": "git add x\ncat >> widgets.py <<'EOF'\nx\nEOF"}, 0),
                  ({"url": "https://github.com/acme/widgets/pull/101"}, 0)]
         for tool_input, code in cases:
             r = subprocess.run([sys.executable, str(hook), live.REAL_HOME], capture_output=True, text=True,

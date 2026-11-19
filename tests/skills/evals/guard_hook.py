@@ -8,10 +8,18 @@ import sys
 NETWORK = r"\b(curl|wget|ncat|telnet|ssh|scp|rsync)\b|/usr/bin/gh\b"
 
 
+def strings(value):
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in strings(v)]
+    return [str(value)]
+
+
 def blocked(tool_input, real_home):
     homes = [re.escape(f"{real_home}/{d}") for d in (".claude", ".agents", ".codex", ".t3")]
     pattern = "|".join([*homes, r"(?:127\.0\.0\.1|localhost|0\.0\.0\.0):\d+", NETWORK])
-    return re.search(pattern, json.dumps(tool_input))
+    return re.search(pattern, "\n".join(strings(tool_input)))
 
 
 def main():
