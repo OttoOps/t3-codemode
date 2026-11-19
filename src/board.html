@@ -104,13 +104,13 @@ ol, ul { list-style: none; }
   font: inherit; text-align: left;
 }
 .linkish:hover, .linkish:focus-visible { text-decoration: underline; text-underline-offset: 2px; }
-input[type=text], textarea {
+input[type=text], input[type=search], textarea {
   width: 100%; min-width: 0; background: var(--panel); color: var(--ink);
   border: 1px solid var(--field); border-radius: 6px; padding: 4px 8px;
   font-size: 14px; line-height: 20px;
 }
-input[type=text] { height: 32px; }
-input[type=text]:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+input[type=text], input[type=search] { height: 32px; }
+input[type=text]:focus, input[type=search]:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
 input::placeholder, textarea::placeholder { color: var(--ink-2); opacity: 1; }
 textarea { resize: none; display: block; }
 
@@ -129,7 +129,7 @@ textarea { resize: none; display: block; }
 
 .app {
   height: 100vh; height: 100dvh; display: grid;
-  grid-template-rows: 40px minmax(0, 1fr);
+  grid-template-rows: 40px auto minmax(0, 1fr);
 }
 .top {
   display: flex; align-items: center; gap: 16px; min-width: 0;
@@ -148,6 +148,27 @@ textarea { resize: none; display: block; }
 .counts b { color: var(--ink); font-weight: 600; }
 .counts .need b { color: var(--need); }
 .top .tools { display: flex; gap: 4px; }
+
+.fbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0;
+  padding: 4px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.fbar #filter-q { flex: 0 1 280px; }
+.facets { display: flex; gap: 4px; flex-wrap: wrap; }
+.facet { position: relative; }
+.fbtn[aria-expanded="true"] { background: var(--panel-2); }
+.fbtn[data-on] { border-color: var(--accent); color: var(--accent); }
+.fpop {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; width: 260px; max-height: 320px; overflow-y: auto;
+  display: grid; gap: 4px; padding: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: none;
+}
+.fpop[hidden] { display: none; }
+.fopts { display: grid; gap: 0; }
+.fopt { display: flex; align-items: center; gap: 8px; min-height: 28px; cursor: pointer; font-size: 13px; line-height: 18px; min-width: 0; }
+.fopt[hidden] { display: none; }
+.fopt span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fpop .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.fbar .newbtn { flex: none; }
 
 .panes {
   display: grid; min-height: 0; min-width: 0; gap: 0;
@@ -361,7 +382,12 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .dock:focus-within #out, .dock.show-out #out { display: grid; }
 }
 @media (max-width: 899px) {
-  .app { grid-template-rows: 44px minmax(0, 1fr); }
+  .app { grid-template-rows: 44px auto minmax(0, 1fr); }
+  .fbar #filter-q { flex: 1 1 100%; height: 44px; }
+  .fopt { min-height: 44px; }
+  .fbar { position: relative; }
+  .facet { position: static; }
+  .fpop { left: 12px; right: 12px; width: auto; top: calc(100% - 4px); }
   .top { gap: 8px; }
   .counts, #keys-btn, .conn .facts { display: none !important; }
   .short { display: inline !important; }
@@ -413,7 +439,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .srow { grid-template-columns: minmax(0, 1fr) auto; height: 48px; }
   .srow .pr { display: none; }
   .srow.ask { grid-template-columns: minmax(0, 1fr) auto auto; height: 64px; }
-  input[type=text], textarea { font-size: 16px; }
+  input[type=text], input[type=search], textarea { font-size: 16px; }
   #ask input[type=text] { height: 44px; }
   #issues { height: 44px; padding-top: 8px; }
   .forms { padding: 4px 12px; align-items: center; }
@@ -455,6 +481,12 @@ kbd { font-family: var(--mono); font-size: 12px; }
     <button class="btn quiet" type="button" id="keys-btn" aria-haspopup="dialog" >Shortcuts</button>
   </span>
 </header>
+<div class="fbar" id="fbar" role="search" aria-label="Filter the board">
+  <input type="search" id="filter-q" placeholder="Search tickets, cards and activity" aria-label="Search the board" autocomplete="off">
+  <span class="facets" id="facets"></span>
+  <button class="btn quiet" type="button" id="filter-clear" hidden>Clear filters</button>
+  <button class="newbtn" type="button" id="hidden-new" hidden></button>
+</div>
 <main class="panes" id="main">
   <section class="pane" id="p-dec" aria-labelledby="h-dec">
     <div class="ph">
@@ -559,6 +591,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
     <dt>g d, g t, g a</dt><dd>Go to Decisions, Tickets, Activity</dd>
     <dt>l</dt><dd>Focus Launch</dd>
     <dt>/</dt><dd>Focus Ask</dd>
+    <dt>f</dt><dd>Focus search; Esc clears it</dd>
     <dt>r</dt><dd>Reply to the focused card</dd>
     <dt>1 to 9</dt><dd>Focus that option; Enter sends it</dd>
     <dt>Esc</dt><dd>Back to the panel</dd>
@@ -1073,6 +1106,7 @@ function undo(id) {
     if (first) first.focus();
   }
   announce("Cancelled. Nothing was sent for " + id + ".");
+  if (filtering()) schedule();
 }
 
 async function fire(id) {
@@ -1163,10 +1197,12 @@ function toggleFull(card) {
 function goneCard(card) {
   const id = card.dataset.id;
   const p = pending.get(id);
+  const kept = card._card && state && state.cards.some((c) => c.id === id && inst(c) === inst(card._card));
   if (p && !p.sent) { clearTimeout(p.timer); }
   pending.delete(id);
   const n = goneNote.get(id);
-  const note = n && card._card && n.inst === inst(card._card) ? n.text : p && !p.sent ? id + " resolved elsewhere; your reply was not sent" : id + " resolved";
+  const note = n && card._card && n.inst === inst(card._card) ? n.text : kept ? id + " hidden by the filter"
+    : p && !p.sent ? id + " resolved elsewhere; your reply was not sent" : id + " resolved";
   const hgt = card.getBoundingClientRect ? card.getBoundingClientRect().height : 0;
   card.className = "card gone";
   card._card = null;
@@ -1176,14 +1212,14 @@ function goneCard(card) {
   setAttr(card, "aria-labelledby", null);
 }
 
-function emptyState(id, show) {
+function emptyState(id, show, filtered) {
   const el = $(id);
   el.hidden = !show;
-  const msg = el.getAttribute("data-empty");
+  const msg = filtered || el.getAttribute("data-empty");
   if (msg) setText(el, msg);
 }
 
-function syncCards(cards) {
+function syncCards(cards, all) {
   const list = $("cards");
   const p = panels.cards;
   const live = firstState || isLive(p);
@@ -1192,7 +1228,7 @@ function syncCards(cards) {
     .map((x) => x[0]);
   const refocus = [];
   for (const [id, p] of pending) {
-    const now = cards.find((c) => c.id === id);
+    const now = all.find((c) => c.id === id);
     if (now && inst(now) === p.inst) continue;
     if (p.sent) pending.delete(id);
     else if (now) {
@@ -1203,13 +1239,13 @@ function syncCards(cards) {
       announce(id + " was already resolved. Nothing was sent.");
     }
   }
-  const held = sync(list, sorted, { key: (c) => c.id, make: makeCard, patch: patchCard, gone: goneCard, live, quiet: firstState });
+  const held = sync(list, sorted, { key: (c) => c.id, make: makeCard, patch: patchCard, gone: goneCard, live, quiet: firstState || refiltering });
   for (const el of refocus) if (el.isConnected) el.focus();
   const urgent = held.filter((c) => FAIL_KINDS.has(c.kind)).length;
   showHeld(p, held, urgent ? urgent + (urgent > 1 ? " blockers" : " blocker") : "");
-  emptyState("cards-empty", !cards.length && !items(list).length);
+  emptyState("cards-empty", !cards.length && !items(list).length, all.length ? "Nothing here matches the filter." : null);
   setAttr(list, "aria-busy", null);
-  for (const k of goneNote.keys()) if (!cards.some((c) => c.id === k) && !cardEl(k)) goneNote.delete(k);
+  for (const k of goneNote.keys()) if (!all.some((c) => c.id === k) && !cardEl(k)) goneNote.delete(k);
 }
 
 function needsOf(cards) {
@@ -1220,6 +1256,261 @@ function needsOf(cards) {
     m.get(c.ticket).push(c);
   }
   return m;
+}
+
+const PHASES = [["running", "running"], ["waiting", "waiting on me"], ["blocked", "blocked"], ["done", "done"]];
+const CARD_KINDS = ["gate", "blocker", "report", "escalate"];
+const FACETS = [
+  { key: "projects", name: "Project", values: projectValues },
+  { key: "statuses", name: "Status", values: () => PHASES },
+  { key: "kinds", name: "Card kind", values: () => CARD_KINDS.map((k) => [k, k]) },
+];
+const filter = { projects: new Set(), statuses: new Set(), kinds: new Set(), q: "" };
+let hiddenBase = null;
+let refiltering = false;
+
+function filterSpec() {
+  return { projects: [...filter.projects], statuses: [...filter.statuses], kinds: [...filter.kinds], q: filter.q };
+}
+
+function setFilter(spec) {
+  spec = spec || {};
+  for (const f of FACETS) filter[f.key] = new Set(spec[f.key] || []);
+  filter.q = String(spec.q || "");
+  clearTimeout(queryTimer);
+  $("filter-q").value = filter.q;
+  filterChanged();
+}
+
+function filtering() {
+  return !!(filter.projects.size || filter.statuses.size || filter.kinds.size || filter.q.trim());
+}
+
+function projectKey(it) {
+  if (!it) return "";
+  return it.repo || (it.project && (it.project.title || it.project.id)) || "";
+}
+
+function phaseOf(t, cards) {
+  if (t.done) return "done";
+  if (t.status === "failed" || t.status === "gone" || cards.some((c) => FAIL_KINDS.has(c.kind))) return "blocked";
+  if (cards.length || t.status === "waiting" || t.gate) return "waiting";
+  return "running";
+}
+
+function filterCtx(s) {
+  const tix = new Map();
+  for (const t of s.tree) if (t.thread) tix.set(t.thread, t);
+  return { needs: needsOf(s.cards), tix, settled: new Map(s.settled.tickets.map((t) => [t.thread, t])) };
+}
+
+function ticketPhase(thread, ctx) {
+  const t = thread && ctx.tix.get(thread);
+  if (t) return phaseOf(t, ctx.needs.get(thread) || []);
+  return thread && ctx.settled.has(thread) ? "done" : null;
+}
+
+function placeText(it) {
+  return [it.repo, it.project && it.project.title];
+}
+
+function ticketDesc(t, ctx) {
+  return { project: projectKey(t), phase: phaseOf(t, ctx.needs.get(t.thread) || []),
+    text: [t.label, t.title, ...placeText(t), t.pr && t.pr.number && "#" + t.pr.number] };
+}
+
+function cardDesc(c, ctx) {
+  const t = c.ticket && ctx.tix.get(c.ticket);
+  return { project: projectKey(c) || projectKey(t), kind: c.kind,
+    phase: ticketPhase(c.ticket, ctx) || (FAIL_KINDS.has(c.kind) ? "blocked" : "waiting"),
+    text: [c.id, c.label, c.text, ...placeText(c), t && t.title] };
+}
+
+function feedDesc(f, ctx) {
+  const t = f.ticket && (ctx.tix.get(f.ticket) || ctx.settled.get(f.ticket));
+  return { project: projectKey(f) || projectKey(t), phase: ticketPhase(f.ticket, ctx),
+    text: [f.label, f.kind, f.head, ...placeText(f), f.ticketLabel, f.ticketTitle, t && t.label, t && t.title] };
+}
+
+function settledDesc(it) {
+  if (it.kind === "t") return { project: projectKey(it.t), phase: "done", text: [it.t.label, it.t.title, it.t.link, ...placeText(it.t)] };
+  return { project: null, phase: null, text: [it.a.question, it.a.answer] };
+}
+
+function matches(d) {
+  const has = (set, v) => !set.size || (v !== null && v !== undefined && set.has(v));
+  if (!has(filter.projects, d.project) || !has(filter.statuses, d.phase)) return false;
+  if (d.kind !== undefined && !has(filter.kinds, d.kind)) return false;
+  const terms = filter.q.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return true;
+  const hay = d.text.filter((x) => typeof x === "string" || typeof x === "number").join("\n").toLowerCase();
+  return terms.every((w) => hay.includes(w));
+}
+
+function visible(s) {
+  if (!filtering()) return { cards: s.cards, tree: s.tree, feed: s.feed };
+  const ctx = filterCtx(s);
+  return {
+    cards: s.cards.filter((c) => (pending.has(c.id) && pending.get(c.id).inst === inst(c)) || matches(cardDesc(c, ctx))),
+    tree: s.tree.filter((t) => matches(ticketDesc(t, ctx))),
+    feed: s.feed.filter((f) => matches(feedDesc(f, ctx))),
+  };
+}
+
+function shown(n, total, blankZero) {
+  if (filtering()) return n + "/" + total;
+  return blankZero && !total ? "" : String(total);
+}
+
+const cardSeen = (c) => c.id + "@" + c.at;
+
+function projectValues() {
+  const m = new Map();
+  const add = (it) => {
+    const k = projectKey(it);
+    if (k && !m.has(k)) m.set(k, it.project && it.project.title && it.project.title !== k ? "T3 project " + it.project.title : null);
+  };
+  if (state) {
+    for (const t of state.tree) add(t);
+    for (const t of state.settled.tickets) add(t);
+    for (const c of state.cards) add(c);
+    for (const f of state.feed) add(f);
+  }
+  for (const k of filter.projects) if (!m.has(k)) m.set(k, null);
+  return [...m].sort((a, b) => a[0].localeCompare(b[0])).map(([k, title]) => [k, k, title]);
+}
+
+function facetEl(key) {
+  return $("facets").querySelector('[data-facet="' + key + '"]');
+}
+
+function makeFacet(f) {
+  const wrap = h("span", { class: "facet", "data-facet": f.key });
+  const btn = h("button", { class: "btn fbtn", type: "button", "data-part": "fbtn", "aria-haspopup": "true",
+    "aria-expanded": "false", "aria-controls": "fpop-" + f.key, onclick: () => toggleFacet(f.key) }, f.name);
+  const find = h("input", { type: "text", "data-part": "ffind", autocomplete: "off",
+    placeholder: "Find a " + f.name.toLowerCase(), "aria-label": "Find a " + f.name.toLowerCase(),
+    oninput: () => paintFacet(f.key),
+    onkeydown: (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      const first = [...part(wrap, "fopts").children].find((o) => !o.hidden);
+      if (first) pickValue(f.key, first.dataset.val, !filter[f.key].has(first.dataset.val));
+    } });
+  const pop = h("div", { class: "fpop", id: "fpop-" + f.key, "data-part": "fpop", role: "group", "aria-label": f.name + " filter", hidden: true },
+    find,
+    h("div", { class: "fopts", "data-part": "fopts" }),
+    h("div", { class: "row" },
+      h("span", { class: "meta", "data-part": "fnone", hidden: true }, "No match"),
+      h("button", { class: "btn quiet", type: "button", "data-part": "fclear", onclick: () => { filter[f.key].clear(); filterChanged(); } }, "Clear")));
+  pop.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeFacet(f.key, true);
+  });
+  wrap.append(btn, pop);
+  return wrap;
+}
+
+function pickValue(key, v, on) {
+  if (on) filter[key].add(v);
+  else filter[key].delete(v);
+  filterChanged();
+}
+
+function paintFacet(key) {
+  const f = FACETS.find((x) => x.key === key);
+  const wrap = facetEl(key);
+  const set = filter[key];
+  const vals = f.values();
+  const btn = part(wrap, "fbtn");
+  const one = set.size === 1 ? (vals.find((v) => set.has(v[0])) || [null, [...set][0]])[1] : null;
+  setText(btn, f.name + (set.size ? ": " + (one || set.size) : ""));
+  setAttr(btn, "data-on", set.size ? "1" : null);
+  setAttr(btn, "aria-label", f.name + " filter" + (set.size ? ", " + set.size + " selected" : ""));
+  if (part(wrap, "fpop").hidden) return;
+  const q = part(wrap, "ffind").value.trim().toLowerCase();
+  const list = part(wrap, "fopts");
+  const have = new Map([...list.children].map((o) => [o.dataset.val, o]));
+  let any = false;
+  vals.forEach(([v, label, title], i) => {
+    let o = have.get(v);
+    if (!o) {
+      const box = h("input", { type: "checkbox", onchange: (e) => pickValue(key, v, e.target.checked) });
+      o = h("label", { class: "fopt", "data-val": v }, box, h("span", {}));
+    }
+    have.delete(v);
+    setText(o.querySelector("span"), label);
+    setAttr(o, "title", title || null);
+    o.firstChild.checked = set.has(v);
+    o.hidden = !!q && !String(label).toLowerCase().includes(q) && !String(title || "").toLowerCase().includes(q);
+    if (!o.hidden) any = true;
+    if (list.children[i] !== o) list.insertBefore(o, list.children[i] || null);
+  });
+  for (const o of have.values()) o.remove();
+  part(wrap, "fnone").hidden = any;
+  part(wrap, "fclear").hidden = !set.size;
+}
+
+function toggleFacet(key) {
+  if (part(facetEl(key), "fpop").hidden) openFacet(key);
+  else closeFacet(key, true);
+}
+
+function openFacet(key) {
+  for (const f of FACETS) if (f.key !== key) closeFacet(f.key, false);
+  const wrap = facetEl(key);
+  part(wrap, "fpop").hidden = false;
+  setAttr(part(wrap, "fbtn"), "aria-expanded", "true");
+  part(wrap, "ffind").value = "";
+  paintFacet(key);
+  part(wrap, "ffind").focus();
+}
+
+function closeFacet(key, focus) {
+  const wrap = facetEl(key);
+  const pop = part(wrap, "fpop");
+  if (pop.hidden) return;
+  pop.hidden = true;
+  setAttr(part(wrap, "fbtn"), "aria-expanded", "false");
+  if (focus) part(wrap, "fbtn").focus();
+}
+
+function paintFilterBar(hidden) {
+  for (const f of FACETS) paintFacet(f.key);
+  $("filter-clear").hidden = !filtering();
+  const b = $("hidden-new");
+  const n = hidden.length;
+  b.hidden = !n;
+  if (!n) return;
+  const urgent = hidden.some((c) => FAIL_KINDS.has(c.kind));
+  setText(b, n + " hidden");
+  setAttr(b, "data-urgent", urgent ? "1" : null);
+  setAttr(b, "aria-label", n + (n > 1 ? " new decisions" : " new decision") + " hidden by the filter. Clear the filter to show them");
+}
+
+const FILTERED = ["cards", "open", "done", "settled", "feed"];
+
+function filterChanged() {
+  if (!state) { paintFilterBar([]); return; }
+  hiddenBase = new Set(state.cards.map(cardSeen));
+  for (const n of FILTERED) panels[n].force = true;
+  refiltering = true;
+  try { render(state); } finally {
+    refiltering = false;
+    for (const n of FILTERED) panels[n].force = false;
+  }
+}
+
+let queryTimer = 0;
+function queryTyped() {
+  clearTimeout(queryTimer);
+  queryTimer = setTimeout(() => {
+    if (filter.q === $("filter-q").value) return;
+    filter.q = $("filter-q").value;
+    filterChanged();
+  }, 150);
 }
 
 function prText(pr) {
@@ -1370,16 +1661,14 @@ function goneTicket(el, msg) {
   setAttr(el, "aria-label", msg(label));
 }
 
-function syncTickets(tree, cards) {
+function syncTickets(tree, cards, all) {
   const needs = needsOf(cards);
-  const rank = (t) => {
-    const cs = needs.get(t.thread) || [];
-    if (t.status === "failed" || t.status === "gone" || cs.some((c) => FAIL_KINDS.has(c.kind))) return 0;
-    if (cs.length || t.status === "waiting" || t.gate) return 1;
-    return 2;
-  };
+  const RANK = { blocked: 0, waiting: 1, running: 2 };
+  const rank = (t) => RANK[phaseOf(t, needs.get(t.thread) || [])];
   const open = tree.filter((t) => !t.done).map((t, i) => [t, i]).sort((a, b) => (rank(a[0]) - rank(b[0])) || (a[1] - b[1])).map((x) => x[0]);
   const done = tree.filter((t) => t.done);
+  const allOpen = all.filter((t) => !t.done);
+  const allDone = all.filter((t) => t.done);
   const po = panels.open, pd = panels.done;
   const ol = $("open");
   for (const t of open) {
@@ -1393,28 +1682,30 @@ function syncTickets(tree, cards) {
     make: makeTicket,
     patch: (el, t) => patchTicket(el, t, { needs, live: lo, done: false }),
     gone: (el) => goneTicket(el, (l) => {
-      const d = done.find((t) => t.label === l);
-      return d ? l + " finished and moved to Done" : l + " left the board";
+      if (allDone.some((t) => t.label === l)) return l + " finished and moved to Done";
+      return allOpen.some((t) => t.label === l) ? l + " hidden by the filter" : l + " left the board";
     }),
     live: lo,
-    quiet: firstState,
+    quiet: firstState || refiltering,
   });
   const ld = firstState || isLive(pd);
   const heldDone = sync($("done"), done, {
     key: (t) => t.thread || t.label,
     make: makeTicket,
     patch: (el, t) => patchTicket(el, t, { needs, live: ld, done: true }),
-    gone: (el) => goneTicket(el, (l) => l + " settled"),
+    gone: (el) => goneTicket(el, (l) => allDone.some((t) => t.label === l) ? l + " hidden by the filter" : l + " settled"),
     live: ld,
-    quiet: firstState,
+    quiet: firstState || refiltering,
   });
   po.heldList = heldOpen;
   pd.heldList = heldDone;
-  emptyState("open-empty", !open.length && !items($("open")).length);
-  $("done-empty").hidden = done.length > 0 || items($("done")).length > 0;
-  setText($("n-open"), open.length);
-  setText($("n-done"), done.length || "");
-  $("settle-all").hidden = !(done.length > 0 || state.asks.some(isClosedAsk));
+  emptyState("open-empty", !open.length && !items($("open")).length, allOpen.length ? "No open tickets match the filter." : null);
+  const de = $("done-empty");
+  de.hidden = done.length > 0 || items($("done")).length > 0;
+  setText(de, allDone.length ? "No finished tickets match the filter." : "No finished tickets waiting to be settled.");
+  setText($("n-open"), shown(open.length, allOpen.length));
+  setText($("n-done"), shown(done.length, allDone.length, true));
+  $("settle-all").hidden = !(allDone.length > 0 || state.asks.some(isClosedAsk));
 }
 
 function showTicketsHeld() {
@@ -1486,7 +1777,7 @@ function syncAsks(asks) {
       if (!firstState) announce("Answer to " + quote(a.question) + ": " + a.answer.slice(0, 300));
     }
   }
-  sync($("asks"), asks, { key: (a) => a.id, make: makeAsk, patch: patchAsk, live, quiet: firstState,
+  sync($("asks"), asks, { key: (a) => a.id, make: makeAsk, patch: patchAsk, live, quiet: firstState || refiltering,
     gone: (el) => goneRow(el, "ask gone meta", "Settled") });
   $("asks-empty").hidden = asks.length > 0 || items($("asks")).length > 0;
 }
@@ -1496,7 +1787,8 @@ function settledItems(s) {
   const hit = (...parts) => !q || parts.some((p) => typeof p === "string" && p.toLowerCase().includes(q));
   const tickets = s.settled.tickets.filter((t) => hit(t.label, t.link)).map((t) => ({ kind: "t", key: "t:" + t.thread, t }));
   const asks = s.settled.asks.filter((a) => hit(a.question, a.answer)).map((a) => ({ kind: "a", key: "a:" + a.id, a }));
-  return [...tickets, ...asks];
+  const out = [...tickets, ...asks];
+  return filtering() ? out.filter((it) => matches(settledDesc(it))) : out;
 }
 
 function makeSettled(it) {
@@ -1551,10 +1843,10 @@ function syncSettled(s, force) {
   const e = $("settled-empty");
   e.hidden = list.length > 0 || items($("settled")).length > 0;
   setText(e, total ? "Nothing matches the filter." : "Nothing settled yet.");
-  setText($("n-settled"), s.counts.settled || "");
+  setText($("n-settled"), shown(list.length, s.counts.settled, true));
 }
 
-function syncFeed(feed) {
+function syncFeed(feed, all) {
   const p = panels.feed;
   const live = firstState || isLive(p);
   const held = sync($("feed"), feed, {
@@ -1575,13 +1867,13 @@ function syncFeed(feed) {
     },
     gone: () => {},
     live,
-    quiet: firstState,
+    quiet: firstState || refiltering,
   });
   p.heldList = held;
   showHeld(p, held, "");
-  emptyState("feed-empty", !feed.length);
-  setText($("n-feed"), feed.length || "");
-  setText($("n-feed-tab"), feed.length || "");
+  emptyState("feed-empty", !feed.length, all.length ? "No activity matches the filter." : null);
+  setText($("n-feed"), shown(feed.length, all.length, true));
+  setText($("n-feed-tab"), shown(feed.length, all.length, true));
 }
 
 function notifyNew(cards) {
@@ -1631,25 +1923,31 @@ let everConnected = false;
 
 function render(s) {
   state = s;
+  if (!hiddenBase) hiddenBase = new Set(s.cards.map(cardSeen));
   notifyNew(s.cards);
   const keep = new Map(s.cards.map((c) => [c.id, inst(c)]));
   for (const [k, d] of drafts) if (keep.get(k) !== d.inst) drafts.delete(k);
-  syncCards(s.cards);
-  syncTickets(s.tree, s.cards);
+  const v = visible(s);
+  syncCards(v.cards, s.cards);
+  syncTickets(v.tree, s.cards, s.tree);
   syncAsks(s.asks);
   syncSettled(s);
-  syncFeed(s.feed);
+  syncFeed(v.feed, s.feed);
   showTicketsHeld();
-  setText($("n-cards"), s.cards.length);
-  setText($("m-cards"), s.cards.length ? " " + s.cards.length : "");
-  setText($("m-tix"), " " + s.counts.tickets);
+  const seen = new Set(v.cards.map((c) => c.id));
+  paintFilterBar(filtering() ? s.cards.filter((c) => !seen.has(c.id) && !hiddenBase.has(cardSeen(c))) : []);
+  const openShown = v.tree.filter((t) => !t.done).length;
+  const running = v.tree.filter((t) => t.status === "running").length;
+  setText($("n-cards"), shown(v.cards.length, s.cards.length));
+  setText($("m-cards"), s.cards.length ? " " + shown(v.cards.length, s.cards.length) : "");
+  setText($("m-tix"), " " + shown(openShown, s.counts.tickets));
   setText($("m-feed"), "");
   const c = $("counts");
   if (!c.firstChild) {
     c.append(h("span", {}, h("b", {}), h("span", { class: "w" }, " running")));
   }
-  setText(c.children[0].firstChild, s.counts.running);
-  setAttr(c, "aria-label", s.counts.running + " tickets running");
+  setText(c.children[0].firstChild, shown(running, s.counts.running));
+  setAttr(c, "aria-label", filtering() ? running + " of " + s.counts.running + " running tickets match the filter" : s.counts.running + " tickets running");
   paintService(s);
   document.title = (s.counts.cards ? "(" + s.counts.cards + ") " : "") + "t3 board";
   firstState = false;
@@ -1823,6 +2121,7 @@ function jumpToCard(id) {
   let el = cardEl(id);
   if (!el) { applyHeld(panels.cards); el = cardEl(id); }
   if (el) focusItem($("cards"), el);
+  else if (filtering()) announce(id + " is hidden by the filter.");
 }
 
 function jumpToTicket(thread) {
@@ -1885,6 +2184,7 @@ document.addEventListener("keydown", (e) => {
   if (key === "g") { gPending = true; setTimeout(() => { gPending = false; }, 1500); return; }
   if (key === "l") { e.preventDefault(); return jump("launch"); }
   if (key === "/") { e.preventDefault(); return jump("ask"); }
+  if (key === "f") { e.preventDefault(); return $("filter-q").focus(); }
   if (key === "j" || key === "k") { e.preventDefault(); return moveIn(list || $("cards"), key === "j" ? 1 : -1); }
   const card = t && t.closest ? t.closest(".card") : null;
   const target = card && !card.classList.contains("gone") ? card : $("cards")._active;
@@ -1934,6 +2234,28 @@ function wire() {
   $("settle-all").addEventListener("click", async (e) => {
     const b = e.currentTarget;
     await act(b, "/api/settle-done");
+  });
+  for (const f of FACETS) $("facets").append(makeFacet(f));
+  paintFilterBar([]);
+  const q = $("filter-q");
+  q.addEventListener("input", queryTyped);
+  q.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || !(q.value || filter.q)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    q.value = "";
+    clearTimeout(queryTimer);
+    filter.q = "";
+    filterChanged();
+  });
+  $("filter-clear").addEventListener("click", () => { setFilter({}); q.focus(); });
+  $("hidden-new").addEventListener("click", () => {
+    setFilter({});
+    announce("Filter cleared. Showing every decision.");
+    jump("decisions");
+  });
+  document.addEventListener("click", (e) => {
+    for (const f of FACETS) if (!facetEl(f.key).contains(e.target)) closeFacet(f.key, false);
   });
   $("settled-filter").addEventListener("input", () => {
     if (state) { panels.settled.filterChanged = true; syncSettled(state, true); }

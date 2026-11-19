@@ -54,6 +54,26 @@ The board trims each answer and drops one that runs past 60 characters or onto
 a second line. Answers that differ only in case share one button, and a card
 shows at most 8.
 
+## Filtering the page
+
+The bar under the header narrows the page to the work you pick. Each filter
+applies to the decision cards, the ticket tree, the activity feed and the
+Settled section at once.
+
+- **Project, Status and Card kind** are multi-select dropdowns. Type in one to
+  narrow its list, and Enter toggles the first value left. A project is the
+  ticket's `owner/repo`, or its T3 project's title when the repo is not known.
+  Status is running, waiting on me, blocked or done. Card kind narrows only the
+  cards.
+- **Search** narrows the page while you type, with no Enter. Every word must
+  appear somewhere in the ticket label, the issue title or number, the repo, or
+  the card or feed text. `Esc` clears it, and `f` focuses it when single-key
+  shortcuts are on.
+
+While a filter is on, each count reads visible/total. A new card the filter
+hides shows up as "N hidden", and clicking it clears the filter. The page keeps
+no filter across a reload.
+
 ## From a thread
 
 | Call | Does |
@@ -61,7 +81,7 @@ shows at most 8.
 | `wf.launchTicket({ issue, project?, title?, model?, effort? })` | Launch a ticket thread for a GitHub issue |
 | `wf.cards({ all? })` | The open cards, oldest first; `all` includes resolved ones |
 | `wf.answer(id, text)` | Answer a card for the user, the same as a button on the page |
-| `wf.feed({ limit? })` | The latest notes and events |
+| `wf.feed({ limit? })` | The latest notes and events, each with its `ticket`, `ticketLabel`, `ticketTitle`, `repo` and `project` |
 | `wf.board({ parent: "board", all: true })` | Every ticket on the board, with live status |
 
 ```js
@@ -100,7 +120,7 @@ hand.
 | Route | Does |
 |---|---|
 | `GET /` | The page, with a per-process CSRF token embedded |
-| `GET /api/state` | `{cards, tree, feed, asks, settled, counts, service}` |
+| `GET /api/state` | `{cards, tree, feed, asks, settled, counts, service}`; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title` |
 | `GET /api/events` | SSE: a `state` event on every change |
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it |

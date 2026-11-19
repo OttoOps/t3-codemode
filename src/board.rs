@@ -344,6 +344,18 @@ fn web_link(v: Option<String>) -> Option<String> {
     v.filter(|l| l.starts_with("https://") || l.starts_with("http://"))
 }
 
+fn owner_repo((owner, repo): (String, String)) -> String {
+    format!("{owner}/{repo}")
+}
+
+pub fn identity_repo(project: &Value) -> Option<String> {
+    let id = &project["repositoryIdentity"];
+    match (id["owner"].as_str(), id["name"].as_str()) {
+        (Some(o), Some(n)) if gh_name(o) && gh_name(n) => Some(format!("{o}/{n}")),
+        _ => id["locator"]["remoteUrl"].as_str().and_then(parse_remote).map(owner_repo),
+    }
+}
+
 impl Wf {
     pub fn changed(&self) {
         let _ = self.changes.send(());
@@ -357,6 +369,7 @@ impl Wf {
         let v = json!({
             "status": th["status"], "asks": count(&th["pendingRequestCount"]), "link": th["link"],
             "pr": pr_of(th), "title": th["title"], "prStale": th["pullRequestsStale"] == true,
+            "project": th["projectId"],
         });
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         if live.get(id) != Some(&v) {
@@ -368,6 +381,111 @@ impl Wf {
 
     fn live_of(&self, id: &str) -> Option<Value> {
         self.live.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
+    }
+
+    fn known_project(&self, id: &str) -> Option<Value> {
+        self.known_projects.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
+    }
+
+    fn remember_project(&self, id: &str, title: &Value, repo: Option<String>) -> bool {
+        let v = json!({"title": title, "repo": repo});
+        let mut known = self.known_projects.lock().unwrap_or_else(|e| e.into_inner());
+        if known.get(id) == Some(&v) {
+            return false;
+        }
+        known.insert(id.to_string(), v);
+        true
+    }
+
+    fn place(&self, project: Option<&str>, live: &Value) -> (Value, Value) {
+        let id = project.or_else(|| live["project"].as_str());
+        let known = id.and_then(|i| self.known_project(i)).unwrap_or(Value::Null);
+        let pr_repo = live["pr"]["repository"].as_str().filter(|r| r.contains('/'));
+        let repo = known["repo"].as_str().or(pr_repo);
+        let project = id.map_or(Value::Null, |i| json!({"id": i, "title": known["title"]}));
+        (json!(repo), project)
+    }
+
+    fn place_of(&self, thread: &str) -> (Value, Value) {
+        let ln = self.store.link_get(thread).ok().flatten();
+        let live = self.live_of(thread).unwrap_or(Value::Null);
+        self.place(ln.as_ref().and_then(|l| l.project.as_deref()), &live)
+    }
+
+    fn placed(&self, mut v: Value, thread: Option<&str>) -> Value {
+        let (repo, project) = thread.map_or((Value::Null, Value::Null), |t| self.place_of(t));
+        v["repo"] = repo;
+        v["project"] = project;
+        v
+    }
+
+    async fn origin_repo(&self, project: &Value) -> Option<String> {
+        let root = project["workspaceRoot"].as_str()?;
+        self.remotes.origin(root).await.as_deref().and_then(parse_remote).map(owner_repo)
+    }
+
+    async fn backfill_project(&self, ln: &Link) -> Result<Option<String>> {
+        if self.live_of(&ln.child).is_none() {
+            let _ = self.read_thread(&ln.child).await;
+        }
+        let Some(project) = self.live_of(&ln.child).and_then(|v| v["project"].as_str().map(String::from)) else {
+            return Ok(None);
+        };
+        let _g = self.lock.lock().await;
+        if let Some(mut fresh) = self.store.link_get(&ln.child)?
+            && fresh.project.is_none()
+        {
+            fresh.project = Some(project.clone());
+            self.store.link_save(&fresh)?;
+        }
+        Ok(Some(project))
+    }
+
+    pub(crate) async fn learn_projects(&self) -> Result<()> {
+        let mut links = Vec::new();
+        for t in self.store.children(BOARD, false)? {
+            links.extend(self.store.children(&t.child, false)?);
+            links.push(t);
+        }
+        let mut ids: Vec<String> = Vec::new();
+        for ln in links {
+            match ln.project {
+                Some(p) => ids.push(p),
+                None => ids.extend(self.backfill_project(&ln).await?),
+            }
+        }
+        ids.extend(
+            self.live
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .filter_map(|v| v["project"].as_str())
+                .map(String::from),
+        );
+        ids.sort();
+        ids.dedup();
+        ids.retain(|i| self.known_project(i).is_none());
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut changed = false;
+        for p in self.project_list().await? {
+            let Some(id) = p["id"].as_str().filter(|i| ids.iter().any(|w| w == i)) else { continue };
+            let repo = match identity_repo(&p) {
+                Some(r) => Some(r),
+                None => self.origin_repo(&p).await,
+            };
+            changed |= self.remember_project(id, &p["title"], repo);
+        }
+        for id in &ids {
+            if self.known_project(id).is_none() {
+                self.remember_project(id, &Value::Null, None);
+            }
+        }
+        if changed {
+            self.changed();
+        }
+        Ok(())
     }
 
     pub(crate) fn alloc_waiting(
@@ -553,28 +671,35 @@ impl Wf {
     }
 
     pub fn feed(&self, limit: usize) -> Result<Vec<Value>> {
-        let mut labels: Vec<(String, String)> = Vec::new();
+        let mut labels: Vec<(String, String, String)> = Vec::new();
         for t in self.store.children(BOARD, false)? {
             for w in self.store.children(&t.child, false)? {
-                labels.push((w.child.clone(), w.label));
+                labels.push((w.child.clone(), w.label, t.child.clone()));
             }
-            labels.push((t.child.clone(), t.label));
+            labels.push((t.child.clone(), t.label, t.child.clone()));
         }
-        let mut to: Vec<String> = labels.iter().map(|(c, _)| c.clone()).collect();
+        let mut to: Vec<String> = labels.iter().map(|(c, _, _)| c.clone()).collect();
         to.push(BOARD.into());
         let label_of = |id: &str| -> String {
             if id == WATCHER {
                 return "watcher".into();
             }
-            labels.iter().find(|(c, _)| c == id).map(|(_, l)| l.clone()).unwrap_or_else(|| id.to_string())
+            labels.iter().find(|(c, _, _)| c == id).map(|(_, l, _)| l.clone()).unwrap_or_else(|| id.to_string())
         };
+        let ticket_of = |id: &str| labels.iter().find(|(c, _, _)| c == id).map(|(_, _, t)| t.clone());
         Ok(self
             .store
             .msgs_recent(FEED_KINDS, &to, limit.clamp(1, 200))?
             .into_iter()
             .map(|m| {
-                json!({"handle": m.handle, "at": local_clock(&m.at), "iso": m.at, "label": label_of(&m.from),
-                       "kind": m.kind, "head": truncate_chars(&m.head(usize::MAX), 200)})
+                let ticket = ticket_of(&m.from);
+                let parent =
+                    ticket.as_deref().map(|t| (label_of(t), self.live_of(t).unwrap_or(Value::Null)["title"].clone()));
+                let (ticket_label, ticket_title) = parent.unzip();
+                let v = json!({"handle": m.handle, "at": local_clock(&m.at), "iso": m.at, "label": label_of(&m.from),
+                       "kind": m.kind, "head": truncate_chars(&m.head(usize::MAX), 200), "ticket": ticket,
+                       "ticketLabel": ticket_label, "ticketTitle": ticket_title});
+                self.placed(v, ticket.as_deref())
             })
             .collect())
     }
@@ -590,6 +715,11 @@ impl Wf {
     }
 
     async fn projects(&self) -> Result<Vec<Value>> {
+        let all = self.project_list().await?;
+        Ok(all.into_iter().filter(|p| p["deletedAt"].is_null() && p["archivedAt"].is_null()).collect())
+    }
+
+    async fn project_list(&self) -> Result<Vec<Value>> {
         let mut out = Vec::new();
         let mut cursor: Option<u64> = None;
         for _ in 0..20 {
@@ -604,7 +734,7 @@ impl Wf {
                 _ => break,
             }
         }
-        Ok(out.into_iter().filter(|p| p["deletedAt"].is_null() && p["archivedAt"].is_null()).collect())
+        Ok(out)
     }
 
     async fn find_project(&self, issue: &Issue, wanted: Option<&str>) -> Result<Option<Value>> {
@@ -658,7 +788,8 @@ impl Wf {
         })?;
         let label = issue.label();
         self.ensure_not_on_board(&label)?;
-        let project = match self.find_project(&issue, nonempty(a.project).as_deref()).await? {
+        let wanted = nonempty(a.project);
+        let project = match self.find_project(&issue, wanted.as_deref()).await? {
             Some(p) => p,
             None => {
                 let text = format!(
@@ -670,6 +801,10 @@ impl Wf {
             }
         };
         let project_id = project["id"].as_str().unwrap_or_default().to_string();
+        let matched = wanted.is_none().then(|| format!("{}/{}", issue.owner, issue.repo));
+        if let Some(repo) = identity_repo(&project).or(matched) {
+            self.remember_project(&project_id, &project["title"], Some(repo));
+        }
         let params = self.config.link_params("overseer", "ticket")?;
         {
             let _g = self.lock.lock().await;
@@ -724,7 +859,7 @@ impl Wf {
                 self.store.pending_put(&p)?;
             }
         }
-        self.note_live(&thread, &json!({"status": r["status"], "link": link, "title": title}));
+        self.note_live(&thread, &json!({"status": r["status"], "link": link, "title": title, "projectId": project_id}));
         self.changed();
         Ok(json!({"ok": true, "label": label, "thread": thread, "link": link, "projectId": project_id, "title": title}))
     }
@@ -867,6 +1002,9 @@ impl Wf {
         }
         self.check_asks(None).await?;
         self.mirror_t3_settles().await?;
+        if let Err(e) = self.learn_projects().await {
+            tracing::debug!("board projects not refreshed: {e:#}");
+        }
         let hours = self.config.board.settle_after_hours;
         if hours > 0 {
             self.settle_closed(Some(hours as f64 * 60.0)).await?;
@@ -1020,7 +1158,9 @@ impl Wf {
         let live = self.live_of(&ln.child);
         let status = if ln.closed { "done" } else { chip(live.as_ref()) };
         let live = live.unwrap_or(Value::Null);
+        let (repo, project) = self.place(ln.project.as_deref(), &live);
         json!({
+            "title": live["title"], "repo": repo, "project": project,
             "thread": ln.child, "label": ln.label, "status": status, "t3Status": live["status"],
             "gate": if ln.closed { None } else { ln.gate.clone() },
             "link": web_link(ln.link.clone().or_else(|| live["link"].as_str().map(String::from))),
@@ -1068,7 +1208,9 @@ impl Wf {
             let live = p.thread.as_deref().and_then(|t| self.live_of(t));
             let status = if p.thread.is_none() { "launching" } else { chip(live.as_ref()) };
             let live = live.unwrap_or(Value::Null);
+            let (repo, project) = self.place(None, &live);
             pending.push(json!({
+                "title": live["title"], "repo": repo, "project": project,
                 "ticket": p.thread, "thread": p.thread, "label": p.label, "status": status,
                 "t3Status": live["status"], "gate": null,
                 "link": web_link(p.link.clone().or_else(|| live["link"].as_str().map(String::from))),
@@ -1094,7 +1236,7 @@ impl Wf {
     }
 
     pub fn snapshot(&self) -> Result<Value> {
-        let cards = self.cards()?;
+        let cards: Vec<Value> = self.cards()?.iter().map(|c| self.placed(json!(c), c.ticket.as_deref())).collect();
         let tree = self.tree()?;
         let feed = self.feed(self.config.board.feed)?;
         let asks = self.asks()?;

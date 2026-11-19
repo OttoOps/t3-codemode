@@ -201,6 +201,7 @@ pub struct Wf {
     pub(crate) remotes: Arc<dyn Remotes>,
     pub(crate) live: Mutex<HashMap<String, Value>>,
     pub(crate) closed_prs: Mutex<HashMap<String, ClosedPrs>>,
+    pub(crate) known_projects: Mutex<HashMap<String, Value>>,
     pub(crate) changes: tokio::sync::broadcast::Sender<()>,
     pub(crate) asks_lock: tokio::sync::Mutex<()>,
 }
@@ -237,6 +238,7 @@ impl Wf {
             remotes,
             live: Mutex::new(HashMap::new()),
             closed_prs: Mutex::new(HashMap::new()),
+            known_projects: Mutex::new(HashMap::new()),
             changes: tokio::sync::broadcast::channel(64).0,
             asks_lock: tokio::sync::Mutex::new(()),
         }
@@ -419,7 +421,6 @@ impl Wf {
                 .and_then(usable)
                 .or_else(|| thread.as_ref().and_then(|t| t["title"].as_str()).and_then(usable))
                 .unwrap_or_else(|| me.to_string());
-            let link_url = thread.as_ref().and_then(|t| t["link"].as_str().map(String::from));
             let args = JoinArgs {
                 parent: BOARD.into(),
                 label: label.clone(),
@@ -428,7 +429,7 @@ impl Wf {
                 miss: None,
                 stall: None,
             };
-            let joined = self.bind(me, args, link_url, true).await?;
+            let joined = self.bind(me, args, thread.as_ref(), true).await?;
             return Ok(json!({"thread": me, "role": a.role, "root": false, "parent": joined["parent"],
                 "label": joined["label"], "watcher": self.watcher_line()}));
         }
@@ -482,11 +483,13 @@ impl Wf {
 
     async fn join(&self, me: &str, a: JoinArgs) -> Result<Value> {
         self.config.check_role(&a.role)?;
-        let link_url = self.read_thread(me).await.ok().and_then(|t| t["link"].as_str().map(String::from));
-        self.bind(me, a, link_url, false).await
+        let thread = self.read_thread(me).await.ok();
+        self.bind(me, a, thread.as_ref(), false).await
     }
 
-    async fn bind(&self, me: &str, a: JoinArgs, link_url: Option<String>, auto: bool) -> Result<Value> {
+    async fn bind(&self, me: &str, a: JoinArgs, thread: Option<&Value>, auto: bool) -> Result<Value> {
+        let field = |k: &str| thread.and_then(|t| t[k].as_str()).map(String::from);
+        let (link_url, project) = (field("link"), field("projectId"));
         let _g = self.lock.lock().await;
         let current = self.store.link_get(me)?;
         if auto && let Some(l) = current.as_ref().filter(|l| !l.closed) {
@@ -531,6 +534,7 @@ impl Wf {
             bad_run: None,
             settled_at: None,
             restored_at: None,
+            project: project.or_else(|| old.as_ref().and_then(|o| o.project.clone())),
         };
         self.store.link_save(&ln)?;
         Ok(json!({
