@@ -50,11 +50,13 @@ and the threads running. Only the lists scroll.
   of them, under the ticket and worker that sent them. Runs from the same
   sender fold into one row that expands. The board drops kind prefixes and
   `Publishing:` tails, and shortens hashes to 7 characters and GitHub links to
-  `#65`.
+  `#65`. With `board.pool` set, each launch adds an entry that names the
+  instance it went to and why.
 - **Launch and Ask,** pinned above Activity. Launch takes GitHub issue URLs and
   makes each one a ticket thread. A question in Ask starts a short-lived Haiku
   thread that reads the board, writes its answer under Ask, and then gets
-  archived.
+  archived. With `board.pool` set, the thread runs on a pool member with the
+  pool's model.
 
 Times show as ages (`36m`, `1h 32m`); hover one for the local time.
 
@@ -175,6 +177,12 @@ throws and leaves an error card. The launched thread is told to use the
 as an agent skill, apart from the service.
 [The workflow skills](getting-started.md#the-workflow-skills) covers installing
 them. Without the skills installed, launched threads do not know the workflow.
+
+With [`board.pool`](config.md#pools) set, each launch from the board picks its
+provider instance from that pool in place of `board.instanceId`. The result
+carries `instanceId` and `reason`, and the feed entry for the launch carries
+the same two fields. When no member of the pool can run, the launch fails,
+leaves an error card that names the pool, and launches nothing.
 
 ## Settling
 

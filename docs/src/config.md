@@ -75,12 +75,75 @@ All under `board`:
 | `ticketModel`, `ticketEffort` | `claude-opus-5-5`, `high` | Model and effort for ticket threads the board launches |
 | `askModel`, `askEffort` | `claude-haiku-5-5`, unset | Model and effort for the ask box's scratch threads |
 | `instanceId` | `claudeAgent` | The T3 provider instance launches use |
+| `pool` | unset | A pool from `pools` that picks the instance for each launch in place of `instanceId`. See [Pools](#pools). |
 | `runtimeMode` | `full-access` | Runtime mode for launches. The service has no thread to inherit a mode from. |
 | `askPollSecs` | `4` | How often an open ask is checked for its answer |
 | `askTimeoutMinutes` | `15` | How long an ask may run |
 | `feed` | `50` | Activity feed entries kept on the page |
 | `settleAfterHours` | `24` | Hours a done ticket or closed ask stays in the main lists; `0` turns auto-settle off |
 | `openLinks` | `desktop` | `desktop`: thread links open in the running T3 Code desktop app, or in a new tab when it is not running. The app check needs Windows, natively or through WSL, so macOS and Linux without WSL always get a tab. `tab`: always a new tab. |
+
+### Pools
+
+`pools` names groups of T3 provider instances of one driver, such as two
+Claude accounts, each one its own T3 provider instance. A launch from a pool
+picks one member, so work spreads across the accounts instead of filling one
+until it hits its usage limit.
+
+```json
+{
+  "pools": {
+    "opus": {
+      "driver": "claudeAgent",
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "strategy": "weighted",
+      "members": [
+        { "instanceId": "claude-a", "weight": 1, "reserve": 30 },
+        { "instanceId": "claude-b", "weight": 3 }
+      ]
+    }
+  },
+  "board": { "pool": "opus" }
+}
+```
+
+| Key | Default | Does |
+|---|---|---|
+| `driver` | required | The driver every member must be, as `orchestrator_capabilities` reports it in `driverKind` |
+| `model`, `effort` | required, unset | Model and effort for every launch from the pool, so a thread gets the same model whichever account runs it |
+| `strategy` | `weighted` | `weighted` spreads launches by weight. `priority` fills members in order and moves to the next only when one is out. |
+| `members[].instanceId` | required | A T3 provider instance |
+| `members[].weight` | `1` | The member's share of `weighted` launches. With weights 3 and 1, three of every four launches go to the first member. |
+| `members[].reserve` | `0` | A share of the account's usage window, 0-100, held for work that names the instance directly |
+
+`weighted` is a smooth weighted round robin. Each member's running credit is
+in `store.db`, so a run of launches from the same state picks the same
+members, and a restart carries on where it stopped. When two members are
+level, the one with fewer running threads wins, then the one listed first.
+
+A pick skips a member that T3 reports as disabled or constrained, a member
+that does not list the pool's model or does not offer its effort, and a member
+marked limited until its reset time. A member with a `reserve` is a last resort: t3cm has no usage
+source yet, so it cannot see how close an account is to its reserve, and the
+pool picks that member only when every member without a reserve is out. A
+launch that names the instance directly ignores the reserve.
+When every member is out, the pick fails, nothing launches, and a board launch
+leaves an error card that names the pool.
+
+At load, a pool must have at least one member, no member twice, weights of 1
+or more and reserves from 0 to 100, and `board.pool` must name a configured
+pool. A bad pool fails config load with a message that names it. Only T3 knows
+whether each member is an instance of the pool's `driver`. Every pick checks
+that against T3's live `orchestrator_capabilities`, and a pick from a pool with
+an unknown instance or a member of another driver fails and names the pool and
+the member. When T3 answers at start, the service also logs a bad pool then.
+
+`board.pool` covers `wf.launchTicket`, the launch box and the ask box. With it
+set, launches use the pool's model and effort, a `wf.launchTicket` call that
+asks for another model or effort fails, and the ask box runs the pool's model
+in place of `askModel`. Skills pick from a pool with [`wf.pick`](globals.md#wf).
+Pools are per T3 environment, since instance ids belong to one T3 server.
 
 ### Upstreams
 
@@ -104,8 +167,9 @@ All under `board`:
 
 State lives in SQLite at `store.db` in the state directory above
 (`--state-dir` or `T3CM_STATE_DIR` override it). It holds the T3 session, `mem`
-and `vars`, the workflow links and messages, the board's cards and feed, and the
-cached T3 catalog for when T3 is down. Everything survives restarts.
+and `vars`, the workflow links and messages, the board's cards and feed, pool
+member credits, limits and pick history, and the cached T3 catalog for when T3
+is down. Everything survives restarts.
 
 On Linux and macOS the directory is `0700` and the database `0600`. On Windows
 t3cm sets no ACL of its own: the store relies on the per-user ACL that
