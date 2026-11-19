@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use crate::board::{BOARD, LaunchArgs, Remotes};
+use crate::board::{BOARD, LaunchArgs, NewCard, Remotes, checked_options};
 use crate::clock::{Clock, iso, local_clock, minutes_since};
 use crate::config::{CLOSING, Config, LinkParams, UP_KINDS};
 use crate::store::{Link, Pending, Store};
@@ -15,6 +15,7 @@ use crate::t3::{T3Client, T3Error};
 pub const ACTIVE: &[&str] = &["preparing", "queued", "starting", "running"];
 pub const ENDED_BADLY: &[&str] = &["failed", "interrupted", "cancelled"];
 pub const WATCHER: &str = "t3cm";
+const OPTION_KINDS: &[&str] = &["gate", "blocker", "report"];
 pub const LAST_PASS: &str = "watcher_last_pass";
 const NO_CALLER: &str = "wf needs the caller's T3 thread id: connect with the X-T3-Thread header \
 (Claude Code: X-T3-Thread: ${T3CODE_THREAD_ID}) or pass `thread` to execute";
@@ -57,6 +58,7 @@ struct SendArgs {
     body: String,
     gate: Option<String>,
     wake: Option<bool>,
+    options: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -551,6 +553,13 @@ impl Wf {
         if a.body.trim().is_empty() {
             bail!("wf.send: empty body");
         }
+        let options = match &a.options {
+            Some(_) if !OPTION_KINDS.contains(&a.kind.as_str()) => {
+                bail!("wf.send: options apply only to kinds {}", OPTION_KINDS.join(", "))
+            }
+            Some(o) => Some(checked_options(o)?),
+            None => None,
+        };
         let _g = self.lock.lock().await;
         let mut ln = self
             .store
@@ -586,7 +595,7 @@ impl Wf {
         }
         if ln.parent == BOARD {
             self.store.link_save(&ln)?;
-            return self.board_receive(&ln, &a.kind, &handle, &a.body);
+            return self.board_receive(&ln, &a.kind, &handle, &a.body, options);
         }
         if !wake {
             ln.unread.push(handle.clone());
@@ -857,7 +866,15 @@ impl Wf {
 
     fn deliver_up(&self, ln: &Link, kind: &str, handle: &str, body: &str) -> Result<()> {
         if ln.parent == BOARD {
-            self.board_card(kind, &ln.label, Some(&ln.child), ln.link.as_deref(), handle, body)?;
+            self.board_card(NewCard {
+                kind,
+                label: Some(&ln.label),
+                ticket: Some(&ln.child),
+                link: ln.link.as_deref(),
+                body,
+                handle: Some(handle),
+                options: None,
+            })?;
             return Ok(());
         }
         let msg = format!("{}\n{body}", header(kind, &ln.label, handle, None));
@@ -1016,7 +1033,15 @@ impl Wf {
             let now = self.now();
             let handle = self.store.msg_new(WATCHER, &p.parent, "report", &body, &now)?;
             if p.parent == BOARD {
-                self.board_card("report", &p.label, p.thread.as_deref(), p.link.as_deref(), &handle, &body)?;
+                self.board_card(NewCard {
+                    kind: "report",
+                    label: Some(&p.label),
+                    ticket: p.thread.as_deref(),
+                    link: p.link.as_deref(),
+                    body: &body,
+                    handle: Some(&handle),
+                    options: None,
+                })?;
             } else {
                 let msg = format!("{}\n{body}", header("report", &p.label, &handle, None));
                 self.store.outbox_push(&p.parent, &msg, &handle, &now)?;

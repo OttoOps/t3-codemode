@@ -524,3 +524,26 @@ async fn init_reopening_a_closed_board_link_forgets_old_reports() {
     h.wf(TICKET, "init", json!({"role": "ticket"})).await;
     assert!(link(&h, TICKET).reported.is_empty());
 }
+
+#[tokio::test]
+async fn options_on_a_send_to_a_thread_parent_are_checked_and_leave_the_body_alone() {
+    let h = H::new();
+    link_ticket_worker(&h).await;
+    let body = "**ACTION NEEDED:** reply \"merge\" to merge #81, here: https://x/pull/81";
+    let out = h
+        .exec_as(
+            WORKER,
+            &format!(
+                "async () => wf.send({{ kind: 'gate', gate: 'merge', body: {}, options: ['merge'] }})",
+                json!(body)
+            ),
+        )
+        .await;
+    assert_eq!(result(&out)["delivery"], "sent");
+    assert!(h.last_message().ends_with(body), "{}", h.last_message());
+    let e = h
+        .wf_err(WORKER, "send", json!({"kind": "gate", "gate": "review", "body": "pick", "options": ["a", "A"]}))
+        .await;
+    assert!(e.contains("options[1]") && e.contains("repeats"), "{e}");
+    assert_eq!(link(&h, WORKER).gate.as_deref(), Some("merge"));
+}

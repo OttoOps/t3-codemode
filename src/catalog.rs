@@ -25,7 +25,7 @@ pub struct Catalog {
     pub json: String,
 }
 
-const WAKE_RESULT: &str = r#"{ handle: string; delivery: "noted" | "sent" | "queued" | "board"; detail?: string; card?: string; closed?: boolean }"#;
+const WAKE_RESULT: &str = r#"{ handle: string; delivery: "noted" | "sent" | "queued" | "board"; detail?: string; card?: string; options?: string[]; warning?: string; closed?: boolean }"#;
 const CARD: &str = r#"{ id: string; kind: string; label: string | null; ticket: string | null; link: string | null; text: string; handle: string | null; options: string[]; at: string; atLocal: string; resolved?: string; resolution?: string | null; token: string }"#;
 
 fn builtin(name: &str, kind: &'static str, description: &str, sig: &str, input: Value) -> Entry {
@@ -120,12 +120,13 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.send",
             "wf",
-            "Send to your parent. note: stored, never wakes, reaches the parent as a digest line at its next wake. event/gate/blocker/report wake it per link policy (overseer links turn events into notes). gate also opens a gate (no nudges until cleared). handoff/closed close the link. wake overrides the policy. With parent \"board\": note/event go to the board's feed, gate/blocker/report become a decision card (delivery \"board\", card id), handoff/closed mark the ticket done.",
+            "Send to your parent. note: stored, never wakes, reaches the parent as a digest line at its next wake. event/gate/blocker/report wake it per link policy (overseer links turn events into notes). gate also opens a gate (no nudges until cleared). handoff/closed close the link. wake overrides the policy. With parent \"board\": note/event go to the board's feed, gate/blocker/report become a decision card (delivery \"board\", card id, and the card's reply buttons as options), handoff/closed mark the ticket done. options (gate/blocker/report only) sets the card's buttons in place of parsing the body: each one line, 1-60 chars, unique ignoring case, at most 8; a bad entry fails the send. A gate card with no buttons also returns a warning.",
             &format!(
-                "wf.send(input: {{ kind: \"note\" | \"event\" | \"gate\" | \"blocker\" | \"report\" | \"handoff\" | \"closed\"; body: string; gate?: string; wake?: boolean }}): Promise<{WAKE_RESULT}>;"
+                "wf.send(input: {{ kind: \"note\" | \"event\" | \"gate\" | \"blocker\" | \"report\" | \"handoff\" | \"closed\"; body: string; gate?: string; wake?: boolean; options?: string[] }}): Promise<{WAKE_RESULT}>;"
             ),
             obj(
-                json!({"kind": {"enum": kinds}, "body": {"type": "string"}, "gate": {"type": "string"}, "wake": {"type": "boolean"}}),
+                json!({"kind": {"enum": kinds}, "body": {"type": "string"}, "gate": {"type": "string"}, "wake": {"type": "boolean"},
+                    "options": {"type": "array", "items": {"type": "string"}, "maxItems": 8}}),
                 &["kind", "body"],
             ),
         ),
@@ -202,7 +203,7 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.cards",
             "wf",
-            "The board's open decision cards, oldest first: gates, blockers, reports and escalations from ticket threads, with the reply options parsed from their text. all: include resolved cards, each with resolved (local time) and resolution.",
+            "The board's open decision cards, oldest first: gates, blockers, reports and escalations from ticket threads, with their reply options (the sender's options, else those parsed from their text). all: include resolved cards, each with resolved (local time) and resolution.",
             &format!("wf.cards(input?: {{ all?: boolean }}): Promise<{CARD}[]>;"),
             obj(json!({"all": {"type": "boolean"}}), &[]),
         ),

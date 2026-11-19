@@ -2227,3 +2227,71 @@ async fn a_project_whose_repo_was_unknown_is_looked_up_again_later() {
     h.app.wf.board_tick().await.unwrap();
     assert_eq!(by_label(&snapshot(&h)["tree"], "widgets#41")["repo"], "acme/widgets");
 }
+
+#[tokio::test]
+async fn a_gate_with_options_shows_exactly_those_buttons() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#41").await;
+    let opts = json!(["merge", " hold for review ", "close it"]);
+    let r = h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": GATE, "options": opts})).await;
+    assert_eq!(r["delivery"], "board");
+    assert_eq!(r["options"], json!(["merge", "hold for review", "close it"]));
+    assert!(r.get("warning").is_none(), "{r}");
+    assert_eq!(cards(&h)[0]["options"], r["options"]);
+}
+
+#[tokio::test]
+async fn a_board_send_reports_the_parsed_buttons() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#41").await;
+    let r = h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE})).await;
+    assert_eq!(r["options"], json!(["merge", "merge and deploy"]));
+    assert!(r.get("warning").is_none(), "{r}");
+    let r = h.wf(TICKET, "send", json!({"kind": "blocker", "body": "Need an AWS SSO login"})).await;
+    assert_eq!(r["options"], json!([]));
+    assert!(r.get("warning").is_none(), "a blocker needs no buttons: {r}");
+}
+
+#[tokio::test]
+async fn a_gate_with_no_buttons_comes_back_with_a_warning() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#41").await;
+    let body = "**ACTION NEEDED:** merge 'feat/x' or hold it, here: https://github.com/o/widgets/pull/81";
+    let r = h.wf(TICKET, "send", json!({"kind": "gate", "body": body})).await;
+    assert_eq!(r["options"], json!([]));
+    let w = r["warning"].as_str().unwrap();
+    assert!(w.contains("options") && w.contains("reply"), "{w}");
+    let r = h.wf(TICKET, "send", json!({"kind": "gate", "body": GATE, "options": []})).await;
+    assert_eq!(r["options"], json!([]));
+    assert!(r["warning"].is_string(), "{r}");
+    assert_eq!(cards(&h)[0]["options"], json!([]));
+}
+
+#[tokio::test]
+async fn bad_options_are_rejected_and_nothing_is_sent() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#41").await;
+    let long = "x".repeat(61);
+    let e = h
+        .wf_err(
+            TICKET,
+            "send",
+            json!({"kind": "gate", "body": GATE, "options": ["merge", "", long, "two\nlines", "MERGE"]}),
+        )
+        .await;
+    for want in ["options[1]", "empty", "options[2]", "60", "options[3]", "line", "options[4]", "repeats"] {
+        assert!(e.contains(want), "{want:?} missing from {e}");
+    }
+    assert!(!e.contains("options[0]"), "{e}");
+    let nine: Vec<String> = (1..=9).map(|n| format!("option {n}")).collect();
+    let e = h.wf_err(TICKET, "send", json!({"kind": "gate", "body": GATE, "options": nine})).await;
+    assert!(e.contains("at most 8"), "{e}");
+    let e = h
+        .wf_err(TICKET, "send", json!({"kind": "gate", "body": GATE, "options": ["\u{c9}t\u{e9}", "\u{e9}T\u{c9}"]}))
+        .await;
+    assert!(e.contains("options[1]") && e.contains("repeats"), "{e}");
+    let e = h.wf_err(TICKET, "send", json!({"kind": "note", "body": "hi", "options": ["ok"]})).await;
+    assert!(e.contains("gate, blocker, report"), "{e}");
+    assert!(cards(&h).is_empty());
+    assert!(h.wf(TICKET, "feed", json!({})).await.as_array().unwrap().is_empty());
+}
