@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::clock::{local_clock, parse_ts};
+use crate::issues::issue_key;
 use crate::pools::Picked;
 use crate::store::{Link, Pending};
 use crate::t3::{BoxFut, truncate_chars};
@@ -418,7 +419,7 @@ impl Wf {
         }
     }
 
-    fn live_of(&self, id: &str) -> Option<Value> {
+    pub(crate) fn live_of(&self, id: &str) -> Option<Value> {
         self.live.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
     }
 
@@ -973,6 +974,9 @@ impl Wf {
             }
         }
         self.note_live(&thread, &json!({"status": r["status"], "link": link, "title": title, "projectId": project_id}));
+        if let Err(e) = self.store.new_issue_remove(&issue_key(&issue)) {
+            tracing::warn!("{label} launched, but taking it off the new issues failed: {e:#}");
+        }
         let mut out = json!({"ok": true, "label": label, "thread": thread, "link": link, "projectId": project_id, "title": title});
         if let Some(p) = &picked {
             self.note_pool_launch(&mut out, p, &label, &thread);
@@ -1393,6 +1397,7 @@ impl Wf {
         let asks = self.asks()?;
         let (settled, settled_total) = self.settled()?;
         let contexts = self.contexts()?;
+        let (new_issues, dismissed_issues) = self.new_issues()?;
         let t3 = self.t3.status();
         let last = self.store.meta_get(crate::wf::LAST_PASS)?;
         let open = tree.iter().filter(|t| t["done"] == false).count();
@@ -1404,7 +1409,10 @@ impl Wf {
             "asks": asks,
             "settled": settled,
             "contexts": contexts,
-            "counts": {"cards": cards.len(), "tickets": open, "running": running, "settled": settled_total},
+            "newIssues": new_issues,
+            "dismissedIssues": dismissed_issues,
+            "counts": {"cards": cards.len(), "tickets": open, "running": running, "settled": settled_total,
+                       "newIssues": new_issues.len()},
             "service": {
                 "version": env!("CARGO_PKG_VERSION"),
                 "t3": {"connected": t3.connected, "lastError": t3.last_error},

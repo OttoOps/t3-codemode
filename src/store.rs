@@ -49,6 +49,8 @@ CREATE INDEX IF NOT EXISTS pool_picks_pool ON pool_picks (pool, seq);
 CREATE INDEX IF NOT EXISTS pool_picks_handle ON pool_picks (handle) WHERE handle IS NOT NULL;
 CREATE TABLE IF NOT EXISTS limit_stops (
   thread TEXT NOT NULL, run TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (thread, run));
+CREATE TABLE IF NOT EXISTS new_issues (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
 "#;
 
 const KEEP_MESSAGES: i64 = 5000;
@@ -180,6 +182,25 @@ pub struct PickRecord {
     pub handle: Option<String>,
     #[serde(default)]
     pub thread: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NewIssue {
+    pub url: String,
+    pub repo: String,
+    pub number: u64,
+    pub label: String,
+    pub title: Option<String>,
+    pub note: Option<String>,
+    pub thread: String,
+    pub thread_link: Option<String>,
+    pub thread_title: Option<String>,
+    pub at: String,
+    #[serde(default)]
+    pub dismissed_at: Option<String>,
+    #[serde(default)]
+    pub restored_at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -876,5 +897,43 @@ impl Store {
             st.query_map([pool], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect()
         })?;
         Ok(rows.into_iter().map(|(i, n, at)| (i, (n.max(0) as u64, at))).collect())
+    }
+
+    pub fn new_issue_add(&self, key: &str, issue: &NewIssue) -> Result<Option<i64>> {
+        let s = serde_json::to_string(issue)?;
+        self.with(|c| {
+            let n = c.execute("INSERT OR IGNORE INTO new_issues (key, data) VALUES (?1, ?2)", params![key, s])?;
+            Ok((n > 0).then(|| c.last_insert_rowid()))
+        })
+    }
+
+    fn new_issue_where<P: rusqlite::Params>(&self, sql: &str, p: P) -> Result<Vec<(i64, NewIssue)>> {
+        let rows: Vec<(i64, String)> = self.with(|c| {
+            let mut st = c.prepare(&format!("SELECT seq, data FROM new_issues {sql}"))?;
+            st.query_map(p, |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+        })?;
+        rows.into_iter().map(|(seq, d)| Ok((seq, serde_json::from_str(&d)?))).collect()
+    }
+
+    pub fn new_issue_by_key(&self, key: &str) -> Result<Option<(i64, NewIssue)>> {
+        Ok(self.new_issue_where("WHERE key = ?1", [key])?.into_iter().next())
+    }
+
+    pub fn new_issue_get(&self, seq: i64) -> Result<Option<NewIssue>> {
+        Ok(self.new_issue_where("WHERE seq = ?1", [seq])?.into_iter().next().map(|(_, i)| i))
+    }
+
+    pub fn new_issues(&self) -> Result<Vec<(i64, NewIssue)>> {
+        self.new_issue_where("ORDER BY seq", [])
+    }
+
+    pub fn new_issue_update(&self, seq: i64, issue: &NewIssue) -> Result<()> {
+        let s = serde_json::to_string(issue)?;
+        self.with(|c| c.execute("UPDATE new_issues SET data = ?2 WHERE seq = ?1", params![seq, s]))?;
+        Ok(())
+    }
+
+    pub fn new_issue_remove(&self, key: &str) -> Result<bool> {
+        Ok(self.with(|c| c.execute("DELETE FROM new_issues WHERE key = ?1", [key]))? > 0)
     }
 }

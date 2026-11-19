@@ -10,6 +10,7 @@ use crate::board::{BOARD, LaunchArgs, NewCard, Remotes, checked_options};
 use crate::clock::{Clock, iso, local_clock, minutes_since};
 use crate::config::{CLOSING, Config, LinkParams, UP_KINDS};
 use crate::github::GitHub;
+use crate::issues::IssueArgs;
 use crate::merge::MergeArgs;
 use crate::store::{Link, Pending, Store};
 use crate::t3::{T3Client, T3Error};
@@ -401,6 +402,7 @@ impl Wf {
                 self.open_child(me, &a.role, &a.label).await
             }
             "join" => self.join(me, parse(method, args)?).await,
+            "issue" => self.report_issue(me, parse::<IssueArgs>(method, args)?).await,
             "send" => self.send(me, parse(method, args)?).await,
             "reply" => self.reply(me, parse(method, args)?).await,
             "gate" => self.gate(me, parse(method, args)?).await,

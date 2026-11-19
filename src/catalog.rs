@@ -29,6 +29,7 @@ const WAKE_RESULT: &str = r#"{ handle: string; delivery: "noted" | "sent" | "que
 const MERGE_SIGNATURE: &str = r#"wf.merge(input: { repo: string; pr: number; head: string; method?: "merge" | "squash" | "rebase" }): Promise<{ repo: string; pr: number; head: string } & ({ status: "queued"; position: number | null } | { status: "merged"; commit: string | null; method?: "merge" | "squash" | "rebase" } | { status: "waiting"; mergeState: string } | { status: "refused"; reason: string })>;"#;
 const CARD: &str = r#"{ id: string; kind: string; label: string | null; ticket: string | null; link: string | null; text: string; handle: string | null; options: string[]; at: string; atLocal: string; resolved?: string; resolution?: string | null; token: string }"#;
 
+const NEW_ISSUE: &str = "{ id: string; url: string; repo: string; number: number; label: string; title: string | null; note: string | null; thread: string; threadLink: string | null; threadTitle: string | null; at: string; atLocal: string; dismissed: boolean; dismissedAt: string | null; dismissedAtLocal: string | null; restoredAt: string | null }";
 const SKIPPED: &str = "{ instanceId: string; reason: string }";
 
 fn builtin(name: &str, kind: &'static str, description: &str, sig: &str, input: Value) -> Entry {
@@ -201,6 +202,19 @@ pub fn builtins() -> Vec<Entry> {
                 json!({"issue": {"type": "string", "description": "https://github.com/<owner>/<repo>/issues/<n> or <owner>/<repo>#<n>"},
                        "project": {"type": "string"}, "title": {"type": "string"}, "model": {"type": "string"}, "effort": {"type": "string"}}),
                 &["issue"],
+            ),
+        ),
+        builtin(
+            "wf.issue",
+            "wf",
+            "Report a GitHub issue this thread just filed, so it shows on the board's new-issues list with a link back to this thread and when it was filed. Needs no parent link. Reporting an issue already on the list, dismissed or not, or one that already has a board ticket, adds nothing: added is false, reason says which, and message says so. From the list the user launches a ticket for it (the same path as wf.launchTicket) or dismisses it.",
+            &format!(
+                "wf.issue(input: {{ url: string; title?: string; note?: string }}): Promise<{{ added: boolean; reason?: \"reported\" | \"ticket\"; message: string; issue?: {NEW_ISSUE}; ticket?: {{ label: string; thread: string | null; link: string | null; done: boolean }} }}>;"
+            ),
+            obj(
+                json!({"url": {"type": "string", "description": "https://github.com/<owner>/<repo>/issues/<n> or <owner>/<repo>#<n>"},
+                       "title": {"type": "string", "maxLength": 300}, "note": {"type": "string", "maxLength": 2000}}),
+                &["url"],
             ),
         ),
         builtin(
