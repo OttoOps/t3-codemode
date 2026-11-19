@@ -169,6 +169,15 @@ textarea { resize: none; display: block; }
 .fopt span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fpop .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .fbar .newbtn { flex: none; }
+.ctxopts { display: grid; gap: 0; }
+.ctxopt { justify-content: flex-start; border-color: transparent; background: transparent; min-width: 0; }
+.ctxopt[aria-pressed="true"] { color: var(--accent); font-weight: 600; }
+.ctxopt span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctxacts { display: grid; gap: 0; padding-top: 4px; border-top: 1px solid var(--line); }
+.ctxacts .btn { justify-content: flex-start; }
+.ctxform { display: grid; gap: 4px; }
+.ctxform[hidden], .ctxacts .btn[hidden] { display: none; }
+.ctxerr { color: var(--fail); }
 
 .panes {
   display: grid; min-height: 0; min-width: 0; gap: 0;
@@ -482,6 +491,10 @@ kbd { font-family: var(--mono); font-size: 12px; }
   </span>
 </header>
 <div class="fbar" id="fbar" role="search" aria-label="Filter the board">
+  <span class="facet ctx" id="ctx">
+    <button class="btn fbtn" type="button" id="ctx-btn" aria-haspopup="true" aria-expanded="false" aria-controls="ctx-pop">Context: All</button>
+    <div class="fpop" id="ctx-pop" role="group" aria-label="Contexts" hidden></div>
+  </span>
   <input type="search" id="filter-q" placeholder="Search tickets, cards and activity" aria-label="Search the board" autocomplete="off">
   <span class="facets" id="facets"></span>
   <button class="btn quiet" type="button" id="filter-clear" hidden>Clear filters</button>
@@ -722,14 +735,22 @@ function age(iso) {
 }
 
 async function post(path, body) {
+  return send("POST", path, body);
+}
+
+async function send(method, path, body) {
   const r = await fetch(path, {
-    method: "POST",
+    method,
     headers: { "Content-Type": "application/json", "X-T3CM-CSRF": CSRF },
     body: JSON.stringify(body || {}),
   });
   let data = null;
   try { data = await r.json(); } catch (_) { data = null; }
-  if (!r.ok) throw new Error((data && data.error) || ("HTTP " + r.status));
+  if (!r.ok) {
+    const err = new Error((data && data.error) || ("HTTP " + r.status));
+    err.status = r.status;
+    throw err;
+  }
   return data;
 }
 
@@ -1273,12 +1294,16 @@ function filterSpec() {
   return { projects: [...filter.projects], statuses: [...filter.statuses], kinds: [...filter.kinds], q: filter.q };
 }
 
-function setFilter(spec) {
+function loadFilter(spec) {
   spec = spec || {};
   for (const f of FACETS) filter[f.key] = new Set(spec[f.key] || []);
   filter.q = String(spec.q || "");
   clearTimeout(queryTimer);
   $("filter-q").value = filter.q;
+}
+
+function setFilter(spec) {
+  loadFilter(spec);
   filterChanged();
 }
 
@@ -1288,7 +1313,7 @@ function filtering() {
 
 function projectKey(it) {
   if (!it) return "";
-  return (it.repo || (it.project && (it.project.title || it.project.id)) || "").toLowerCase();
+  return (it.repo || (it.project && (it.project.title || it.project.id)) || "").trim().toLowerCase();
 }
 
 function phaseOf(t, cards) {
@@ -1339,11 +1364,11 @@ function settledDesc(it) {
   return { project: null, phase: null, text: [it.a.question, it.a.answer] };
 }
 
-function matches(d) {
+function matches(d, f = filter) {
   const has = (set, v) => !set.size || (v !== null && v !== undefined && set.has(v));
-  if (!has(filter.projects, d.project) || !has(filter.statuses, d.phase)) return false;
-  if (d.kind !== undefined && !has(filter.kinds, d.kind)) return false;
-  const terms = filter.q.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!has(f.projects, d.project) || !has(f.statuses, d.phase)) return false;
+  if (d.kind !== undefined && !has(f.kinds, d.kind)) return false;
+  const terms = f.q.toLowerCase().split(/\s+/).filter(Boolean);
   if (!terms.length) return true;
   const hay = d.text.filter((x) => typeof x === "string" || typeof x === "number").join("\n").toLowerCase();
   return terms.every((w) => hay.includes(w));
@@ -1462,6 +1487,7 @@ function toggleFacet(key) {
 
 function openFacet(key) {
   for (const f of FACETS) if (f.key !== key) closeFacet(f.key, false);
+  closeCtx(false);
   const wrap = facetEl(key);
   part(wrap, "fpop").hidden = false;
   setAttr(part(wrap, "fbtn"), "aria-expanded", "true");
@@ -1481,6 +1507,7 @@ function closeFacet(key, focus) {
 
 function paintFilterBar(hidden) {
   for (const f of FACETS) paintFacet(f.key);
+  paintCtx();
   $("filter-clear").hidden = !filtering();
   const b = $("hidden-new");
   const n = hidden.length;
@@ -1494,9 +1521,9 @@ function paintFilterBar(hidden) {
 
 const FILTERED = ["cards", "open", "done", "settled", "feed"];
 
-function filterChanged() {
+function filterChanged(base) {
   if (!state) { paintFilterBar([]); return; }
-  hiddenBase = new Set(state.cards.map(cardSeen));
+  hiddenBase = base || new Set(state.cards.map(cardSeen));
   for (const n of FILTERED) panels[n].force = true;
   refiltering = true;
   try { render(state); } finally {
@@ -1513,6 +1540,315 @@ function queryTyped() {
     filter.q = $("filter-q").value;
     filterChanged();
   }, 150);
+}
+
+function flushQuery() {
+  clearTimeout(queryTimer);
+  if (filter.q === $("filter-q").value) return;
+  filter.q = $("filter-q").value;
+  filterChanged();
+}
+
+const CTX_KEY = "t3board.context";
+const CTX_GRACE = 5000;
+const contexts = { list: [], active: "", applied: null, form: null, forms: 0, armed: false, busy: false, fresh: new Map(), picks: 0, sent: null };
+try { contexts.active = localStorage.getItem(CTX_KEY) || ""; } catch (_) {}
+
+function normSpec(spec) {
+  spec = spec || {};
+  const list = (k, low) => [...new Set((spec[k] || []).map((v) => low ? String(v).toLowerCase() : String(v)))].sort();
+  return { projects: list("projects", true), statuses: list("statuses"), kinds: list("kinds"), q: String(spec.q || "").trim() };
+}
+
+const specKey = (spec) => JSON.stringify(normSpec(spec));
+
+function specFilter(spec) {
+  const n = normSpec(spec);
+  return { projects: new Set(n.projects), statuses: new Set(n.statuses), kinds: new Set(n.kinds), q: n.q };
+}
+
+function describeSpec(spec) {
+  const n = normSpec(spec);
+  const said = [];
+  if (n.projects.length) said.push("Project: " + n.projects.join(", "));
+  if (n.statuses.length) said.push("Status: " + n.statuses.map((v) => (PHASES.find((p) => p[0] === v) || [v, v])[1]).join(", "));
+  if (n.kinds.length) said.push("Card kind: " + n.kinds.join(", "));
+  if (n.q) said.push("Search: " + n.q);
+  return said.join("; ") || "No filter";
+}
+
+function activeContext() {
+  return contexts.active ? contexts.list.find((c) => c.id === contexts.active) || null : null;
+}
+
+function rememberContext(id) {
+  contexts.picks++;
+  contexts.active = id || "";
+  try {
+    if (id) localStorage.setItem(CTX_KEY, id);
+    else localStorage.removeItem(CTX_KEY);
+  } catch (_) {}
+}
+
+function sortContexts(list) {
+  return list.slice().sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || (a.id < b.id ? -1 : 1));
+}
+
+function syncContexts(s) {
+  let list = Array.isArray(s.contexts) ? s.contexts : [];
+  for (const [id, f] of contexts.fresh) {
+    if (list.some((c) => c.id === id) || (connected && Date.now() > f.until)) contexts.fresh.delete(id);
+    else list = [...list, f.c];
+  }
+  contexts.list = sortContexts(list);
+  if (!contexts.active) return null;
+  const c = activeContext();
+  if (!c) {
+    rememberContext("");
+    contexts.applied = null;
+    if (contexts.form === "rename") closeCtx(true);
+    return { spec: {}, all: true, note: "The active context is gone. Showing All." };
+  }
+  const key = specKey(c.spec);
+  if (key === contexts.applied) return null;
+  const sent = contexts.sent;
+  contexts.applied = key;
+  if (sent && sent.id === c.id && sent.key === key) return null;
+  return { spec: c.spec };
+}
+
+function keepContext(c, fresh) {
+  contexts.list = sortContexts([...contexts.list.filter((x) => x.id !== c.id), c]);
+  if (fresh) contexts.fresh.set(c.id, { c, until: Date.now() + CTX_GRACE });
+  else if (contexts.fresh.has(c.id)) contexts.fresh.get(c.id).c = c;
+  if (!fresh && state && Array.isArray(state.contexts)) state.contexts = state.contexts.map((x) => x.id === c.id ? c : x);
+}
+
+function dropContext(id) {
+  contexts.list = contexts.list.filter((x) => x.id !== id);
+  contexts.fresh.delete(id);
+  if (state && Array.isArray(state.contexts)) state.contexts = state.contexts.filter((x) => x.id !== id);
+}
+
+function clearSettledFind() {
+  $("settled-filter").value = "";
+}
+
+function useContext(id, quiet) {
+  const c = id ? contexts.list.find((x) => x.id === id) || null : null;
+  rememberContext(c ? c.id : "");
+  contexts.applied = c ? specKey(c.spec) : null;
+  closeCtx(true);
+  if (!c) clearSettledFind();
+  setFilter(c ? c.spec : {});
+  if (!quiet) announce(c ? "Context " + c.name + "." : "All. Every filter cleared.");
+}
+
+function ctxEdited(c) {
+  return !!c && specKey(filterSpec()) !== specKey(c.spec);
+}
+
+function makeCtxPop() {
+  const pop = $("ctx-pop");
+  pop.hidden = true;
+  const act = (name, onclick) => h("button", { class: "btn quiet", type: "button", "data-act": name, onclick });
+  const name = h("input", { type: "text", "data-part": "cname", id: "ctx-name", autocomplete: "off",
+    onkeydown: (e) => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); saveCtxForm(); } } });
+  pop.append(
+    h("div", { class: "ctxopts", "data-part": "copts" }),
+    h("div", { class: "ctxacts", "data-part": "cacts" },
+      act("new", () => openCtxForm("new")), act("update", updateCtx), act("rename", () => openCtxForm("rename")), act("delete", deleteCtx)),
+    h("div", { class: "ctxform", "data-part": "cform", hidden: true },
+      h("label", { class: "meta", for: "ctx-name", "data-part": "clabel" }, "Name"),
+      name,
+      h("div", { class: "row" },
+        h("button", { class: "btn go", type: "button", "data-part": "cok", onclick: saveCtxForm }, "Save"),
+        h("button", { class: "btn quiet", type: "button", "data-part": "ccancel", onclick: closeCtxForm }, "Cancel"))),
+    h("p", { class: "meta ctxerr", "data-part": "cerr", hidden: true }));
+  pop.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (contexts.form) closeCtxForm();
+    else closeCtx(true);
+  });
+  $("ctx-btn").addEventListener("click", () => { if (pop.hidden) openCtx(); else closeCtx(true); });
+}
+
+function paintCtx() {
+  const c = activeContext();
+  const edited = ctxEdited(c);
+  const btn = $("ctx-btn");
+  setText(btn, "Context: " + (c ? c.name + (edited ? " (edited)" : "") : filtering() ? "Unsaved filter" : "All"));
+  setAttr(btn, "data-on", c ? "1" : null);
+  setAttr(btn, "title", c ? describeSpec(c.spec) : null);
+  const pop = $("ctx-pop");
+  if (pop.hidden) return;
+  const list = part(pop, "copts");
+  const have = new Map([...list.children].map((o) => [o.dataset.ctx, o]));
+  [{ id: "", name: "All" }, ...contexts.list].forEach((it, i) => {
+    let o = have.get(it.id);
+    if (!o) o = h("button", { class: "btn ctxopt", type: "button", "data-ctx": it.id, onclick: () => useContext(it.id) }, h("span", {}));
+    have.delete(it.id);
+    setText(o.firstChild, it.name);
+    setAttr(o, "title", it.id ? describeSpec(it.spec) : "Clear every filter");
+    setAttr(o, "aria-pressed", (c ? it.id === c.id : !it.id && !filtering()) ? "true" : "false");
+    if (list.children[i] !== o) list.insertBefore(o, list.children[i] || null);
+  });
+  for (const o of have.values()) o.remove();
+  const acts = part(pop, "cacts");
+  const btnOf = (a) => acts.querySelector('[data-act="' + a + '"]');
+  acts.hidden = !!contexts.form;
+  setText(btnOf("new"), "Save filter as a new context");
+  btnOf("new").hidden = !filtering();
+  btnOf("update").hidden = !edited;
+  btnOf("rename").hidden = !c;
+  btnOf("delete").hidden = !c;
+  if (c) {
+    setText(btnOf("update"), "Save filter to " + c.name);
+    setText(btnOf("rename"), "Rename " + c.name);
+    setText(btnOf("delete"), contexts.armed ? "Click again to delete " + c.name : "Delete " + c.name);
+  }
+  setAttr(btnOf("delete"), "data-armed", contexts.armed ? "1" : null);
+  part(pop, "cform").hidden = !contexts.form;
+}
+
+function openCtx() {
+  for (const f of FACETS) closeFacet(f.key, false);
+  const pop = $("ctx-pop");
+  contexts.form = null;
+  contexts.armed = false;
+  ctxError("");
+  pop.hidden = false;
+  setAttr($("ctx-btn"), "aria-expanded", "true");
+  paintCtx();
+  const on = pop.querySelector('[aria-pressed="true"]') || part(pop, "copts").firstChild;
+  if (on) on.focus();
+}
+
+function closeCtx(focus) {
+  const pop = $("ctx-pop");
+  if (pop.hidden) return;
+  pop.hidden = true;
+  contexts.form = null;
+  contexts.armed = false;
+  setAttr($("ctx-btn"), "aria-expanded", "false");
+  if (focus) $("ctx-btn").focus();
+}
+
+function ctxError(msg) {
+  const el = part($("ctx-pop"), "cerr");
+  setText(el, msg);
+  el.hidden = !msg;
+  if (msg) announce(msg, true);
+}
+
+function openCtxForm(mode) {
+  const c = activeContext();
+  if (mode === "rename" && !c) return;
+  const pop = $("ctx-pop");
+  contexts.form = mode;
+  contexts.forms++;
+  contexts.armed = false;
+  part(pop, "cname").value = mode === "rename" ? c.name : "";
+  setText(part(pop, "clabel"), mode === "rename" ? "New name for " + c.name : "Name for this filter");
+  ctxError("");
+  paintCtx();
+  part(pop, "cname").focus();
+}
+
+function closeCtxForm() {
+  contexts.form = null;
+  ctxError("");
+  paintCtx();
+  const pop = $("ctx-pop");
+  const on = pop.querySelector('[aria-pressed="true"]') || part(pop, "copts").firstChild;
+  if (on) on.focus();
+}
+
+function newContextId() {
+  return "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+async function putContext(id, name, spec) {
+  return (await send("PUT", "/api/contexts/" + encodeURIComponent(id), { name, spec })).context;
+}
+
+async function saveCtxForm() {
+  const mode = contexts.form;
+  if (!mode || contexts.busy) return;
+  const name = part($("ctx-pop"), "cname").value.trim();
+  if (!name) { ctxError("Name the context first."); return; }
+  const c = activeContext();
+  if (mode === "rename" && !c) return;
+  if (mode === "new") flushQuery();
+  contexts.busy = true;
+  const picks = contexts.picks;
+  const forms = contexts.forms;
+  const sameForm = () => contexts.form === mode && contexts.forms === forms;
+  try {
+    const saved = mode === "rename" ? await putContext(c.id, name) : await putContext(newContextId(), name, filterSpec());
+    keepContext(saved, mode === "new");
+    if (mode === "new" && picks === contexts.picks) {
+      rememberContext(saved.id);
+      contexts.applied = specKey(saved.spec);
+    }
+    if (sameForm()) closeCtx(true);
+    paintCtx();
+    announce((mode === "new" ? "Saved context " : "Renamed the context to ") + saved.name + ".");
+  } catch (err) {
+    if (sameForm()) ctxError(err.message);
+    else announce(err.message, true);
+  } finally { contexts.busy = false; }
+}
+
+async function updateCtx() {
+  const c = activeContext();
+  if (!c || contexts.busy) return;
+  const picks = contexts.picks;
+  flushQuery();
+  if (picks !== contexts.picks) return;
+  const spec = filterSpec();
+  contexts.busy = true;
+  contexts.sent = { id: c.id, key: specKey(spec) };
+  try {
+    const saved = await putContext(c.id, undefined, spec);
+    if (picks === contexts.picks) contexts.applied = specKey(saved.spec);
+    keepContext(saved, false);
+    paintCtx();
+    announce("Saved the filter to " + saved.name + ".");
+  } catch (err) {
+    ctxError(err.message);
+  } finally {
+    contexts.busy = false;
+    contexts.sent = null;
+  }
+}
+
+async function deleteCtx() {
+  const c = activeContext();
+  if (!c || contexts.busy) return;
+  if (!contexts.armed) {
+    contexts.armed = true;
+    paintCtx();
+    return;
+  }
+  contexts.busy = true;
+  try {
+    try { await send("DELETE", "/api/contexts/" + encodeURIComponent(c.id)); } catch (err) { if (err.status !== 404) throw err; }
+    dropContext(c.id);
+    if (contexts.active === c.id) {
+      useContext("", true);
+      announce("Deleted context " + c.name + ". Showing All.");
+    } else {
+      paintCtx();
+      announce("Deleted context " + c.name + ".");
+    }
+  } catch (err) {
+    contexts.armed = false;
+    paintCtx();
+    ctxError(err.message);
+  } finally { contexts.busy = false; }
 }
 
 function prText(pr) {
@@ -1878,14 +2214,19 @@ function syncFeed(feed, all) {
   setText($("n-feed-tab"), shown(feed.length, all.length, true));
 }
 
-function notifyNew(cards) {
+function notifyNew(s) {
+  const cards = s.cards;
   const fresh = cards.filter((c) => !seenCards.has(c.id + "@" + c.at));
   cards.forEach((c) => seenCards.add(c.id + "@" + c.at));
   if (firstState || !fresh.length) return;
   const urgent = fresh.filter((c) => FAIL_KINDS.has(c.kind)).length;
   announce(fresh.length + (fresh.length > 1 ? " new decisions" : " new decision") + (urgent ? ", " + urgent + (urgent > 1 ? " blockers" : " blocker") : ""));
   if (!document.hidden || !("Notification" in window) || Notification.permission !== "granted") return;
+  const ctx = activeContext();
+  const only = ctx && specFilter(ctx.spec);
+  const where = only && filterCtx(s);
   for (const c of fresh) {
+    if (only && !matches(cardDesc(c, where), only)) continue;
     try { new Notification((c.label ? c.label + " " : "") + c.kind + " (" + c.id + ")", { body: plain(c.text), tag: "t3cm-" + c.id }); } catch (_) {}
   }
 }
@@ -1924,9 +2265,18 @@ let lastStateClock = "";
 let everConnected = false;
 
 function render(s) {
+  const prior = state;
   state = s;
+  const apply = syncContexts(s);
+  if (apply) {
+    loadFilter(apply.spec);
+    if (apply.all) clearSettledFind();
+    if (apply.note && !firstState) announce(apply.note);
+    filterChanged(new Set((prior || s).cards.map(cardSeen)));
+    return;
+  }
   if (!hiddenBase) hiddenBase = new Set(s.cards.map(cardSeen));
-  notifyNew(s.cards);
+  notifyNew(s);
   const keep = new Map(s.cards.map((c) => [c.id, inst(c)]));
   for (const [k, d] of drafts) if (keep.get(k) !== d.inst) drafts.delete(k);
   const v = visible(s);
@@ -2238,6 +2588,7 @@ function wire() {
     await act(b, "/api/settle-done");
   });
   for (const f of FACETS) $("facets").append(makeFacet(f));
+  makeCtxPop();
   paintFilterBar([]);
   const q = $("filter-q");
   q.addEventListener("input", queryTyped);
@@ -2250,14 +2601,15 @@ function wire() {
     filter.q = "";
     filterChanged();
   });
-  $("filter-clear").addEventListener("click", () => { setFilter({}); q.focus(); });
+  $("filter-clear").addEventListener("click", () => { useContext("", true); q.focus(); });
   $("hidden-new").addEventListener("click", () => {
-    setFilter({});
+    useContext("", true);
     announce("Filter cleared. Showing every decision.");
     jump("decisions");
   });
   document.addEventListener("click", (e) => {
     for (const f of FACETS) if (!facetEl(f.key).contains(e.target)) closeFacet(f.key, false);
+    if (!$("ctx").contains(e.target)) closeCtx(false);
   });
   $("settled-filter").addEventListener("input", () => {
     if (state) { panels.settled.filterChanged = true; syncSettled(state, true); }
@@ -2366,7 +2718,7 @@ setInterval(() => {
 }, 30000);
 
 wire();
-fetch("/api/state").then((r) => r.json()).then((s) => { if (!state) render(s); }).catch(() => {});
+fetch("/api/state").then((r) => r.ok ? r.json() : null).then((s) => { if (s && !state) render(s); }).catch(() => {});
 connect();
 </script>
 </body>

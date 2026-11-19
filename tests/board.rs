@@ -416,6 +416,29 @@ impl Srv {
     fn csrf(&self) -> String {
         self.h.app.csrf.clone()
     }
+
+    async fn get(&self, path: &str) -> Value {
+        self.http.get(format!("{}{path}", self.base)).send().await.unwrap().json().await.unwrap()
+    }
+
+    async fn context(&self, method: reqwest::Method, id: &str, body: Value, csrf: Option<&str>) -> (u16, Value) {
+        let url = format!("{}/api/contexts/{}", self.base, id.replace(' ', "%20"));
+        let mut req = self.http.request(method, url).json(&body).header("Origin", &self.base);
+        if let Some(c) = csrf {
+            req = req.header("X-T3CM-CSRF", c);
+        }
+        let r = req.send().await.unwrap();
+        (r.status().as_u16(), r.json().await.unwrap_or(Value::Null))
+    }
+
+    async fn restart(mut self) -> Srv {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        let mut h = std::mem::replace(&mut self.h, H::new());
+        h.reopen();
+        start(h).await
+    }
 }
 
 #[tokio::test]
@@ -1076,10 +1099,14 @@ const answers = () => fetches.filter((f) => /\/(answer|dismiss)$/.test(f.url));
 "##;
 
 fn run_page_async(html: &str, scenario: &str) -> Value {
+    run_page_async_with(html, "", scenario)
+}
+
+fn run_page_async_with(html: &str, prelude: &str, scenario: &str) -> Value {
     let open = html.find("<script>").unwrap() + "<script>".len();
     let close = html.rfind("</script>").unwrap();
     let src = format!(
-        "{}\n{}\nPromise.resolve(({scenario})()).then((v) => {{ globalThis.__out = JSON.stringify(v); }}, (e) => {{ globalThis.__out = JSON.stringify({{ error: String(e) }}); }});",
+        "{prelude}\n{}\n{}\nPromise.resolve(({scenario})()).then((v) => {{ globalThis.__out = JSON.stringify(v); }}, (e) => {{ globalThis.__out = JSON.stringify({{ error: String(e) }}); }});",
         include_str!("support/board_dom.js"),
         &html[open..close]
     );
@@ -1957,7 +1984,11 @@ const view = () => ({
 "##;
 
 fn filter_scenario(html: &str, st: &Value, body: &str) -> Value {
-    let wrap = format!(
+    page_scenario(html, st, &format!("{}\n{body}", filter_setup()))
+}
+
+fn filter_setup() -> String {
+    format!(
         r##"{FILTER_HELPERS}
 const T = "{TICKET}", W = "{WORKER}";
 const repoOf = (t) => t === T ? "acme/widgets" : "acme/gadgets";
@@ -1975,10 +2006,8 @@ const s0 = {{
     asks: [{{ id: "q1", seq: 1, question: "Which tickets wait?", answer: "None", status: "answered" }}],
   }},
   counts: {{ ...base.counts, settled: 2 }},
-}};
-{body}"##
-    );
-    page_scenario(html, st, &wrap)
+}};"##
+    )
 }
 
 #[tokio::test]
@@ -2294,4 +2323,507 @@ async fn bad_options_are_rejected_and_nothing_is_sent() {
     assert!(e.contains("gate, blocker, report"), "{e}");
     assert!(cards(&h).is_empty());
     assert!(h.wf(TICKET, "feed", json!({})).await.as_array().unwrap().is_empty());
+}
+
+fn context_names(v: &Value) -> Vec<Value> {
+    v["contexts"].as_array().unwrap().iter().map(|c| c["name"].clone()).collect()
+}
+
+#[tokio::test]
+async fn contexts_are_created_renamed_edited_and_deleted_and_survive_a_restart() {
+    use reqwest::Method;
+    let s = start(H::new()).await;
+    let csrf = s.csrf();
+    let spec = json!({"projects": ["Acme/Widgets", "acme/gadgets", "acme/widgets"], "statuses": ["done", "waiting"], "kinds": [], "q": "  grader "});
+    let (code, made) = s.context(Method::PUT, "c1", json!({"name": " Widgets ", "spec": spec}), Some(&csrf)).await;
+    assert_eq!(code, 201, "{made}");
+    let made = &made["context"];
+    assert_eq!((&made["id"], &made["name"]), (&json!("c1"), &json!("Widgets")));
+    assert_eq!(
+        made["spec"],
+        json!({"projects": ["acme/gadgets", "acme/widgets"], "statuses": ["waiting", "done"], "kinds": [], "q": "grader"})
+    );
+    assert_eq!((&made["createdAt"], &made["updatedAt"]), (&json!(T0), &json!(T0)));
+    s.h.clock.advance_minutes(5);
+    let (code, renamed) = s.context(Method::PUT, "c1", json!({"name": "Widget work"}), Some(&csrf)).await;
+    assert_eq!(code, 200, "{renamed}");
+    assert_eq!(renamed["context"]["name"], "Widget work");
+    assert_eq!(renamed["context"]["spec"], made["spec"]);
+    assert_eq!((&renamed["context"]["createdAt"], &renamed["context"]["updatedAt"]), (&json!(T0), &json!(at(5))));
+    let (code, edited) = s.context(Method::PUT, "c1", json!({"spec": {"kinds": ["gate"]}}), Some(&csrf)).await;
+    assert_eq!(code, 200, "{edited}");
+    assert_eq!(edited["context"]["name"], "Widget work");
+    assert_eq!(edited["context"]["spec"], json!({"projects": [], "statuses": [], "kinds": ["gate"]}));
+    assert_eq!(s.context(Method::PUT, "c2", json!({"name": "AI research", "spec": {}}), Some(&csrf)).await.0, 201);
+    assert_eq!(context_names(&s.get("/api/contexts").await), [json!("AI research"), json!("Widget work")]);
+
+    let s = s.restart().await;
+    let listed = s.get("/api/contexts").await;
+    assert_eq!(context_names(&listed), [json!("AI research"), json!("Widget work")]);
+    assert_eq!(listed["contexts"][1], edited["context"]);
+    assert_eq!(context_names(&s.get("/api/state").await), [json!("AI research"), json!("Widget work")]);
+    let csrf = s.csrf();
+    let (code, gone) = s.context(Method::DELETE, "c1", json!({}), Some(&csrf)).await;
+    assert_eq!((code, gone), (200, json!({"deleted": "c1"})));
+    let (code, again) = s.context(Method::DELETE, "c1", json!({}), Some(&csrf)).await;
+    assert_eq!((code, &again["error"]), (404, &json!("no context \"c1\"")));
+
+    let s = s.restart().await;
+    assert_eq!(context_names(&s.get("/api/contexts").await), [json!("AI research")]);
+}
+
+#[tokio::test]
+async fn context_routes_check_the_token_the_origin_and_the_input() {
+    use reqwest::Method;
+    let s = start(H::new()).await;
+    let csrf = s.csrf();
+    let ok = json!({"name": "Widgets", "spec": {}});
+    assert_eq!(s.context(Method::PUT, "c1", ok.clone(), None).await.0, 403);
+    assert_eq!(s.context(Method::PUT, "c1", ok.clone(), Some("nope")).await.0, 403);
+    let foreign = s
+        .http
+        .put(format!("{}/api/contexts/c1", s.base))
+        .json(&ok)
+        .header("X-T3CM-CSRF", &csrf)
+        .header("Origin", "https://evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), 403);
+    let r =
+        s.http.get(format!("{}/api/contexts", s.base)).header("Origin", "https://evil.example").send().await.unwrap();
+    assert_eq!(r.status(), 403);
+    let long = "x".repeat(61);
+    let bad = [
+        ("c 1", ok.clone(), "context ids are 1 to 64"),
+        ("c1", json!({"name": "  ", "spec": {}}), "a context needs a name"),
+        ("c1", json!({"name": "All", "spec": {}}), "\"All\" is the built-in context"),
+        ("c1", json!({"name": long, "spec": {}}), "at most 60 characters"),
+        ("c1", json!({"name": "W", "spec": {"statuses": ["stuck"]}}), "unknown status \"stuck\""),
+        ("c1", json!({"name": "W", "spec": {"kinds": ["note"]}}), "unknown card kind \"note\""),
+        ("c1", json!({"name": "W", "spec": {"projects": [""]}}), "each project is one line"),
+        ("c1", json!({"name": "W", "spec": {"project": ["a/b"]}}), "unknown field `project`"),
+    ];
+    for (id, body, want) in bad {
+        let (code, r) = s.context(Method::PUT, id, body.clone(), Some(&csrf)).await;
+        assert_eq!(code, 400, "{body}: {r}");
+        assert!(r["error"].as_str().unwrap().contains(want), "{body}: {r}");
+    }
+    let gone = json!("no context \"c1\"; give a name and a spec to create one");
+    let (code, r) = s.context(Method::PUT, "c1", json!({"name": "W"}), Some(&csrf)).await;
+    assert_eq!((code, &r["error"]), (404, &gone));
+    let (code, r) = s.context(Method::PUT, "c1", json!({"spec": {}}), Some(&csrf)).await;
+    assert_eq!((code, &r["error"]), (404, &gone));
+    let (code, r) = s.context(Method::PUT, "c1", json!({}), Some(&csrf)).await;
+    assert_eq!((code, &r["error"]), (400, &json!("give a name, a spec or both")));
+    assert_eq!(s.context(Method::PUT, "c1", ok.clone(), Some(&csrf)).await.0, 201);
+    let (code, r) = s.context(Method::PUT, "c2", json!({"name": "WIDGETS", "spec": {}}), Some(&csrf)).await;
+    assert_eq!((code, &r["error"]), (409, &json!("a context named \"Widgets\" exists")));
+    assert_eq!(s.context(Method::DELETE, "c1", json!({}), None).await.0, 403);
+    assert_eq!(s.context(Method::DELETE, "c9", json!({}), Some(&csrf)).await.0, 404);
+    assert_eq!(context_names(&s.get("/api/contexts").await), [json!("Widgets")]);
+    for n in 2..=t3_codemode::contexts::MAX_CONTEXTS {
+        let body = serde_json::from_value(json!({"name": format!("n{n}"), "spec": {}})).unwrap();
+        s.h.app.wf.put_context(&format!("c{n}"), body).unwrap();
+    }
+    let (code, r) = s.context(Method::PUT, "c999", json!({"name": "One more", "spec": {}}), Some(&csrf)).await;
+    assert_eq!((code, &r["error"]), (400, &json!("the board keeps at most 100 contexts")));
+    assert_eq!(s.context(Method::PUT, "c1", json!({"name": "Renamed", "spec": {}}), Some(&csrf)).await.0, 200);
+}
+
+async fn next_state(r: &mut reqwest::Response, buf: &mut Vec<u8>) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        while let Some(end) = buf.windows(2).position(|w| w == b"\n\n") {
+            let raw: Vec<u8> = buf.drain(..end + 2).collect();
+            let event = String::from_utf8(raw).unwrap();
+            if event.lines().any(|l| l == "event: state") {
+                let data: String = event.lines().filter_map(|l| l.strip_prefix("data: ")).collect();
+                return serde_json::from_str(&data).unwrap();
+            }
+        }
+        let chunk =
+            tokio::time::timeout_at(deadline, r.chunk()).await.expect("a state event in time").unwrap().unwrap();
+        buf.extend_from_slice(&chunk);
+    }
+}
+
+#[tokio::test]
+async fn a_saved_context_reaches_every_open_board() {
+    let s = start(H::new()).await;
+    let mut r = s.http.get(format!("{}/api/events", s.base)).send().await.unwrap();
+    let mut buf = Vec::new();
+    assert_eq!(next_state(&mut r, &mut buf).await["contexts"], json!([]));
+    let body = json!({"name": "Widgets", "spec": {"projects": ["acme/widgets"]}});
+    assert_eq!(s.context(reqwest::Method::PUT, "c1", body, Some(&s.csrf())).await.0, 201);
+    let st = next_state(&mut r, &mut buf).await;
+    assert_eq!(context_names(&st), [json!("Widgets")], "{st}");
+    assert_eq!(st["contexts"][0]["spec"]["projects"], json!(["acme/widgets"]), "{st}");
+}
+
+const SAVED_CONTEXTS: &str = r##"[
+  { id: "c1", name: "Widgets", spec: { projects: ["acme/widgets"], statuses: [], kinds: [] }, createdAt: "2026-11-17T12:00:00Z", updatedAt: "2026-11-17T12:00:00Z" },
+  { id: "c2", name: "Gadget gates", spec: { projects: ["acme/gadgets"], statuses: [], kinds: ["gate"], q: "gadget" }, createdAt: "2026-11-17T12:00:00Z", updatedAt: "2026-11-17T12:00:00Z" },
+]"##;
+
+const CONTEXT_HELPERS: &str = r##"
+const ctxBtn = () => $$("ctx-btn");
+const ctxPop = () => $$("ctx-pop");
+const ctxOpts = () => [...ctxPop().querySelectorAll(".ctxopt")].map((o) => [o.dataset.ctx, o.textContent, o.getAttribute("aria-pressed")]);
+const openCtxMenu = () => { if (ctxPop().hidden) ctxBtn().dispatch("click"); };
+const choose = (id) => { openCtxMenu(); ctxPop().querySelector('[data-ctx="' + id + '"]').dispatch("click"); };
+const ctxAct = (a) => ctxPop().querySelector('[data-act="' + a + '"]');
+const stored = () => localStorage.getItem("t3board.context");
+const flush = async () => { for (let i = 0; i < 20; i++) await null; };
+"##;
+
+fn context_scenario(html: &str, st: &Value, storage: Value, body: &str) -> Value {
+    context_scenario_with(html, st, storage, "", body)
+}
+
+fn context_scenario_with(html: &str, st: &Value, storage: Value, prelude: &str, body: &str) -> Value {
+    run_page_async_with(
+        html,
+        &format!("globalThis.__storage = {storage};\n{prelude}"),
+        &format!(
+            "async () => {{\n{PAGE_HELPERS}\nconst base = {st};\n{}\n{CONTEXT_HELPERS}\nconst ctxs = {SAVED_CONTEXTS};\nconst s1 = {{ ...s0, contexts: ctxs }};\n{body}\n}}",
+            filter_setup()
+        ),
+    )
+}
+
+#[tokio::test]
+async fn switching_contexts_applies_their_filters_and_all_clears_them() {
+    let (html, st) = two_gate_page().await;
+    let r = context_scenario(
+        &html,
+        &st,
+        json!({}),
+        r##"
+emitState({ ...s0, contexts: [] });
+$$("settled-filter").value = "gadgets";
+const before = { btn: ctxBtn().textContent, cards: ids() };
+openCtxMenu();
+const lonely = ctxOpts();
+emitState(s1);
+const live = ctxOpts();
+choose("c1");
+const one = { ...view(), btn: ctxBtn().textContent, stored: stored(), menu: !ctxPop().hidden, proj: facet("projects").querySelector('[data-part="fbtn"]').textContent };
+choose("c2");
+const two = { cards: ids(), q: $$("filter-q").value, kinds: facet("kinds").querySelector('[data-part="fbtn"]').textContent, btn: ctxBtn().textContent };
+pick("statuses", "waiting");
+const edited = ctxBtn().textContent;
+openCtxMenu();
+const acts = ["new", "update", "rename", "delete"].filter((a) => !ctxAct(a).hidden);
+choose("");
+const all = { ...view(), btn: ctxBtn().textContent, stored: stored(), q: $$("filter-q").value, find: $$("settled-filter").value };
+pick("projects", "acme/widgets");
+const loose = ctxBtn().textContent;
+choose("c1");
+$$("filter-clear").dispatch("click");
+return { before, lonely, live, one, two, edited, acts, all, loose, cleared: { btn: ctxBtn().textContent, stored: stored(), cards: ids() } };
+"##,
+    );
+    let t = json!(TICKET);
+    assert_eq!(r["before"], json!({"btn": "Context: All", "cards": ["a1", "a2"]}), "{r}");
+    assert_eq!(r["lonely"], json!([["", "All", "true"]]), "{r}");
+    assert_eq!(
+        r["live"],
+        json!([["", "All", "true"], ["c2", "Gadget gates", "false"], ["c1", "Widgets", "false"]]),
+        "{r}"
+    );
+    assert_eq!(r["one"]["cards"], json!(["a1"]), "{r}");
+    assert_eq!(r["one"]["open"], json!([t]), "{r}");
+    assert_eq!(r["one"]["feed"], json!(["m91"]), "{r}");
+    assert_eq!(r["one"]["btn"], "Context: Widgets", "{r}");
+    assert_eq!(r["one"]["stored"], "c1", "{r}");
+    assert_eq!(r["one"]["menu"], false, "{r}");
+    assert_eq!(r["one"]["proj"], "Project: acme/widgets", "{r}");
+    assert_eq!(
+        r["two"],
+        json!({"cards": ["a2"], "q": "gadget", "kinds": "Card kind: gate", "btn": "Context: Gadget gates"}),
+        "{r}"
+    );
+    assert_eq!(r["edited"], "Context: Gadget gates (edited)", "{r}");
+    assert_eq!(r["acts"], json!(["new", "update", "rename", "delete"]), "{r}");
+    assert_eq!(r["all"]["cards"], json!(["a1", "a2"]), "{r}");
+    assert_eq!(r["all"]["n"], json!(["2", "2", "", "2", "2"]), "{r}");
+    assert_eq!(
+        (&r["all"]["btn"], &r["all"]["stored"], &r["all"]["q"]),
+        (&json!("Context: All"), &Value::Null, &json!(""))
+    );
+    assert_eq!(r["all"]["find"], "", "{r}");
+    assert_eq!(r["loose"], "Context: Unsaved filter", "{r}");
+    assert_eq!(r["cleared"], json!({"btn": "Context: All", "stored": null, "cards": ["a1", "a2"]}), "{r}");
+}
+
+#[tokio::test]
+async fn the_active_context_comes_back_after_a_reload_or_falls_back_to_all() {
+    let (html, st) = two_gate_page().await;
+    let body = r##"
+emitState(s1);
+return { ...view(), btn: ctxBtn().textContent, stored: stored(), q: $$("filter-q").value };
+"##;
+    let kept = context_scenario(&html, &st, json!({"t3board.context": "c2"}), body);
+    assert_eq!(kept["cards"], json!(["a2"]), "{kept}");
+    assert_eq!(
+        (&kept["btn"], &kept["stored"], &kept["q"]),
+        (&json!("Context: Gadget gates"), &json!("c2"), &json!("gadget"))
+    );
+    let stale = context_scenario(&html, &st, json!({"t3board.context": "c-gone"}), body);
+    assert_eq!(stale["cards"], json!(["a1", "a2"]), "{stale}");
+    assert_eq!((&stale["btn"], &stale["stored"]), (&json!("Context: All"), &Value::Null));
+}
+
+#[tokio::test]
+async fn a_context_changed_or_deleted_elsewhere_updates_this_page() {
+    let (html, st) = two_gate_page().await;
+    let r = context_scenario(
+        &html,
+        &st,
+        json!({"t3board.context": "c1"}),
+        r##"
+emitState(s1);
+const first = ids();
+const a3 = { ...s0.cards[0], id: "a3", at: "2026-11-17T12:30:00Z", kind: "blocker", token: "t-a3" };
+emitState({ ...s1, cards: [...s1.cards, a3], contexts: [ctxs[1], { ...ctxs[0], spec: { projects: ["acme/gadgets"], statuses: [], kinds: [] } }] });
+const edited = { cards: ids(), btn: ctxBtn().textContent, hidden: $$("hidden-new").textContent };
+const find = $$("settled-filter");
+find.value = "gadgets";
+find.dispatch("input");
+emitState({ ...s1, contexts: [ctxs[1]] });
+return { first, edited, gone: { cards: ids(), btn: ctxBtn().textContent, stored: stored(), find: find.value, settled: keysOf("settled") } };
+"##,
+    );
+    assert_eq!(r["first"], json!(["a1"]), "{r}");
+    assert_eq!(r["edited"], json!({"cards": ["a2"], "btn": "Context: Widgets", "hidden": "1 hidden"}), "{r}");
+    assert_eq!(
+        r["gone"],
+        json!({"cards": ["a1", "a2"], "btn": "Context: All", "stored": null, "find": "", "settled": ["t:th-s", "a:q1"]}),
+        "{r}"
+    );
+}
+
+#[tokio::test]
+async fn contexts_are_saved_renamed_edited_and_deleted_from_the_page() {
+    let (html, st) = two_gate_page().await;
+    let r = context_scenario(
+        &html,
+        &st,
+        json!({}),
+        r##"
+emitState({ ...s0, contexts: [] });
+let reply = null;
+fetchReply = (url, opts) => reply(url, opts);
+let lastSpec = null, lastName = null;
+const echo = (status) => async (url, opts) => {
+  const b = JSON.parse(opts.body);
+  if (b.spec) lastSpec = b.spec;
+  if (b.name) lastName = b.name;
+  return { ok: true, status, json: async () => ({ context: { id: decodeURIComponent(url.split("/").pop()), name: lastName, spec: lastSpec, createdAt: "x", updatedAt: "x" } }) };
+};
+const writes = () => fetches.filter((f) => f.method !== "GET").map((f) => [f.method, f.url, f.body ? JSON.parse(f.body) : null]);
+openCtxMenu();
+const idle = ["new", "update", "rename", "delete"].filter((a) => !ctxAct(a).hidden);
+pick("projects", "acme/widgets");
+openCtxMenu();
+ctxAct("new").dispatch("click");
+const name = ctxPop().querySelector('[data-part="cname"]');
+const focused = document.activeElement === name;
+name.value = "  ";
+name.dispatch("keydown", { key: "Enter" });
+const empty = ctxPop().querySelector('[data-part="cerr"]').textContent;
+name.value = "Widgets";
+reply = echo(201);
+name.dispatch("keydown", { key: "Enter" });
+await flush();
+const made = writes()[0];
+const id = made[1].split("/").pop();
+const saved = { btn: ctxBtn().textContent, stored: stored() === id, closed: ctxPop().hidden, cards: ids() };
+emitState({ ...s0, contexts: [{ id, name: "Widgets", spec: made[2].spec }] });
+const pushed = { btn: ctxBtn().textContent, cards: ids() };
+openCtxMenu();
+ctxAct("rename").dispatch("click");
+const prefill = name.value;
+name.value = "Widget work";
+ctxPop().querySelector('[data-part="cok"]').dispatch("click");
+await flush();
+const renamed = ctxBtn().textContent;
+pick("statuses", "waiting");
+openCtxMenu();
+const editedActs = ["new", "update", "rename", "delete"].filter((a) => !ctxAct(a).hidden);
+ctxAct("update").dispatch("click");
+await flush();
+const updated = ctxBtn().textContent;
+openCtxMenu();
+ctxAct("new").dispatch("click");
+name.value = "widget WORK";
+reply = async () => ({ ok: false, status: 409, json: async () => ({ error: "a context named \"Widget work\" exists" }) });
+name.dispatch("keydown", { key: "Enter" });
+await flush();
+const taken = { err: ctxPop().querySelector('[data-part="cerr"]').textContent, open: !ctxPop().hidden, alert: $$("alert").textContent };
+ctxPop().dispatch("keydown", { key: "Escape", stopPropagation() {} });
+const formClosed = { form: ctxPop().querySelector('[data-part="cform"]').hidden, open: !ctxPop().hidden };
+ctxAct("delete").dispatch("click");
+const armed = { text: ctxAct("delete").textContent, writes: writes().length };
+reply = async () => ({ ok: true, status: 200, json: async () => ({ deleted: id }) });
+ctxAct("delete").dispatch("click");
+await flush();
+const deleted = { btn: ctxBtn().textContent, stored: stored(), cards: ids(), q: facet("projects").querySelector('[data-part="fbtn"]').textContent };
+return { idle, focused, empty, made, saved, pushed, prefill, renamed, editedActs, updated, taken, formClosed, armed, deleted, writes: writes().slice(1).map((w) => [w[0], w[1] === made[1], w[2]]) };
+"##,
+    );
+    assert_eq!(r["idle"], json!([]), "{r}");
+    assert_eq!(r["focused"], true, "{r}");
+    assert_eq!(r["empty"], "Name the context first.", "{r}");
+    assert!(r["made"][1].as_str().unwrap().starts_with("/api/contexts/c"), "{r}");
+    assert_eq!(r["made"][0], "PUT", "{r}");
+    assert_eq!(
+        r["made"][2],
+        json!({"name": "Widgets", "spec": {"projects": ["acme/widgets"], "statuses": [], "kinds": [], "q": ""}}),
+        "{r}"
+    );
+    assert_eq!(r["saved"], json!({"btn": "Context: Widgets", "stored": true, "closed": true, "cards": ["a1"]}), "{r}");
+    assert_eq!(r["pushed"], json!({"btn": "Context: Widgets", "cards": ["a1"]}), "{r}");
+    assert_eq!(r["prefill"], "Widgets", "{r}");
+    assert_eq!(r["renamed"], "Context: Widget work", "{r}");
+    assert_eq!(r["editedActs"], json!(["new", "update", "rename", "delete"]), "{r}");
+    assert_eq!(r["updated"], "Context: Widget work", "{r}");
+    assert_eq!(r["taken"]["err"], "a context named \"Widget work\" exists", "{r}");
+    assert_eq!(r["taken"]["open"], true, "{r}");
+    assert_eq!(r["formClosed"], json!({"form": true, "open": true}), "{r}");
+    assert_eq!(r["armed"], json!({"text": "Click again to delete Widget work", "writes": 4}), "{r}");
+    assert_eq!(
+        r["deleted"],
+        json!({"btn": "Context: All", "stored": null, "cards": ["a1", "a2"], "q": "Project"}),
+        "{r}"
+    );
+    let waiting = json!({"projects": ["acme/widgets"], "statuses": ["waiting"], "kinds": [], "q": ""});
+    assert_eq!(
+        r["writes"],
+        json!([
+            ["PUT", true, {"name": "Widget work"}],
+            ["PUT", true, {"spec": waiting}],
+            ["PUT", false, {"name": "widget WORK", "spec": waiting}],
+            ["DELETE", true, {}],
+        ]),
+        "{r}"
+    );
+}
+
+#[tokio::test]
+async fn notifications_skip_cards_outside_the_active_context() {
+    let (html, st) = two_gate_page().await;
+    let r = context_scenario(
+        &html,
+        &st,
+        json!({}),
+        r##"
+const notes = [];
+globalThis.Notification = class { constructor(title) { notes.push(title.match(/\((a\d+)\)$/)[1]); } };
+Notification.permission = "granted";
+document.hidden = true;
+emitState(s1);
+choose("c1");
+const a3 = { ...s0.cards[1], id: "a3", at: "2026-11-17T12:30:00Z", kind: "blocker", token: "t-a3" };
+const a4 = { ...s0.cards[0], id: "a4", at: "2026-11-17T12:31:00Z", kind: "blocker", token: "t-a4" };
+emitState({ ...s1, cards: [...s1.cards, a3, a4] });
+const inside = { notes: notes.slice(), hidden: $$("hidden-new").textContent, cards: ids() };
+choose("");
+const a5 = { ...s0.cards[1], id: "a5", at: "2026-11-17T12:32:00Z", token: "t-a5" };
+emitState({ ...s1, cards: [...s1.cards, a3, a4, a5] });
+return { inside, all: notes };
+"##,
+    );
+    assert_eq!(r["inside"], json!({"notes": ["a4"], "hidden": "1 hidden", "cards": ["a4", "a1"]}), "{r}");
+    assert_eq!(r["all"], json!(["a4", "a5"]), "{r}");
+}
+
+#[tokio::test]
+async fn a_save_that_finishes_after_a_switch_keeps_the_new_context() {
+    let (html, st) = two_gate_page().await;
+    let r = context_scenario(
+        &html,
+        &st,
+        json!({}),
+        r##"
+emitState(s1);
+const waiting = [];
+fetchReply = () => new Promise((resolve) => waiting.push(resolve));
+const answer = () => {
+  const f = fetches[fetches.length - 1];
+  const b = JSON.parse(f.body);
+  const id = f.url.split("/").pop();
+  const name = b.name || ctxs.find((c) => c.id === id).name;
+  waiting.shift()({ ok: true, status: b.name ? 201 : 200, json: async () => ({ context: { id, name, spec: b.spec, createdAt: "x", updatedAt: "x" } }) });
+};
+pick("projects", "acme/widgets");
+openCtxMenu();
+ctxAct("new").dispatch("click");
+const name = ctxPop().querySelector('[data-part="cname"]');
+name.value = "Mine";
+name.dispatch("keydown", { key: "Enter" });
+choose("c2");
+openCtxMenu();
+ctxAct("rename").dispatch("click");
+name.value = "Gadgets draft";
+answer();
+await flush();
+const draft = { form: !ctxPop().querySelector('[data-part="cform"]').hidden, value: name.value };
+ctxPop().dispatch("keydown", { key: "Escape", stopPropagation() {} });
+const saved = { btn: ctxBtn().textContent, stored: stored(), cards: ids(), names: ctxOpts().map((o) => o[1]) };
+choose("c1");
+pick("statuses", "waiting");
+openCtxMenu();
+ctxAct("update").dispatch("click");
+choose("c2");
+pick("statuses", "waiting");
+answer();
+await flush();
+const c1 = contexts.list.find((c) => c.id === "c1");
+const updatedC1 = { name: c1.name, statuses: c1.spec.statuses };
+emitState({ ...s1, contexts: [...ctxs, { id: "mine", name: "Mine", spec: { projects: ["acme/widgets"], statuses: [], kinds: [] } }] });
+const updated = ctxBtn().textContent;
+choose("c1");
+pick("statuses", "running");
+openCtxMenu();
+ctxAct("update").dispatch("click");
+const sent = JSON.parse(fetches[fetches.length - 1].body).spec;
+pick("kinds", "gate");
+emitState({ ...s1, contexts: [{ ...ctxs[0], spec: sent }, ctxs[1]] });
+const echoed = { kinds: facet("kinds").querySelector('[data-part="fbtn"]').textContent, btn: ctxBtn().textContent };
+answer();
+await flush();
+return { draft, saved, updatedC1, updated, echoed };
+"##,
+    );
+    assert_eq!(r["draft"], json!({"form": true, "value": "Gadgets draft"}), "{r}");
+    assert_eq!(
+        r["saved"],
+        json!({"btn": "Context: Gadget gates", "stored": "c2", "cards": ["a2"], "names": ["All", "Gadget gates", "Mine", "Widgets"]}),
+        "{r}"
+    );
+    assert_eq!(r["updatedC1"], json!({"name": "Widgets", "statuses": ["waiting"]}), "{r}");
+    assert_eq!(r["updated"], "Context: Gadget gates (edited)", "{r}");
+    assert_eq!(r["echoed"], json!({"kinds": "Card kind: gate", "btn": "Context: Widgets (edited)"}), "{r}");
+}
+
+#[tokio::test]
+async fn a_failed_first_state_request_keeps_the_saved_context() {
+    let (html, st) = two_gate_page().await;
+    let r = context_scenario_with(
+        &html,
+        &st,
+        json!({"t3board.context": "c1"}),
+        r#"globalThis.__fetchReply = async () => ({ ok: false, status: 500, json: async () => ({ error: "store is busy" }) });"#,
+        r##"
+await flush();
+const early = { stored: stored(), btn: ctxBtn().textContent };
+emitState(s1);
+return { early, cards: ids(), btn: ctxBtn().textContent, stored: stored() };
+"##,
+    );
+    assert_eq!(r["early"], json!({"stored": "c1", "btn": "Context: All"}), "{r}");
+    assert_eq!(r["cards"], json!(["a1"]), "{r}");
+    assert_eq!((&r["btn"], &r["stored"]), (&json!("Context: Widgets"), &json!("c1")), "{r}");
 }

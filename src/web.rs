@@ -8,7 +8,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use futures_util::stream;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -17,6 +17,7 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
 use crate::app::App;
 use crate::board::{CardRef, LaunchArgs};
+use crate::contexts::{ContextBody, ContextError};
 
 pub const CSRF_HEADER: &str = "x-t3cm-csrf";
 const PAGE: &str = include_str!("board.html");
@@ -322,6 +323,50 @@ async fn settle_done(State(web): State<Web>, headers: HeaderMap) -> Response {
     }
 }
 
+fn context_failed(app: &App, e: ContextError) -> Response {
+    let status = match e {
+        ContextError::Invalid(_) => StatusCode::BAD_REQUEST,
+        ContextError::Missing(_) => StatusCode::NOT_FOUND,
+        ContextError::Taken(_) => StatusCode::CONFLICT,
+        ContextError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    error(status, app.t3.redact(e.to_string()))
+}
+
+async fn list_contexts(State(web): State<Web>, headers: HeaderMap) -> Response {
+    if let Some(r) = web.reject(&headers, false) {
+        return r;
+    }
+    match web.app.wf.contexts() {
+        Ok(v) => json_ok(StatusCode::OK, json!({"contexts": v})),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}
+
+async fn put_context(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>, raw: Bytes) -> Response {
+    if let Some(r) = web.reject(&headers, true) {
+        return r;
+    }
+    let b: ContextBody = match body(&raw) {
+        Ok(b) => b,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    match web.app.wf.put_context(&id, b) {
+        Ok((created, c)) => json_ok(if created { StatusCode::CREATED } else { StatusCode::OK }, json!({"context": c})),
+        Err(e) => context_failed(&web.app, e),
+    }
+}
+
+async fn delete_context(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    if let Some(r) = web.reject(&headers, true) {
+        return r;
+    }
+    match web.app.wf.delete_context(&id) {
+        Ok(()) => json_ok(StatusCode::OK, json!({"deleted": id})),
+        Err(e) => context_failed(&web.app, e),
+    }
+}
+
 pub fn routes(app: Arc<App>, port: u16) -> Router {
     Router::new()
         .route("/", get(page))
@@ -338,5 +383,7 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/asks/{id}/restore", post(restore_ask))
         .route("/api/settle-done", post(settle_done))
         .route("/api/open", post(open_link))
+        .route("/api/contexts", get(list_contexts))
+        .route("/api/contexts/{id}", put(put_context).delete(delete_context))
         .with_state(Web { app, port })
 }
