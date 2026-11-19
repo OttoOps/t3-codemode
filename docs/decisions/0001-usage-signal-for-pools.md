@@ -61,6 +61,10 @@ Chosen: option 1 now, with a seam for option 5.
   t3cm cannot know the reset, so it holds the member for `limitHoldMinutes`,
   60 by default, from when it saw the stop. It ignores a snooze that shows up
   later, because that one may be the user's.
+- T3 does not say who set a snooze, so t3cm trusts the first one it sees. If
+  the user snoozes a limit-stopped thread before the next watcher pass reads
+  the stop, t3cm takes that snooze for T3's, and the member stays limited
+  until the user's snooze ends.
 - A stop with a later reset extends a member's mark, and one with an earlier
   reset leaves it as it is. The pass clears the mark at its reset.
 - `UsageSource` is a trait that reports each instance's share of its usage
@@ -77,7 +81,12 @@ Chosen: option 1 now, with a seam for option 5.
 
 - Good: a limit stop takes the account out of its pools within one watcher
   pass, with no new T3 API and no provider access.
-- Good: a snooze the user set never takes an account out of its pools.
+- Good: a snooze the user set on its own never takes an account out of its
+  pools.
+- Bad: a user snooze on a thread that did stop on a limit, set before the
+  watcher pass reads the stop, sets the member's reset time. A long snooze
+  benches the account for that long, and t3cm has no command to clear the
+  mark early.
 - Bad: with T3's limit snooze off, the reset time is a guess. A member can come
   back before its account resets, and the next launch on it fails and marks it
   again. The docs tell users to turn the setting on.
