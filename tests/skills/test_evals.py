@@ -19,7 +19,7 @@ ROLES_AND_SETUP = ["t3-overseer", "t3-ticket", "t3-worker", "setup-t3-workflow"]
 BRIEF_SKILLS = ["t3-ticket", "t3-worker"]
 TRIGGER_KEYS = {"query", "should_trigger", "form", "env"}
 CHECK_EXTRAS = {"input", "none", "contains"}
-SETUP_KEYS = {"issues", "t3", "config", "home_skills", "repo_files", "link", "branch"}
+SETUP_KEYS = {"issues", "t3", "t3cm", "config", "home_skills", "repo_files", "link", "branch"}
 
 
 class EvalSets(unittest.TestCase):
@@ -100,6 +100,26 @@ class EvalSets(unittest.TestCase):
                             re.compile(check[key])
                 if "{link_block}" in ev["prompt"]:
                     self.assertIn("link", ev["setup"], ev["name"])
+                for rule in ev["setup"].get("t3cm", []):
+                    self.assertEqual(len(set(rule) & {"result", "results", "error"}), 1, rule)
+                    self.assertLessEqual(set(rule), {"match", "result", "results", "error"}, rule)
+                    re.compile(rule["match"])
+
+    def test_a_pool_slot_is_covered_for_workers_tickets_and_setup(self):
+        for skill, role in (("t3-ticket", "worker"), ("t3-overseer", "ticket")):
+            evs = [e for e in live.load(skill, "evals")["evals"]
+                   if "pool" in e["setup"].get("config", {}).get("models", {}).get(role, {})]
+            with_t3cm = [e for e in evs if "t3cm" in e["setup"]]
+            self.assertTrue(any(c.get("t3") == "t3_thread_launch" and "claude-b" in c.get("input", "")
+                                for e in with_t3cm for c in e["checks"]), skill)
+            self.assertTrue(any(c.get("tool") == "execute" and "wf\\.pick" in c.get("input", "")
+                                for e in with_t3cm for c in e["checks"]), skill)
+        self.assertTrue([e for e in live.load("t3-ticket", "evals")["evals"]
+                         if "pool" in e["setup"].get("config", {}).get("models", {}).get("worker", {})
+                         and "t3cm" not in e["setup"]], "no eval launches a pool slot without t3cm")
+        setup = live.load("setup-t3-workflow", "evals")["evals"]
+        self.assertTrue(any(c.get("tool") == "execute" and "wf\\.pools" in c.get("input", "")
+                            for e in setup for c in e["checks"]))
 
     def test_the_worker_runs_a_slash_only_pass(self):
         evs = [e for e in live.load("t3-worker", "evals")["evals"]
@@ -222,6 +242,42 @@ class SandboxHarness(unittest.TestCase):
         self.assertEqual(status, {"attached": True, "worktreePath": str(box.repo)})
         self.assertEqual([c["tool"] for c in live.read_jsonl(box.t3_log)], ["t3_worktree_status", "t3_thread_launch"])
 
+    def test_the_stub_t3cm_server_answers_by_rule_and_logs(self):
+        box = self.box(setup={"t3cm": [{"match": r"wf\.pick\(", "results": [{"instanceId": "claude-a"},
+                                                                         {"instanceId": "claude-b"}]},
+                                       {"match": r"wf\.pools\(", "error": "pool opus: T3 did not answer"}]})
+        servers = json.loads((box.repo / ".mcp.json").read_text())["mcpServers"]
+        self.assertEqual(sorted(servers), ["t3-code", "t3cm"])
+        settings = json.loads((box.home / ".claude" / "settings.json").read_text())
+        self.assertIn("mcp__t3cm", settings["permissions"]["allow"])
+        code = lambda i, c: {"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                             "params": {"name": "execute", "arguments": {"code": c}}}
+        calls = [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                 code(2, 'async () => wf.pick({ pool: "opus" })'),
+                 code(3, "async () => wf.pools()"),
+                 code(4, 'async () => wf.openChild({ role: "worker", label: "x" })'),
+                 code(5, "async () => 1"),
+                 code(6, 'async () => wf.pick({ pool: "opus" })'),
+                 code(7, 'async () => wf.pick({ pool: "opus" })')]
+        server = servers["t3cm"]
+        r = subprocess.run([server["command"], *server["args"]], input="\n".join(map(json.dumps, calls)) + "\n",
+                           env={**os.environ, **server["env"]}, capture_output=True, text=True, timeout=30)
+        out = [json.loads(line)["result"] for line in r.stdout.splitlines()]
+        self.assertEqual(sorted(t["name"] for t in out[0]["tools"]), ["execute", "search"])
+        text = lambda o: json.loads(o["content"][0]["text"])
+        self.assertEqual([text(out[i])["result"]["instanceId"] for i in (1, 5, 6)],
+                         ["claude-a", "claude-b", "claude-a"])
+        self.assertTrue(out[2]["isError"])
+        self.assertIn("t3-codemode link", text(out[3])["result"]["brief"])
+        self.assertIsNone(text(out[4])["result"])
+        self.assertEqual(len(live.read_jsonl(box.t3cm_log)), 6)
+
+    def test_without_t3cm_the_sandbox_has_no_t3cm_server(self):
+        box = self.box()
+        self.assertEqual(list(json.loads((box.repo / ".mcp.json").read_text())["mcpServers"]), ["t3-code"])
+        settings = json.loads((box.home / ".claude" / "settings.json").read_text())
+        self.assertNotIn("mcp__t3cm", settings["permissions"]["allow"])
+
 
 class Checks(unittest.TestCase):
     STREAM = [
@@ -343,6 +399,33 @@ class Checks(unittest.TestCase):
         (sc / "scripts").mkdir(parents=True)
         (sc / "scripts" / "run_eval.py").write_text("")
         self.assertEqual(live.skill_creator_dir(str(sc)), sc.resolve())
+
+    def test_the_pool_checks_match_a_pick_and_its_launch(self):
+        ev = next(e for e in live.load("t3-overseer", "evals")["evals"] if e["name"] == "tickets-from-a-pool-in-thread")
+        pick = next(c for c in ev["checks"] if c.get("tool") == "execute" and "pick" in c["input"])
+        launches = [c for c in ev["checks"] if c.get("t3") == "t3_thread_launch" and not c.get("none")]
+        self.assertEqual(len(launches), 4)
+        facts = {"uses": [{"name": "mcp__t3cm__execute", "input": {"code": 'async () => wf.pick({ pool: "opus" })'}}]}
+        self.assertTrue(live.check_passes(pick, facts, self.root))
+
+        def sel(inst, option="effort"):
+            return {"instanceId": inst, "model": "claude-opus-5-5", "options": [{"id": option, "value": "high"}]}
+
+        def launch(title, n, s):
+            return {"tool": "t3_thread_launch", "input": {"title": f"widgets#{title}: x", "modelSelection": s,
+                                                          "message": f"Work https://github.com/acme/widgets/issues/{n}"}}
+
+        def logged(*calls):
+            (self.root / "t3-calls.jsonl").write_text("".join(json.dumps(c) + "\n" for c in calls))
+            return [live.check_passes(c, facts, self.root) for c in launches]
+
+        self.assertEqual(logged(launch(42, 42, sel("claude-a")), launch(43, 43, sel("claude-b"))), [True] * 4)
+        self.assertFalse(all(logged(launch(42, 42, sel("claude-a")), launch(43, 43, sel("claude-a")))),
+                         "one pick reused for both tickets")
+        self.assertFalse(all(logged(launch(42, 43, sel("claude-a")), launch(42, 42, sel("claude-b")))),
+                         "a launch whose title and issue URL disagree")
+        self.assertFalse(any(logged(launch(42, 42, sel("claude-a", "temperature")),
+                                    launch(43, 43, {"instanceId": "claude-b"}))))
 
     def test_none_inverts_a_check(self):
         self.assertTrue(self.passes({"tool": "Edit", "none": True}))

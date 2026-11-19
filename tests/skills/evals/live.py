@@ -47,6 +47,19 @@ DENY = ["WebFetch", "WebSearch", "AskUserQuestion"]
 CHECK_KINDS = ("tool", "bash", "text", "file", "gh", "t3", "repo")
 LINK_HEADING = "## t3-workflow link"
 BRIEF_TOOLS = 8
+T3CM_DEFAULTS = [
+    {"match": r"wf\.openChild", "result": {
+        "brief": "## t3-codemode link\nThis thread is a child on a t3-codemode link. Before anything else, "
+                 "call the t3cm `execute` tool with:\nasync () => wf.join({ parent: \"mcp:launch:eval\", "
+                 "label: \"eval child\", role: \"worker\" })",
+        "params": {"down": 45, "miss": 2, "stall": 240}}},
+    {"match": r"wf\.(init|join)\(", "result": {"thread": SELF, "role": "ticket", "root": False,
+                                               "parent": "board", "label": "widgets#42", "watcher": "running"}},
+    {"match": r"wf\.send\(", "result": {"handle": "m1", "delivery": "noted"}},
+    {"match": r"wf\.launchTicket\(", "result": {"ok": True, "label": "widgets#42", "thread": "thread-launched",
+                                                "link": "t3://thread-launched", "projectId": "proj-widgets",
+                                                "title": "widgets#42"}},
+]
 REAL_HOME = os.path.expanduser("~")
 
 
@@ -75,6 +88,7 @@ class Sandbox:
         self.bin = self.root / "bin"
         self.fake_t3 = self.root / "fake-t3.json"
         self.t3_log = self.root / "t3-calls.jsonl"
+        self.t3cm_log = self.root / "t3cm-calls.jsonl"
         self.gh_log = self.root / "gh.log"
         self.t3 = t3
         for d in (self.home / ".claude" / "skills", self.bin, self.root / "config", self.root / "state",
@@ -96,7 +110,8 @@ class Sandbox:
 
     def _settings(self):
         guard = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'guard_hook.py'))} {shlex.quote(REAL_HOME)}"
-        settings = {"permissions": {"allow": ALLOW, "deny": DENY}, "enableAllProjectMcpServers": True,
+        allow = ALLOW + (["mcp__t3cm"] if "t3cm" in self.setup else [])
+        settings = {"permissions": {"allow": allow, "deny": DENY}, "enableAllProjectMcpServers": True,
                     "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": guard}]}]}}
         (self.home / ".claude" / "settings.json").write_text(json.dumps(settings))
         if self.t3:
@@ -142,9 +157,15 @@ class Sandbox:
         if self.setup.get("branch"):
             self._git("switch", "-q", "-c", self.setup["branch"])
         if self.t3:
-            server = {"command": sys.executable, "args": [str(HERE / "stub_t3_mcp.py")],
-                      "env": {"T3_STUB_LOG": str(self.t3_log), "T3_STUB_FIXTURE": str(self.root / "t3.json")}}
-            (self.repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"t3-code": server}}))
+            servers = {"t3-code": {"command": sys.executable, "args": [str(HERE / "stub_t3_mcp.py")],
+                                   "env": {"T3_STUB_LOG": str(self.t3_log),
+                                           "T3_STUB_FIXTURE": str(self.root / "t3.json")}}}
+            if "t3cm" in self.setup:
+                (self.root / "t3cm.json").write_text(json.dumps(self.setup["t3cm"] + T3CM_DEFAULTS))
+                servers["t3cm"] = {"command": sys.executable, "args": [str(HERE / "stub_t3cm_mcp.py")],
+                                   "env": {"T3CM_STUB_LOG": str(self.t3cm_log),
+                                           "T3CM_STUB_FIXTURE": str(self.root / "t3cm.json")}}
+            (self.repo / ".mcp.json").write_text(json.dumps({"mcpServers": servers}))
             (self.repo / ".git" / "info" / "exclude").write_text(".mcp.json\n")
         (self.root / "repo-base.json").write_text(json.dumps(repo_snapshot(self.repo)))
 

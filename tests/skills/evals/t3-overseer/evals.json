@@ -64,6 +64,212 @@
           }
         }
       }
+    },
+    {
+      "id": 2,
+      "name": "tickets-from-a-pool-in-thread",
+      "prompt": "Work acme/widgets issues 42 and 43 at the same time. Watch both ticket threads from this thread, not on the board. I approve starting both, so launch them now.",
+      "expected_output": "Takes the path without the board, picks each ticket's instance from the opus pool with its own wf.pick, and launches each ticket thread with that pick's modelSelection.",
+      "files": [],
+      "expectations": [
+        "Picks from the opus pool with wf.pick",
+        "Launches the ticket thread for issue 42 with a pick's whole modelSelection",
+        "Launches the ticket thread for issue 43 with a pick's whole modelSelection",
+        "Launches one ticket on claude-a, so each launch has its own pick",
+        "Launches one ticket on claude-b, so each launch has its own pick",
+        "Launches no ticket on the default claudeAgent instance",
+        "Starts no ticket through the board's wf.launchTicket",
+        "Changes, adds or deletes no file in the repo"
+      ],
+      "checks": [
+        {
+          "tool": "execute",
+          "input": "wf\\.pick\\([^)]*opus"
+        },
+        {
+          "t3": "t3_thread_launch",
+          "input": "(?=.*\"title\":\\s*\"[^\"]*#42\\b)(?=.*/issues/42\\b)(?=.*\"modelSelection\")(?=.*\"instanceId\":\\s*\"claude-(?:a|b)\")(?=.*\"model\":\\s*\"claude-opus-5-5\")(?=.*\\{\\s*\"id\":\\s*\"effort\",\\s*\"value\":\\s*\"high\"\\s*\\})"
+        },
+        {
+          "t3": "t3_thread_launch",
+          "input": "(?=.*\"title\":\\s*\"[^\"]*#43\\b)(?=.*/issues/43\\b)(?=.*\"modelSelection\")(?=.*\"instanceId\":\\s*\"claude-(?:a|b)\")(?=.*\"model\":\\s*\"claude-opus-5-5\")(?=.*\\{\\s*\"id\":\\s*\"effort\",\\s*\"value\":\\s*\"high\"\\s*\\})"
+        },
+        {
+          "t3": "t3_thread_launch",
+          "input": "(?=.*\"modelSelection\")(?=.*\"instanceId\":\\s*\"claude-a\")(?=.*\"model\":\\s*\"claude-opus-5-5\")(?=.*\\{\\s*\"id\":\\s*\"effort\",\\s*\"value\":\\s*\"high\"\\s*\\})"
+        },
+        {
+          "t3": "t3_thread_launch",
+          "input": "(?=.*\"modelSelection\")(?=.*\"instanceId\":\\s*\"claude-b\")(?=.*\"model\":\\s*\"claude-opus-5-5\")(?=.*\\{\\s*\"id\":\\s*\"effort\",\\s*\"value\":\\s*\"high\"\\s*\\})"
+        },
+        {
+          "t3": "t3_thread_launch",
+          "input": "\"instanceId\":\\s*\"claudeAgent\"",
+          "none": true
+        },
+        {
+          "tool": "execute",
+          "input": "launchTicket",
+          "none": true
+        },
+        {
+          "repo": ".",
+          "none": true
+        }
+      ],
+      "setup": {
+        "issues": {
+          "42": {
+            "number": 42,
+            "title": "Add a --quiet flag to the widget CLI",
+            "state": "OPEN",
+            "body": "The CLI prints progress for every widget it builds. Add a --quiet flag that suppresses the progress output, document it in the README, and cover it with a test.",
+            "labels": [],
+            "assignees": [],
+            "milestone": null,
+            "comments": [],
+            "url": "https://github.com/acme/widgets/issues/42"
+          },
+          "43": {
+            "number": 43,
+            "title": "Widget names should be trimmed",
+            "state": "OPEN",
+            "body": "widget(' a ') returns 'widget  a '. Trim the name first.",
+            "labels": [],
+            "assignees": [],
+            "milestone": null,
+            "comments": [],
+            "url": "https://github.com/acme/widgets/issues/43"
+          }
+        },
+        "config": {
+          "version": 1,
+          "models": {
+            "ticket": {
+              "pool": "opus"
+            }
+          }
+        },
+        "t3cm": [
+          {
+            "match": "wf\\.pick\\(",
+            "results": [
+              {
+                "pool": "opus",
+                "instanceId": "claude-a",
+                "model": "claude-opus-5-5",
+                "options": [
+                  {
+                    "id": "effort",
+                    "value": "high"
+                  }
+                ],
+                "reason": "weighted: claude-a has the most credit",
+                "skipped": [],
+                "modelSelection": {
+                  "instanceId": "claude-a",
+                  "model": "claude-opus-5-5",
+                  "options": [
+                    {
+                      "id": "effort",
+                      "value": "high"
+                    }
+                  ]
+                }
+              },
+              {
+                "pool": "opus",
+                "instanceId": "claude-b",
+                "model": "claude-opus-5-5",
+                "options": [
+                  {
+                    "id": "effort",
+                    "value": "high"
+                  }
+                ],
+                "reason": "weighted: claude-b has the most credit",
+                "skipped": [],
+                "modelSelection": {
+                  "instanceId": "claude-b",
+                  "model": "claude-opus-5-5",
+                  "options": [
+                    {
+                      "id": "effort",
+                      "value": "high"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "name": "board-tickets-with-a-pool-slot",
+      "prompt": "Work acme/widgets issues 42 and 43 at the same time. I approve starting both, so start them now.",
+      "expected_output": "Starts both on the board with wf.launchTicket, passes no model or effort for the pool slot, and tells the user the board launches from board.pool.",
+      "files": [],
+      "expectations": [
+        "Starts the tickets with wf.launchTicket",
+        "Passes no model to wf.launchTicket for the pool slot",
+        "Tells the user the board's board.pool decides the ticket instance",
+        "Changes, adds or deletes no file in the repo"
+      ],
+      "checks": [
+        {
+          "tool": "execute",
+          "input": "launchTicket"
+        },
+        {
+          "tool": "execute",
+          "input": "launchTicket\\(\\s*\\{[^}]*\\bmodel\\s*:",
+          "none": true
+        },
+        {
+          "text": "board\\.pool"
+        },
+        {
+          "repo": ".",
+          "none": true
+        }
+      ],
+      "setup": {
+        "issues": {
+          "42": {
+            "number": 42,
+            "title": "Add a --quiet flag to the widget CLI",
+            "state": "OPEN",
+            "body": "The CLI prints progress for every widget it builds. Add a --quiet flag that suppresses the progress output, document it in the README, and cover it with a test.",
+            "labels": [],
+            "assignees": [],
+            "milestone": null,
+            "comments": [],
+            "url": "https://github.com/acme/widgets/issues/42"
+          },
+          "43": {
+            "number": 43,
+            "title": "Widget names should be trimmed",
+            "state": "OPEN",
+            "body": "widget(' a ') returns 'widget  a '. Trim the name first.",
+            "labels": [],
+            "assignees": [],
+            "milestone": null,
+            "comments": [],
+            "url": "https://github.com/acme/widgets/issues/43"
+          }
+        },
+        "config": {
+          "version": 1,
+          "models": {
+            "ticket": {
+              "pool": "opus"
+            }
+          }
+        },
+        "t3cm": []
+      }
     }
   ]
 }
