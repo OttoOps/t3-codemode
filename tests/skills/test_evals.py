@@ -269,7 +269,8 @@ class Checks(unittest.TestCase):
 
     def test_the_repo_check_sees_files_changed_by_any_tool(self):
         repo = self.root / "repo"
-        self.assertFalse(self.passes({"repo": ".", "none": True}), "no saved base must not pass as clean")
+        with self.assertRaises(FileNotFoundError, msg="no saved base must not pass as clean"):
+            self.passes({"repo": r"\.py$", "none": True})
         (self.root / "repo-base.json").write_text(json.dumps(live.repo_snapshot(repo)))
         (repo / ".git").mkdir()
         (repo / ".git" / "index").write_text("x")
@@ -283,6 +284,10 @@ class Checks(unittest.TestCase):
         self.assertEqual(live.repo_changes(self.root), ["src/new.py"])
         (repo / "src" / "new.py").unlink()
         (repo / "out.md").unlink()
+        self.assertEqual(live.repo_changes(self.root), ["out.md"])
+        (repo / "out.md").write_text("Unslopped: 2 rules applied.\n")
+        self.assertEqual(live.repo_changes(self.root), [])
+        (repo / "out.md").chmod(0o755)
         self.assertEqual(live.repo_changes(self.root), ["out.md"])
 
 
