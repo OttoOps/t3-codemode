@@ -30,7 +30,8 @@ bash install.sh   # latest release: binary, user service, Claude Code MCP entry
 t3cm status       # t3.connected should be true
 ```
 
-On Windows, use `deploy/install.ps1`. Until the first release is published,
+Update it in place with `t3cm update`; `t3cm --version` says when a newer
+release is out. On Windows, use `deploy/install.ps1`. Until the first release is published,
 Linux and macOS build from a clone with `deploy/install.sh --from-source`. See
 [Getting started](https://ottoops.com/t3-codemode/getting-started.html) for
 every OS, the config, and the `t3cm` commands.

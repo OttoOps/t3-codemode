@@ -110,6 +110,26 @@ The board answers only on its own host and port: `http://127.0.0.1:<port>/` or
 origin gets 403. POSTs from your own scripts also need the `X-T3CM-CSRF` token
 embedded in the page.
 
+## `t3cm update` rolled back
+
+`t3cm update` puts the old binary back, and on Linux the old systemd unit,
+when the restarted service does not report the new version on `/healthz`
+within 45 seconds. The service log says
+why the new version did not start. If it should have, rerun `t3cm update`, or
+install the release with the installer: `install.sh --version vX.Y.Z` or
+`install.ps1 -Version vX.Y.Z`.
+
+`the service runs ..., but this is ...` means you ran a different `t3cm` than
+the one the service runs. Run the installed one, which the message names.
+
+`another t3cm update is running` means a second update started while one was
+still going. Let the first one finish, then run it again if you still need to.
+
+`the service is running but nothing answers on 127.0.0.1:<port>` means the
+service serves another port, or it is up but not answering. Pass its port with
+`--port` (or `T3CM_PORT`) so the update can check the restart; if the port is
+right, the service log says what is wrong. The update changed nothing.
+
 ## Still stuck
 
 Search the [issues](https://github.com/OttoOps/t3-codemode/issues), and open one

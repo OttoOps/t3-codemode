@@ -62,6 +62,16 @@ Times show as ages (`36m`, `1h 32m`); hover one for the local time.
 
 A `handoff` or `closed` message marks a ticket done.
 
+## Updates
+
+When a newer t3cm release is out, the header shows **Update to vX.Y.Z**. It
+opens a panel with the `t3cm update` command, a button that copies it, and a
+link to the release notes. **Hide until the next release** hides the button
+until a later release comes out; the board remembers that per browser. After
+`t3cm update` restarts the service, the page reconnects by itself. Once the
+service runs a newer version than the loaded page, the button reads **Reload
+for vX.Y.Z**, and a click loads the new board.
+
 ## Reply buttons
 
 A `gate`, `blocker` or `report` sent with `options` gets exactly those
@@ -207,7 +217,7 @@ hand.
 | Route | Does |
 |---|---|
 | `GET /` | The page, with a per-process CSRF token embedded |
-| `GET /api/state` | `{cards, tree, feed, asks, settled, contexts, counts, service}`; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt` |
+| `GET /api/state` | `{cards, tree, feed, asks, settled, contexts, counts, service}`; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` until a release check has answered, then `{current, latest, available, notes, command}` |
 | `GET /api/events` | SSE: a `state` event on every change |
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it |
