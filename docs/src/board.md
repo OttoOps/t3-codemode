@@ -81,7 +81,7 @@ no filter across a reload.
 | `wf.launchTicket({ issue, project?, title?, model?, effort? })` | Launch a ticket thread for a GitHub issue |
 | `wf.cards({ all? })` | The open cards, oldest first; `all` includes resolved ones |
 | `wf.answer(id, text)` | Answer a card for the user, the same as a button on the page |
-| `wf.feed({ limit? })` | The latest notes and events, each with its `ticket`, `ticketLabel`, `ticketTitle`, `repo` and `project` |
+| `wf.feed({ limit? })` | The latest notes and events, each with its `ticket`, `ticketLabel`, `ticketTitle`, `ticketStatus`, `repo` and `project` |
 | `wf.board({ parent: "board", all: true })` | Every ticket on the board, with live status |
 
 ```js

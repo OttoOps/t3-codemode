@@ -424,9 +424,12 @@ impl Wf {
         self.remotes.origin(root).await.as_deref().and_then(parse_remote).map(owner_repo)
     }
 
-    async fn backfill_project(&self, ln: &Link) -> Result<Option<String>> {
+    async fn hydrate(&self, ln: &Link) -> Result<Option<String>> {
         if self.live_of(&ln.child).is_none() {
             let _ = self.read_thread(&ln.child).await;
+        }
+        if ln.project.is_some() {
+            return Ok(ln.project.clone());
         }
         let Some(project) = self.live_of(&ln.child).and_then(|v| v["project"].as_str().map(String::from)) else {
             return Ok(None);
@@ -449,10 +452,7 @@ impl Wf {
         }
         let mut ids: Vec<String> = Vec::new();
         for ln in links {
-            match ln.project {
-                Some(p) => ids.push(p),
-                None => ids.extend(self.backfill_project(&ln).await?),
-            }
+            ids.extend(self.hydrate(&ln).await?);
         }
         ids.extend(
             self.live
@@ -672,7 +672,11 @@ impl Wf {
 
     pub fn feed(&self, limit: usize) -> Result<Vec<Value>> {
         let mut labels: Vec<(String, String, String)> = Vec::new();
+        let mut done: Vec<String> = Vec::new();
         for t in self.store.children(BOARD, false)? {
+            if t.closed {
+                done.push(t.child.clone());
+            }
             for w in self.store.children(&t.child, false)? {
                 labels.push((w.child.clone(), w.label, t.child.clone()));
             }
@@ -693,12 +697,15 @@ impl Wf {
             .into_iter()
             .map(|m| {
                 let ticket = ticket_of(&m.from);
-                let parent =
-                    ticket.as_deref().map(|t| (label_of(t), self.live_of(t).unwrap_or(Value::Null)["title"].clone()));
-                let (ticket_label, ticket_title) = parent.unzip();
+                let parent = ticket.as_deref().map(|t| {
+                    let live = self.live_of(t);
+                    let status = if done.iter().any(|d| d == t) { "done" } else { chip(live.as_ref()) };
+                    (label_of(t), live.unwrap_or(Value::Null)["title"].clone(), status)
+                });
                 let v = json!({"handle": m.handle, "at": local_clock(&m.at), "iso": m.at, "label": label_of(&m.from),
                        "kind": m.kind, "head": truncate_chars(&m.head(usize::MAX), 200), "ticket": ticket,
-                       "ticketLabel": ticket_label, "ticketTitle": ticket_title});
+                       "ticketLabel": parent.as_ref().map(|p| &p.0), "ticketTitle": parent.as_ref().map(|p| &p.1),
+                       "ticketStatus": parent.as_ref().map(|p| p.2)});
                 self.placed(v, ticket.as_deref())
             })
             .collect())
@@ -801,8 +808,11 @@ impl Wf {
             }
         };
         let project_id = project["id"].as_str().unwrap_or_default().to_string();
-        let matched = wanted.is_none().then(|| format!("{}/{}", issue.owner, issue.repo));
-        if let Some(repo) = identity_repo(&project).or(matched) {
+        let repo = match identity_repo(&project) {
+            Some(r) => Some(r),
+            None => self.origin_repo(&project).await,
+        };
+        if let Some(repo) = repo {
             self.remember_project(&project_id, &project["title"], Some(repo));
         }
         let params = self.config.link_params("overseer", "ticket")?;
