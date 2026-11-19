@@ -109,8 +109,12 @@ parent and a child, and the service keeps every link and message in its store.
   When no member can run, it throws and names the pool.
 - `wf.pools()` lists each pool's members with `state` (`ready`, `limited`,
   `disabled`, `constrained`, `missing-model`, `missing-effort`, or `unknown`
-  when T3 did not answer), `reason`, `limitedUntil` and `limitedUntilLocal`, `running` threads,
-  `picks` and `lastPick`.
+  when T3 did not answer), `reason`, `limitedUntil`, `limitedUntilLocal`,
+  `limitReason`, `usageLeft`, `running` threads, `picks` and `lastPick`.
+  `limitReason` names the thread whose limit stop set the mark and where its
+  reset time came from. `usageLeft` stays `null` until t3cm has a usage
+  source. The watcher sets and clears the marks, as
+  [Limits](config.md#limits) describes.
 - `wf.waiting.add`, `wf.waiting.resolve` and `wf.waiting.list` keep an overseer
   thread's waiting list.
 - `wf.merge({repo, pr, head, method?})` merges a GitHub pull request at the
@@ -135,8 +139,9 @@ turns messages into cards and feed entries. A wake is one compact
 Wakes to a busy thread wait in an outbox and go out as one combined message
 when it is idle, held at most `maxHoldMinutes` (30). A watcher task runs every
 `watcherIntervalSecs` (60 s): it nudges idle children, reports stalls and
-pending requests once, escalates after repeated misses, and closes links whose
-thread was deleted or archived.
+pending requests once, escalates after repeated misses, closes links whose
+thread was deleted or archived, and marks [pool](config.md#limits) members
+limited when one of their threads stops on a usage limit.
 
 ```js
 async () => {

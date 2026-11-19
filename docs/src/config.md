@@ -112,7 +112,7 @@ until it hits its usage limit.
 |---|---|---|
 | `driver` | required | The driver every member must be, as `orchestrator_capabilities` reports it in `driverKind` |
 | `model`, `effort` | required, unset | Model and effort for every launch from the pool, so a thread gets the same model whichever account runs it |
-| `strategy` | `weighted` | `weighted` spreads launches by weight. `priority` fills members in order and moves to the next only when one is out. |
+| `strategy` | `weighted` | `weighted` spreads launches by weight. `priority` fills members in order and moves to the next only when one is out. `headroom` needs a usage source, so config load rejects it for now. |
 | `members[].instanceId` | required | A T3 provider instance |
 | `members[].weight` | `1` | The member's share of `weighted` launches. With weights 3 and 1, three of every four launches go to the first member. |
 | `members[].reserve` | `0` | A share of the account's usage window, 0-100, held for work that names the instance directly |
@@ -124,12 +124,12 @@ level, the one with fewer running threads wins, then the one listed first.
 
 A pick skips a member that T3 reports as disabled or constrained, a member
 that does not list the pool's model or does not offer its effort, and a member
-marked limited until its reset time. A member with a `reserve` is a last resort: t3cm has no usage
-source yet, so it cannot see how close an account is to its reserve, and the
-pool picks that member only when every member without a reserve is out. A
-launch that names the instance directly ignores the reserve.
-When every member is out, the pick fails, nothing launches, and a board launch
-leaves an error card that names the pool.
+marked limited until its reset time, as [Limits](#limits) describes. A member
+with a `reserve` is a last resort. t3cm has no usage source yet, so it cannot
+see how close an account is to its reserve, and the pool picks that member only
+when every member without a reserve is out. A launch that names the instance
+directly ignores the reserve. When every member is out, the pick fails, nothing
+launches, and a board launch leaves an error card that names the pool.
 
 At load, a pool must have at least one member, no member twice, weights of 1
 or more and reserves from 0 to 100, and `board.pool` must name a configured
@@ -138,6 +138,33 @@ whether each member is an instance of the pool's `driver`. Every pick checks
 that against T3's live `orchestrator_capabilities`, and a pick from a pool with
 an unknown instance or a member of another driver fails and names the pool and
 the member. When T3 answers at start, the service also logs a bad pool then.
+
+#### Limits
+
+The watcher pass marks a member limited when a thread on it stops on a usage
+limit, and picks skip the member until the reset. T3 shows no reason for a
+snooze, so a snooze alone never marks a member. A thread counts as stopped on
+a limit when its status is `failed` and its latest run ends with T3's
+`Usage limit reached` error item. The pass reads each failed run once, and it
+looks only at runs on pool members from the last 24 hours.
+
+The reset time comes from T3's limit snooze. With T3's "snooze limited
+threads" setting on, T3 snoozes a thread that stops on a limit until its
+account resets, and t3cm takes that time when it first sees the stop. With the
+setting off, t3cm cannot see the reset, so it holds the member for
+`limitHoldMinutes` from when it saw the stop. Turn the setting on in T3 to get
+exact reset times.
+
+| Key | Default | Does |
+|---|---|---|
+| `limitHoldMinutes` | `60` | How long a member stays limited after a limit stop whose reset time T3 does not show |
+
+A stop with a later reset extends a member's mark, and one with an earlier
+reset leaves it as it is. The
+pass clears a mark once its reset passes, and the member is picked again.
+Marks live in `store.db`, so they survive a restart. `wf.pools()` shows each
+mark's reset time and the thread that set it. [ADR 0001](https://github.com/OttoOps/t3-codemode/blob/main/docs/decisions/0001-usage-signal-for-pools.md)
+records why t3cm reads limits this way.
 
 `board.pool` covers `wf.launchTicket`, the launch box and the ask box. With it
 set, launches use the pool's model and effort, a `wf.launchTicket` call that
