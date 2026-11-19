@@ -2,11 +2,17 @@ mod common;
 
 use common::*;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use t3_codemode::board::BOARD;
 use t3_codemode::clock::local_clock;
 use t3_codemode::config::Config;
-use t3_codemode::fake::{disabled_provider, project, provider, thread};
-use t3_codemode::store::Limit;
+
+use t3_codemode::app::App;
+use t3_codemode::fake::{FakeUsage, disabled_provider, project, provider, thread, usage_limit_item};
+use t3_codemode::pools::{Inputs, PoolConfig, PoolMember, choose};
+use t3_codemode::store::{Limit, Store};
+use t3_codemode::usage::Usage;
 
 const OPUS: &str = "claude-opus-5-5";
 
@@ -57,7 +63,7 @@ fn tally(picks: &[String], id: &str) -> usize {
 fn limit(h: &H, id: &str, until: &str) {
     h.app
         .store
-        .limit_set(id, &Limit { until: until.into(), reason: Some("usage limit".into()), at: T0.into() })
+        .limit_set(id, &Limit { until: until.into(), reason: Some("usage limit".into()), at: T0.into(), thread: None })
         .unwrap();
 }
 
@@ -378,4 +384,240 @@ fn config_load_rejects_bad_pools_by_name() {
     assert_eq!(ok.pools["opus"].strategy, "weighted");
     assert_eq!(ok.pools["opus"].members[0].weight, 1);
     assert!(Config::default().pools.is_empty() && Config::default().board.pool.is_none());
+}
+
+const RESET: &str = "2026-11-17T15:00:00Z";
+
+fn stopped(h: &H, id: &str, instance: &str, status: &str, updated: &str, limit_item: bool) {
+    let mut t = thread(id, status, updated);
+    t["providerInstanceId"] = json!(instance);
+    t["itemCount"] = json!(10);
+    h.fake.put(t);
+    if limit_item {
+        let text = "You've hit your usage limit. Try again later.";
+        h.fake.set_items(id, vec![usage_limit_item(&format!("run:{id}:1"), text)]);
+    }
+}
+
+fn snooze(h: &H, id: &str, until: &str) {
+    h.fake.update(id, json!({"snoozed": true, "snoozedUntil": until}));
+}
+
+async fn mark(h: &H) -> Vec<String> {
+    h.app.wf.mark_limits().await.unwrap()
+}
+
+fn reads(h: &H) -> usize {
+    h.fake.calls().iter().filter(|c| *c == "t3_thread_read").count()
+}
+
+#[tokio::test]
+async fn a_thread_stopped_on_a_usage_limit_benches_its_member_until_the_reset() {
+    let h = pooled("weighted", two(1, 1));
+    stopped(&h, "stop:a", "claude-a", "failed", T0, true);
+    snooze(&h, "stop:a", RESET);
+    let until = local_clock(RESET);
+    assert_eq!(mark(&h).await, [format!("limited claude-a until {until}")]);
+    assert_eq!(launches(&h, 1, 4).await, ["claude-b"; 4]);
+    let r = pick(&h).await;
+    let reason = r["reason"].as_str().unwrap();
+    assert!(reason.contains(&format!("claude-a limited until {until}")), "{reason}");
+    let pools = result(&h.exec("async () => wf.pools()").await);
+    let a = &pools[0]["members"][0];
+    assert_eq!(a["state"], "limited");
+    assert_eq!(a["limitedUntil"], RESET);
+    assert_eq!(a["limitReason"], "usage limit on thread stop:a; reset time from T3's limit snooze");
+    assert!(mark(&h).await.is_empty());
+    h.clock.set("2026-11-17T15:00:01Z");
+    assert_eq!(mark(&h).await, [format!("limit cleared claude-a, reset {until} passed")]);
+    assert!(h.app.store.limits().unwrap().is_empty());
+    let back = launches(&h, 5, 2).await;
+    assert!(back.contains(&"claude-a".to_string()), "{back:?}");
+    assert!(mark(&h).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_snooze_without_a_limit_stop_marks_nothing() {
+    let h = pooled("weighted", two(1, 1));
+    stopped(&h, "done:a", "claude-a", "completed", T0, true);
+    snooze(&h, "done:a", RESET);
+    stopped(&h, "error:a", "claude-a", "failed", T0, false);
+    snooze(&h, "error:a", RESET);
+    h.fake.set_items("error:a", vec![json!({"type": "error", "title": "Provider error", "runId": "run:error:a:1"})]);
+    stopped(&h, "rerun:b", "claude-b", "failed", T0, false);
+    h.fake.set_items("rerun:b", vec![usage_limit_item("run:rerun:b:0", "an earlier run's limit")]);
+    assert!(mark(&h).await.is_empty());
+    assert!(h.app.store.limits().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_limit_stop_without_a_reset_time_holds_the_member_for_limit_hold_minutes() {
+    let mut h = pooled("weighted", two(1, 1));
+    stopped(&h, "stop:b", "claude-b", "failed", T0, true);
+    let held = at(60);
+    assert_eq!(mark(&h).await, [format!("limited claude-b until {}", local_clock(&held))]);
+    let limits = h.app.store.limits().unwrap();
+    assert_eq!(limits["claude-b"].until, held);
+    assert_eq!(
+        limits["claude-b"].reason.as_deref(),
+        Some("usage limit on thread stop:b; reset time unknown, held 60 min")
+    );
+    snooze(&h, "stop:b", "2026-11-18T09:00:00Z");
+    h.reopen();
+    assert!(mark(&h).await.is_empty());
+    assert_eq!(h.app.store.limits().unwrap()["claude-b"].until, held);
+    assert_eq!(reads(&h), 1);
+    h.clock.set(&at(61));
+    assert_eq!(mark(&h).await.len(), 1);
+    assert!(h.app.store.limits().unwrap().is_empty());
+    assert_eq!(reads(&h), 1);
+    let mut longer = config("weighted", two(1, 1), true);
+    longer.limit_hold_minutes = 120;
+    h.app = App::with_host(
+        longer,
+        Arc::new(Store::open(h.dir.path()).unwrap()),
+        h.fake.clone(),
+        h.clock.clone(),
+        h.remotes.clone(),
+        h.github.clone(),
+        h.desktop.clone(),
+    );
+    h.clock.set(&at(70));
+    assert!(mark(&h).await.is_empty());
+    assert!(h.app.store.limits().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn limit_marking_skips_other_instances_and_old_stops() {
+    let h = pooled("weighted", two(1, 1));
+    stopped(&h, "stop:codex", "codex", "failed", T0, true);
+    stopped(&h, "stop:old", "claude-b", "failed", "2026-11-15T12:00:00Z", true);
+    assert!(mark(&h).await.is_empty());
+    assert_eq!(reads(&h), 0);
+    let none = H::new();
+    stopped(&none, "stop:a", "claude-a", "failed", T0, true);
+    assert!(mark(&none).await.is_empty());
+    assert!(!none.fake.calls().iter().any(|c| c == "t3_thread_list"));
+}
+
+#[tokio::test]
+async fn a_later_stop_extends_a_limit_and_an_earlier_one_does_not_shorten_it() {
+    let h = pooled("weighted", two(1, 1));
+    stopped(&h, "stop:1", "claude-a", "failed", T0, true);
+    snooze(&h, "stop:1", RESET);
+    mark(&h).await;
+    stopped(&h, "stop:2", "claude-a", "failed", T0, true);
+    snooze(&h, "stop:2", "2026-11-17T14:00:00Z");
+    assert!(mark(&h).await.is_empty());
+    assert_eq!(h.app.store.limits().unwrap()["claude-a"].until, RESET);
+    stopped(&h, "stop:3", "claude-a", "failed", T0, true);
+    snooze(&h, "stop:3", "2026-11-17T16:00:00Z");
+    assert_eq!(mark(&h).await.len(), 1);
+    assert_eq!(h.app.store.limits().unwrap()["claude-a"].thread.as_deref(), Some("stop:3"));
+    h.fake.update("stop:3", json!({"latestRunId": "run:stop:3:2", "snoozed": false, "snoozedUntil": null}));
+    h.fake.set_items("stop:3", vec![usage_limit_item("run:stop:3:2", "again")]);
+    assert!(mark(&h).await.is_empty());
+    assert_eq!(h.app.store.limits().unwrap()["claude-a"].until, "2026-11-17T16:00:00Z");
+}
+
+#[tokio::test]
+async fn a_reset_that_already_passed_marks_nothing() {
+    let h = pooled("weighted", two(1, 1));
+    stopped(&h, "stop:a", "claude-a", "failed", T0, true);
+    snooze(&h, "stop:a", &at(-1));
+    assert!(mark(&h).await.is_empty());
+    assert!(h.app.store.limits().unwrap().is_empty());
+}
+
+fn usage(h: &H) -> Arc<FakeUsage> {
+    let u = Arc::new(FakeUsage::default());
+    h.app.wf.set_usage_source(Some(u.clone()));
+    u
+}
+
+#[tokio::test]
+async fn a_usage_source_turns_a_reserve_into_a_floor() {
+    let h = pooled("weighted", json!([{"instanceId": "claude-a", "reserve": 30}, {"instanceId": "claude-b"}]));
+    let u = usage(&h);
+    u.set("claude-a", 50.0, None);
+    let picks = launches(&h, 1, 4).await;
+    assert_eq!(tally(&picks, "claude-a"), 2, "{picks:?}");
+    u.set("claude-a", 20.0, None);
+    let r = pick(&h).await;
+    assert_eq!(r["instanceId"], "claude-b");
+    assert_eq!(r["skipped"], json!([{"instanceId": "claude-a", "reason": "held at its 30% reserve with 20% left"}]));
+    limit(&h, "claude-b", RESET);
+    let out = h.exec("async () => wf.pick({ pool: 'opus' })").await;
+    assert!(err_text(&out).contains("claude-a held at its 30% reserve with 20% left"), "{}", out.text);
+    let pools = result(&h.exec("async () => wf.pools()").await);
+    assert_eq!(pools[0]["members"][0]["usageLeft"], 20.0);
+}
+
+#[tokio::test]
+async fn a_usage_source_with_nothing_left_limits_the_member() {
+    let h = pooled("weighted", two(1, 1));
+    let u = usage(&h);
+    u.set("claude-a", 0.0, Some(RESET));
+    let r = pick(&h).await;
+    assert_eq!(r["instanceId"], "claude-b");
+    assert!(r["reason"].as_str().unwrap().contains(&format!("claude-a limited until {}", local_clock(RESET))));
+    assert_eq!(mark(&h).await, [format!("limited claude-a until {}", local_clock(RESET))]);
+    let limits = h.app.store.limits().unwrap();
+    assert_eq!(limits["claude-a"].reason.as_deref(), Some("the usage source reports no usage left"));
+    u.set("claude-b", 0.0, None);
+    let out = h.exec("async () => wf.pick({ pool: 'opus' })").await;
+    assert!(err_text(&out).contains("claude-b has no usage left"), "{}", out.text);
+    u.set_fails(true);
+    h.app.store.limit_clear("claude-a").unwrap();
+    assert_eq!(pick(&h).await["instanceId"], "claude-a");
+}
+
+fn headroom_choice(usage: &[(&str, f64)], credits: &BTreeMap<String, i64>) -> (String, String, BTreeMap<String, i64>) {
+    let pool = PoolConfig {
+        driver: "claudeAgent".into(),
+        model: OPUS.into(),
+        effort: None,
+        strategy: "headroom".into(),
+        members: ["claude-a", "claude-b", "claude-c"]
+            .iter()
+            .map(|id| PoolMember { instance_id: id.to_string(), weight: 1, reserve: 0.0 })
+            .collect(),
+    };
+    let providers: Vec<Value> =
+        ["claude-a", "claude-b", "claude-c"].map(|id| provider(id, "claudeAgent", &[OPUS])).into();
+    let caps = json!({ "providers": providers });
+    let usage: BTreeMap<String, Usage> =
+        usage.iter().map(|(id, left)| (id.to_string(), Usage { left: *left, resets_at: None })).collect();
+    let c = choose(&Inputs {
+        name: "opus",
+        pool: &pool,
+        caps: &caps,
+        running: &BTreeMap::new(),
+        limits: &BTreeMap::new(),
+        usage: &usage,
+        credits,
+        now: "2026-11-17T12:00:00Z".parse().unwrap(),
+    })
+    .unwrap();
+    (c.instance_id, c.reason, c.credits)
+}
+
+#[test]
+fn headroom_picks_the_most_room_and_breaks_ties_by_weight() {
+    let none = BTreeMap::new();
+    let (id, reason, _) = headroom_choice(&[("claude-a", 40.0), ("claude-b", 62.0), ("claude-c", 10.0)], &none);
+    assert_eq!((id.as_str(), reason.as_str()), ("claude-b", "headroom: most left, 62%"));
+    let tie = [("claude-a", 70.0), ("claude-b", 70.0), ("claude-c", 10.0)];
+    let (first, _, credits) = headroom_choice(&tie, &none);
+    let (second, _, _) = headroom_choice(&tie, &credits);
+    assert_eq!([first.as_str(), second.as_str()], ["claude-a", "claude-b"]);
+    let (_, reason, _) = headroom_choice(&[], &none);
+    assert_eq!(reason, "headroom: no member reports usage, so weighted: weight 1 of 3");
+}
+
+#[test]
+fn limit_hold_minutes_must_be_positive() {
+    let e = Config::from_value(json!({"limitHoldMinutes": 0})).unwrap_err();
+    assert!(format!("{e:#}").contains("limitHoldMinutes must be at least 1"));
+    assert_eq!(Config::default().limit_hold_minutes, 60);
 }
