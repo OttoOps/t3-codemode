@@ -184,6 +184,49 @@ carries `instanceId` and `reason`, and the feed entry for the launch carries
 the same two fields. When no member of the pool can run, the launch fails,
 leaves an error card that names the pool, and launches nothing.
 
+## GitHub reconcile
+
+The board checks what it believes against GitHub on a timer, so a pull request
+merged, closed or dropped from a merge queue outside T3 still reaches the board
+and its ticket. It tracks:
+
+- each pull request of an open worker link,
+- each pull request named by an open card, when the card names exactly one,
+  read from the card's action line or else from its message,
+- each pull request `wf.merge` left waiting to be queued, or queued.
+
+It reads them with `gh` as the user the service runs as, in one GraphQL query
+for every 100 pull requests it tracks, and makes no GitHub call when it tracks
+nothing. A check runs
+every `board.reconcileActiveMinutes`, 2 by default, while a tracked pull
+request is queued or waiting, and every `board.reconcileIdleMinutes`, 10 by
+default, otherwise. Loading the page runs one too, at most once every 30
+seconds. `docs/decisions/0001-github-reconcile-cadence.md` in the repository
+has the reasoning.
+
+| GitHub shows | The board |
+|---|---|
+| Merged | Resolves the pull request's cards opened before the merge, with the note "merged on GitHub at `<sha>`, `<time>`" and sends each ticket tracking it one `event` to run its post-merge steps |
+| Closed without merging | Resolves its cards opened before the close and sends each ticket one `event` |
+| Dropped from the merge queue for `merge_conflict`, `failed_checks` or `manual` removal | Opens a `report` card that gives the reason, with `requeue` and `hold` buttons when a ticket tracks the pull request, or with no buttons and the steps to take by hand when none does |
+| Waiting to be queued, now mergeable at the approved head | Queues it through `wf.merge` |
+| Waiting to be queued, at a new head | Drops the record and opens a new merge gate for the new head |
+| An open `merge` gate, at a head other than the one the gate named | Resolves the gate and opens a new one for the new head |
+
+A gate names its head with the word `head` and the SHA, such as
+`head d4db97c`. A gate that names none is held to the head the first check
+saw. Each fix fires once, because the board remembers the state it last acted
+on, so a resolved card or a sent event does not repeat on later checks. A pull request
+already merged or closed the first time the board sees it, with no open card or
+waiting record, stays quiet. Every fix goes on the activity feed from `github`.
+
+The tree shows a pull request in the merge queue as `queued`, next to `open`,
+`merged` and `closed`. When `gh` cannot reach GitHub, the check logs a warning
+and runs again at the next interval. A failure on the first query changes
+nothing, while a failure on a later query leaves the fixes from the queries
+before it in place. A head that moves while the waiting list is full keeps its
+waiting record, so the next check opens the new gate once a slot is free.
+
 ## Settling
 
 The board settles finished tickets and answered asks and never deletes them. A ticket that

@@ -81,6 +81,8 @@ All under `board`:
 | `askTimeoutMinutes` | `15` | How long an ask may run |
 | `feed` | `50` | Activity feed entries kept on the page |
 | `settleAfterHours` | `24` | Hours a done ticket or closed ask stays in the main lists; `0` turns auto-settle off |
+| `reconcileActiveMinutes` | `2` | Minutes between GitHub checks while any tracked pull request is queued or waiting to be queued. From 1 to `reconcileIdleMinutes`. |
+| `reconcileIdleMinutes` | `10` | Minutes between GitHub checks otherwise; `0` turns the check off, page loads included. See [The board](board.md#github-reconcile). |
 | `openLinks` | `desktop` | `desktop`: thread links open in the running T3 Code desktop app, or in a new tab when it is not running. The app check needs Windows, natively or through WSL, so macOS and Linux without WSL always get a tab. `tab`: always a new tab. |
 
 ### Pools
