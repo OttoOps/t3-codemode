@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS pool_picks (
   handle TEXT, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS pool_picks_pool ON pool_picks (pool, seq);
 CREATE INDEX IF NOT EXISTS pool_picks_handle ON pool_picks (handle) WHERE handle IS NOT NULL;
+CREATE TABLE IF NOT EXISTS pr_seen (
+  repo TEXT NOT NULL, pr INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (repo, pr));
 "#;
 
 const KEEP_MESSAGES: i64 = 5000;
@@ -165,6 +167,27 @@ pub struct PickRecord {
     pub handle: Option<String>,
     #[serde(default)]
     pub thread: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PrSeen {
+    pub repo: String,
+    pub pr: u64,
+    pub state: String,
+    pub head: String,
+    pub queued: bool,
+    pub removed_at: Option<String>,
+    pub thread: Option<String>,
+    pub gate: Option<GateSeen>,
+    pub at: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GateSeen {
+    pub seq: i64,
+    pub head: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -431,12 +454,84 @@ impl Store {
             > 0)
     }
 
+    pub fn merge_wait_remove_if(&self, w: &MergeWait) -> Result<bool> {
+        let data = serde_json::to_string(w)?;
+        let sql = "DELETE FROM merge_waits WHERE repo = ?1 AND pr = ?2 AND data = ?3";
+        Ok(self.with(|c| c.execute(sql, params![w.repo, w.pr as i64, data]))? > 0)
+    }
+
+    pub fn merge_wait_restore(&self, w: &MergeWait) -> Result<bool> {
+        let data = serde_json::to_string(w)?;
+        let sql = "INSERT OR IGNORE INTO merge_waits (repo, pr, data) VALUES (?1, ?2, ?3)";
+        Ok(self.with(|c| c.execute(sql, params![w.repo, w.pr as i64, data]))? > 0)
+    }
+
+    pub fn merge_wait_get(&self, repo: &str, pr: u64) -> Result<Option<MergeWait>> {
+        Ok(self.merge_waits()?.into_iter().find(|w| w.repo == repo && w.pr == pr))
+    }
+
     pub fn merge_waits(&self) -> Result<Vec<MergeWait>> {
         let raws: Vec<String> = self.with(|c| {
             let mut st = c.prepare("SELECT data FROM merge_waits ORDER BY rowid")?;
             st.query_map([], |r| r.get(0))?.collect()
         })?;
         raws.iter().map(|s| Ok(serde_json::from_str(s)?)).collect()
+    }
+
+    pub fn pr_seen_put(&self, p: &PrSeen) -> Result<()> {
+        let data = serde_json::to_string(p)?;
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO pr_seen (repo, pr, data) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (repo, pr) DO UPDATE SET data = excluded.data",
+                params![p.repo, p.pr as i64, data],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn pr_seen_get(&self, repo: &str, pr: u64) -> Result<Option<PrSeen>> {
+        let raw: Option<String> = self.with(|c| {
+            c.query_row("SELECT data FROM pr_seen WHERE repo = ?1 AND pr = ?2", params![repo, pr as i64], |r| r.get(0))
+                .optional()
+        })?;
+        raw.map(|s| Ok(serde_json::from_str(&s)?)).transpose()
+    }
+
+    pub fn pr_seen_all(&self) -> Result<Vec<PrSeen>> {
+        let raws: Vec<String> = self.with(|c| {
+            let mut st = c.prepare("SELECT data FROM pr_seen ORDER BY rowid")?;
+            st.query_map([], |r| r.get(0))?.collect()
+        })?;
+        raws.iter().map(|s| Ok(serde_json::from_str(s)?)).collect()
+    }
+
+    pub fn pr_seen_remove_if(&self, p: &PrSeen) -> Result<bool> {
+        let data = serde_json::to_string(p)?;
+        let sql = "DELETE FROM pr_seen WHERE repo = ?1 AND pr = ?2 AND data = ?3";
+        Ok(self.with(|c| c.execute(sql, params![p.repo, p.pr as i64, data]))? > 0)
+    }
+
+    pub fn pr_seen_swap(&self, old: Option<&PrSeen>, new: &PrSeen) -> Result<bool> {
+        let data = serde_json::to_string(new)?;
+        let n = match old {
+            None => self.with(|c| {
+                c.execute(
+                    "INSERT OR IGNORE INTO pr_seen (repo, pr, data) VALUES (?1, ?2, ?3)",
+                    params![new.repo, new.pr as i64, data],
+                )
+            })?,
+            Some(o) => {
+                let was = serde_json::to_string(o)?;
+                self.with(|c| {
+                    c.execute(
+                        "UPDATE pr_seen SET data = ?3 WHERE repo = ?1 AND pr = ?2 AND data = ?4",
+                        params![new.repo, new.pr as i64, data, was],
+                    )
+                })?
+            }
+        };
+        Ok(n > 0)
     }
 
     pub fn msg_new(&self, from: &str, to: &str, kind: &str, body: &str, at: &str) -> Result<String> {

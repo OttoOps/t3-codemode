@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::board::gh_name;
 use crate::github::errors;
-use crate::store::MergeWait;
+use crate::store::{MergeWait, PrSeen};
 use crate::wf::Wf;
 
 pub const MERGEABLE: &[&str] = &["CLEAN", "HAS_HOOKS", "UNSTABLE"];
@@ -16,7 +16,9 @@ const UNKNOWN_WAIT: Duration = Duration::from_secs(1);
 
 pub const READ_PR: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { \
 viewerDefaultMergeMethod pullRequest(number: $number) { id state isDraft headRefOid mergeStateStatus \
-isMergeQueueEnabled isInMergeQueue mergeQueueEntry { position } mergeCommit { oid } } } }";
+isMergeQueueEnabled isInMergeQueue mergeQueueEntry { position } mergeCommit { oid } \
+timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) { nodes { ... on RemovedFromMergeQueueEvent { \
+createdAt } } } } } }";
 pub const ENQUEUE_PR: &str = "mutation($id: ID!, $head: GitObjectID!) { enqueuePullRequest(input: { \
 pullRequestId: $id, expectedHeadOid: $head }) { mergeQueueEntry { position } } }";
 pub const MERGE_PR: &str = "mutation($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!) { \
@@ -26,10 +28,10 @@ pullRequest { mergeCommit { oid } } } }";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MergeArgs {
-    repo: String,
-    pr: u64,
-    head: String,
-    method: Option<String>,
+    pub(crate) repo: String,
+    pub(crate) pr: u64,
+    pub(crate) head: String,
+    pub(crate) method: Option<String>,
 }
 
 struct Outcome {
@@ -73,6 +75,13 @@ impl Wf {
         };
         let out = Outcome { repo: format!("{owner}/{name}").to_ascii_lowercase(), pr: a.pr, head: head.clone() };
 
+        let waiting = self.store.merge_wait_get(&out.repo, out.pr)?;
+        let done_waiting = || -> Result<()> {
+            if let Some(w) = &waiting {
+                self.store.merge_wait_remove_if(w)?;
+            }
+            Ok(())
+        };
         let mut read = Value::Null;
         for attempt in 0..UNKNOWN_READS {
             if attempt > 0 {
@@ -93,12 +102,24 @@ impl Wf {
             return Ok(out.refused(format!("{}#{} is not a pull request", out.repo, out.pr)));
         }
         let now = pr["headRefOid"].as_str().unwrap_or_default().to_ascii_lowercase();
+        let removed_at = pr["timelineItems"]["nodes"][0]["createdAt"].as_str().map(String::from);
+        let seen = |state: &str, head: &str, queued: bool| PrSeen {
+            repo: out.repo.clone(),
+            pr: out.pr,
+            state: state.into(),
+            head: head.into(),
+            queued,
+            removed_at: removed_at.clone(),
+            thread: caller.map(String::from),
+            ..PrSeen::default()
+        };
         match pr["state"].as_str() {
             Some("MERGED") => {
                 self.store.merge_wait_remove(&out.repo, out.pr)?;
                 if now != head {
                     return Ok(out.refused(format!("already merged, at head {now}")));
                 }
+                self.note_seen(seen("MERGED", &now, false))?;
                 return Ok(out.with("merged", json!({"commit": pr["mergeCommit"]["oid"]})));
             }
             Some("OPEN") => {}
@@ -118,7 +139,8 @@ impl Wf {
 
         if pr["isMergeQueueEnabled"] == true {
             if pr["isInMergeQueue"] == true {
-                self.store.merge_wait_remove(&out.repo, out.pr)?;
+                done_waiting()?;
+                self.note_seen(seen("OPEN", &head, true))?;
                 return Ok(out.with("queued", json!({"position": pr["mergeQueueEntry"]["position"]})));
             }
             if !mergeable {
@@ -143,7 +165,8 @@ impl Wf {
             if let Some(e) = errors(&r) {
                 return Ok(out.refused(e));
             }
-            self.store.merge_wait_remove(&out.repo, out.pr)?;
+            done_waiting()?;
+            self.note_seen(seen("OPEN", &head, true))?;
             let position = &r["data"]["enqueuePullRequest"]["mergeQueueEntry"]["position"];
             return Ok(out.with("queued", json!({"position": position})));
         }
@@ -158,7 +181,8 @@ impl Wf {
         if let Some(e) = errors(&r) {
             return Ok(out.refused(e));
         }
-        self.store.merge_wait_remove(&out.repo, out.pr)?;
+        done_waiting()?;
+        self.note_seen(seen("MERGED", &head, false))?;
         let commit = &r["data"]["mergePullRequest"]["pullRequest"]["mergeCommit"]["oid"];
         Ok(out.with("merged", json!({"commit": commit, "method": method.to_lowercase()})))
     }

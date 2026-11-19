@@ -216,6 +216,7 @@ pub struct Wf {
     pub(crate) changes: tokio::sync::broadcast::Sender<()>,
     pub(crate) asks_lock: tokio::sync::Mutex<()>,
     pub(crate) pool_lock: tokio::sync::Mutex<()>,
+    pub(crate) reconcile_lock: tokio::sync::Mutex<()>,
 }
 
 const MAX_PR_PAGES: usize = 20;
@@ -256,6 +257,7 @@ impl Wf {
             changes: tokio::sync::broadcast::channel(64).0,
             asks_lock: tokio::sync::Mutex::new(()),
             pool_lock: tokio::sync::Mutex::new(()),
+            reconcile_lock: tokio::sync::Mutex::new(()),
         }
     }
 

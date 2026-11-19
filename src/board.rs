@@ -408,6 +408,7 @@ impl Wf {
         let v = json!({
             "status": th["status"], "asks": count(&th["pendingRequestCount"]), "link": th["link"],
             "pr": pr_of(th), "title": th["title"], "prStale": th["pullRequestsStale"] == true,
+            "prs": th["pullRequests"].as_array().map(|a| a.iter().filter_map(|p| p["url"].as_str()).collect::<Vec<_>>()),
             "project": th["projectId"],
         });
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
@@ -751,7 +752,7 @@ impl Wf {
             .msgs_recent(FEED_KINDS, &to, limit.clamp(1, 200))?
             .into_iter()
             .map(|m| {
-                let ticket = ticket_of(&m.from);
+                let ticket = ticket_of(&m.from).or_else(|| ticket_of(&m.to));
                 let parent = ticket.as_deref().map(|t| {
                     let live = self.live_of(t);
                     let status = if done.iter().any(|d| d == t) { "done" } else { chip(live.as_ref()) };
@@ -1134,6 +1135,11 @@ impl Wf {
             }
         }
         self.check_asks(None).await?;
+        match self.reconcile_if_due().await {
+            Ok(a) if !a.is_empty() => tracing::info!(actions = ?a, "github reconcile"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("github reconcile failed: {e:#}"),
+        }
         self.mirror_t3_settles().await?;
         if let Err(e) = self.learn_projects().await {
             tracing::debug!("board projects not refreshed: {e:#}");
@@ -1297,7 +1303,7 @@ impl Wf {
             "thread": ln.child, "label": ln.label, "status": status, "t3Status": live["status"],
             "gate": if ln.closed { None } else { ln.gate.clone() },
             "link": web_link(ln.link.clone().or_else(|| live["link"].as_str().map(String::from))),
-            "pr": live["pr"], "done": ln.closed, "closedHow": ln.closed_how, "lastUp": local_clock(&ln.last_up),
+            "pr": self.pr_view(&live["pr"]), "done": ln.closed, "closedHow": ln.closed_how, "lastUp": local_clock(&ln.last_up),
             "upAt": ln.last_up,
         })
     }
