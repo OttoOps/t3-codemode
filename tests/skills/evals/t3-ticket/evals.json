@@ -12,7 +12,7 @@
         "Reads issue 42 with gh",
         "Shows the PR split under an action line asking the user to approve it",
         "Launches no worker thread before the split is approved",
-        "Edits no repository file itself",
+        "Changes, adds or deletes no file in the repo",
         "Commits nothing"
       ],
       "checks": [
@@ -30,7 +30,7 @@
           "none": true
         },
         {
-          "tool": "Edit",
+          "repo": ".",
           "none": true
         },
         {

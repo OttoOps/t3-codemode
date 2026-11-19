@@ -12,6 +12,7 @@ CLAUDE_CODE_OAUTH_TOKEN in the environment.
 """
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import multiprocessing
 import os
@@ -43,7 +44,7 @@ RUNTIME_NOTE = ("<runtime_info>You are running in T3 Code through the Claude Cod
                 "No need to mention this otherwise.</runtime_info>\n")
 ALLOW = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "ToolSearch", "mcp__t3-code"]
 DENY = ["WebFetch", "WebSearch", "AskUserQuestion"]
-CHECK_KINDS = ("tool", "bash", "text", "file", "gh", "t3")
+CHECK_KINDS = ("tool", "bash", "text", "file", "gh", "t3", "repo")
 LINK_HEADING = "## t3-workflow link"
 BRIEF_TOOLS = 8
 REAL_HOME = os.path.expanduser("~")
@@ -145,6 +146,7 @@ class Sandbox:
                       "env": {"T3_STUB_LOG": str(self.t3_log), "T3_STUB_FIXTURE": str(self.root / "t3.json")}}
             (self.repo / ".mcp.json").write_text(json.dumps({"mcpServers": {"t3-code": server}}))
             (self.repo / ".git" / "info" / "exclude").write_text(".mcp.json\n")
+        (self.root / "repo-base.json").write_text(json.dumps(repo_snapshot(self.repo)))
 
     def _t3(self):
         replies = {"t3_worktree_status": {"attached": False, "projectWorkspaceRoot": str(self.repo),
@@ -343,6 +345,29 @@ def transcript_facts(lines):
     return {"uses": uses, "text": text, "cost": cost, "turns": turns, "completed": completed}
 
 
+def repo_snapshot(repo):
+    snap = {}
+    for path in sorted(pathlib.Path(repo).rglob("*")):
+        rel = path.relative_to(repo).as_posix()
+        if rel == ".git" or rel.startswith(".git/") or (path.is_dir() and not path.is_symlink()):
+            continue
+        if path.is_symlink():
+            data = b"link:" + os.readlink(path).encode()
+        else:
+            data = path.read_bytes() if path.is_file() else b"special"
+        snap[rel] = hashlib.sha256(data).hexdigest()
+    return snap
+
+
+def repo_changes(box_root):
+    base_file = box_root / "repo-base.json"
+    if not base_file.exists():
+        return ["repo-base.json is missing"]
+    base = json.loads(base_file.read_text())
+    now = repo_snapshot(box_root / "repo")
+    return sorted(p for p in base.keys() | now.keys() if base.get(p) != now.get(p))
+
+
 def read_jsonl(path):
     p = pathlib.Path(path)
     return [json.loads(line) for line in p.read_text().splitlines() if line.strip()] if p.exists() else []
@@ -370,6 +395,8 @@ def count_hits(check, facts, box_root):
     if kind == "t3":
         return sum(1 for c in read_jsonl(box_root / "t3-calls.jsonl")
                    if c["tool"] == check["t3"] and (want is None or matches(want, c["input"])))
+    if kind == "repo":
+        return sum(1 for p in repo_changes(box_root) if matches(check["repo"], p))
     path = box_root / "repo" / check["file"]
     if "contains" not in check:
         return int(path.exists())
