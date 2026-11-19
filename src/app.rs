@@ -485,6 +485,7 @@ impl App {
             },
             "store": self.store.path().display().to_string(),
             "upstreams": self.upstreams.status(),
+            "update": self.wf.update_view(),
         })
     }
 

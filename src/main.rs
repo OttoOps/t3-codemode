@@ -10,12 +10,18 @@ use t3_codemode::app::App;
 use t3_codemode::catalog::Catalog;
 use t3_codemode::clock::{SystemClock, local_datetime, parse_ts};
 use t3_codemode::config::{self, Config};
+use t3_codemode::release::{self, Version};
 use t3_codemode::store::Store;
 use t3_codemode::t3_http::HttpT3;
-use t3_codemode::{bench, platform, server, watcher};
+use t3_codemode::{bench, platform, server, upgrade, watcher};
 
 #[derive(Parser)]
-#[command(name = "t3cm", version, about = "Code Mode MCP server for T3 Code: two tools, search and execute")]
+#[command(
+    name = "t3cm",
+    version,
+    about = "Code Mode MCP server for T3 Code: two tools, search and execute",
+    arg_required_else_help = true
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -83,6 +89,23 @@ enum Cmd {
         file: String,
         #[command(flatten)]
         port: PortArgs,
+    },
+    /// Install the latest release in place and restart the service on it
+    #[command(visible_alias = "upgrade")]
+    Update {
+        /// Only report whether a newer release is out
+        #[arg(long)]
+        check: bool,
+        /// Install this release instead of the latest (vX.Y.Z)
+        #[arg(long = "version", value_name = "vX.Y.Z", conflicts_with = "check")]
+        tag: Option<String>,
+        /// Replace the binary but leave the running service alone
+        #[arg(long)]
+        no_restart: bool,
+        #[command(flatten)]
+        port: PortArgs,
+        #[command(flatten)]
+        state: StateArgs,
     },
     /// Print the generated TypeScript declarations for the catalog
     Types {
@@ -204,6 +227,59 @@ async fn os_shutdown() {
     }
 }
 
+fn update_check_allowed() -> bool {
+    !release::check_disabled(Config::load(&config::default_path()).map(|c| c.update_check).unwrap_or(true))
+}
+
+async fn print_update_notice() {
+    if !std::io::IsTerminal::is_terminal(&std::io::stderr()) || !update_check_allowed() {
+        return;
+    }
+    let Ok(releases) = release::releases_url() else { return };
+    let dir = std::env::var_os("T3CM_STATE_DIR").filter(|d| !d.is_empty()).map(PathBuf::from);
+    let dir = dir.unwrap_or_else(platform::state_dir);
+    let check = release::known_latest(&dir, &releases, release::CLI_FRESH);
+    let Ok(Some(latest)) = tokio::time::timeout(std::time::Duration::from_secs(3), check).await else { return };
+    if let Some(n) = release::notice(&Version::current(), &latest, &releases) {
+        eprintln!("\n{n}");
+    }
+}
+
+fn spawn_release_checks(app: Arc<App>, state_dir: PathBuf) {
+    if !app.config.update_check || release::check_disabled(true) {
+        return;
+    }
+    tokio::spawn(async move {
+        let Ok(releases) = release::releases_url() else { return };
+        let every = release::SERVICE_EVERY;
+        let mut wait = std::time::Duration::from_secs(5);
+        if let Some(c) = release::read_cache(&state_dir)
+            && let Some(v) = c.version()
+        {
+            app.wf.set_release(v);
+            if let Some(age) = c.age().and_then(|a| a.try_into().ok()) {
+                wait = every.saturating_sub(age).max(wait);
+            }
+        }
+        loop {
+            tokio::time::sleep(wait).await;
+            wait = every;
+            match release::latest(&releases).await {
+                Ok(v) => {
+                    if let Err(e) = release::write_cache(&state_dir, &release::Checked::now(&v)) {
+                        tracing::debug!("update check cache: {e:#}");
+                    }
+                    if v > Version::current() {
+                        tracing::info!(latest = %v, "a newer t3cm release is out; run `t3cm update`");
+                    }
+                    app.wf.set_release(v);
+                }
+                Err(e) => tracing::debug!("update check: {e:#}"),
+            }
+        }
+    });
+}
+
 async fn shutdown_signal() {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},
@@ -250,6 +326,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 server::bind(port.port).await.with_context(|| format!("binding 127.0.0.1:{}", port.port))?;
             tracing::info!(%addr, store = %app.store.path().display(), "t3-codemode serving MCP at /mcp");
             tokio::spawn(warm_up(app.clone(), t3));
+            spawn_release_checks(app.clone(), state_dir(&state));
             if !no_watcher {
                 watcher::spawn(app.clone());
             }
@@ -328,6 +405,16 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 raw / 4
             );
         }
+        Cmd::Update { check, tag, no_restart, port, state } => {
+            upgrade::run(upgrade::Opts {
+                check,
+                tag,
+                port: port.port,
+                restart: !no_restart,
+                state_dir: state_dir(&state),
+            })
+            .await?;
+        }
         Cmd::Bench { n, tools } => bench::run(n, tools.as_deref()).await?,
     }
     Ok(ExitCode::SUCCESS)
@@ -335,7 +422,24 @@ async fn run(cli: Cli) -> Result<ExitCode> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match run(Cli::parse()).await {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            use clap::error::ErrorKind;
+            let shown = matches!(
+                e.kind(),
+                ErrorKind::DisplayHelp
+                    | ErrorKind::DisplayVersion
+                    | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            );
+            let _ = e.print();
+            if shown {
+                print_update_notice().await;
+            }
+            return ExitCode::from(u8::try_from(e.exit_code()).unwrap_or(2));
+        }
+    };
+    match run(cli).await {
         Ok(code) => code,
         Err(e) => {
             if LOGS_TO_FILE.load(std::sync::atomic::Ordering::Relaxed) {

@@ -220,6 +220,7 @@ pub struct Wf {
     pub(crate) pool_lock: tokio::sync::Mutex<()>,
     pub(crate) reconcile_lock: tokio::sync::Mutex<()>,
     pub(crate) usage: Mutex<Option<Arc<dyn UsageSource>>>,
+    pub(crate) release: Mutex<Option<crate::release::Version>>,
 }
 
 const MAX_PR_PAGES: usize = 20;
@@ -265,6 +266,7 @@ impl Wf {
             pool_lock: tokio::sync::Mutex::new(()),
             reconcile_lock: tokio::sync::Mutex::new(()),
             usage: Mutex::new(None),
+            release: Mutex::new(None),
         }
     }
 

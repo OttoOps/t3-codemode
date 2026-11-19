@@ -418,6 +418,21 @@ impl Wf {
         self.changes.subscribe()
     }
 
+    pub fn set_release(&self, latest: crate::release::Version) {
+        let mut slot = self.release.lock().unwrap();
+        if slot.as_ref() != Some(&latest) {
+            *slot = Some(latest);
+            drop(slot);
+            self.changed();
+        }
+    }
+
+    pub fn update_view(&self) -> Value {
+        let latest = self.release.lock().unwrap().clone();
+        let releases = crate::release::releases_url().unwrap_or_else(|_| crate::release::RELEASES.to_string());
+        crate::release::view(&crate::release::Version::current(), latest.as_ref(), &releases)
+    }
+
     pub(crate) fn note_live(&self, id: &str, th: &Value) {
         let v = json!({
             "status": th["status"], "asks": count(&th["pendingRequestCount"]), "link": th["link"],
@@ -1446,6 +1461,7 @@ impl Wf {
                 "tokenExpiresAt": t3.token_expires_at.as_deref().map(local_clock_date),
                 "watcher": {"lastPass": last.as_deref().map(local_clock), "lastPassAt": last, "alive": self.watcher_alive()},
                 "openLinks": self.config.board.open_links,
+                "update": self.update_view(),
             },
         }))
     }

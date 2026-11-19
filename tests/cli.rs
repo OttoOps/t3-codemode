@@ -17,6 +17,7 @@ fn t3cm(home: &std::path::Path) -> Command {
     cmd.env("T3CODE_HOME", home)
         .env("T3CM_T3_BIN", home.join("no-t3"))
         .env("T3CM_CONFIG", home.join("none.json"))
+        .env("T3CM_NO_UPDATE_CHECK", "1")
         .env("RUST_LOG", "info");
     cmd
 }
