@@ -101,6 +101,16 @@ parent and a child, and the service keeps every link and message in its store.
   `wf.adopt` and `wf.sweep` cover the rest of a link's life.
 - `wf.launchTicket`, `wf.cards`, `wf.answer` and `wf.feed` work with the
   [board](board.md).
+- `wf.pick({ pool })` picks a member of a configured [pool](config.md#pools)
+  for one launch and returns `{ pool, instanceId, model, options, reason,
+  skipped, modelSelection }`. Pass `modelSelection` to `t3_thread_launch`.
+  `reason` says why that member, and `skipped` lists each member left out with
+  its reason, such as `limited until 14:00 MST`. The service records each pick.
+  When no member can run, it throws and names the pool.
+- `wf.pools()` lists each pool's members with `state` (`ready`, `limited`,
+  `disabled`, `constrained`, `missing-model`, `missing-effort`, or `unknown`
+  when T3 did not answer), `reason`, `limitedUntil` and `limitedUntilLocal`, `running` threads,
+  `picks` and `lastPick`.
 - `wf.waiting.add`, `wf.waiting.resolve` and `wf.waiting.list` keep an overseer
   thread's waiting list.
 - `wf.merge({repo, pr, head, method?})` merges a GitHub pull request at the
@@ -127,6 +137,13 @@ when it is idle, held at most `maxHoldMinutes` (30). A watcher task runs every
 `watcherIntervalSecs` (60 s): it nudges idle children, reports stalls and
 pending requests once, escalates after repeated misses, and closes links whose
 thread was deleted or archived.
+
+```js
+async () => {
+  const p = await wf.pick({ pool: "opus" });
+  return t3.thread_launch({ projectId, title, message, modelSelection: p.modelSelection });
+}
+```
 
 ### wf.merge
 
