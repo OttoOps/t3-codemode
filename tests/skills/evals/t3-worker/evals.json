@@ -57,16 +57,16 @@
       "expected_output": "Builds the change, then runs the configured slash-only unslop pass inline by reading its SKILL.md, and opens the PR with the pass applied to the description.",
       "files": [],
       "expectations": [
-        "Builds the change the brief asks for",
+        "Builds the change the brief asks for: shout('a') returns 'WIDGET A'",
         "Reads the slash-only unslop skill's SKILL.md",
         "Never calls the Skill tool for unslop",
-        "Opens the PR with the unslop pass applied to the description",
+        "Opens the PR with the unslop pass's closing line on the description",
+        "Opens the PR with none of the words the unslop pass deletes",
         "Reports the opened PR to the orchestrator over the link"
       ],
       "checks": [
         {
-          "file": "widgets.py",
-          "contains": "def shout\\("
+          "run": "python3 -c \"import widgets; assert widgets.shout('a') == 'WIDGET A'\""
         },
         {
           "tool": "*",
@@ -79,7 +79,12 @@
         },
         {
           "gh": "pr create",
-          "input": "Unslopped: 2 rules applied"
+          "input": "Unslopped: 2 rules applied\\.\\s*$"
+        },
+        {
+          "gh": "pr create",
+          "input": "seamless|robust",
+          "none": true
         },
         {
           "bash": "t3wf\\.py.*send.*opened"

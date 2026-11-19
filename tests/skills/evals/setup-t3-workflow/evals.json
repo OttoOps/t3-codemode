@@ -23,7 +23,7 @@
           "text": "model worker"
         },
         {
-          "text": "review"
+          "text": "\\A[^?]*review[^?]{0,400}\\?"
         },
         {
           "bash": "setup_workflow\\.py.*write",
@@ -31,7 +31,6 @@
         },
         {
           "file": "../config/t3-workflow/config.json",
-          "contains": ".",
           "none": true
         },
         {

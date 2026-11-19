@@ -28,6 +28,8 @@ import time
 import uuid
 
 HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import guard_hook  # noqa: E402
 ROOT = HERE.parents[2]
 SKILLS = ROOT / "skills"
 T3WF = SKILLS / "t3-workflow" / "scripts" / "t3wf.py"
@@ -41,12 +43,10 @@ RUNTIME_NOTE = ("<runtime_info>You are running in T3 Code through the Claude Cod
                 "No need to mention this otherwise.</runtime_info>\n")
 ALLOW = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "ToolSearch", "mcp__t3-code"]
 DENY = ["WebFetch", "WebSearch", "AskUserQuestion"]
-CHECK_KINDS = ("tool", "bash", "text", "file", "gh", "t3")
+CHECK_KINDS = ("tool", "bash", "text", "file", "gh", "t3", "run")
 LINK_HEADING = "## t3-workflow link"
 BRIEF_TOOLS = 8
 REAL_HOME = os.path.expanduser("~")
-ESCAPES = [re.escape(os.path.join(REAL_HOME, d)) for d in (".claude", ".agents", ".codex", ".t3")]
-ESCAPE = re.compile("|".join([*ESCAPES, r"(?:127\.0\.0\.1|localhost):\d+"]))
 
 
 def skill_names():
@@ -94,7 +94,9 @@ class Sandbox:
         self.link_block = self._link() if self.setup.get("link") else ""
 
     def _settings(self):
-        settings = {"permissions": {"allow": ALLOW, "deny": DENY}, "enableAllProjectMcpServers": True}
+        guard = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'guard_hook.py'))} {shlex.quote(REAL_HOME)}"
+        settings = {"permissions": {"allow": ALLOW, "deny": DENY}, "enableAllProjectMcpServers": True,
+                    "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": guard}]}]}}
         (self.home / ".claude" / "settings.json").write_text(json.dumps(settings))
         if self.t3:
             (self.home / ".claude" / "CLAUDE.md").write_text(RUNTIME_NOTE)
@@ -233,14 +235,24 @@ def run_until_skill(query, skill_name, description, timeout, project, model, max
                 if seen >= max_tools:
                     return False
             if '"type":"result"' in line.replace(" ", ""):
-                return False
-        return False
+                return False if facts["completed"] else None
+        return None
     finally:
         timer.cancel()
         if proc.poll() is None:
             proc.kill()
             proc.wait()
         command.unlink(missing_ok=True)
+
+
+def preflight(root, model):
+    """One plain run in a sandbox first: an auth or CLI failure would otherwise read as every query not firing."""
+    box = Sandbox(root, t3=False)
+    r = subprocess.run([str(box.bin / "claude"), "-p", "Reply with the word ready.", "--model", model,
+                        "--output-format", "stream-json", "--verbose"], cwd=box.repo, env=box.environ(),
+                       stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+    if not transcript_facts(r.stdout.splitlines())["completed"]:
+        sys.exit(f"claude did not complete a plain run in the sandbox: {r.stderr.strip()[-500:]}")
 
 
 def one_trigger(job):
@@ -251,8 +263,10 @@ def one_trigger(job):
     os.environ.clear()
     os.environ.update(job["env"])
     detect = run_until_skill if LINK_HEADING in job["query"] else run_single_query
+    start = time.time()
     try:
-        return detect(job["query"], job["name"], job["description"], job["timeout"], job["project"], job["model"])
+        fired = detect(job["query"], job["name"], job["description"], job["timeout"], job["project"], job["model"])
+        return None if fired is False and time.time() - start >= job["timeout"] else fired
     except Exception as e:
         print(f"query failed: {e}", file=sys.stderr)
         return None
@@ -281,6 +295,7 @@ def run_triggers(args):
                 jobs.append({"skill": skill, "index": i, "item": item, "query": item["query"], "name": name,
                              "description": description, "timeout": args.timeout, "project": str(box.repo),
                              "model": args.model, "env": env})
+    preflight(out / "preflight", args.model)
     ctx = multiprocessing.get_context("fork")
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers, mp_context=ctx) as pool:
         fired = list(pool.map(one_trigger, jobs))
@@ -312,7 +327,7 @@ def run_triggers(args):
 
 
 def transcript_facts(lines):
-    uses, text, cost, turns = [], "", None, None
+    uses, text, cost, turns, completed = [], "", None, None, False
     for line in lines:
         try:
             e = json.loads(line)
@@ -324,7 +339,8 @@ def transcript_facts(lines):
                     uses.append({"name": c["name"], "input": c.get("input", {})})
         elif e.get("type") == "result":
             text, cost, turns = e.get("result") or "", e.get("total_cost_usd"), e.get("num_turns")
-    return {"uses": uses, "text": text, "cost": cost, "turns": turns}
+            completed = e.get("subtype") == "error_max_turns" or not e.get("is_error")
+    return {"uses": uses, "text": text, "cost": cost, "turns": turns, "completed": completed}
 
 
 def read_jsonl(path):
@@ -354,7 +370,13 @@ def count_hits(check, facts, box_root):
     if kind == "t3":
         return sum(1 for c in read_jsonl(box_root / "t3-calls.jsonl")
                    if c["tool"] == check["t3"] and (want is None or matches(want, c["input"])))
+    if kind == "run":
+        r = subprocess.run(check["run"], shell=True, cwd=box_root / "repo", capture_output=True, text=True,
+                           timeout=60, env={"PATH": "/usr/bin:/bin", "HOME": str(box_root / "home")})
+        return int(r.returncode == 0)
     path = box_root / "repo" / check["file"]
+    if "contains" not in check:
+        return int(path.exists())
     return int(path.exists() and matches(check["contains"], path.read_text()))
 
 
@@ -381,12 +403,11 @@ def behave(ev, skill, mode, out, args):
     facts = transcript_facts(stream.splitlines())
     return {"checks": [check_passes(c, facts, root) for c in ev["checks"]], "cost_usd": facts["cost"],
             "turns": facts["turns"], "seconds": None if args.rescore else round(time.time() - t),
-            "completed": facts["turns"] is not None, "escapes": escapes(facts), "sandbox": str(root)}
+            "completed": facts["completed"], "blocked": blocked_calls(facts), "sandbox": str(root)}
 
 
-def escapes(facts):
-    """Tool calls that named the real home's agent folders or a local server: the run left its sandbox."""
-    return [u for u in facts["uses"] if ESCAPE.search(json.dumps(u["input"]))]
+def blocked_calls(facts):
+    return [u for u in facts["uses"] if guard_hook.blocked(u["input"], REAL_HOME)]
 
 
 def run_behavior(args):
@@ -403,7 +424,7 @@ def run_behavior(args):
                 continue
             runs = {mode: behave(ev, skill, mode, out, args) for mode in ("with_skill", "without_skill")}
             w, wo = runs["with_skill"]["checks"], runs["without_skill"]["checks"]
-            valid = all(r["completed"] and not r["escapes"] for r in runs.values())
+            valid = all(r["completed"] for r in runs.values())
             row = {"skill": skill, "id": ev["id"], "name": ev["name"], "runs": runs, "valid": valid,
                    "pass": valid and all(w) and not all(wo),
                    "expectations": [{"text": x, "with_skill": a, "without_skill": b}

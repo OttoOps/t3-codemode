@@ -153,6 +153,9 @@ class SandboxHarness(unittest.TestCase):
         settings = json.loads((without.home / ".claude" / "settings.json").read_text())
         self.assertIn("mcp__t3-code", settings["permissions"]["allow"])
         self.assertIn("WebFetch", settings["permissions"]["deny"])
+        hook = settings["hooks"]["PreToolUse"][0]
+        self.assertEqual(hook["matcher"], "*")
+        self.assertIn("guard_hook.py", hook["hooks"][0]["command"])
 
     def test_gh_answers_from_fixtures_and_logs(self):
         box = self.box(setup={"issues": {"42": {"number": 42, "title": "Quiet flag"}}})
@@ -260,6 +263,10 @@ class Checks(unittest.TestCase):
         self.assertTrue(self.passes({"file": "out.md", "contains": "Unslopped"}))
         self.assertFalse(self.passes({"gh": "pr create", "input": "robust"}))
         self.assertFalse(self.passes({"file": "missing.md", "contains": "x"}))
+        self.assertTrue(self.passes({"file": "out.md"}))
+        self.assertTrue(self.passes({"file": "missing.md", "none": True}))
+        self.assertTrue(self.passes({"run": "grep -q Unslopped out.md"}))
+        self.assertFalse(self.passes({"run": "grep -q robust out.md"}))
 
     def test_rescore_reads_saved_transcripts_without_a_model(self):
         ev = live.load("setup-t3-workflow", "evals")["evals"][0]
@@ -287,12 +294,20 @@ class Checks(unittest.TestCase):
                               "--rescore", str(out)])
         self.assertEqual(code, 1, "a control run that never finished must not count as a difference")
 
-    def test_a_tool_call_into_the_real_home_or_a_local_server_is_an_escape(self):
+    def test_the_guard_hook_refuses_the_real_home_local_servers_and_network_clients(self):
+        hook = live.HERE / "guard_hook.py"
         real = os.path.join(live.REAL_HOME, ".claude", "settings.json")
-        uses = [{"name": "Bash", "input": {"command": f"cat {real}"}},
-                {"name": "Bash", "input": {"command": "curl -s http://127.0.0.1:3773/mcp"}},
-                {"name": "Read", "input": {"file_path": str(self.root / "home" / ".claude" / "x")}}]
-        self.assertEqual(live.escapes({"uses": uses}), uses[:2])
+        cases = [({"command": f"cat {real}"}, 2),
+                 ({"command": "curl -s http://127.0.0.1:3773/mcp"}, 2),
+                 ({"command": "wget https://example.com"}, 2),
+                 ({"file_path": str(self.root / "home" / ".claude" / "x")}, 0),
+                 ({"url": "https://github.com/acme/widgets/pull/101"}, 0)]
+        for tool_input, code in cases:
+            r = subprocess.run([sys.executable, str(hook), live.REAL_HOME], capture_output=True, text=True,
+                               input=json.dumps({"tool_name": "Bash", "tool_input": tool_input}))
+            self.assertEqual(r.returncode, code, tool_input)
+        facts = {"uses": [{"name": "Bash", "input": cases[0][0]}, {"name": "Read", "input": cases[3][0]}]}
+        self.assertEqual(live.blocked_calls(facts), facts["uses"][:1])
 
     def test_skill_creator_must_be_named(self):
         with mock.patch.dict(os.environ, {}, clear=True), contextlib.redirect_stderr(io.StringIO()):
