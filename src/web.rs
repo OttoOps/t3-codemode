@@ -125,13 +125,20 @@ async fn events(State(web): State<Web>, headers: HeaderMap) -> Response {
         return r;
     }
     let rx = web.app.wf.subscribe();
-    let s = stream::unfold((web.app.clone(), rx, None::<String>), |(app, mut rx, last)| async move {
+    let stop = web.app.stopping.subscribe();
+    let s = stream::unfold((web.app.clone(), rx, stop, None::<String>), |(app, mut rx, mut stop, last)| async move {
         let mut wait = last.is_some();
         loop {
+            if *stop.borrow() {
+                return None;
+            }
             if wait {
-                match rx.recv().await {
-                    Ok(()) | Err(RecvError::Lagged(_)) => {}
-                    Err(RecvError::Closed) => return None,
+                tokio::select! {
+                    r = rx.recv() => match r {
+                        Ok(()) | Err(RecvError::Lagged(_)) => {}
+                        Err(RecvError::Closed) => return None,
+                    },
+                    _ = stop.wait_for(|s| *s) => return None,
                 }
                 tokio::time::sleep(SETTLE).await;
                 while matches!(rx.try_recv(), Ok(()) | Err(TryRecvError::Lagged(_))) {}
@@ -146,7 +153,7 @@ async fn events(State(web): State<Web>, headers: HeaderMap) -> Response {
             };
             if last.as_deref() != Some(snap.as_str()) {
                 let ev = Event::default().event("state").data(snap.clone());
-                return Some((Ok::<_, Infallible>(ev), (app, rx, Some(snap))));
+                return Some((Ok::<_, Infallible>(ev), (app, rx, stop, Some(snap))));
             }
         }
     });

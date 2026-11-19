@@ -114,6 +114,11 @@ pub async fn serve(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let port = listener.local_addr()?.port();
+    let stopping = app.stopping.clone();
+    let shutdown = async move {
+        shutdown.await;
+        stopping.send_replace(true);
+    };
     axum::serve(listener, router(app, port)).with_graceful_shutdown(shutdown).await
 }
 
