@@ -94,7 +94,7 @@ async fn page(State(web): State<Web>, headers: HeaderMap) -> Response {
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (header::REFERRER_POLICY, "no-referrer"),
         ],
-        PAGE.replace("{{CSRF}}", &web.app.csrf),
+        PAGE.replace("{{CSRF}}", &web.app.csrf).replace("{{VERSION}}", env!("CARGO_PKG_VERSION")),
     )
         .into_response()
 }

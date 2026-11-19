@@ -166,6 +166,11 @@ textarea { resize: none; display: block; }
 .counts b { color: var(--ink); font-weight: 600; }
 .counts .needc { display: inline-flex; align-items: center; gap: 8px; color: var(--ink); font-weight: 600; }
 .top .tools { display: flex; gap: 8px; }
+.upd { position: relative; }
+.upd[hidden], .upd-pop[hidden] { display: none; }
+.upd-pop { left: auto; right: 0; width: 300px; gap: 8px; font-size: 13px; line-height: 18px; }
+.upd-pop code { display: block; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; user-select: all; }
+#upd-hide { justify-content: flex-start; }
 
 .fbar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0;
@@ -451,6 +456,9 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .fbar { position: relative; }
   .facet { position: static; }
   .fpop { left: 12px; right: 12px; width: auto; top: calc(100% - 4px); }
+  .top { position: relative; }
+  .upd { position: static; }
+  .upd-pop { top: calc(100% + 4px); }
   .top { gap: 8px; padding: 0 12px; }
   .counts .runc, #keys-btn, .conn .facts, .needc .w, .tools .btn .w { display: none !important; }
   .short { display: inline !important; }
@@ -536,6 +544,18 @@ kbd { font-family: var(--mono); font-size: 12px; }
   </div>
   <span class="counts num" id="counts"></span>
   <span class="tools">
+    <span class="upd" id="upd" hidden>
+      <button class="btn" type="button" id="upd-btn" aria-expanded="false" aria-controls="upd-pop"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M8 11V5M5.5 7.5 8 5l2.5 2.5"/></svg><span class="w" id="upd-text">Update</span></button>
+      <div class="fpop upd-pop" id="upd-pop" role="group" aria-label="t3cm update" hidden>
+        <p id="upd-msg"></p>
+        <code id="upd-cmd">t3cm update</code>
+        <div class="row">
+          <button class="btn" type="button" id="upd-copy">Copy command</button>
+          <a id="upd-notes" target="_blank" rel="noopener noreferrer">Release notes</a>
+        </div>
+        <button class="btn quiet" type="button" id="upd-hide">Hide until the next release</button>
+      </div>
+    </span>
     <button class="btn" type="button" id="notify" hidden><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 11V7a4 4 0 0 1 8 0v4l1 1.5H3z"/><path d="M6.5 14h3"/></svg><span class="w" id="notify-text">Notify me</span></button>
     <button class="btn" type="button" id="keys-btn" aria-haspopup="dialog"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4 7h1M7 7h2M11 7h1M5 9.5h6"/></svg><span class="w">Shortcuts</span></button>
   </span>
@@ -667,6 +687,10 @@ kbd { font-family: var(--mono); font-size: 12px; }
 <script>
 "use strict";
 const CSRF = "{{CSRF}}";
+const PAGE_VERSION = "{{VERSION}}";
+const UPD_KEY = "t3board.update.hidden";
+const upd = { hidden: "", announced: "", reload: false };
+try { upd.hidden = localStorage.getItem(UPD_KEY) || ""; } catch (_) {}
 const SEND_DELAY = 5000;
 const $ = (id) => document.getElementById(id);
 let state = null;
@@ -2610,6 +2634,78 @@ function paintService(s) {
   $("svc").title = tips.join(". ");
 }
 
+function paintUpdate(s) {
+  const u = s.service.update;
+  const reload = s.service.version !== PAGE_VERSION;
+  const offer = !reload && !!u && u.available && u.latest !== upd.hidden;
+  upd.reload = reload;
+  const wrap = $("upd");
+  wrap.hidden = !(reload || offer);
+  if (wrap.hidden) { closeUpd(false); return; }
+  const btn = $("upd-btn");
+  btn.classList.toggle("go", reload);
+  const label = reload ? "Reload for " + s.service.version : "Update to " + u.latest;
+  setText($("upd-text"), label);
+  setAttr(btn, "aria-label", label);
+  setAttr(btn, "aria-haspopup", reload ? null : "true");
+  setAttr(btn, "title", reload
+    ? "t3cm now runs " + s.service.version + "; this page came from " + PAGE_VERSION + ". Reload to get the new board."
+    : "t3cm " + u.latest + " is out; you run " + u.current + ".");
+  if (reload) { closeUpd(false); return; }
+  setText($("upd-msg"), "t3cm " + u.latest + " is out; you run " + u.current +
+    ". Run this in a terminal. The board reconnects by itself once the service restarts.");
+  setText($("upd-cmd"), u.command);
+  setAttr($("upd-notes"), "href", u.notes);
+  if (upd.announced !== u.latest) { upd.announced = u.latest; announce("t3cm " + u.latest + " is available."); }
+}
+
+function closeUpd(focus) {
+  const pop = $("upd-pop");
+  if (pop.hidden) return;
+  pop.hidden = true;
+  setAttr($("upd-btn"), "aria-expanded", "false");
+  if (focus) $("upd-btn").focus();
+}
+
+function initUpdate() {
+  const pop = $("upd-pop");
+  pop.hidden = true;
+  $("upd-btn").addEventListener("click", () => {
+    if (upd.reload) { location.reload(); return; }
+    if (!pop.hidden) { closeUpd(true); return; }
+    pop.hidden = false;
+    setAttr($("upd-btn"), "aria-expanded", "true");
+    $("upd-copy").focus();
+  });
+  pop.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeUpd(true);
+  });
+  $("upd-copy").addEventListener("click", async () => {
+    const b = $("upd-copy");
+    try {
+      await navigator.clipboard.writeText($("upd-cmd").textContent);
+      setText(b, "Copied");
+    } catch (_) {
+      const r = document.createRange && document.createRange();
+      if (r) { r.selectNodeContents($("upd-cmd")); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); }
+      setText(b, "Press Ctrl+C to copy");
+    }
+    setTimeout(() => setText(b, "Copy command"), 2000);
+  });
+  $("upd-hide").addEventListener("click", () => {
+    const u = state && state.service.update;
+    if (!u) return;
+    upd.hidden = u.latest;
+    try { localStorage.setItem(UPD_KEY, u.latest); } catch (_) {}
+    closeUpd(false);
+    paintUpdate(state);
+    announce("Hidden until a release after " + u.latest + ".");
+  });
+}
+
 function runningIn(tree) {
   let n = 0;
   for (const t of tree) {
@@ -2671,6 +2767,7 @@ function render(s) {
   setAttr(c, "aria-label", (filtering() ? v.cards.length + " of " + s.cards.length : s.cards.length) + " need you, " +
     (filtering() ? running + " of " + runAll : runAll) + " threads running");
   paintService(s);
+  paintUpdate(s);
   document.title = (s.counts.cards ? "(" + s.counts.cards + ") " : "") + "t3 board";
   firstState = false;
 }
@@ -2980,7 +3077,9 @@ function wire() {
   document.addEventListener("click", (e) => {
     for (const f of FACETS) if (!facetEl(f.key).contains(e.target)) closeFacet(f.key, false);
     if (!$("ctx").contains(e.target)) closeCtx(false);
+    if (!$("upd").contains(e.target)) closeUpd(false);
   });
+  initUpdate();
   $("settled-filter").addEventListener("input", () => {
     if (state) { panels.settled.filterChanged = true; syncSettled(state, true); }
   });
