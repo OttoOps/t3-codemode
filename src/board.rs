@@ -19,6 +19,7 @@ const SETTLED_SHOWN: usize = 200;
 const MAX_OPTIONS: usize = 8;
 const MAX_TEXT: usize = 2000;
 const ANSWER_CAP: usize = 1500;
+const PROJECT_RETRY_MINS: f64 = 30.0;
 
 pub trait Remotes: Send + Sync {
     fn origin<'a>(&'a self, root: &'a str) -> BoxFut<'a, Option<String>>;
@@ -388,7 +389,8 @@ impl Wf {
     }
 
     fn remember_project(&self, id: &str, title: &Value, repo: Option<String>) -> bool {
-        let v = json!({"title": title, "repo": repo});
+        let tried = repo.is_none().then(|| self.now());
+        let v = json!({"title": title, "repo": repo, "triedAt": tried});
         let mut known = self.known_projects.lock().unwrap_or_else(|e| e.into_inner());
         if known.get(id) == Some(&v) {
             return false;
@@ -464,23 +466,26 @@ impl Wf {
         );
         ids.sort();
         ids.dedup();
-        ids.retain(|i| self.known_project(i).is_none());
+        ids.retain(|i| match self.known_project(i) {
+            None => true,
+            Some(k) => k["repo"].is_null() && self.mins(k["triedAt"].as_str()).is_none_or(|m| m >= PROJECT_RETRY_MINS),
+        });
         if ids.is_empty() {
             return Ok(());
         }
         let mut changed = false;
+        let mut seen: Vec<String> = Vec::new();
         for p in self.project_list().await? {
             let Some(id) = p["id"].as_str().filter(|i| ids.iter().any(|w| w == i)) else { continue };
+            seen.push(id.to_string());
             let repo = match identity_repo(&p) {
                 Some(r) => Some(r),
                 None => self.origin_repo(&p).await,
             };
             changed |= self.remember_project(id, &p["title"], repo);
         }
-        for id in &ids {
-            if self.known_project(id).is_none() {
-                self.remember_project(id, &Value::Null, None);
-            }
+        for id in ids.iter().filter(|i| !seen.contains(i)) {
+            self.remember_project(id, &Value::Null, None);
         }
         if changed {
             self.changed();
