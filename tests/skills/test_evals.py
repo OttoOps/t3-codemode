@@ -95,7 +95,7 @@ class EvalSets(unittest.TestCase):
                     kinds = [k for k in live.CHECK_KINDS if k in check]
                     self.assertEqual(len(kinds), 1, check)
                     self.assertLessEqual(set(check) - {kinds[0]}, CHECK_EXTRAS, check)
-                    for key in ("input", "contains", *(k for k in ("bash", "text", "gh") if k in check)):
+                    for key in ("input", "contains", *(k for k in ("bash", "text", "gh", "repo") if k in check)):
                         if key in check:
                             re.compile(check[key])
                 if "{link_block}" in ev["prompt"]:
@@ -143,6 +143,7 @@ class SandboxHarness(unittest.TestCase):
         self.assertEqual(env["T3CODE_THREAD_ID"], live.SELF)
         self.assertEqual(env["GIT_ALLOW_PROTOCOL"], "file")
         self.assertFalse({"CLAUDE_CONFIG_DIR", "CODEX_HOME", "GH_TOKEN", "GITHUB_TOKEN"} & set(env))
+        self.assertEqual(live.repo_changes(box.root), [], "a fresh sandbox starts with a clean repo")
 
     def test_with_skill_installs_every_skill_and_without_installs_none(self):
         with_box = live.Sandbox(self.tmp / "with", skills=live.skill_names())
@@ -266,6 +267,24 @@ class Checks(unittest.TestCase):
         self.assertTrue(self.passes({"file": "out.md"}))
         self.assertTrue(self.passes({"file": "missing.md", "none": True}))
 
+    def test_the_repo_check_sees_files_changed_by_any_tool(self):
+        repo = self.root / "repo"
+        self.assertFalse(self.passes({"repo": ".", "none": True}), "no saved base must not pass as clean")
+        (self.root / "repo-base.json").write_text(json.dumps(live.repo_snapshot(repo)))
+        (repo / ".git").mkdir()
+        (repo / ".git" / "index").write_text("x")
+        self.assertTrue(self.passes({"repo": ".", "none": True}))
+        (repo / "out.md").write_text("changed\n")
+        self.assertFalse(self.passes({"repo": ".", "none": True}))
+        self.assertTrue(self.passes({"repo": r"^out\.md$"}))
+        (repo / "out.md").write_text("Unslopped: 2 rules applied.\n")
+        (repo / "src").mkdir()
+        (repo / "src" / "new.py").write_text("")
+        self.assertEqual(live.repo_changes(self.root), ["src/new.py"])
+        (repo / "src" / "new.py").unlink()
+        (repo / "out.md").unlink()
+        self.assertEqual(live.repo_changes(self.root), ["out.md"])
+
 
     def test_rescore_reads_saved_transcripts_without_a_model(self):
         ev = live.load("setup-t3-workflow", "evals")["evals"][0]
@@ -277,7 +296,9 @@ class Checks(unittest.TestCase):
         without = [{"type": "result", "result": "Which reviewer?", "total_cost_usd": 0.1, "num_turns": 2}]
         for mode, stream in (("with_skill", with_skill), ("without_skill", without)):
             root = self.root / "out" / "setup-t3-workflow" / ev["name"] / mode
-            root.mkdir(parents=True)
+            (root / "repo").mkdir(parents=True)
+            (root / "repo" / "README.md").write_text("# widgets\n")
+            (root / "repo-base.json").write_text(json.dumps(live.repo_snapshot(root / "repo")))
             (root / "transcript.jsonl").write_text("\n".join(map(json.dumps, stream)) + "\n")
         out = self.root / "out"
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):

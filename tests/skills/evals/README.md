@@ -28,8 +28,8 @@ stub server, the fake `gh` and the check matchers. None of it calls a model.
 Live runs call Claude, cost money, and run on demand, never in CI. Each run
 gets its own sandbox under `--out` (a temporary folder by default):
 
-- its own `HOME`, XDG config and state, and T3 home, so it works on its own
-  copies, not the real `~/.claude`, `~/.agents`, `~/.codex` or T3 Code;
+- its own `HOME`, XDG config and state, and T3 home, so it reads and writes
+  its own copies of `~/.claude`, `~/.agents`, `~/.codex` and T3 Code;
 - `PATH` set to the sandbox's `bin` (a fake `gh`, `python3` and `claude`)
   then `/usr/bin:/bin`;
 - a stub `t3-code` MCP server that logs each call, `t3wf` on its file-backed
@@ -41,8 +41,9 @@ gets its own sandbox under `--out` (a temporary folder by default):
 
 A PreToolUse hook (`guard_hook.py`) refuses, before it runs, any tool call
 that names the real `~/.claude`, `~/.agents`, `~/.codex` or `~/.t3`, a local
-server port, or a network client such as `curl`. It matches what a call
-names, so it is a guard, not an OS jail. A behavior run that ended without a
+server port, or a network client such as `curl`. It matches the text of a
+call, so a command that builds a real path at run time could still get past
+it; an OS-level jail would close that gap. A behavior run that ended without a
 result, or with an error, makes its eval fail.
 
 Auth comes from `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in the
@@ -76,11 +77,15 @@ python3 tests/skills/evals/live.py behavior [--skill t3-worker] [--eval 2]
 
 Each eval runs twice: with every skill from `skills/` installed and with
 none. The `checks` read the run's tool calls, its final text, the stub
-server's and fake `gh`'s logs, and the repo's files. An eval passes when every
+server's and fake `gh`'s logs, and the repo's files. A `repo` check compares
+every file in the repo against the snapshot the sandbox took before the run,
+so it sees a change made by any tool. An eval passes when every
 check holds with the skill and at least one fails without it.
 
 After changing a check, score the transcripts a past run saved again, with
 no model calls: `live.py behavior --rescore <out>`.
 
-Both commands print a summary and write the full results, each run's
-transcript and its sandbox to `--out`. Remove the folder when you are done.
+Both commands print a summary and write the full results and each run's
+sandbox to `--out`. The `behavior` command also saves each run's transcript,
+which `--rescore` reads; the `triggers` command reads each run's output as it
+streams and saves no transcript. Remove the folder when you are done.

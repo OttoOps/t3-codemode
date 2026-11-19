@@ -11,7 +11,7 @@
         "Joins the link from the brief",
         "Checks the thread's worktree with T3",
         "Tells the orchestrator it is bound to the main checkout",
-        "Edits no file",
+        "Changes, adds or deletes no file in the repo",
         "Commits nothing"
       ],
       "checks": [
@@ -25,7 +25,7 @@
           "bash": "t3wf\\.py.*send.*main checkout"
         },
         {
-          "tool": "Edit",
+          "repo": ".",
           "none": true
         },
         {

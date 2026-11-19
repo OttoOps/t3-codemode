@@ -13,7 +13,7 @@
         "Asks about the reviewer first",
         "Runs no config write before the user answers",
         "Leaves the config file unwritten",
-        "Edits no file"
+        "Changes, adds or deletes no file in the repo"
       ],
       "checks": [
         {
@@ -34,7 +34,7 @@
           "none": true
         },
         {
-          "tool": "Edit",
+          "repo": ".",
           "none": true
         }
       ],
