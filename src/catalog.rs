@@ -29,6 +29,8 @@ const WAKE_RESULT: &str = r#"{ handle: string; delivery: "noted" | "sent" | "que
 const MERGE_SIGNATURE: &str = r#"wf.merge(input: { repo: string; pr: number; head: string; method?: "merge" | "squash" | "rebase" }): Promise<{ repo: string; pr: number; head: string } & ({ status: "queued"; position: number | null } | { status: "merged"; commit: string | null; method?: "merge" | "squash" | "rebase" } | { status: "waiting"; mergeState: string } | { status: "refused"; reason: string })>;"#;
 const CARD: &str = r#"{ id: string; kind: string; label: string | null; ticket: string | null; link: string | null; text: string; handle: string | null; options: string[]; at: string; atLocal: string; resolved?: string; resolution?: string | null; token: string }"#;
 
+const SKIPPED: &str = "{ instanceId: string; reason: string }";
+
 fn builtin(name: &str, kind: &'static str, description: &str, sig: &str, input: Value) -> Entry {
     Entry {
         name: name.into(),
@@ -193,13 +195,29 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.launchTicket",
             "wf",
-            "Launch a t3-ticket thread for a GitHub issue that reports to the t3-codemode board (the root overseer). The T3 project is the one whose workspace origin remote is the issue's repo, unless project (id or title) is given. An unmapped repo or failed launch throws and leaves an error card on the board.",
-            "wf.launchTicket(input: { issue: string; project?: string; title?: string; model?: string; effort?: string }): Promise<{ ok: true; label: string; thread: string; link: string | null; projectId: string; title: string }>;",
+            "Launch a t3-ticket thread for a GitHub issue that reports to the t3-codemode board (the root overseer). The T3 project is the one whose workspace origin remote is the issue's repo, unless project (id or title) is given. With board.pool set, the instance comes from that pool and the result carries instanceId and the pick's reason. An unmapped repo, a pool with no member that can run, or a failed launch throws and leaves an error card on the board.",
+            "wf.launchTicket(input: { issue: string; project?: string; title?: string; model?: string; effort?: string }): Promise<{ ok: true; label: string; thread: string; link: string | null; projectId: string; title: string; instanceId?: string; reason?: string }>;",
             obj(
                 json!({"issue": {"type": "string", "description": "https://github.com/<owner>/<repo>/issues/<n> or <owner>/<repo>#<n>"},
                        "project": {"type": "string"}, "title": {"type": "string"}, "model": {"type": "string"}, "effort": {"type": "string"}}),
                 &["issue"],
             ),
+        ),
+        builtin(
+            "wf.pick",
+            "wf",
+            "Pick a provider instance from a configured pool for one launch. Skips members T3 reports disabled or constrained, members that do not list the pool's model or offer its effort, and members marked limited; a member with a reserve is a last resort, picked only when every other member is out. Pass modelSelection to t3_thread_launch. Throws, naming the pool, when no member can run or a member is not an instance of the pool's driver; nothing is launched.",
+            &format!(
+                "wf.pick(input: {{ pool: string }}): Promise<{{ pool: string; instanceId: string; model: string; options: {{ id: string; value: string }}[]; reason: string; skipped: {SKIPPED}[]; modelSelection: {{ instanceId: string; model: string; options?: {{ id: string; value: string }}[] }} }}>;"
+            ),
+            obj(json!({"pool": {"type": "string"}}), &["pool"]),
+        ),
+        builtin(
+            "wf.pools",
+            "wf",
+            "Each configured pool with its members: state (ready, limited, disabled, constrained, missing-model, missing-effort, or unknown when T3 did not answer), why, the limit's reset time (ISO and local), running threads, and pick count and last pick. error names a member that is not an instance of the pool's driver, or says T3 did not answer.",
+            "wf.pools(): Promise<{ pool: string; driver: string; model: string; effort: string | null; strategy: \"weighted\" | \"priority\"; error: string | null; members: { instanceId: string; weight: number; reserve: number; state: string; reason: string | null; limitedUntil: string | null; limitedUntilLocal: string | null; running: number | null; picks: number; lastPick: string | null; lastPickLocal: string | null }[] }[]>;",
+            obj(json!({}), &[]),
         ),
         builtin(
             "wf.merge",

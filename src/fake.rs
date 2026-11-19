@@ -13,6 +13,7 @@ struct State {
     prs: BTreeMap<String, Vec<Value>>,
     prs_before_list: BTreeMap<String, Vec<Value>>,
     projects: Vec<Value>,
+    providers: Vec<Value>,
     launched: Vec<Value>,
     organized: Vec<Value>,
     sent: Vec<Value>,
@@ -76,6 +77,21 @@ pub fn pull_request(repository: &str, number: u64, state: &str) -> Value {
         "watching": state == "open", "state": state, "title": format!("PR {number}"),
         "headBranch": format!("fix/{number}"), "baseBranch": "main", "isDraft": false, "stack": null
     })
+}
+
+pub fn provider(id: &str, driver: &str, models: &[&str]) -> Value {
+    let models: Vec<Value> = models
+        .iter()
+        .map(|m| json!({"id": m, "options": [{"id": "effort", "values": ["low", "medium", "high"], "default": "medium"}]}))
+        .collect();
+    json!({"providerInstanceId": id, "driverKind": driver, "displayName": id, "models": models,
+           "canRunChildTask": true, "canRunCrossProviderChildTask": true, "constraints": []})
+}
+
+pub fn disabled_provider(id: &str, driver: &str) -> Value {
+    json!({"providerInstanceId": id, "driverKind": driver, "displayName": id, "models": [],
+           "canRunChildTask": false, "canRunCrossProviderChildTask": false,
+           "constraints": ["Provider instance is disabled."]})
 }
 
 pub fn thread(id: &str, status: &str, updated: &str) -> Value {
@@ -156,6 +172,10 @@ impl FakeT3 {
         self.st().projects = projects;
     }
 
+    pub fn set_providers(&self, providers: Vec<Value>) {
+        self.st().providers = providers;
+    }
+
     pub fn launched(&self) -> Vec<Value> {
         self.st().launched.clone()
     }
@@ -209,14 +229,15 @@ impl FakeT3 {
                 let wanted: Option<Vec<&str>> =
                     args["statuses"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect());
                 let limit = args["limit"].as_u64().unwrap_or(u64::MAX) as usize;
-                let threads: Vec<Value> = st
+                let start = args["cursor"].as_u64().unwrap_or(0) as usize;
+                let matching: Vec<&Value> = st
                     .threads
                     .values()
                     .filter(|t| wanted.as_ref().is_none_or(|w| w.contains(&t["status"].as_str().unwrap_or(""))))
-                    .take(limit)
-                    .cloned()
                     .collect();
-                Ok(json!({"threads": threads}))
+                let threads: Vec<Value> = matching.iter().skip(start).take(limit).map(|t| (*t).clone()).collect();
+                let next = (start.saturating_add(limit) < matching.len()).then(|| start + limit);
+                Ok(json!({"threads": threads, "nextCursor": next, "total": matching.len()}))
             }
             "list_thread_pull_requests" => {
                 if st.prs_fail {
@@ -243,11 +264,35 @@ impl FakeT3 {
                 Ok(json!({"pullRequests": prs[start.min(end)..end], "chains": [], "nextCursor": next}))
             }
             "t3_project_list" => Ok(json!({"projects": st.projects, "nextCursor": null})),
+            "orchestrator_capabilities" => {
+                let search = args["search"].as_str();
+                let providers: Vec<Value> = st
+                    .providers
+                    .iter()
+                    .map(|p| {
+                        let mut p = p.clone();
+                        if let Some(q) = search {
+                            let models: Vec<Value> = p["models"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter(|m| m["id"].as_str().is_some_and(|id| id.contains(q)))
+                                .cloned()
+                                .collect();
+                            p["models"] = json!(models);
+                        }
+                        p
+                    })
+                    .collect();
+                Ok(json!({"parentThreadId": null, "runtimeMode": "full-access", "providers": providers}))
+            }
             "t3_thread_launch" => {
                 st.launched.push(args.clone());
                 let id = format!("launch:{}", st.launched.len());
                 let mut th = thread(&id, "running", "2026-11-17T12:00:00Z");
                 th["title"] = args["title"].clone();
+                th["providerInstanceId"] = args["modelSelection"]["instanceId"].clone();
+                th["model"] = args["modelSelection"]["model"].clone();
                 st.threads.insert(id.clone(), th);
                 Ok(json!({"threadId": id, "link": format!("https://t3/{id}"), "projectId": args["projectId"],
                           "modelSelection": args["modelSelection"], "runId": format!("run:{id}:1"), "status": "running"}))
