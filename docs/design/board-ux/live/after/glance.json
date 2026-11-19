@@ -1,0 +1,330 @@
+{
+ "base": "http://127.0.0.1:47792/",
+ "now": "2026-11-19T00:26:30Z",
+ "views": {
+  "1920-dark": {
+   "G4": {
+    "amberOff": [],
+    "amberWithoutCard": [],
+    "redOff": [],
+    "accentOff": []
+   },
+   "G7": [],
+   "G8": {
+    "clockTimes": [
+     "#654 rebase-merged (99cffc8); deploy/v2.6.66 pushed 17:07 MST carrying #651/#653/#654; deploy hold lifted once it succeeds"
+    ],
+    "zones": 1
+   },
+   "G9": {
+    "rows": 11,
+    "kindPrefix": 0,
+    "longHash": 0,
+    "repeatedNeighbours": 0,
+    "groups": 1
+   },
+   "G10": {
+    "answersHeight": 0,
+    "feedTop": 324
+   },
+   "G11": {
+    "text": [],
+    "lines": [],
+    "min": {
+     "text": 4.95,
+     "line": 3.08
+    }
+   }
+  },
+  "1920-light": {
+   "G4": {
+    "amberOff": [],
+    "amberWithoutCard": [],
+    "redOff": [],
+    "accentOff": []
+   },
+   "G7": [],
+   "G8": {
+    "clockTimes": [
+     "#654 rebase-merged (99cffc8); deploy/v2.6.66 pushed 17:07 MST carrying #651/#653/#654; deploy hold lifted once it succeeds"
+    ],
+    "zones": 1
+   },
+   "G9": {
+    "rows": 11,
+    "kindPrefix": 0,
+    "longHash": 0,
+    "repeatedNeighbours": 0,
+    "groups": 1
+   },
+   "G10": {
+    "answersHeight": 0,
+    "feedTop": 324
+   },
+   "G11": {
+    "text": [],
+    "lines": [],
+    "min": {
+     "text": 5.2,
+     "line": 3.25
+    }
+   }
+  },
+  "1366-dark": {
+   "G4": {
+    "amberOff": [],
+    "amberWithoutCard": [],
+    "redOff": [],
+    "accentOff": []
+   },
+   "G7": [],
+   "G8": {
+    "clockTimes": [],
+    "zones": 0
+   },
+   "G9": {
+    "rows": 6,
+    "kindPrefix": 0,
+    "longHash": 0,
+    "repeatedNeighbours": 0,
+    "groups": 0
+   },
+   "G10": {
+    "answersHeight": 0,
+    "feedTop": 324
+   },
+   "G11": {
+    "text": [],
+    "lines": [],
+    "min": {
+     "text": 4.95,
+     "line": 3.08
+    }
+   }
+  },
+  "1366-light": {
+   "G4": {
+    "amberOff": [],
+    "amberWithoutCard": [],
+    "redOff": [],
+    "accentOff": []
+   },
+   "G7": [],
+   "G8": {
+    "clockTimes": [],
+    "zones": 0
+   },
+   "G9": {
+    "rows": 6,
+    "kindPrefix": 0,
+    "longHash": 0,
+    "repeatedNeighbours": 0,
+    "groups": 0
+   },
+   "G10": {
+    "answersHeight": 0,
+    "feedTop": 324
+   },
+   "G11": {
+    "text": [],
+    "lines": [],
+    "min": {
+     "text": 5.2,
+     "line": 3.25
+    }
+   }
+  },
+  "390-dark": {
+   "G4": {
+    "amberOff": [],
+    "amberWithoutCard": [],
+    "redOff": [],
+    "accentOff": []
+   },
+   "G7": [],
+   "G8": {
+    "clockTimes": [],
+    "zones": 0
+   },
+   "G9": {
+    "rows": 0,
+    "kindPrefix": 0,
+    "longHash": 0,
+    "repeatedNeighbours": 0,
+    "groups": 0
+   },
+   "G10": {
+    "answersHeight": 0,
+    "feedTop": 0
+   },
+   "G11": {
+    "text": [],
+    "lines": [],
+    "min": {
+     "text": 4.95,
+     "line": 3.08
+    }
+   }
+  },
+  "390-dark-tickets": {
+   "G4": {
+    "amberOff": [],
+    "amberWithoutCard": [],
+    "redOff": [],
+    "accentOff": []
+   },
+   "G7": [],
+   "G8": {
+    "clockTimes": [],
+    "zones": 0
+   },
+   "G9": {
+    "rows": 0,
+    "kindPrefix": 0,
+    "longHash": 0,
+    "repeatedNeighbours": 0,
+    "groups": 0
+   },
+   "G10": {
+    "answersHeight": 0,
+    "feedTop": 0
+   },
+   "G11": {
+    "text": [],
+    "lines": [],
+    "min": {
+     "text": 4.95,
+     "line": 3.49
+    }
+   }
+  },
+  "390-dark-activity": {
+   "G4": {
+    "amberOff": [],
+    "amberWithoutCard": [],
+    "redOff": [],
+    "accentOff": []
+   },
+   "G7": [],
+   "G8": {
+    "clockTimes": [],
+    "zones": 0
+   },
+   "G9": {
+    "rows": 7,
+    "kindPrefix": 0,
+    "longHash": 0,
+    "repeatedNeighbours": 0,
+    "groups": 0
+   },
+   "G10": {
+    "answersHeight": 0,
+    "feedTop": 245
+   },
+   "G11": {
+    "text": [],
+    "lines": [],
+    "min": {
+     "text": 4.95,
+     "line": 3.49
+    }
+   }
+  },
+  "390-light": {
+   "G4": {
+    "amberOff": [],
+    "amberWithoutCard": [],
+    "redOff": [],
+    "accentOff": []
+   },
+   "G7": [],
+   "G8": {
+    "clockTimes": [],
+    "zones": 0
+   },
+   "G9": {
+    "rows": 0,
+    "kindPrefix": 0,
+    "longHash": 0,
+    "repeatedNeighbours": 0,
+    "groups": 0
+   },
+   "G10": {
+    "answersHeight": 0,
+    "feedTop": 0
+   },
+   "G11": {
+    "text": [],
+    "lines": [],
+    "min": {
+     "text": 5.2,
+     "line": 3.25
+    }
+   }
+  },
+  "390-light-tickets": {
+   "G4": {
+    "amberOff": [],
+    "amberWithoutCard": [],
+    "redOff": [],
+    "accentOff": []
+   },
+   "G7": [],
+   "G8": {
+    "clockTimes": [],
+    "zones": 0
+   },
+   "G9": {
+    "rows": 0,
+    "kindPrefix": 0,
+    "longHash": 0,
+    "repeatedNeighbours": 0,
+    "groups": 0
+   },
+   "G10": {
+    "answersHeight": 0,
+    "feedTop": 0
+   },
+   "G11": {
+    "text": [],
+    "lines": [],
+    "min": {
+     "text": 5.2,
+     "line": 3.25
+    }
+   }
+  },
+  "390-light-activity": {
+   "G4": {
+    "amberOff": [],
+    "amberWithoutCard": [],
+    "redOff": [],
+    "accentOff": []
+   },
+   "G7": [],
+   "G8": {
+    "clockTimes": [],
+    "zones": 0
+   },
+   "G9": {
+    "rows": 7,
+    "kindPrefix": 0,
+    "longHash": 0,
+    "repeatedNeighbours": 0,
+    "groups": 0
+   },
+   "G10": {
+    "answersHeight": 0,
+    "feedTop": 245
+   },
+   "G11": {
+    "text": [],
+    "lines": [],
+    "min": {
+     "text": 5.2,
+     "line": 3.25
+    }
+   }
+  }
+ }
+}

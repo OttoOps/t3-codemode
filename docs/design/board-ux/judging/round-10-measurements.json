@@ -1,0 +1,896 @@
+{
+ "build": "59b51ca",
+ "gates_seeded": {
+  "U1": {
+   "1440x900": {
+    "scrollHeight": 900,
+    "innerHeight": 900,
+    "scrollWidth": 1440,
+    "innerWidth": 1440,
+    "ok": true,
+    "decisions": 7,
+    "openTickets": 15
+   },
+   "1280x800": {
+    "scrollHeight": 800,
+    "innerHeight": 800,
+    "scrollWidth": 1280,
+    "innerWidth": 1280,
+    "ok": true,
+    "decisions": 7,
+    "openTickets": 15
+   },
+   "1024x768": {
+    "scrollHeight": 768,
+    "innerHeight": 768,
+    "scrollWidth": 1024,
+    "innerWidth": 1024,
+    "ok": true,
+    "decisions": 7,
+    "openTickets": 15
+   }
+  },
+  "U2": {
+   "1440x900": {
+    "launch": true,
+    "ask": true,
+    "pageScrollY": 0
+   },
+   "1280x800": {
+    "launch": true,
+    "ask": true,
+    "pageScrollY": 0
+   },
+   "1024x768": {
+    "launch": true,
+    "ask": false,
+    "pageScrollY": 0
+   },
+   "switchKeepsDrafts": {
+    "launch": "acme/widgets#52",
+    "ask": "what waits on me",
+    "focused": "issues"
+   },
+   "tabPresses": {
+    "launch": {
+     "tabs": 2,
+     "focus": "issues"
+    },
+    "ask": {
+     "tabs": 3,
+     "focus": "question"
+    }
+   },
+   "shortcutL": "issues",
+   "shortcutSlash": "question"
+  },
+  "U5": {
+   "visible1440": 5,
+   "median": 128,
+   "heights": [
+    108,
+    128,
+    128,
+    128,
+    129,
+    130,
+    160
+   ]
+  },
+  "U6": {
+   "1024": {
+    "visible": 9,
+    "heightsBySameFields": {
+     "true,true": [
+      57
+     ],
+     "true,false": [
+      55
+     ]
+    }
+   },
+   "1440": {
+    "visible": 12,
+    "heightsBySameFields": {
+     "true,true": [
+      57
+     ],
+     "true,false": [
+      55
+     ]
+    }
+   }
+  },
+  "U7": {
+   "kinds": [
+    "blocker",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "report"
+   ],
+   "sorted": true,
+   "rowToCard": true,
+   "cardToRow": true
+  },
+  "U8": {
+   "optionStyles": {
+    "distinct": 1,
+    "any": 9
+   },
+   "sentBefore5s": 0,
+   "sendingText": "Sending “merge” to widgets#41",
+   "sentAfter5s": 1,
+   "afterUndo": 1,
+   "digitSent": 0,
+   "digitFocus": "1"
+  },
+  "U9": {
+   "typedInField": "lgj/?",
+   "focusAfter": "question",
+   "helpOpens": true,
+   "offStopsShortcuts": true,
+   "jMoves": "a1",
+   "gtTickets": true,
+   "gaActivity": "feed",
+   "skipLinks": [
+    "Skip to Needs you",
+    "Skip to Launch",
+    "Skip to Ask",
+    "Skip to Tickets",
+    "Skip to Activity"
+   ]
+  },
+  "U10": {
+   "768x1024": {
+    "scrollHeight": 1024,
+    "innerHeight": 1024,
+    "scrollWidth": 768,
+    "innerWidth": 768,
+    "ok": true,
+    "small": [],
+    "shownPanels": [
+     "p-dec"
+    ]
+   },
+   "390x844": {
+    "scrollHeight": 844,
+    "innerHeight": 844,
+    "scrollWidth": 390,
+    "innerWidth": 390,
+    "ok": true,
+    "small": [],
+    "shownPanels": [
+     "p-dec"
+    ]
+   },
+   "zoom200": {
+    "scrollHeight": 422,
+    "innerHeight": 422,
+    "scrollWidth": 195,
+    "innerWidth": 195,
+    "ok": true,
+    "clipped": []
+   },
+   "keyboard": {
+    "field": [
+     328,
+     456
+    ],
+    "submit": [
+     412,
+     456
+    ],
+    "within": true,
+    "cls": "app kb"
+   },
+   "sheet": {
+    "cls": "app kb sheet",
+    "height": 250
+   },
+   "restore": {
+    "before": {
+     "panel": "decisions",
+     "top": 200
+    },
+    "after": {
+     "panel": "decisions",
+     "top": 200,
+     "cls": "app"
+    },
+    "same": true
+   }
+  },
+  "P1": {
+   "light": {
+    "status:mark.s-fail.kw": 7.11,
+    "status:mark.s-report.kw": 6.84,
+    "status:mark.s-run": 15.74,
+    "status:mark.s-done": 6.43,
+    "inputBorder": 3.92,
+    "focusRing:panel": 5.52,
+    "focusRing:canvas": 3.56,
+    "meta": 5.5,
+    "status:linkish.needs.r-fail": 7.11,
+    "status:linkish.needs": 6.56,
+    "status:linkish.needs.r-report": 5.9,
+    "status:tag": 6.84
+   },
+   "dark": {
+    "status:mark.s-fail.kw": 6.8,
+    "status:mark.s-report.kw": 6.82,
+    "status:mark.s-run": 13.93,
+    "status:mark.s-done": 8.72,
+    "inputBorder": 4.57,
+    "focusRing:panel": 7.23,
+    "focusRing:canvas": 8.74,
+    "meta": 6.74,
+    "status:linkish.needs.r-fail": 7.72,
+    "status:linkish.needs": 9.38,
+    "status:linkish.needs.r-report": 7.19,
+    "status:tag": 7.74
+   }
+  },
+  "P2": {
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "weights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "offScale": []
+  },
+  "P3": {
+   "accentStatus": 0,
+   "amberOff": [],
+   "runningRoles": [
+    "ink"
+   ]
+  },
+  "N1": {
+   "bad": [],
+   "emoji": false
+  },
+  "N2": {
+   "markdown": false,
+   "zone": "",
+   "zoneCount": 0,
+   "truncated": 5,
+   "untitled": []
+  },
+  "F4": {
+   "options": {
+    "n": 9,
+    "unique": 9,
+    "contextless": []
+   },
+   "send": {
+    "n": 7,
+    "unique": 7,
+    "contextless": []
+   },
+   "dismiss": {
+    "n": 7,
+    "unique": 7,
+    "contextless": []
+   },
+   "settle": {
+    "n": 7,
+    "unique": 7,
+    "contextless": []
+   },
+   "restore": {
+    "n": 26,
+    "unique": 26,
+    "contextless": []
+   }
+  },
+  "errors": []
+ },
+ "gates_heavy": {
+  "U1": {
+   "1440x900": {
+    "scrollHeight": 900,
+    "innerHeight": 900,
+    "scrollWidth": 1440,
+    "innerWidth": 1440,
+    "ok": true,
+    "decisions": 27,
+    "openTickets": 30
+   },
+   "1280x800": {
+    "scrollHeight": 800,
+    "innerHeight": 800,
+    "scrollWidth": 1280,
+    "innerWidth": 1280,
+    "ok": true,
+    "decisions": 27,
+    "openTickets": 30
+   },
+   "1024x768": {
+    "scrollHeight": 768,
+    "innerHeight": 768,
+    "scrollWidth": 1024,
+    "innerWidth": 1024,
+    "ok": true,
+    "decisions": 27,
+    "openTickets": 30
+   }
+  },
+  "U2": {
+   "1440x900": {
+    "launch": true,
+    "ask": true,
+    "pageScrollY": 0
+   },
+   "1280x800": {
+    "launch": true,
+    "ask": true,
+    "pageScrollY": 0
+   },
+   "1024x768": {
+    "launch": true,
+    "ask": false,
+    "pageScrollY": 0
+   },
+   "switchKeepsDrafts": {
+    "launch": "acme/widgets#52",
+    "ask": "what waits on me",
+    "focused": "issues"
+   },
+   "tabPresses": {
+    "launch": {
+     "tabs": 2,
+     "focus": "issues"
+    },
+    "ask": {
+     "tabs": 3,
+     "focus": "question"
+    }
+   },
+   "shortcutL": "issues",
+   "shortcutSlash": "question"
+  },
+  "U5": {
+   "visible1440": 5,
+   "median": 128,
+   "heights": [
+    108,
+    108,
+    108,
+    108,
+    108,
+    128,
+    128,
+    128,
+    128,
+    128,
+    128,
+    128,
+    128,
+    128,
+    128,
+    128,
+    128,
+    128,
+    128,
+    128,
+    128,
+    129,
+    130,
+    160,
+    160,
+    160,
+    160
+   ]
+  },
+  "U6": {
+   "1024": {
+    "visible": 9,
+    "heightsBySameFields": {
+     "true,true": [
+      57
+     ],
+     "true,false": [
+      55
+     ]
+    }
+   },
+   "1440": {
+    "visible": 13,
+    "heightsBySameFields": {
+     "true,true": [
+      57
+     ],
+     "true,false": [
+      55
+     ]
+    }
+   }
+  },
+  "U7": {
+   "kinds": [
+    "blocker",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "gate",
+    "report"
+   ],
+   "sorted": true,
+   "rowToCard": true,
+   "cardToRow": true
+  },
+  "U8": {
+   "optionStyles": {
+    "distinct": 1,
+    "any": 39
+   },
+   "sentBefore5s": 0,
+   "sendingText": "Sending “accept” to relay#9",
+   "sentAfter5s": 1,
+   "afterUndo": 1,
+   "digitSent": 0,
+   "digitFocus": "1"
+  },
+  "U9": {
+   "typedInField": "lgj/?",
+   "focusAfter": "question",
+   "helpOpens": true,
+   "offStopsShortcuts": true,
+   "jMoves": "a2",
+   "gtTickets": true,
+   "gaActivity": "feed",
+   "skipLinks": [
+    "Skip to Needs you",
+    "Skip to Launch",
+    "Skip to Ask",
+    "Skip to Tickets",
+    "Skip to Activity"
+   ]
+  },
+  "U10": {
+   "768x1024": {
+    "scrollHeight": 1024,
+    "innerHeight": 1024,
+    "scrollWidth": 768,
+    "innerWidth": 768,
+    "ok": true,
+    "small": [],
+    "shownPanels": [
+     "p-dec"
+    ]
+   },
+   "390x844": {
+    "scrollHeight": 844,
+    "innerHeight": 844,
+    "scrollWidth": 390,
+    "innerWidth": 390,
+    "ok": true,
+    "small": [],
+    "shownPanels": [
+     "p-dec"
+    ]
+   },
+   "zoom200": {
+    "scrollHeight": 422,
+    "innerHeight": 422,
+    "scrollWidth": 195,
+    "innerWidth": 195,
+    "ok": true,
+    "clipped": []
+   },
+   "keyboard": {
+    "field": [
+     328,
+     456
+    ],
+    "submit": [
+     412,
+     456
+    ],
+    "within": true,
+    "cls": "app kb"
+   },
+   "sheet": {
+    "cls": "app kb sheet",
+    "height": 250
+   },
+   "restore": {
+    "before": {
+     "panel": "decisions",
+     "top": 200
+    },
+    "after": {
+     "panel": "decisions",
+     "top": 200,
+     "cls": "app"
+    },
+    "same": true
+   }
+  },
+  "P1": {
+   "light": {
+    "status:mark.s-fail.kw": 7.11,
+    "status:mark.s-report.kw": 6.84,
+    "status:mark.s-run": 15.74,
+    "status:mark.s-done": 6.43,
+    "inputBorder": 3.92,
+    "focusRing:panel": 5.52,
+    "focusRing:canvas": 3.56,
+    "meta": 5.5,
+    "status:linkish.needs.r-fail": 7.11,
+    "status:linkish.needs": 6.56,
+    "status:linkish.needs.r-report": 5.9,
+    "status:tag": 6.84
+   },
+   "dark": {
+    "status:mark.s-fail.kw": 6.8,
+    "status:mark.s-report.kw": 6.82,
+    "status:mark.s-run": 13.93,
+    "status:mark.s-done": 8.72,
+    "inputBorder": 4.57,
+    "focusRing:panel": 7.23,
+    "focusRing:canvas": 8.74,
+    "meta": 6.74,
+    "status:linkish.needs.r-fail": 7.72,
+    "status:linkish.needs": 9.38,
+    "status:linkish.needs.r-report": 7.19,
+    "status:tag": 7.74
+   }
+  },
+  "P2": {
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "weights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "offScale": []
+  },
+  "P3": {
+   "accentStatus": 0,
+   "amberOff": [],
+   "runningRoles": [
+    "ink"
+   ]
+  },
+  "N1": {
+   "bad": [],
+   "emoji": false
+  },
+  "N2": {
+   "markdown": false,
+   "zone": "",
+   "zoneCount": 0,
+   "truncated": 6,
+   "untitled": []
+  },
+  "F4": {
+   "options": {
+    "n": 42,
+    "unique": 42,
+    "contextless": []
+   },
+   "send": {
+    "n": 31,
+    "unique": 31,
+    "contextless": []
+   },
+   "dismiss": {
+    "n": 31,
+    "unique": 31,
+    "contextless": []
+   },
+   "settle": {
+    "n": 7,
+    "unique": 7,
+    "contextless": []
+   },
+   "restore": {
+    "n": 26,
+    "unique": 26,
+    "contextless": []
+   }
+  },
+  "errors": []
+ },
+ "stability_churn": {
+  "a": {
+   "answered": {
+    "id": "a2",
+    "status": 200
+   },
+   "launch": {
+    "samples": 752,
+    "maxMovePx": 0,
+    "focusValueCaretKept": true
+   },
+   "reconnected": true,
+   "ask": {
+    "samples": 1103,
+    "maxMovePx": 0,
+    "focusValueCaretKept": true
+   },
+   "card reply": {
+    "samples": 746,
+    "maxMovePx": 0,
+    "focusValueCaretKept": true
+   },
+   "settled filter": {
+    "samples": 750,
+    "maxMovePx": 0,
+    "focusValueCaretKept": true
+   }
+  },
+  "b": {
+   "ticket thread link": {
+    "same": true,
+    "connected": true,
+    "active": "A",
+    "samples": 1852,
+    "samplesLost": 0,
+    "seen": []
+   },
+   "worker PR link": {
+    "same": true,
+    "connected": true,
+    "active": "A",
+    "samples": 1501,
+    "samplesLost": 0,
+    "seen": []
+   },
+   "ask Settle": {
+    "same": true,
+    "connected": true,
+    "active": "BUTTON",
+    "samples": 1500,
+    "samplesLost": 0,
+    "seen": []
+   },
+   "settled Restore": {
+    "same": true,
+    "connected": true,
+    "active": "BUTTON",
+    "samples": 1501,
+    "samplesLost": 0,
+    "seen": []
+   }
+  },
+  "c": {
+   "card option": {
+    "answer": {
+     "id": "b9",
+     "status": 200,
+     "error": null
+    },
+    "removed": true,
+    "samples": 2984,
+    "samplesMoved": 0
+   },
+   "ticket Settle": {
+    "reconnected": true,
+    "samples": 3355,
+    "samplesMoved": 0
+   }
+  }
+ },
+ "holds_seeded": {
+  "U4": {
+   "before": {
+    "cards": {
+     "key": "a6",
+     "offset": -108
+    },
+    "open": {
+     "key": "mcp:ticket:1",
+     "offset": -5
+    },
+    "feed": {
+     "key": "m33",
+     "offset": -71
+    }
+   },
+   "after": {
+    "cards": {
+     "key": "a6",
+     "offset": -108
+    },
+    "open": {
+     "key": "mcp:ticket:1",
+     "offset": -5
+    },
+    "feed": {
+     "key": "m33",
+     "offset": -71
+    }
+   },
+   "same": true,
+   "slots": {
+    "cards": "2 new",
+    "tickets": "1 new",
+    "feed": "15 new"
+   },
+   "tabRestore": {
+    "before": 86,
+    "after": 86
+   },
+   "afterApply": {
+    "slot": "newbtn off",
+    "top": 0,
+    "focus": "a6"
+   }
+  },
+  "U11": {
+   "during": {
+    "header": "Disconnected. Reconnecting; showing data from 11:23.",
+    "stale": true,
+    "optionsDisabled": true
+   },
+   "rectsSame": true,
+   "after": {
+    "header": "T3 connected · checked just now",
+    "stale": false
+   },
+   "rectsSameAfter": true
+  },
+  "F3": {
+   "said": [
+    [
+     "alert",
+     "Ask failed: T3 is not answering"
+    ],
+    [
+     "live",
+     "Asked. The answer shows under Answers when it is ready."
+    ],
+    [
+     "live",
+     "1 new decision"
+    ],
+    [
+     "live",
+     "Answer to “Which gate is oldest?”: atlas#57 has waited longest: one PR or two for the CSV export."
+    ],
+    [
+     "live",
+     "Launched widgets#77."
+    ],
+    [
+     "alert",
+     "acme/nowhere#3: Cannot launch nowhere#3: no T3 project has github.com/acme/nowhere as its origin remote. Add the repository as a T3 project, then launch it again."
+    ],
+    [
+     "live",
+     "1 new decision, 1 blocker"
+    ],
+    [
+     "live",
+     "Sending “merge” to widgets#41 in 5 seconds. Undo to cancel."
+    ],
+    [
+     "alert",
+     "a1: the ticket thread is gone"
+    ]
+   ],
+   "askError": {
+    "n": 1,
+    "alert": true
+   },
+   "askAnswer": {
+    "n": 1
+   },
+   "launch": {
+    "ok": 1,
+    "failed": 1,
+    "shown": {
+     "good": 1,
+     "bad": 1
+    }
+   },
+   "cardError": {
+    "n": 1,
+    "alert": true
+   },
+   "newDecisions": {
+    "n": 2
+   },
+   "activity": 0
+  },
+  "F1": {
+   "notification": {
+    "button": "Notifications on",
+    "cardsBefore": 11,
+    "notes": [
+     {
+      "title": "atlas#518 gate (b3)",
+      "state": "shown"
+     }
+    ],
+    "shown": true
+   }
+  }
+ },
+ "live_capture": "live/after/report.json",
+ "live_glance": "live/after/glance.json",
+ "G1": {
+  "still": "live/after/1920-dark.webp",
+  "expected": [
+   "t3-codemode#2: windows ready",
+   "t3-codemode#17: merge",
+   "t3-codemode#59: merge",
+   "t3-codemode#56: merge"
+  ],
+  "readers": {
+   "Claude Haiku 5.5": {
+    "seconds": 9.7,
+    "named": "exactly the four",
+    "unsure": "none"
+   },
+   "Claude Sonnet 5.5": {
+    "seconds": 4.3,
+    "named": "exactly the four",
+    "unsure": "none"
+   },
+   "Claude Opus 5.5": {
+    "seconds": 5.7,
+    "named": "exactly the four",
+    "unsure": "none"
+   }
+  },
+  "baseline_seconds": {
+   "Claude Haiku 5.5": 17.0,
+   "Claude Sonnet 5.5": 9.2,
+   "Claude Opus 5.5": 14.3
+  }
+ },
+ "G3": {
+  "judge": "Claude Sonnet 5.5",
+  "result": "pass",
+  "weakest_pair": "waiting (dashed ring) and idle (hollow ring)"
+ },
+ "gates_build": {
+  "gates_seeded": "59b51ca",
+  "gates_heavy": "8839cf1",
+  "holds_seeded": "59b51ca",
+  "stability_churn": "59b51ca",
+  "live_capture": "59b51ca",
+  "live_glance": "59b51ca",
+  "G1": "7298bf1",
+  "G3": "8839cf1"
+ }
+}

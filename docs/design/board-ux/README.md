@@ -20,9 +20,9 @@ direction.
 | [`references/`](references/README.md) | Sixteen screenshots of comparable products, with source URLs, the basis for keeping each, and notes on what each does well. |
 | [`current/`](current/) | Captures of the current board (commit `7e29c9d`) under realistic load, plus `report.json` with the measurements the review cites. |
 | [`harness/`](harness/README.md) | The seeded demo board and the capture scripts, so every capture and measurement here can be rerun. |
-| [`judging/`](judging/README.md) | The blind-judging rounds for the redesign: each round's gates, judged scores with evidence, and letter key. |
+| [`judging/`](judging/README.md) | The blind-judging rounds for the redesign (1 to 7) and for issue #67's readability pass (8 to 10): each round's gates, judged scores with evidence, and letter key. |
 | [`critique.md`](critique.md) | Issue #67: the readability critique under the live load, the task-test baseline, and the proposed direction for the decision card, ticket row and Activity row. |
-| [`live/`](live/README.md) | Issue #67: an anonymized snapshot of the live board, a read-only replay server, the capture script, and the before-stills at 1920, 1366 and 390. |
+| [`live/`](live/README.md) | Issue #67: an anonymized snapshot of the live board, a read-only replay server, the capture and glance scripts, and the before- and after-stills at 1920, 1366 and 390. |
 | [`mockups/`](mockups/README.md) | Issue #67: a static mockup of the direction under the same load, a component sheet, and the after-stills. |
 
 ## Method

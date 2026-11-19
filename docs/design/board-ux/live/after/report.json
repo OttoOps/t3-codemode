@@ -1,0 +1,1268 @@
+{
+ "base": "http://127.0.0.1:47792/",
+ "now": "2026-11-19T00:26:30Z",
+ "views": {
+  "1920-dark": {
+   "viewport": [
+    1920,
+    1080
+   ],
+   "scrollHeight": 1080,
+   "clipped": [
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "q",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge via t3cm and reconcile with GitHub",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "You chose \"sections\": build the transcript from each section's heading lines (ta",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-page/add",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the work",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its ban",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#654 rebase-merged (99cffc8); deploy/v2.6.66 pushed 17:07 MST carrying #651/#653",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Follow-up PR opened: #654, head 3e8d9d7 (follow-up of #653). Refs #646 #648. Con",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "HOLD all web deploys: main (with #651 + #653) would null the launch page's banne",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/1 updated: #653, head f280174 (remote confirmed; GitHub PR head still catch",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 16,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 133,
+     "left": 0,
+     "width": 439,
+     "height": 947,
+     "scrollHeight": 947
+    },
+    "open": {
+     "top": 133,
+     "left": 440,
+     "width": 1099,
+     "height": 947,
+     "scrollHeight": 947
+    },
+    "feed": {
+     "top": 324,
+     "left": 1540,
+     "width": 380,
+     "height": 756,
+     "scrollHeight": 3048
+    }
+   }
+  },
+  "1920-light": {
+   "viewport": [
+    1920,
+    1080
+   ],
+   "scrollHeight": 1080,
+   "clipped": [
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "q",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge via t3cm and reconcile with GitHub",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "You chose \"sections\": build the transcript from each section's heading lines (ta",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-page/add",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the work",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its ban",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#654 rebase-merged (99cffc8); deploy/v2.6.66 pushed 17:07 MST carrying #651/#653",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Follow-up PR opened: #654, head 3e8d9d7 (follow-up of #653). Refs #646 #648. Con",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "HOLD all web deploys: main (with #651 + #653) would null the launch page's banne",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/1 updated: #653, head f280174 (remote confirmed; GitHub PR head still catch",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 16,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 133,
+     "left": 0,
+     "width": 439,
+     "height": 947,
+     "scrollHeight": 947
+    },
+    "open": {
+     "top": 133,
+     "left": 440,
+     "width": 1099,
+     "height": 947,
+     "scrollHeight": 947
+    },
+    "feed": {
+     "top": 324,
+     "left": 1540,
+     "width": 380,
+     "height": 756,
+     "scrollHeight": 3048
+    }
+   }
+  },
+  "1366-dark": {
+   "viewport": [
+    1366,
+    768
+   ],
+   "scrollHeight": 768,
+   "clipped": [
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "q",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge via t3cm and reconcile with GitHub",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge #17 PR 5/6 #63 (skills install guide in the README)",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "You chose \"sections\": build the transcript from each section's heading lines (ta",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 handed off and cleaned up; PR 2/2 worker launched on feat/648-page-build-",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-page/add",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 handed off and cleaned up; PR 2/2 worker launched on feat/648-page-build-",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the work",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its ban",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 15,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 133,
+     "left": 0,
+     "width": 399,
+     "height": 635,
+     "scrollHeight": 635
+    },
+    "open": {
+     "top": 133,
+     "left": 400,
+     "width": 625,
+     "height": 635,
+     "scrollHeight": 635
+    },
+    "feed": {
+     "top": 324,
+     "left": 1026,
+     "width": 340,
+     "height": 444,
+     "scrollHeight": 3066
+    }
+   }
+  },
+  "1366-light": {
+   "viewport": [
+    1366,
+    768
+   ],
+   "scrollHeight": 768,
+   "clipped": [
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "q",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge via t3cm and reconcile with GitHub",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge #17 PR 5/6 #63 (skills install guide in the README)",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "You chose \"sections\": build the transcript from each section's heading lines (ta",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 handed off and cleaned up; PR 2/2 worker launched on feat/648-page-build-",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-page/add",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 handed off and cleaned up; PR 2/2 worker launched on feat/648-page-build-",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the work",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its ban",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 15,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 133,
+     "left": 0,
+     "width": 399,
+     "height": 635,
+     "scrollHeight": 635
+    },
+    "open": {
+     "top": 133,
+     "left": 400,
+     "width": 625,
+     "height": 635,
+     "scrollHeight": 635
+    },
+    "feed": {
+     "top": 324,
+     "left": 1026,
+     "width": 340,
+     "height": 444,
+     "scrollHeight": 3066
+    }
+   }
+  },
+  "390-dark": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "q",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 5,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 245,
+     "left": 0,
+     "width": 390,
+     "height": 487,
+     "scrollHeight": 758
+    },
+    "open": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "feed": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    }
+   },
+   "tabs": [
+    "Needs you4",
+    "Tickets 8",
+    "Activity"
+   ]
+  },
+  "390-dark-needs-you4": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "q",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 5,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 245,
+     "left": 0,
+     "width": 390,
+     "height": 487,
+     "scrollHeight": 758
+    },
+    "open": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "feed": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    }
+   }
+  },
+  "390-dark-tickets-8": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge #17 PR 5/6 #63 (skills install guide in the README)",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 5,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "open": {
+     "top": 245,
+     "left": 0,
+     "width": 390,
+     "height": 487,
+     "scrollHeight": 1352
+    },
+    "feed": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    }
+   }
+  },
+  "390-dark-activity": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "Built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-page/add",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the work",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its ban",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 4,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "open": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "feed": {
+     "top": 245,
+     "left": 0,
+     "width": 390,
+     "height": 487,
+     "scrollHeight": 3156
+    }
+   }
+  },
+  "390-light": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "q",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 5,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 245,
+     "left": 0,
+     "width": 390,
+     "height": 487,
+     "scrollHeight": 758
+    },
+    "open": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "feed": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    }
+   },
+   "tabs": [
+    "Needs you4",
+    "Tickets 8",
+    "Activity"
+   ]
+  },
+  "390-light-needs-you4": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "q",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 5,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 245,
+     "left": 0,
+     "width": 390,
+     "height": 487,
+     "scrollHeight": 758
+    },
+    "open": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "feed": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    }
+   }
+  },
+  "390-light-tickets-8": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge #17 PR 5/6 #63 (skills install guide in the README)",
+     "cls": "note clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "ttl clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 5,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "open": {
+     "top": 245,
+     "left": 0,
+     "width": 390,
+     "height": 487,
+     "scrollHeight": 1352
+    },
+    "feed": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    }
+   }
+  },
+  "390-light-activity": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "Built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-page/add",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the work",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its ban",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 4,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "open": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "feed": {
+     "top": 245,
+     "left": 0,
+     "width": 390,
+     "height": 487,
+     "scrollHeight": 3156
+    }
+   }
+  }
+ }
+}
