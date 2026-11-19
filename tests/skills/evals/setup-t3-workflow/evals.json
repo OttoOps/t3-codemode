@@ -39,6 +39,71 @@
         }
       ],
       "setup": {}
+    },
+    {
+      "id": 2,
+      "name": "worker-model-from-a-pool",
+      "prompt": "Use my opus pool for the worker threads.",
+      "expected_output": "Reads t3cm's pools, records the worker model as the opus pool alone, and shows the new slot lines.",
+      "files": [],
+      "expectations": [
+        "Reads t3cm's pools with wf.pools",
+        "Writes the worker model as the opus pool",
+        "Saves the pool alone, with no model or effort beside it",
+        "Shows the worker slot as the pool",
+        "Changes, adds or deletes no file in the repo"
+      ],
+      "checks": [
+        {
+          "tool": "execute",
+          "input": "wf\\.pools\\("
+        },
+        {
+          "bash": "setup_workflow\\.py.*write"
+        },
+        {
+          "file": "../config/t3-workflow/config.json",
+          "contains": "\"worker\":\\s*\\{\\s*\"pool\":\\s*\"opus\"\\s*\\}"
+        },
+        {
+          "text": "pool opus"
+        },
+        {
+          "repo": ".",
+          "none": true
+        }
+      ],
+      "setup": {
+        "t3cm": [
+          {
+            "match": "wf\\.pools\\(",
+            "result": [
+              {
+                "pool": "opus",
+                "driver": "claudeAgent",
+                "model": "claude-opus-5-5",
+                "effort": "high",
+                "strategy": "weighted",
+                "error": null,
+                "members": [
+                  {
+                    "instanceId": "claude-a",
+                    "weight": 1,
+                    "reserve": 0,
+                    "state": "ready"
+                  },
+                  {
+                    "instanceId": "claude-b",
+                    "weight": 1,
+                    "reserve": 0,
+                    "state": "ready"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }

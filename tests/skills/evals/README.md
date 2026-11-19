@@ -8,7 +8,7 @@ The eval sets for the skills in `skills/`, in the format Anthropic's
 | `<skill>/triggers.json` | Trigger evals: `{"query", "should_trigger"}` items, plus `form` (`plain` or `brief`) on each should-trigger item and `env: "plain"` on a prompt that runs outside T3 Code. |
 | `<skill>/evals.json` | Behavior evals for the roles and setup: skill-creator's `evals.json` shape, with a `checks` list that matches `expectations` one to one, and the `setup` the sandbox needs. |
 | `live.py` | The live runner. |
-| `stub_t3_mcp.py`, `fake_gh.py`, `guard_hook.py` | The stub T3 MCP server, the fake `gh` and the PreToolUse guard a sandbox runs with. |
+| `stub_t3_mcp.py`, `stub_t3cm_mcp.py`, `fake_gh.py`, `guard_hook.py` | The stub T3 MCP server, the stub t3cm server, the fake `gh` and the PreToolUse guard a sandbox runs with. |
 
 The sets live here rather than in each skill's folder because
 `npx skills add` copies a skill's whole folder onto the user's machine, and
@@ -35,6 +35,11 @@ gets its own sandbox under `--out` (a temporary folder by default):
 - a stub `t3-code` MCP server that logs each call, `t3wf` on its file-backed
   fake T3, and a T3 Code runtime note in the sandbox's `CLAUDE.md`, so a
   prompt runs as it would in a T3 Code thread (`env: "plain"` drops all three);
+- with a `t3cm` list in the eval's `setup`, a stub t3cm server whose
+  `execute` runs no code: each call gets the `result` (or `error`) of the
+  first rule whose `match` regular expression finds the submitted code, and a
+  rule's `results` list answers its calls in turn, so a pool eval can hand
+  each `wf.pick` its own pick;
 - a git repo whose `origin` is `https://github.com/acme/widgets.git`, rewritten
   with `insteadOf` to a local bare repo, and `GIT_ALLOW_PROTOCOL=file`, so no
   fetch or push leaves the machine.
