@@ -64,7 +64,7 @@ impl Issue {
     }
 }
 
-fn gh_name(s: &str) -> bool {
+pub(crate) fn gh_name(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 

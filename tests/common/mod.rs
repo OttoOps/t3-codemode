@@ -6,7 +6,7 @@ use serde_json::Value;
 use t3_codemode::app::{App, ExecuteRequest, ToolOutput};
 use t3_codemode::clock::FakeClock;
 use t3_codemode::config::Config;
-use t3_codemode::fake::{FakeDesktop, FakeRemotes, FakeT3, thread};
+use t3_codemode::fake::{FakeDesktop, FakeGitHub, FakeRemotes, FakeT3, thread};
 use t3_codemode::store::Store;
 
 pub const BOSS: &str = "mcp:boss";
@@ -30,6 +30,7 @@ pub struct H {
     pub clock: Arc<FakeClock>,
     pub app: Arc<App>,
     pub remotes: Arc<FakeRemotes>,
+    pub github: Arc<FakeGitHub>,
     pub desktop: Arc<FakeDesktop>,
     config: Config,
 }
@@ -52,9 +53,18 @@ impl H {
         let clock = Arc::new(FakeClock::at(T0));
         let store = Arc::new(Store::open(dir.path()).unwrap());
         let remotes = Arc::new(FakeRemotes::default());
+        let github = Arc::new(FakeGitHub::default());
         let desktop = Arc::new(FakeDesktop::default());
-        let app = App::with_host(config.clone(), store, fake.clone(), clock.clone(), remotes.clone(), desktop.clone());
-        H { dir, fake, clock, app, remotes, desktop, config }
+        let app = App::with_host(
+            config.clone(),
+            store,
+            fake.clone(),
+            clock.clone(),
+            remotes.clone(),
+            github.clone(),
+            desktop.clone(),
+        );
+        H { dir, fake, clock, app, remotes, github, desktop, config }
     }
 
     pub async fn load_catalog(&self) {
@@ -69,6 +79,7 @@ impl H {
             self.fake.clone(),
             self.clock.clone(),
             self.remotes.clone(),
+            self.github.clone(),
             self.desktop.clone(),
         );
     }

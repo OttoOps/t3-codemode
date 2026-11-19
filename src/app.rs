@@ -10,6 +10,7 @@ use crate::catalog::{Catalog, aliases};
 use crate::clock::{Clock, iso};
 use crate::config::{Config, OpenLinks};
 use crate::desktop::{Desktop, WindowsDesktop, app_link};
+use crate::github::{GhCli, GitHub};
 use crate::sandbox::{self, Host, Limits, NoHost, Run};
 use crate::store::Store;
 use crate::t3::{BoxFut, T3Client};
@@ -74,7 +75,7 @@ const EXEC_PRELUDE: &str = r#"
     init: m("init"), openChild: m("openChild"), join: m("join"), send: m("send"), reply: m("reply"),
     gate: m("gate"), close: m("close"), inbox: m("inbox"), board: m("board"), adopt: m("adopt"), sweep: m("sweep"),
     show: (handle) => call("wf.show", { handle }),
-    launchTicket: m("launchTicket"), cards: m("cards"), feed: m("feed"),
+    launchTicket: m("launchTicket"), cards: m("cards"), feed: m("feed"), merge: m("merge"),
     answer: (id, text) => call("wf.answer", { id, text }),
     waiting: Object.freeze({
       add: m("waiting.add"),
@@ -158,6 +159,12 @@ fn error_output(msg: &str, logs: Vec<String>, globals: &str) -> ToolOutput {
     ToolOutput { is_error: true, text }
 }
 
+struct Outside {
+    remotes: Arc<dyn Remotes>,
+    github: Arc<dyn GitHub>,
+    desktop: Arc<dyn Desktop>,
+}
+
 impl App {
     pub fn new(config: Config, store: Arc<Store>, t3: Arc<dyn T3Client>, clock: Arc<dyn Clock>) -> Arc<App> {
         let upstreams = Arc::new(UpstreamManager::new(config.upstreams.clone()));
@@ -181,7 +188,7 @@ impl App {
         clock: Arc<dyn Clock>,
         remotes: Arc<dyn Remotes>,
     ) -> Arc<App> {
-        App::with_host(config, store, t3, clock, remotes, Arc::new(WindowsDesktop))
+        App::with_host(config, store, t3, clock, remotes, Arc::new(GhCli), Arc::new(WindowsDesktop))
     }
 
     pub fn with_host(
@@ -190,10 +197,11 @@ impl App {
         t3: Arc<dyn T3Client>,
         clock: Arc<dyn Clock>,
         remotes: Arc<dyn Remotes>,
+        github: Arc<dyn GitHub>,
         desktop: Arc<dyn Desktop>,
     ) -> Arc<App> {
         let upstreams = Arc::new(UpstreamManager::new(config.upstreams.clone()));
-        App::assemble(config, store, t3, clock, remotes, upstreams, desktop)
+        App::assemble(config, store, t3, clock, upstreams, Outside { remotes, github, desktop })
     }
 
     pub fn build(
@@ -204,7 +212,14 @@ impl App {
         remotes: Arc<dyn Remotes>,
         upstreams: Arc<UpstreamManager>,
     ) -> Arc<App> {
-        App::assemble(config, store, t3, clock, remotes, upstreams, Arc::new(WindowsDesktop))
+        App::assemble(
+            config,
+            store,
+            t3,
+            clock,
+            upstreams,
+            Outside { remotes, github: Arc::new(GhCli), desktop: Arc::new(WindowsDesktop) },
+        )
     }
 
     fn assemble(
@@ -212,12 +227,11 @@ impl App {
         store: Arc<Store>,
         t3: Arc<dyn T3Client>,
         clock: Arc<dyn Clock>,
-        remotes: Arc<dyn Remotes>,
         upstreams: Arc<UpstreamManager>,
-        desktop: Arc<dyn Desktop>,
+        Outside { remotes, github, desktop }: Outside,
     ) -> Arc<App> {
         let config = Arc::new(config);
-        let wf = Arc::new(Wf::new(store.clone(), t3.clone(), clock.clone(), config.clone(), remotes));
+        let wf = Arc::new(Wf::new(store.clone(), t3.clone(), clock.clone(), config.clone(), remotes, github));
         let cached: Vec<Value> =
             store.meta_get(TOOLS_CACHE).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let generation = upstreams.generation();
