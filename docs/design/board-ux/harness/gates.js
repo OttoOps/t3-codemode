@@ -98,10 +98,10 @@ async (page) => {
     return { kinds, sorted };
   });
   const needs = page.locator("#open .needs:visible").first();
-  const needId = (await needs.textContent()).match(/a\d+/)[0];
+  const needId = (await needs.getAttribute("aria-label")).match(/card (\w+)/)[1];
   await needs.click();
   r.U7.rowToCard = await page.evaluate((id) => document.activeElement.dataset.id === id, needId);
-  await page.locator(`#cards [data-id="${needId}"] .cid`).click();
+  await page.locator(`#cards [data-id="${needId}"] [data-part="id"]`).click();
   r.U7.cardToRow = await page.evaluate(() => document.activeElement.classList.contains("tk"));
   await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
   await page.evaluate(() => { document.documentElement.style.filter = "grayscale(1)"; });
@@ -281,11 +281,12 @@ async (page) => {
   });
   r.P3 = await page.evaluate(() => {
     const acc = getComputedStyle(document.querySelector("#cards a, #open a")).color;
-    const need = getComputedStyle(document.querySelector(".r-need") || document.body).color;
+    const need = getComputedStyle(document.querySelector(".s-need") || document.body).color;
     const accentStatus = [...document.querySelectorAll(".mark, .tag")].filter((el) => getComputedStyle(el).color === acc).length;
     const amberOff = [...document.querySelectorAll("body *")].filter((el) => el.getClientRects().length && getComputedStyle(el).color === need
-      && !el.closest(".r-need, .needs, .tag, .counts .need, .k-need")).map((el) => el.className).slice(0, 10);
-    const running = [...document.querySelectorAll(".mark")].filter((m) => m.textContent === "running").map((m) => m.className);
+      && !el.closest(".s-need, .needs")).map((el) => el.className).slice(0, 10);
+    const ink = getComputedStyle(document.body).color;
+    const running = [...document.querySelectorAll(".s-run")].map((m) => getComputedStyle(m).color === ink ? "ink" : getComputedStyle(m).color);
     return { accentStatus, amberOff, runningRoles: [...new Set(running)] };
   });
 

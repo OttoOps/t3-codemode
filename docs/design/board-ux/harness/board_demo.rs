@@ -6,7 +6,7 @@ use t3_codemode::app::App;
 use t3_codemode::board::{BOARD, LaunchArgs};
 use t3_codemode::clock::{FakeClock, iso, plus_minutes};
 use t3_codemode::config::Config;
-use t3_codemode::fake::{FakeDesktop, FakeRemotes, FakeT3, project, thread};
+use t3_codemode::fake::{FakeDesktop, FakeGitHub, FakeRemotes, FakeT3, project, thread};
 use t3_codemode::server;
 use t3_codemode::store::Store;
 
@@ -62,6 +62,26 @@ const GATES: &[(&str, &str)] = &[
     ),
 ];
 
+const TITLES: &[&str] = &[
+    "Retry failed webhook deliveries with backoff",
+    "Add CSV export to the usage report",
+    "Move tenant settings into their own table",
+    "Show deploy status on the release page",
+    "Cache the pricing lookup per request",
+    "Sign Windows builds in CI",
+    "Drop the legacy v1 sync endpoint",
+    "Paginate the audit log API",
+    "Speed up the nightly reconcile job",
+    "Fix flaky integration test teardown",
+    "Let admins rotate API keys",
+    "Report p95 latency per route",
+];
+
+fn title_for(label: &str) -> String {
+    let n: usize = label.bytes().map(usize::from).sum();
+    format!("{label}: {}", TITLES[n % TITLES.len()])
+}
+
 const ASK_ANSWER: &str = "atlas#57 has waited longest: one PR or two for the CSV export.";
 
 fn id(kind: &str, n: usize) -> String {
@@ -89,6 +109,7 @@ impl Demo {
             fake.clone(),
             clock.clone(),
             remotes,
+            Arc::new(FakeGitHub::default()),
             Arc::new(FakeDesktop::default()),
         );
         Demo { app, fake, clock, start }
@@ -119,7 +140,7 @@ impl Demo {
 
     async fn ticket(&self, n: usize, label: &str, status: &str, pr: Option<(&str, u64, &str)>) -> String {
         let me = id("ticket", n);
-        self.put(&me, status, &format!("Ticket {label}"), pr);
+        self.put(&me, status, &title_for(label), pr);
         self.wf(&me, "join", json!({"parent": BOARD, "label": label, "role": "ticket"})).await;
         me
     }
@@ -284,7 +305,7 @@ impl Demo {
             if n.is_multiple_of(9) {
                 let label = format!("{}#{}", REPOS[n % REPOS.len()], 500 + n);
                 let me = id("late", n);
-                self.put(&me, "running", &label, None);
+                self.put(&me, "running", &title_for(&label), None);
                 if self
                     .app
                     .wf

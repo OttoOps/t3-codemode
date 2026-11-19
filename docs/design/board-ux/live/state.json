@@ -84,7 +84,8 @@
      "pr": null,
      "done": true,
      "closedHow": "handoff",
-     "lastUp": "23:58 MST"
+     "lastUp": "23:58 MST",
+     "upAt": "2026-11-18T06:58:00Z"
     },
     {
      "thread": "thread-6acc60bfed59",
@@ -96,7 +97,8 @@
      "pr": null,
      "done": true,
      "closedHow": "handoff",
-     "lastUp": "00:21 MST"
+     "lastUp": "00:21 MST",
+     "upAt": "2026-11-18T07:21:00Z"
     },
     {
      "thread": "thread-45a2dde634b9",
@@ -108,7 +110,8 @@
      "pr": null,
      "done": true,
      "closedHow": "handoff",
-     "lastUp": "02:35 MST"
+     "lastUp": "02:35 MST",
+     "upAt": "2026-11-18T09:35:00Z"
     },
     {
      "thread": "thread-a36966150854",
@@ -120,7 +123,8 @@
      "pr": null,
      "done": true,
      "closedHow": "handoff",
-     "lastUp": "07:46 MST"
+     "lastUp": "07:46 MST",
+     "upAt": "2026-11-18T14:46:00Z"
     },
     {
      "thread": "thread-ae0cd36937bd",
@@ -132,7 +136,8 @@
      "pr": null,
      "done": true,
      "closedHow": "handoff",
-     "lastUp": "15:53 MST"
+     "lastUp": "15:53 MST",
+     "upAt": "2026-11-18T22:53:00Z"
     }
    ],
    "ticket": "thread-e3a060d6c67e",
@@ -141,8 +146,11 @@
     "handle": "m616",
     "kind": "gate",
     "head": "**ACTION NEEDED:** get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath) per the checklist, then reply \"windows r...",
-    "at": "15:54 MST"
-   }
+    "at": "15:54 MST",
+    "iso": "2026-11-18T22:54:00Z"
+   },
+   "title": "t3-codemode#2: Release builds for Linux, macOS and Windows",
+   "upAt": "2026-11-18T22:54:00Z"
   },
   {
    "thread": "thread-04d98505c36b",
@@ -166,7 +174,8 @@
      "pr": null,
      "done": true,
      "closedHow": "handoff",
-     "lastUp": "23:40 MST"
+     "lastUp": "23:40 MST",
+     "upAt": "2026-11-18T06:40:00Z"
     },
     {
      "thread": "thread-8e2839e81910",
@@ -178,7 +187,8 @@
      "pr": null,
      "done": true,
      "closedHow": "handoff",
-     "lastUp": "00:19 MST"
+     "lastUp": "00:19 MST",
+     "upAt": "2026-11-18T07:19:00Z"
     },
     {
      "thread": "thread-32095b7dee1d",
@@ -190,7 +200,8 @@
      "pr": null,
      "done": true,
      "closedHow": "handoff",
-     "lastUp": "01:35 MST"
+     "lastUp": "01:35 MST",
+     "upAt": "2026-11-18T08:35:00Z"
     },
     {
      "thread": "thread-22a9c0ad39ed",
@@ -202,7 +213,8 @@
      "pr": null,
      "done": true,
      "closedHow": "handoff",
-     "lastUp": "15:53 MST"
+     "lastUp": "15:53 MST",
+     "upAt": "2026-11-18T22:53:00Z"
     },
     {
      "thread": "thread-d578d769ac28",
@@ -219,7 +231,8 @@
      },
      "done": false,
      "closedHow": null,
-     "lastUp": "16:21 MST"
+     "lastUp": "16:21 MST",
+     "upAt": "2026-11-18T23:21:00Z"
     }
    ],
    "ticket": "thread-04d98505c36b",
@@ -228,8 +241,11 @@
     "handle": "m668",
     "kind": "gate",
     "head": "**ACTION NEEDED:** reply \"merge\" to merge #17 PR 5/6 #63 (skills install guide in the README), or review it first, here: https://github.com/...",
-    "at": "16:21 MST"
-   }
+    "at": "16:21 MST",
+    "iso": "2026-11-18T23:21:00Z"
+   },
+   "title": "t3-codemode#17: Publish T3 workflow skills with a setup skill",
+   "upAt": "2026-11-18T23:21:00Z"
   },
   {
    "thread": "thread-eb081b99ac8f",
@@ -253,7 +269,8 @@
      "pr": null,
      "done": true,
      "closedHow": "handoff",
-     "lastUp": "17:18 MST"
+     "lastUp": "17:18 MST",
+     "upAt": "2026-11-19T00:18:00Z"
     },
     {
      "thread": "thread-e0ac4dfdfbe6",
@@ -265,7 +282,8 @@
      "pr": null,
      "done": false,
      "closedHow": null,
-     "lastUp": "17:21 MST"
+     "lastUp": "17:21 MST",
+     "upAt": "2026-11-19T00:21:00Z"
     }
    ],
    "ticket": "thread-eb081b99ac8f",
@@ -274,8 +292,11 @@
     "handle": "m714",
     "kind": "reply",
     "head": "You chose \"sections\": build the transcript from each section's heading lines (tags stripped, whitespace collapsed), grouped by section. Say i...",
-    "at": "17:24 MST"
-   }
+    "at": "17:24 MST",
+    "iso": "2026-11-19T00:24:00Z"
+   },
+   "title": "web#647: Build a search index from page sections",
+   "upAt": "2026-11-19T00:21:00Z"
   },
   {
    "thread": "thread-ad28a8000b9b",
@@ -299,7 +320,8 @@
      "pr": null,
      "done": true,
      "closedHow": "handoff",
-     "lastUp": "17:19 MST"
+     "lastUp": "17:19 MST",
+     "upAt": "2026-11-19T00:19:00Z"
     },
     {
      "thread": "thread-714a6e908ec3",
@@ -311,7 +333,8 @@
      "pr": null,
      "done": false,
      "closedHow": null,
-     "lastUp": "17:25 MST"
+     "lastUp": "17:25 MST",
+     "upAt": "2026-11-19T00:25:00Z"
     }
    ],
    "ticket": "thread-ad28a8000b9b",
@@ -320,8 +343,11 @@
     "handle": "m709",
     "kind": "note",
     "head": "PR 1/2 handed off and cleaned up; PR 2/2 worker launched on feat/648-page-build-checks",
-    "at": "17:20 MST"
-   }
+    "at": "17:20 MST",
+    "iso": "2026-11-19T00:20:00Z"
+   },
+   "title": "web#648: Check pages at build time",
+   "upAt": "2026-11-19T00:20:00Z"
   },
   {
    "thread": "thread-9626382a95f2",
@@ -350,7 +376,8 @@
      },
      "done": false,
      "closedHow": null,
-     "lastUp": "17:16 MST"
+     "lastUp": "17:16 MST",
+     "upAt": "2026-11-19T00:16:00Z"
     }
    ],
    "ticket": "thread-9626382a95f2",
@@ -359,8 +386,11 @@
     "handle": "m698",
     "kind": "note",
     "head": "PR 1/2 open for review while checks run: https://github.com/OttoOps/t3-codemode/pull/66 (head 00caefa)",
-    "at": "17:16 MST"
-   }
+    "at": "17:16 MST",
+    "iso": "2026-11-19T00:16:00Z"
+   },
+   "title": "t3-codemode#55: Add filters, live search and saved contexts to board",
+   "upAt": "2026-11-19T00:16:00Z"
   },
   {
    "thread": "thread-cd8896e65d18",
@@ -389,7 +419,8 @@
      },
      "done": false,
      "closedHow": null,
-     "lastUp": "16:50 MST"
+     "lastUp": "16:50 MST",
+     "upAt": "2026-11-18T23:50:00Z"
     }
    ],
    "ticket": "thread-cd8896e65d18",
@@ -398,8 +429,11 @@
     "handle": "m685",
     "kind": "gate",
     "head": "**ACTION NEEDED:** reply \"merge\" to merge #65 (rebase through the merge queue), or review it first, here: https://github.com/OttoOps/t3-code...",
-    "at": "16:50 MST"
-   }
+    "at": "16:50 MST",
+    "iso": "2026-11-18T23:50:00Z"
+   },
+   "title": "t3-codemode#56: Merge via t3cm and reconcile with GitHub",
+   "upAt": "2026-11-18T23:50:00Z"
   },
   {
    "thread": "thread-b7319108b8ee",
@@ -428,7 +462,8 @@
      },
      "done": false,
      "closedHow": null,
-     "lastUp": "16:30 MST"
+     "lastUp": "16:30 MST",
+     "upAt": "2026-11-18T23:30:00Z"
     }
    ],
    "ticket": "thread-b7319108b8ee",
@@ -437,8 +472,11 @@
     "handle": "m674",
     "kind": "gate",
     "head": "**ACTION NEEDED:** reply \"merge\" to merge #64, or review it first, here: https://github.com/OttoOps/t3-codemode/pull/64",
-    "at": "16:31 MST"
-   }
+    "at": "16:31 MST",
+    "iso": "2026-11-18T23:31:00Z"
+   },
+   "title": "t3-codemode#59: Board drops reply buttons for natural gate lines",
+   "upAt": "2026-11-18T23:31:00Z"
   },
   {
    "thread": "thread-090c1aeff387",
@@ -462,7 +500,8 @@
      "pr": null,
      "done": false,
      "closedHow": null,
-     "lastUp": "17:25 MST"
+     "lastUp": "17:25 MST",
+     "upAt": "2026-11-19T00:25:00Z"
     }
    ],
    "ticket": "thread-090c1aeff387",
@@ -471,8 +510,11 @@
     "handle": "m712",
     "kind": "gate",
     "head": "reply \"approve\" to approve the 2-PR split for #67 (docs critique, then the build), or reply with changes, here: https://github.com/OttoOps/t...",
-    "at": "17:23 MST"
-   }
+    "at": "17:23 MST",
+    "iso": "2026-11-19T00:23:00Z"
+   },
+   "title": "t3-codemode#67: Make the T3 board readable at a glance",
+   "upAt": "2026-11-19T00:23:00Z"
   }
  ],
  "feed": [
@@ -482,7 +524,9 @@
    "iso": "2026-11-19T00:25:22Z",
    "label": "#648 PR 2/2",
    "kind": "note",
-   "head": "PR 2/2 built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-page/add-section-guide; npm test 1976 pass, npm run build green. Starting sol-loop."
+   "head": "PR 2/2 built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-page/add-section-guide; npm test 1976 pass, npm run build green. Starting sol-loop.",
+   "ticketLabel": "web#648",
+   "ticketTitle": "web#648: Check pages at build time"
   },
   {
    "handle": "m709",
@@ -490,7 +534,9 @@
    "iso": "2026-11-19T00:20:23Z",
    "label": "web#648",
    "kind": "note",
-   "head": "PR 1/2 handed off and cleaned up; PR 2/2 worker launched on feat/648-page-build-checks"
+   "head": "PR 1/2 handed off and cleaned up; PR 2/2 worker launched on feat/648-page-build-checks",
+   "ticketLabel": "web#648",
+   "ticketTitle": "web#648: Check pages at build time"
   },
   {
    "handle": "m706",
@@ -498,7 +544,9 @@
    "iso": "2026-11-19T00:19:26Z",
    "label": "web#647",
    "kind": "note",
-   "head": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned, issue commented. PR 2/2 worker launched on feat/647-search-index."
+   "head": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned, issue commented. PR 2/2 worker launched on feat/647-search-index.",
+   "ticketLabel": "web#647",
+   "ticketTitle": "web#647: Build a search index from page sections"
   },
   {
    "handle": "m704",
@@ -506,7 +554,9 @@
    "iso": "2026-11-19T00:18:56Z",
    "label": "web#648",
    "kind": "note",
-   "head": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the worker's handoff before PR 2/2"
+   "head": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the worker's handoff before PR 2/2",
+   "ticketLabel": "web#648",
+   "ticketTitle": "web#648: Check pages at build time"
   },
   {
    "handle": "m702",
@@ -514,7 +564,9 @@
    "iso": "2026-11-19T00:18:47Z",
    "label": "web#646",
    "kind": "note",
-   "head": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its banner; release notes stay live. Deploy hold lifted."
+   "head": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its banner; release notes stay live. Deploy hold lifted.",
+   "ticketLabel": "web#646",
+   "ticketTitle": "web#646: Launch page banner field"
   },
   {
    "handle": "m698",
@@ -522,7 +574,9 @@
    "iso": "2026-11-19T00:16:08Z",
    "label": "t3-codemode#55",
    "kind": "note",
-   "head": "PR 1/2 open for review while checks run: https://github.com/OttoOps/t3-codemode/pull/66 (head 00caefa)"
+   "head": "PR 1/2 open for review while checks run: https://github.com/OttoOps/t3-codemode/pull/66 (head 00caefa)",
+   "ticketLabel": "t3-codemode#55",
+   "ticketTitle": "t3-codemode#55: Add filters, live search and saved contexts to board"
   },
   {
    "handle": "m697",
@@ -530,7 +584,9 @@
    "iso": "2026-11-19T00:16:00Z",
    "label": "#55 PR 1/2",
    "kind": "event",
-   "head": "PR 1/2 opened: #66 https://github.com/OttoOps/t3-codemode/pull/66, head 00caefa Publishing: filled .github/PULL_REQUEST_TEMPLATE.md (repo names no PR skill); voice skill ran with voice-check...."
+   "head": "PR 1/2 opened: #66 https://github.com/OttoOps/t3-codemode/pull/66, head 00caefa Publishing: filled .github/PULL_REQUEST_TEMPLATE.md (repo names no PR skill); voice skill ran with voice-check....",
+   "ticketLabel": "t3-codemode#55",
+   "ticketTitle": "t3-codemode#55: Add filters, live search and saved contexts to board"
   },
   {
    "handle": "m694",
@@ -538,7 +594,9 @@
    "iso": "2026-11-19T00:08:14Z",
    "label": "web#646",
    "kind": "note",
-   "head": "#654 rebase-merged (99cffc899); deploy/v2.6.66 pushed 17:07 MST carrying #651/#653/#654; deploy hold lifted once it succeeds"
+   "head": "#654 rebase-merged (99cffc899); deploy/v2.6.66 pushed 17:07 MST carrying #651/#653/#654; deploy hold lifted once it succeeds",
+   "ticketLabel": "web#646",
+   "ticketTitle": "web#646: Launch page banner field"
   },
   {
    "handle": "m690",
@@ -546,7 +604,9 @@
    "iso": "2026-11-18T23:59:59Z",
    "label": "#646 fix cover",
    "kind": "event",
-   "head": "Follow-up PR opened: #654 https://github.com/acme/web/pull/654, head 3e8d9d750 (follow-up of #653). Refs #646 #648. Contents: meta.json \"banner\": \"launch-2026-11\"; body.md lead iframe droppe..."
+   "head": "Follow-up PR opened: #654 https://github.com/acme/web/pull/654, head 3e8d9d750 (follow-up of #653). Refs #646 #648. Contents: meta.json \"banner\": \"launch-2026-11\"; body.md lead iframe droppe...",
+   "ticketLabel": "web#646",
+   "ticketTitle": "web#646: Launch page banner field"
   },
   {
    "handle": "m688",
@@ -554,7 +614,9 @@
    "iso": "2026-11-18T23:55:43Z",
    "label": "web#646",
    "kind": "note",
-   "head": "HOLD all web deploys: main (with #651 + #653) would null the launch page's banner on boot and blank the live launch page. Fix PR in progress on fix/646-launch-banner-field; web#646 pushes the next deploy/ t..."
+   "head": "HOLD all web deploys: main (with #651 + #653) would null the launch page's banner on boot and blank the live launch page. Fix PR in progress on fix/646-launch-banner-field; web#646 pushes the next deploy/ t...",
+   "ticketLabel": "web#646",
+   "ticketTitle": "web#646: Launch page banner field"
   },
   {
    "handle": "m686",
@@ -562,7 +624,9 @@
    "iso": "2026-11-18T23:52:36Z",
    "label": "#646 fix cover",
    "kind": "event",
-   "head": "PR 1/1 updated: #653, head f280174ee (remote confirmed; GitHub PR head still catching up from 390604428). Change: hero is now 1600x1600 square, fill = hero.jpg border mean (252,244,237) ~#fcf4ec, card..."
+   "head": "PR 1/1 updated: #653, head f280174ee (remote confirmed; GitHub PR head still catching up from 390604428). Change: hero is now 1600x1600 square, fill = hero.jpg border mean (252,244,237) ~#fcf4ec, card...",
+   "ticketLabel": "web#646",
+   "ticketTitle": "web#646: Launch page banner field"
   },
   {
    "handle": "m682",
@@ -570,7 +634,9 @@
    "iso": "2026-11-18T23:47:00Z",
    "label": "#646 fix cover",
    "kind": "event",
-   "head": "PR 1/1 opened: #653 https://github.com/acme/web/pull/653, head 390604428 Publishing: pr skill template; voice pass (voice-check OK, no hard violations); unslop pass, every rule checked ..."
+   "head": "PR 1/1 opened: #653 https://github.com/acme/web/pull/653, head 390604428 Publishing: pr skill template; voice pass (voice-check OK, no hard violations); unslop pass, every rule checked ...",
+   "ticketLabel": "web#646",
+   "ticketTitle": "web#646: Launch page banner field"
   },
   {
    "handle": "m681",
@@ -578,7 +644,9 @@
    "iso": "2026-11-18T23:44:49Z",
    "label": "#646 fix cover",
    "kind": "note",
-   "head": "#646 fix committed (390604428): image set, og.png removed, seeder reconcile proven on staging (cover-updated). npm test 1961/1961, build OK. Featured slot crops the 3:2 banner (object-fit cover, t..."
+   "head": "#646 fix committed (390604428): image set, og.png removed, seeder reconcile proven on staging (cover-updated). npm test 1961/1961, build OK. Featured slot crops the 3:2 banner (object-fit cover, t...",
+   "ticketLabel": "web#646",
+   "ticketTitle": "web#646: Launch page banner field"
   },
   {
    "handle": "m676",
@@ -586,7 +654,9 @@
    "iso": "2026-11-18T23:38:47Z",
    "label": "#56 PR 1/4",
    "kind": "event",
-   "head": "PR 1/4 updated: #65, head cc9af534e849ca731d2cc42d736d82d3cf93aa1a. CodeRabbit follow-up: a worker that finished while its PR was open (or closed) kept that state on the board. board_tick now re-reads..."
+   "head": "PR 1/4 updated: #65, head cc9af534e849ca731d2cc42d736d82d3cf93aa1a. CodeRabbit follow-up: a worker that finished while its PR was open (or closed) kept that state on the board. board_tick now re-reads...",
+   "ticketLabel": "t3-codemode#56",
+   "ticketTitle": "t3-codemode#56: Merge via t3cm and reconcile with GitHub"
   },
   {
    "handle": "m675",
@@ -594,7 +664,9 @@
    "iso": "2026-11-18T23:34:45Z",
    "label": "#56 PR 1/4",
    "kind": "event",
-   "head": "PR 1/4 updated: #65, head 6900c903f0b3c9729d6b96ef6e8426011204b555. CodeRabbit minor: a PR that reopened between t3_thread_read and the list call got cached as open under stale counts. Cache reuse is ..."
+   "head": "PR 1/4 updated: #65, head 6900c903f0b3c9729d6b96ef6e8426011204b555. CodeRabbit minor: a PR that reopened between t3_thread_read and the list call got cached as open under stale counts. Cache reuse is ...",
+   "ticketLabel": "t3-codemode#56",
+   "ticketTitle": "t3-codemode#56: Merge via t3cm and reconcile with GitHub"
   },
   {
    "handle": "m672",
@@ -602,7 +674,9 @@
    "iso": "2026-11-18T23:30:18Z",
    "label": "#56 PR 1/4",
    "kind": "note",
-   "head": "#65: CodeRabbit marked both inline findings addressed in 0d14802; required check passed on 0d14802. Waiting on checks and CodeRabbit review for head d940b1f."
+   "head": "#65: CodeRabbit marked both inline findings addressed in 0d14802; required check passed on 0d14802. Waiting on checks and CodeRabbit review for head d940b1f.",
+   "ticketLabel": "t3-codemode#56",
+   "ticketTitle": "t3-codemode#56: Merge via t3cm and reconcile with GitHub"
   },
   {
    "handle": "m671",
@@ -610,7 +684,9 @@
    "iso": "2026-11-18T23:29:58Z",
    "label": "#56 PR 1/4",
    "kind": "event",
-   "head": "PR 1/4 updated: #65, head d940b1f (full sha via gh). CodeRabbit's summary flagged a retained reliability concern (Medium, inferred): a stalled list_thread_pull_requests under the shared wf lock had no..."
+   "head": "PR 1/4 updated: #65, head d940b1f (full sha via gh). CodeRabbit's summary flagged a retained reliability concern (Medium, inferred): a stalled list_thread_pull_requests under the shared wf lock had no...",
+   "ticketLabel": "t3-codemode#56",
+   "ticketTitle": "t3-codemode#56: Merge via t3cm and reconcile with GitHub"
   },
   {
    "handle": "m670",
@@ -618,7 +694,9 @@
    "iso": "2026-11-18T23:27:35Z",
    "label": "#56 PR 1/4",
    "kind": "event",
-   "head": "PR 1/4 updated: #65, head 0d14802ed4ff8d0c6dbac051b25d4edf3f3ab9cd. Fixed two CodeRabbit minors: list_thread_pull_requests now follows nextCursor (cap 20 pages), and a cached list holding a closed PR ..."
+   "head": "PR 1/4 updated: #65, head 0d14802ed4ff8d0c6dbac051b25d4edf3f3ab9cd. Fixed two CodeRabbit minors: list_thread_pull_requests now follows nextCursor (cap 20 pages), and a cached list holding a closed PR ...",
+   "ticketLabel": "t3-codemode#56",
+   "ticketTitle": "t3-codemode#56: Merge via t3cm and reconcile with GitHub"
   },
   {
    "handle": "m669",
@@ -626,7 +704,9 @@
    "iso": "2026-11-18T23:23:14Z",
    "label": "#59 PR 1/2",
    "kind": "note",
-   "head": "#64: CodeRabbit approved, no actionable comments. Linux checks green; macOS and Windows still running."
+   "head": "#64: CodeRabbit approved, no actionable comments. Linux checks green; macOS and Windows still running.",
+   "ticketLabel": "t3-codemode#59",
+   "ticketTitle": "t3-codemode#59: Board drops reply buttons for natural gate lines"
   },
   {
    "handle": "m666",
@@ -634,7 +714,9 @@
    "iso": "2026-11-18T23:21:19Z",
    "label": "#647 PR 1/2",
    "kind": "note",
-   "head": "#652 head 886b34cc8: CodeRabbit's re-review generated no actionable comments. Thread r4622151434 still shows unresolved (not resolved by CodeRabbit), and merge state is BLOCKED on the ruleset's review..."
+   "head": "#652 head 886b34cc8: CodeRabbit's re-review generated no actionable comments. Thread r4622151434 still shows unresolved (not resolved by CodeRabbit), and merge state is BLOCKED on the ruleset's review...",
+   "ticketLabel": "web#647",
+   "ticketTitle": "web#647: Build a search index from page sections"
   },
   {
    "handle": "m665",
@@ -642,7 +724,9 @@
    "iso": "2026-11-18T23:20:29Z",
    "label": "#17 PR 5/6",
    "kind": "event",
-   "head": "PR 5/6 updated: #63, head 905fcaa7d21dfe1978040c8cec2f6f56b63f3c17. CodeRabbit requested changes on 997522b (3 minor findings, all valid): README now says the skills need T3 Code (t3_thread_launch), t..."
+   "head": "PR 5/6 updated: #63, head 905fcaa7d21dfe1978040c8cec2f6f56b63f3c17. CodeRabbit requested changes on 997522b (3 minor findings, all valid): README now says the skills need T3 Code (t3_thread_launch), t...",
+   "ticketLabel": "t3-codemode#17",
+   "ticketTitle": "t3-codemode#17: Publish T3 workflow skills with a setup skill"
   },
   {
    "handle": "m662",
@@ -650,7 +734,9 @@
    "iso": "2026-11-18T23:19:08Z",
    "label": "t3-codemode#56",
    "kind": "note",
-   "head": "PR 1/4 opened: https://github.com/OttoOps/t3-codemode/pull/65 (head f837a84), checks running"
+   "head": "PR 1/4 opened: https://github.com/OttoOps/t3-codemode/pull/65 (head f837a84), checks running",
+   "ticketLabel": "t3-codemode#56",
+   "ticketTitle": "t3-codemode#56: Merge via t3cm and reconcile with GitHub"
   },
   {
    "handle": "m661",
@@ -658,7 +744,9 @@
    "iso": "2026-11-18T23:19:01Z",
    "label": "#56 PR 1/4",
    "kind": "event",
-   "head": "PR 1/4 opened: #65 https://github.com/OttoOps/t3-codemode/pull/65, head f837a8436e3f6353a8b34231f9916a3195a41ec3 Publishing: filled .github/PULL_REQUEST_TEMPLATE.md (no format skill named by the repo)..."
+   "head": "PR 1/4 opened: #65 https://github.com/OttoOps/t3-codemode/pull/65, head f837a8436e3f6353a8b34231f9916a3195a41ec3 Publishing: filled .github/PULL_REQUEST_TEMPLATE.md (no format skill named by the repo)...",
+   "ticketLabel": "t3-codemode#56",
+   "ticketTitle": "t3-codemode#56: Merge via t3cm and reconcile with GitHub"
   },
   {
    "handle": "m658",
@@ -666,7 +754,9 @@
    "iso": "2026-11-18T23:17:45Z",
    "label": "#59 PR 1/2",
    "kind": "event",
-   "head": "PR 1/2 opened: #64 https://github.com/OttoOps/t3-codemode/pull/64, head e718a8e Publishing: pr skill template (Summary/Evidence/Merge Danger) for the PR body; docs/src/board.md \"Reply buttons\" section..."
+   "head": "PR 1/2 opened: #64 https://github.com/OttoOps/t3-codemode/pull/64, head e718a8e Publishing: pr skill template (Summary/Evidence/Merge Danger) for the PR body; docs/src/board.md \"Reply buttons\" section...",
+   "ticketLabel": "t3-codemode#59",
+   "ticketTitle": "t3-codemode#59: Board drops reply buttons for natural gate lines"
   },
   {
    "handle": "m655",
@@ -674,7 +764,9 @@
    "iso": "2026-11-18T23:16:10Z",
    "label": "web#647",
    "kind": "note",
-   "head": "#652 head moved to 886b34c (CodeRabbit lastmod edge, now documented as best estimate); merge card c1 is stale, new one follows when checks pass."
+   "head": "#652 head moved to 886b34c (CodeRabbit lastmod edge, now documented as best estimate); merge card c1 is stale, new one follows when checks pass.",
+   "ticketLabel": "web#647",
+   "ticketTitle": "web#647: Build a search index from page sections"
   },
   {
    "handle": "m654",
@@ -682,7 +774,9 @@
    "iso": "2026-11-18T23:16:07Z",
    "label": "#647 PR 1/2",
    "kind": "event",
-   "head": "PR 1/2 updated: #652, head 886b34cc8 (ready-to-merge for 9df37f4aa is stale). CodeRabbit raised a second lastmod edge (section added to an already-published page keeps the older page date). The basel..."
+   "head": "PR 1/2 updated: #652, head 886b34cc8 (ready-to-merge for 9df37f4aa is stale). CodeRabbit raised a second lastmod edge (section added to an already-published page keeps the older page date). The basel...",
+   "ticketLabel": "web#647",
+   "ticketTitle": "web#647: Build a search index from page sections"
   },
   {
    "handle": "m653",
@@ -690,7 +784,9 @@
    "iso": "2026-11-18T23:15:48Z",
    "label": "web#646",
    "kind": "note",
-   "head": "deploy/v2.6.65 Succeeded; prod done-when checks all pass; waiting on worker handoff"
+   "head": "deploy/v2.6.65 Succeeded; prod done-when checks all pass; waiting on worker handoff",
+   "ticketLabel": "web#646",
+   "ticketTitle": "web#646: Launch page banner field"
   },
   {
    "handle": "m651",
@@ -698,7 +794,9 @@
    "iso": "2026-11-18T23:14:35Z",
    "label": "#17 PR 5/6",
    "kind": "event",
-   "head": "PR 5/6 opened: #63 https://github.com/OttoOps/t3-codemode/pull/63, head 997522b9c216701a2749eb1511c2b7a789231628 Publishing: format = .github/PULL_REQUEST_TEMPLATE.md (no repo-named format skill); REA..."
+   "head": "PR 5/6 opened: #63 https://github.com/OttoOps/t3-codemode/pull/63, head 997522b9c216701a2749eb1511c2b7a789231628 Publishing: format = .github/PULL_REQUEST_TEMPLATE.md (no repo-named format skill); REA...",
+   "ticketLabel": "t3-codemode#17",
+   "ticketTitle": "t3-codemode#17: Publish T3 workflow skills with a setup skill"
   },
   {
    "handle": "m650",
@@ -706,7 +804,9 @@
    "iso": "2026-11-18T23:13:50Z",
    "label": "#647 PR 1/2",
    "kind": "note",
-   "head": "#652: CodeRabbit verified the lastmod change but keeps the finding open over the unpublish-clears-date gap. Declined on the thread (needs a never-cleared column, a schema change outside #647; gap d..."
+   "head": "#652: CodeRabbit verified the lastmod change but keeps the finding open over the unpublish-clears-date gap. Declined on the thread (needs a never-cleared column, a schema change outside #647; gap d...",
+   "ticketLabel": "web#647",
+   "ticketTitle": "web#647: Build a search index from page sections"
   },
   {
    "handle": "m649",
@@ -714,7 +814,9 @@
    "iso": "2026-11-18T23:12:01Z",
    "label": "#59 PR 1/2",
    "kind": "note",
-   "head": "#59 PR 1/2 built and committed (cc6691f): action-line parser, corpus tests, board.md rule; all checks green. Starting sol-loop review."
+   "head": "#59 PR 1/2 built and committed (cc6691f): action-line parser, corpus tests, board.md rule; all checks green. Starting sol-loop review.",
+   "ticketLabel": "t3-codemode#59",
+   "ticketTitle": "t3-codemode#59: Board drops reply buttons for natural gate lines"
   },
   {
    "handle": "m648",
@@ -722,7 +824,9 @@
    "iso": "2026-11-18T23:11:45Z",
    "label": "#647 PR 1/2",
    "kind": "note",
-   "head": "#652 head 9df37f4aa: CodeRabbit started a re-review, merge state BLOCKED while its check runs. Hold the merge until it finishes; I will confirm or resend ready-to-merge."
+   "head": "#652 head 9df37f4aa: CodeRabbit started a re-review, merge state BLOCKED while its check runs. Hold the merge until it finishes; I will confirm or resend ready-to-merge.",
+   "ticketLabel": "web#647",
+   "ticketTitle": "web#647: Build a search index from page sections"
   },
   {
    "handle": "m647",
@@ -730,7 +834,9 @@
    "iso": "2026-11-18T23:10:55Z",
    "label": "#56 PR 1/4",
    "kind": "note",
-   "head": "#56 PR 1/4 built (f87a18d), checks green; starting sol-loop review"
+   "head": "#56 PR 1/4 built (f87a18d), checks green; starting sol-loop review",
+   "ticketLabel": "t3-codemode#56",
+   "ticketTitle": "t3-codemode#56: Merge via t3cm and reconcile with GitHub"
   },
   {
    "handle": "m646",
@@ -738,7 +844,9 @@
    "iso": "2026-11-18T23:10:21Z",
    "label": "#17 PR 5/6",
    "kind": "note",
-   "head": "PR 5/6 built at e8e332f (README skills install + docs/getting-started, board.md); npx skills and manual routes verified in scratch HOMEs; starting sol-loop"
+   "head": "PR 5/6 built at e8e332f (README skills install + docs/getting-started, board.md); npx skills and manual routes verified in scratch HOMEs; starting sol-loop",
+   "ticketLabel": "t3-codemode#17",
+   "ticketTitle": "t3-codemode#17: Publish T3 workflow skills with a setup skill"
   },
   {
    "handle": "m641",
@@ -746,7 +854,9 @@
    "iso": "2026-11-18T23:09:08Z",
    "label": "#648 PR 1/2",
    "kind": "event",
-   "head": "PR 1/2 updated: #651, head 0ebaaf1bc2f2dbae81db9a4fafeb21fde94b2916. Fixed CodeRabbit's two backfill findings (one thread): migration 0044 now backfills the leading blocks liftHeroBanner lifts (single/..."
+   "head": "PR 1/2 updated: #651, head 0ebaaf1bc2f2dbae81db9a4fafeb21fde94b2916. Fixed CodeRabbit's two backfill findings (one thread): migration 0044 now backfills the leading blocks liftHeroBanner lifts (single/...",
+   "ticketLabel": "web#648",
+   "ticketTitle": "web#648: Check pages at build time"
   },
   {
    "handle": "m640",
@@ -754,7 +864,9 @@
    "iso": "2026-11-18T23:08:25Z",
    "label": "web#647",
    "kind": "note",
-   "head": "#652 head moved to 9df37f4 (CodeRabbit follow-up); earlier merge card b9 is stale, new one follows when checks pass."
+   "head": "#652 head moved to 9df37f4 (CodeRabbit follow-up); earlier merge card b9 is stale, new one follows when checks pass.",
+   "ticketLabel": "web#647",
+   "ticketTitle": "web#647: Build a search index from page sections"
   },
   {
    "handle": "m639",
@@ -762,7 +874,9 @@
    "iso": "2026-11-18T23:08:22Z",
    "label": "#647 PR 1/2",
    "kind": "event",
-   "head": "PR 1/2 updated: #652, head 9df37f4aa. The earlier ready-to-merge (f9c260340) is stale. CodeRabbit follow-up: lastmod is now the earliest known page release (min of pages.publishedAt and the ear..."
+   "head": "PR 1/2 updated: #652, head 9df37f4aa. The earlier ready-to-merge (f9c260340) is stale. CodeRabbit follow-up: lastmod is now the earliest known page release (min of pages.publishedAt and the ear...",
+   "ticketLabel": "web#647",
+   "ticketTitle": "web#647: Build a search index from page sections"
   },
   {
    "handle": "m636",
@@ -770,7 +884,9 @@
    "iso": "2026-11-18T23:05:01Z",
    "label": "web#646",
    "kind": "note",
-   "head": "#650 merged (b8c23b727); deploy/v2.6.65 pushed 16:04 MST, DeployPipeline running; deploy watch every 5 min"
+   "head": "#650 merged (b8c23b727); deploy/v2.6.65 pushed 16:04 MST, DeployPipeline running; deploy watch every 5 min",
+   "ticketLabel": "web#646",
+   "ticketTitle": "web#646: Launch page banner field"
   },
   {
    "handle": "m635",
@@ -778,7 +894,9 @@
    "iso": "2026-11-18T23:04:29Z",
    "label": "#647 PR 1/2",
    "kind": "event",
-   "head": "PR 1/2 updated: #652, head f9c260340. Fixed CodeRabbit's one finding: Sitemap lastmod now comes from the page's pages.publishedAt (Google: date the page last changed), with the post..."
+   "head": "PR 1/2 updated: #652, head f9c260340. Fixed CodeRabbit's one finding: Sitemap lastmod now comes from the page's pages.publishedAt (Google: date the page last changed), with the post...",
+   "ticketLabel": "web#647",
+   "ticketTitle": "web#647: Build a search index from page sections"
   },
   {
    "handle": "m633",
@@ -786,7 +904,9 @@
    "iso": "2026-11-18T23:02:55Z",
    "label": "t3-codemode#59",
    "kind": "note",
-   "head": "split approved and posted to #59; PR 1/2 worker launched (fix/59-gate-line-options)"
+   "head": "split approved and posted to #59; PR 1/2 worker launched (fix/59-gate-line-options)",
+   "ticketLabel": "t3-codemode#59",
+   "ticketTitle": "t3-codemode#59: Board drops reply buttons for natural gate lines"
   },
   {
    "handle": "m629",
@@ -794,7 +914,9 @@
    "iso": "2026-11-18T22:59:20Z",
    "label": "#647 PR 1/2",
    "kind": "event",
-   "head": "PR 1/2 opened: #652 https://github.com/acme/web/pull/652, head 28e3901b6 Publishing: pr skill template filled (Summary/Evidence/Merge Danger); voice pass with voice-check.py OK (PR body..."
+   "head": "PR 1/2 opened: #652 https://github.com/acme/web/pull/652, head 28e3901b6 Publishing: pr skill template filled (Summary/Evidence/Merge Danger); voice pass with voice-check.py OK (PR body...",
+   "ticketLabel": "web#647",
+   "ticketTitle": "web#647: Build a search index from page sections"
   },
   {
    "handle": "m625",
@@ -802,7 +924,9 @@
    "iso": "2026-11-18T22:57:49Z",
    "label": "t3-codemode#56",
    "kind": "note",
-   "head": "split posted to #56 and issue assigned; PR 1/4 worker launched (fix/56-pr-state-any-state)"
+   "head": "split posted to #56 and issue assigned; PR 1/4 worker launched (fix/56-pr-state-any-state)",
+   "ticketLabel": "t3-codemode#56",
+   "ticketTitle": "t3-codemode#56: Merge via t3cm and reconcile with GitHub"
   },
   {
    "handle": "m623",
@@ -810,7 +934,9 @@
    "iso": "2026-11-18T22:56:53Z",
    "label": "t3-codemode#56",
    "kind": "note",
-   "head": "split approved; posting it to #56 and launching PR 1/4"
+   "head": "split approved; posting it to #56 and launching PR 1/4",
+   "ticketLabel": "t3-codemode#56",
+   "ticketTitle": "t3-codemode#56: Merge via t3cm and reconcile with GitHub"
   },
   {
    "handle": "m620",
@@ -818,7 +944,9 @@
    "iso": "2026-11-18T22:56:16Z",
    "label": "#648 PR 1/2",
    "kind": "event",
-   "head": "PR 1/2 opened: #651 https://github.com/acme/web/pull/651, head c276689af2d3225676f22b8c6558cfaae2242fc3 Publishing: pr skill template filled; voice pass on the PR description and ADR-00..."
+   "head": "PR 1/2 opened: #651 https://github.com/acme/web/pull/651, head c276689af2d3225676f22b8c6558cfaae2242fc3 Publishing: pr skill template filled; voice pass on the PR description and ADR-00...",
+   "ticketLabel": "web#648",
+   "ticketTitle": "web#648: Check pages at build time"
   },
   {
    "handle": "m617",
@@ -826,7 +954,9 @@
    "iso": "2026-11-18T22:55:20Z",
    "label": "#55 PR 1/2",
    "kind": "note",
-   "head": "PR 1/2 built at e2ef657: filters, search, hidden indicator, repo/project in /api/state; fmt, clippy, tests green (72 board tests). Starting sol-loop review."
+   "head": "PR 1/2 built at e2ef657: filters, search, hidden indicator, repo/project in /api/state; fmt, clippy, tests green (72 board tests). Starting sol-loop review.",
+   "ticketLabel": "t3-codemode#55",
+   "ticketTitle": "t3-codemode#55: Add filters, live search and saved contexts to board"
   },
   {
    "handle": "m615",
@@ -834,7 +964,9 @@
    "iso": "2026-11-18T22:54:07Z",
    "label": "t3-codemode#17",
    "kind": "note",
-   "head": "PR 4 wrapped up: handoff stored, worktree and branch removed, #17 comment posted (issuecomment-6994014793). PR 5/6 worker launched on docs/17-skills-install. The t3api.py token findings are already tr..."
+   "head": "PR 4 wrapped up: handoff stored, worktree and branch removed, #17 comment posted (issuecomment-6994014793). PR 5/6 worker launched on docs/17-skills-install. The t3api.py token findings are already tr...",
+   "ticketLabel": "t3-codemode#17",
+   "ticketTitle": "t3-codemode#17: Publish T3 workflow skills with a setup skill"
   },
   {
    "handle": "m611",
@@ -842,7 +974,9 @@
    "iso": "2026-11-18T22:53:12Z",
    "label": "t3-codemode#4",
    "kind": "note",
-   "head": "#4 delivered: both PRs merged (#22, #37), site live at https://ottoops.com/t3-codemode/, worktrees cleaned, closing comment posted. Waiting only on the redaction-leak tracking answer before handoff."
+   "head": "#4 delivered: both PRs merged (#22, #37), site live at https://ottoops.com/t3-codemode/, worktrees cleaned, closing comment posted. Waiting only on the redaction-leak tracking answer before handoff.",
+   "ticketLabel": "t3-codemode#4",
+   "ticketTitle": null
   },
   {
    "handle": "m603",
@@ -850,7 +984,9 @@
    "iso": "2026-11-18T22:51:54Z",
    "label": "t3-codemode#17",
    "kind": "note",
-   "head": "#40 merged at d545a9a (12:27 MST). PR 4/6 worker handing off; PR 5/6 next."
+   "head": "#40 merged at d545a9a (12:27 MST). PR 4/6 worker handing off; PR 5/6 next.",
+   "ticketLabel": "t3-codemode#17",
+   "ticketTitle": "t3-codemode#17: Publish T3 workflow skills with a setup skill"
   },
   {
    "handle": "m594",
@@ -858,7 +994,9 @@
    "iso": "2026-11-18T22:49:20Z",
    "label": "#648 PR 1/2",
    "kind": "note",
-   "head": "PR 1/2 built and committed at 4c3bb948d: npm test 1962/1962, npm run build ok, Postgres release/seed/admin suites green locally; starting sol-loop review"
+   "head": "PR 1/2 built and committed at 4c3bb948d: npm test 1962/1962, npm run build ok, Postgres release/seed/admin suites green locally; starting sol-loop review",
+   "ticketLabel": "web#648",
+   "ticketTitle": "web#648: Check pages at build time"
   },
   {
    "handle": "m593",
@@ -866,7 +1004,9 @@
    "iso": "2026-11-18T22:44:18Z",
    "label": "#646 PR 1/1",
    "kind": "event",
-   "head": "PR 1/1 opened: #650 https://github.com/acme/web/pull/650, head c67d3f6f6 Publishing: pr skill template; voice pass (voice-check.py: no hard violations; short-sentence share 31% comes fr..."
+   "head": "PR 1/1 opened: #650 https://github.com/acme/web/pull/650, head c67d3f6f6 Publishing: pr skill template; voice pass (voice-check.py: no hard violations; short-sentence share 31% comes fr...",
+   "ticketLabel": "web#646",
+   "ticketTitle": "web#646: Launch page banner field"
   },
   {
    "handle": "m592",
@@ -874,7 +1014,9 @@
    "iso": "2026-11-18T22:40:45Z",
    "label": "#646 PR 1/1",
    "kind": "note",
-   "head": "Built: banner-only render + test, launch seed + og.png; npm test, test:seed-pages, build pass. Verifying locally next."
+   "head": "Built: banner-only render + test, launch seed + og.png; npm test, test:seed-pages, build pass. Verifying locally next.",
+   "ticketLabel": "web#646",
+   "ticketTitle": "web#646: Launch page banner field"
   }
  ],
  "asks": [],
@@ -891,7 +1033,10 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "17:19 MST",
-    "settledAt": "17:20 MST"
+    "settledAt": "17:20 MST",
+    "title": "web#646: Launch page banner field",
+    "upAt": "2026-11-19T00:19:00Z",
+    "settledIso": "2026-11-19T00:20:00Z"
    },
    {
     "thread": "thread-db395c4b2937",
@@ -904,7 +1049,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "15:56 MST",
-    "settledAt": "15:57 MST"
+    "settledAt": "15:57 MST",
+    "upAt": "2026-11-18T22:56:00Z",
+    "settledIso": "2026-11-18T22:57:00Z"
    },
    {
     "thread": "thread-d7ccde75974e",
@@ -917,7 +1064,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "15:57 MST",
-    "settledAt": "15:57 MST"
+    "settledAt": "15:57 MST",
+    "upAt": "2026-11-18T22:57:00Z",
+    "settledIso": "2026-11-18T22:57:00Z"
    },
    {
     "thread": "thread-0484c4105cd4",
@@ -930,7 +1079,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "15:52 MST",
-    "settledAt": "15:52 MST"
+    "settledAt": "15:52 MST",
+    "upAt": "2026-11-18T22:52:00Z",
+    "settledIso": "2026-11-18T22:52:00Z"
    },
    {
     "thread": "thread-cb9246ea73d4",
@@ -943,7 +1094,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "00:13 MST",
-    "settledAt": "01:05 MST"
+    "settledAt": "01:05 MST",
+    "upAt": "2026-11-18T07:13:00Z",
+    "settledIso": "2026-11-18T08:05:00Z"
    },
    {
     "thread": "thread-b12a6744ca54",
@@ -956,7 +1109,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "00:18 MST",
-    "settledAt": "01:04 MST"
+    "settledAt": "01:04 MST",
+    "upAt": "2026-11-18T07:18:00Z",
+    "settledIso": "2026-11-18T08:04:00Z"
    },
    {
     "thread": "thread-9951fe6dda0c",
@@ -969,7 +1124,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "14:16 MST",
-    "settledAt": "00:06 MST"
+    "settledAt": "00:06 MST",
+    "upAt": "2026-11-18T21:16:00Z",
+    "settledIso": "2026-11-18T07:06:00Z"
    },
    {
     "thread": "thread-69865e5310f2",
@@ -982,7 +1139,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "14:06 MST",
-    "settledAt": "00:06 MST"
+    "settledAt": "00:06 MST",
+    "upAt": "2026-11-18T21:06:00Z",
+    "settledIso": "2026-11-18T07:06:00Z"
    },
    {
     "thread": "thread-cd4a10972dd2",
@@ -995,7 +1154,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "14:06 MST",
-    "settledAt": "00:06 MST"
+    "settledAt": "00:06 MST",
+    "upAt": "2026-11-18T21:06:00Z",
+    "settledIso": "2026-11-18T07:06:00Z"
    },
    {
     "thread": "thread-0ab15f6192ec",
@@ -1008,7 +1169,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "14:06 MST",
-    "settledAt": "00:06 MST"
+    "settledAt": "00:06 MST",
+    "upAt": "2026-11-18T21:06:00Z",
+    "settledIso": "2026-11-18T07:06:00Z"
    },
    {
     "thread": "thread-e66c5f52600a",
@@ -1021,7 +1184,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "14:05 MST",
-    "settledAt": "00:06 MST"
+    "settledAt": "00:06 MST",
+    "upAt": "2026-11-18T21:05:00Z",
+    "settledIso": "2026-11-18T07:06:00Z"
    },
    {
     "thread": "thread-00c5b472f5c6",
@@ -1034,7 +1199,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "14:03 MST",
-    "settledAt": "00:06 MST"
+    "settledAt": "00:06 MST",
+    "upAt": "2026-11-18T21:03:00Z",
+    "settledIso": "2026-11-18T07:06:00Z"
    },
    {
     "thread": "thread-9c1517c242d2",
@@ -1047,7 +1214,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "14:04 MST",
-    "settledAt": "00:06 MST"
+    "settledAt": "00:06 MST",
+    "upAt": "2026-11-18T21:04:00Z",
+    "settledIso": "2026-11-18T07:06:00Z"
    },
    {
     "thread": "thread-231907046f85",
@@ -1060,7 +1229,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "14:03 MST",
-    "settledAt": "00:06 MST"
+    "settledAt": "00:06 MST",
+    "upAt": "2026-11-18T21:03:00Z",
+    "settledIso": "2026-11-18T07:06:00Z"
    },
    {
     "thread": "thread-79585c7fb2e6",
@@ -1073,7 +1244,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "14:03 MST",
-    "settledAt": "00:06 MST"
+    "settledAt": "00:06 MST",
+    "upAt": "2026-11-18T21:03:00Z",
+    "settledIso": "2026-11-18T07:06:00Z"
    },
    {
     "thread": "thread-5c3a4b555a0c",
@@ -1086,7 +1259,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "22:41 MST",
-    "settledAt": "00:05 MST"
+    "settledAt": "00:05 MST",
+    "upAt": "2026-11-18T05:41:00Z",
+    "settledIso": "2026-11-18T07:05:00Z"
    },
    {
     "thread": "thread-2d2cb31305ec",
@@ -1099,7 +1274,9 @@
     "done": true,
     "closedHow": "handoff",
     "lastUp": "23:16 MST",
-    "settledAt": "00:05 MST"
+    "settledAt": "00:05 MST",
+    "upAt": "2026-11-18T06:16:00Z",
+    "settledIso": "2026-11-18T07:05:00Z"
    }
   ],
   "asks": [
@@ -1148,7 +1325,8 @@
   "tokenExpiresAt": "2026-12-17 12:38 MST",
   "watcher": {
    "lastPass": "17:26 MST",
-   "alive": true
+   "alive": true,
+   "lastPassAt": "2026-11-19T00:26:00Z"
   },
   "openLinks": "desktop"
  }

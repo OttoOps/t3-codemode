@@ -8,7 +8,9 @@ server is needed and no real repository, thread or person appears on screen.
   tickets with nested workers and PRs (running, waiting, failed, idle, and
   one launched but not yet joined), 4 done tickets, 7 decision cards (5 gates, a blocker, a report),
   about 45 activity lines, 3 asks (2 answered, 1 running) and 26 settled
-  tickets. It then keeps the board live: a note every 4 seconds, a new gate
+  tickets. Each ticket's thread title reads like a launched ticket's
+  (`relay#11: Move tenant settings into their own table`). It then keeps
+  the board live: a note every 4 seconds, a new gate
   card every 6 notes and a new ticket every 9. With `BOARD_DEMO_CHURN=1` it
   every 5 notes also dismisses the oldest card and, when a ticket has
   arrived during the run, moves the oldest such ticket to Done, for the rubric's stability tests.
