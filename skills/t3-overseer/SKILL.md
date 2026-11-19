@@ -1,6 +1,6 @@
 ---
 name: t3-overseer
-description: Ticket Boss for T3 Code - one root thread over several GitHub issues worked in parallel, one t3-ticket thread each, watched over the t3-workflow link protocol, with one waiting list for every decision the user owes. Use when the user hands over two or more issues to work in parallel or at the same time, asks for a ticket boss or overseer, or asks this thread to watch the ticket threads it starts. One issue, or issues worked one after another, is t3-ticket.
+description: Ticket Boss for T3 Code - one root thread over several GitHub issues worked in parallel, one t3-ticket thread each, watched over the t3-workflow link protocol, with one waiting list for every decision the user owes. Use when the t3_thread_launch tool is available (T3 Code) and the user hands over two or more issues to work in parallel or at the same time, asks for a ticket boss or overseer, or asks this thread to watch the ticket threads it starts. Not without t3_thread_launch. One issue, or issues worked one after another, is t3-ticket.
 argument-hint: "<#issue | issue URL> <#issue | issue URL> ..."
 ---
 
