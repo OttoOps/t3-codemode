@@ -617,7 +617,10 @@ fn headroom_picks_the_most_room_and_breaks_ties_by_weight() {
 
 #[test]
 fn limit_hold_minutes_must_be_positive() {
-    let e = Config::from_value(json!({"limitHoldMinutes": 0})).unwrap_err();
-    assert!(format!("{e:#}").contains("limitHoldMinutes must be at least 1"));
+    for bad in [0, 10081, u64::MAX] {
+        let e = Config::from_value(json!({"limitHoldMinutes": bad})).unwrap_err();
+        assert!(format!("{e:#}").contains("limitHoldMinutes must be between 1 and 10080"), "{e:#}");
+    }
+    assert_eq!(Config::from_value(json!({"limitHoldMinutes": 10080})).unwrap().limit_hold_minutes, 10080);
     assert_eq!(Config::default().limit_hold_minutes, 60);
 }

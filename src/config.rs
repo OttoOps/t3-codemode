@@ -12,7 +12,10 @@ pub const UP_KINDS: &[&str] = &["note", "event", "gate", "blocker", "report", "h
 pub const CLOSING: &[&str] = &["handoff", "closed"];
 const EXTRA_WAKE_KINDS: &[&str] = &["escalate", "reply"];
 
+pub const MAX_LIMIT_HOLD_MINUTES: u64 = 7 * 24 * 60;
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+
 pub struct LinkParams {
     pub down: i64,
     pub miss: i64,
@@ -223,8 +226,8 @@ impl Config {
             }
         }
         crate::upstream::config::validate(&self.upstreams).context("upstreams")?;
-        if self.limit_hold_minutes == 0 {
-            bail!("limitHoldMinutes must be at least 1");
+        if !(1..=MAX_LIMIT_HOLD_MINUTES).contains(&self.limit_hold_minutes) {
+            bail!("limitHoldMinutes must be between 1 and {MAX_LIMIT_HOLD_MINUTES} (a week)");
         }
         for (name, pool) in &self.pools {
             if name.trim().is_empty() {
