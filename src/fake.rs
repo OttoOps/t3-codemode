@@ -5,6 +5,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::t3::{BoxFut, T3Client, T3Error};
+use crate::usage::{Usage, UsageSource};
 
 #[derive(Default)]
 struct State {
@@ -92,6 +93,40 @@ pub fn disabled_provider(id: &str, driver: &str) -> Value {
     json!({"providerInstanceId": id, "driverKind": driver, "displayName": id, "models": [],
            "canRunChildTask": false, "canRunCrossProviderChildTask": false,
            "constraints": ["Provider instance is disabled."]})
+}
+
+pub fn usage_limit_item(run: &str, text: &str) -> Value {
+    json!({"position": 9, "itemId": format!("error:{run}"), "runId": run, "type": "error", "status": "failed",
+           "title": "Usage limit reached", "text": text, "createdBy": null, "creationSource": null})
+}
+
+#[derive(Default)]
+pub struct FakeUsage {
+    usage: Mutex<BTreeMap<String, Usage>>,
+    fails: Mutex<bool>,
+}
+
+impl FakeUsage {
+    pub fn set(&self, instance: &str, left: f64, resets_at: Option<&str>) {
+        let u = Usage { left, resets_at: resets_at.map(String::from) };
+        self.usage.lock().unwrap().insert(instance.into(), u);
+    }
+
+    pub fn set_fails(&self, fails: bool) {
+        *self.fails.lock().unwrap() = fails;
+    }
+}
+
+impl UsageSource for FakeUsage {
+    fn usage<'a>(&'a self, instances: &'a [String]) -> BoxFut<'a, anyhow::Result<BTreeMap<String, Usage>>> {
+        Box::pin(async move {
+            if *self.fails.lock().unwrap() {
+                anyhow::bail!("usage source unreachable (fake)");
+            }
+            let all = self.usage.lock().unwrap();
+            Ok(instances.iter().filter_map(|i| all.get(i).map(|u| (i.clone(), u.clone()))).collect())
+        })
+    }
 }
 
 pub fn thread(id: &str, status: &str, updated: &str) -> Value {

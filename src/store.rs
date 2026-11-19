@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS pool_picks (
   handle TEXT, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS pool_picks_pool ON pool_picks (pool, seq);
 CREATE INDEX IF NOT EXISTS pool_picks_handle ON pool_picks (handle) WHERE handle IS NOT NULL;
+CREATE TABLE IF NOT EXISTS limit_stops (
+  thread TEXT NOT NULL, run TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (thread, run));
 "#;
 
 const KEEP_MESSAGES: i64 = 5000;
@@ -149,6 +151,19 @@ pub struct Limit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitStop {
+    pub limit: bool,
+    pub seen_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub how: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -766,6 +781,26 @@ impl Store {
             st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
         })?;
         rows.into_iter().map(|(k, v)| Ok((k, serde_json::from_str(&v)?))).collect()
+    }
+
+    pub fn limit_stop(&self, thread: &str, run: &str) -> Result<Option<LimitStop>> {
+        let raw: Option<String> = self.with(|c| {
+            c.query_row("SELECT data FROM limit_stops WHERE thread = ?1 AND run = ?2", [thread, run], |r| r.get(0))
+                .optional()
+        })?;
+        Ok(raw.map(|s| serde_json::from_str(&s)).transpose()?)
+    }
+
+    pub fn limit_stop_put(&self, thread: &str, run: &str, stop: &LimitStop) -> Result<()> {
+        let s = serde_json::to_string(stop)?;
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO limit_stops (thread, run, data) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (thread, run) DO UPDATE SET data = excluded.data",
+                params![thread, run, s],
+            )
+        })?;
+        Ok(())
     }
 
     pub fn pool_credits(&self, pool: &str) -> Result<BTreeMap<String, i64>> {

@@ -97,6 +97,7 @@ pub struct Config {
     pub upstreams: Vec<UpstreamConfig>,
     #[serde(default)]
     pub pools: BTreeMap<String, PoolConfig>,
+    pub limit_hold_minutes: u64,
 }
 
 pub fn builtin_defaults() -> Value {
@@ -114,6 +115,7 @@ pub fn builtin_defaults() -> Value {
         "bodyCap": 1500,
         "replyCap": 1500,
         "digestLines": 6,
+        "limitHoldMinutes": 60,
         "roles": {
             "overseer": {"children": {"ticket": {
                 "down": 75, "stall": 480,
@@ -221,6 +223,9 @@ impl Config {
             }
         }
         crate::upstream::config::validate(&self.upstreams).context("upstreams")?;
+        if self.limit_hold_minutes == 0 {
+            bail!("limitHoldMinutes must be at least 1");
+        }
         for (name, pool) in &self.pools {
             if name.trim().is_empty() {
                 bail!("a pool needs a name");

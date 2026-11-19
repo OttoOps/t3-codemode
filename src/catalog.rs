@@ -216,7 +216,7 @@ pub fn builtins() -> Vec<Entry> {
             "wf.pools",
             "wf",
             "Each configured pool with its members: state (ready, limited, disabled, constrained, missing-model, missing-effort, or unknown when T3 did not answer), why, the limit's reset time (ISO and local), running threads, and pick count and last pick. error names a member that is not an instance of the pool's driver, or says T3 did not answer.",
-            "wf.pools(): Promise<{ pool: string; driver: string; model: string; effort: string | null; strategy: \"weighted\" | \"priority\"; error: string | null; members: { instanceId: string; weight: number; reserve: number; state: string; reason: string | null; limitedUntil: string | null; limitedUntilLocal: string | null; running: number | null; picks: number; lastPick: string | null; lastPickLocal: string | null }[] }[]>;",
+            "wf.pools(): Promise<{ pool: string; driver: string; model: string; effort: string | null; strategy: \"weighted\" | \"priority\"; error: string | null; members: { instanceId: string; weight: number; reserve: number; state: string; reason: string | null; limitedUntil: string | null; limitedUntilLocal: string | null; limitReason: string | null; usageLeft: number | null; running: number | null; picks: number; lastPick: string | null; lastPickLocal: string | null }[] }[]>;",
             obj(json!({}), &[]),
         ),
         builtin(

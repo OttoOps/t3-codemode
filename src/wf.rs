@@ -13,6 +13,7 @@ use crate::github::GitHub;
 use crate::merge::MergeArgs;
 use crate::store::{Link, Pending, Store};
 use crate::t3::{T3Client, T3Error};
+use crate::usage::UsageSource;
 
 pub const ACTIVE: &[&str] = &["preparing", "queued", "starting", "running"];
 pub const ENDED_BADLY: &[&str] = &["failed", "interrupted", "cancelled"];
@@ -216,6 +217,7 @@ pub struct Wf {
     pub(crate) changes: tokio::sync::broadcast::Sender<()>,
     pub(crate) asks_lock: tokio::sync::Mutex<()>,
     pub(crate) pool_lock: tokio::sync::Mutex<()>,
+    pub(crate) usage: Mutex<Option<Arc<dyn UsageSource>>>,
 }
 
 const MAX_PR_PAGES: usize = 20;
@@ -256,6 +258,7 @@ impl Wf {
             changes: tokio::sync::broadcast::channel(64).0,
             asks_lock: tokio::sync::Mutex::new(()),
             pool_lock: tokio::sync::Mutex::new(()),
+            usage: Mutex::new(None),
         }
     }
 

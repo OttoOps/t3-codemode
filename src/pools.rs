@@ -1,17 +1,23 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::clock::{local_clock, parse_ts};
-use crate::store::{Limit, PickRecord};
+use crate::clock::{iso, local_clock, parse_ts, plus_minutes};
+use crate::store::{Limit, LimitStop, PickRecord};
+use crate::usage::{Usage, UsageSource};
 use crate::wf::{ACTIVE, Wf};
 
 pub const STRATEGIES: &[&str] = &["weighted", "priority"];
 const EFFORT_IDS: &[&str] = &["effort", "reasoningEffort", "thinking_level"];
 const THREAD_PAGE: u64 = 200;
+const LIMIT_TITLE: &str = "Usage limit reached";
+const LOOKBACK_MINUTES: f64 = 24.0 * 60.0;
+const STOP_ITEMS: u64 = 20;
+const LAST_POSITION: u64 = 1 << 40;
 
 fn weighted() -> String {
     "weighted".into()
@@ -115,6 +121,7 @@ pub fn check_members(name: &str, pool: &PoolConfig, caps: &Value) -> Result<()> 
 enum State {
     Ready,
     Limited(String),
+    NoUsage,
     Disabled,
     Constrained(String),
     MissingModel,
@@ -125,7 +132,7 @@ impl State {
     fn name(&self) -> &'static str {
         match self {
             State::Ready => "ready",
-            State::Limited(_) => "limited",
+            State::Limited(_) | State::NoUsage => "limited",
             State::Disabled => "disabled",
             State::Constrained(_) => "constrained",
             State::MissingModel => "missing-model",
@@ -137,6 +144,7 @@ impl State {
         match self {
             State::Ready => None,
             State::Limited(until) => Some(format!("limited until {}", local_clock(until))),
+            State::NoUsage => Some("has no usage left".into()),
             State::Disabled => Some("disabled".into()),
             State::Constrained(c) => Some(format!("constrained: {c}")),
             State::MissingModel => Some(format!("does not list model {}", pool.model)),
@@ -151,7 +159,7 @@ fn active_limit<'a>(limits: &'a BTreeMap<String, Limit>, id: &str, now: Timestam
     limits.get(id).filter(|l| parse_ts(&l.until).is_some_and(|u| u > now))
 }
 
-fn member_state(pool: &PoolConfig, p: &Value, limit: Option<&Limit>) -> State {
+fn member_state(pool: &PoolConfig, p: &Value, limit: Option<&Limit>, usage: Option<&Usage>) -> State {
     let constraints: Vec<&str> = p["constraints"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     if constraints.iter().any(|c| c.to_ascii_lowercase().contains("disabled")) {
         return State::Disabled;
@@ -165,9 +173,12 @@ fn member_state(pool: &PoolConfig, p: &Value, limit: Option<&Limit>) -> State {
     if pool.effort.is_some() && effort_options(pool, p).is_none() {
         return State::MissingEffort;
     }
-    match limit {
-        Some(l) => State::Limited(l.until.clone()),
-        None => State::Ready,
+    if let Some(l) = limit {
+        return State::Limited(l.until.clone());
+    }
+    match usage {
+        Some(u) if u.left <= 0.0 => u.resets_at.clone().map_or(State::NoUsage, State::Limited),
+        _ => State::Ready,
     }
 }
 
@@ -180,6 +191,10 @@ fn effort_options(pool: &PoolConfig, p: &Value) -> Option<Value> {
     let option = EFFORT_IDS.iter().find_map(|id| options.iter().find(|o| o["id"] == *id))?;
     let offered = option["values"].as_array().is_some_and(|vs| vs.iter().any(|v| v == effort.as_str()));
     offered.then(|| json!([{"id": option["id"], "value": effort}]))
+}
+
+fn pct(v: f64) -> String {
+    format!("{}%", (v * 10.0).round() / 10.0)
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -204,6 +219,7 @@ pub struct Inputs<'a> {
     pub caps: &'a Value,
     pub running: &'a BTreeMap<String, u64>,
     pub limits: &'a BTreeMap<String, Limit>,
+    pub usage: &'a BTreeMap<String, Usage>,
     pub credits: &'a BTreeMap<String, i64>,
     pub now: Timestamp,
 }
@@ -216,60 +232,90 @@ fn with_skips(base: String, skipped: &[Skipped]) -> String {
     format!("{base}; skipped {}", list.join(", "))
 }
 
+fn by_weight(
+    pool: &PoolConfig,
+    among: &[usize],
+    credits: &mut BTreeMap<String, i64>,
+    running: &BTreeMap<String, u64>,
+) -> (usize, i64) {
+    let total: i64 = among.iter().map(|&i| pool.members[i].weight as i64).sum();
+    for &i in among {
+        let m = &pool.members[i];
+        *credits.entry(m.instance_id.clone()).or_default() += m.weight as i64;
+    }
+    let load = |i: usize| running.get(&pool.members[i].instance_id).copied().unwrap_or(0);
+    let credit = |i: usize| credits[&pool.members[i].instance_id];
+    let best =
+        among
+            .iter()
+            .copied()
+            .reduce(|a, b| {
+                if (credit(b), std::cmp::Reverse(load(b))) > (credit(a), std::cmp::Reverse(load(a))) { b } else { a }
+            })
+            .expect("among is not empty");
+    *credits.get_mut(&pool.members[best].instance_id).expect("credited") -= total;
+    (best, total)
+}
+
 pub fn choose(inp: &Inputs) -> Result<Choice> {
-    let Inputs { name, pool, caps, running, limits, credits, now } = *inp;
+    let Inputs { name, pool, caps, running, limits, usage, credits, now } = *inp;
     check_members(name, pool, caps)?;
     let mut skipped = Vec::new();
-    let mut ready = Vec::new();
+    let mut open = Vec::new();
+    let mut held = Vec::new();
     for (i, m) in pool.members.iter().enumerate() {
         let p = provider(caps, &m.instance_id).expect("checked members");
-        let state = member_state(pool, p, active_limit(limits, &m.instance_id, now));
-        match state.why(pool) {
-            Some(why) => skipped.push(Skipped { instance_id: m.instance_id.clone(), reason: why }),
-            None => ready.push(i),
+        let left = usage.get(&m.instance_id);
+        let state = member_state(pool, p, active_limit(limits, &m.instance_id, now), left);
+        if let Some(why) = state.why(pool) {
+            skipped.push(Skipped { instance_id: m.instance_id.clone(), reason: why });
+            continue;
+        }
+        match left {
+            _ if m.reserve <= 0.0 => open.push(i),
+            Some(u) if u.left > m.reserve => open.push(i),
+            Some(u) => skipped.push(Skipped {
+                instance_id: m.instance_id.clone(),
+                reason: format!("held at its {}% reserve with {} left", m.reserve, pct(u.left)),
+            }),
+            None => held.push(i),
         }
     }
-    let (open, held): (Vec<usize>, Vec<usize>) = ready.iter().partition(|&&i| pool.members[i].reserve <= 0.0);
     let last_resort = open.is_empty() && !held.is_empty();
-    let candidates = if open.is_empty() { held } else { open };
+    let candidates = if open.is_empty() { held.clone() } else { open };
     if candidates.is_empty() {
         let list: Vec<String> = skipped.iter().map(|s| format!("{} {}", s.instance_id, s.reason)).collect();
         bail!("pool {name} has no member that can run: {}", list.join("; "));
     }
     if !last_resort {
-        for &i in &ready {
+        for &i in &held {
             let m = &pool.members[i];
-            if !candidates.contains(&i) {
-                skipped.push(Skipped {
-                    instance_id: m.instance_id.clone(),
-                    reason: format!("held at its {}% reserve until every other member is out", m.reserve),
-                });
-            }
+            skipped.push(Skipped {
+                instance_id: m.instance_id.clone(),
+                reason: format!("held at its {}% reserve until every other member is out", m.reserve),
+            });
         }
     }
     let mut credits = credits.clone();
     let (chosen, base) = match pool.strategy.as_str() {
         "priority" => (candidates[0], "priority: the first member that can run".to_string()),
-        _ => {
-            let total: i64 = candidates.iter().map(|&i| pool.members[i].weight as i64).sum();
-            for &i in &candidates {
-                let m = &pool.members[i];
-                *credits.entry(m.instance_id.clone()).or_default() += m.weight as i64;
+        "headroom" => {
+            let left = |i: usize| usage.get(&pool.members[i].instance_id).map(|u| u.left);
+            match candidates.iter().filter_map(|&i| left(i)).reduce(f64::max) {
+                Some(most) => {
+                    let top: Vec<usize> = candidates.iter().copied().filter(|&i| left(i) == Some(most)).collect();
+                    let (best, _) = by_weight(pool, &top, &mut credits, running);
+                    (best, format!("headroom: most left, {}", pct(most)))
+                }
+                None => {
+                    let (best, total) = by_weight(pool, &candidates, &mut credits, running);
+                    let w = pool.members[best].weight;
+                    (best, format!("headroom: no member reports usage, so weighted: weight {w} of {total}"))
+                }
             }
-            let load = |i: usize| running.get(&pool.members[i].instance_id).copied().unwrap_or(0);
-            let credit = |i: usize| credits[&pool.members[i].instance_id];
-            let best = candidates
-                .iter()
-                .copied()
-                .reduce(|a, b| {
-                    if (credit(b), std::cmp::Reverse(load(b))) > (credit(a), std::cmp::Reverse(load(a))) {
-                        b
-                    } else {
-                        a
-                    }
-                })
-                .expect("candidates is not empty");
-            *credits.get_mut(&pool.members[best].instance_id).expect("credited") -= total;
+        }
+        _ => {
+            let (best, total) = by_weight(pool, &candidates, &mut credits, running);
             (best, format!("weighted: weight {} of {total}", pool.members[best].weight))
         }
     };
@@ -317,6 +363,17 @@ pub fn model_selection(instance_id: &str, model: &str, options: &Value) -> Value
     m
 }
 
+fn snooze_until(t: &Value) -> Option<String> {
+    if t["snoozed"] != true {
+        return None;
+    }
+    parse_ts(t["snoozedUntil"].as_str()?).map(iso)
+}
+
+fn later(a: &str, b: &str) -> bool {
+    matches!((parse_ts(a), parse_ts(b)), (Some(a), Some(b)) if a > b)
+}
+
 impl Wf {
     pub(crate) fn pool(&self, name: &str) -> Result<&PoolConfig> {
         self.config.pools.get(name).ok_or_else(|| {
@@ -328,6 +385,22 @@ impl Wf {
         })
     }
 
+    pub fn set_usage_source(&self, source: Option<Arc<dyn UsageSource>>) {
+        *self.usage.lock().unwrap_or_else(|e| e.into_inner()) = source;
+    }
+
+    async fn usage_of(&self, instances: &[String]) -> BTreeMap<String, Usage> {
+        let source = self.usage.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(source) = source else { return BTreeMap::new() };
+        match source.usage(instances).await {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!("usage source did not answer, picking without it: {e:#}");
+                BTreeMap::new()
+            }
+        }
+    }
+
     async fn capabilities(&self, model: Option<&str>) -> Result<Value> {
         let input = match model {
             Some(m) => json!({"search": m}),
@@ -336,24 +409,31 @@ impl Wf {
         Ok(self.t3.call("orchestrator_capabilities", input).await?)
     }
 
-    async fn running_by_instance(&self) -> Result<BTreeMap<String, u64>> {
-        let mut out = BTreeMap::new();
+    async fn threads_with(&self, statuses: &[&str]) -> Result<Vec<Value>> {
+        let mut out = Vec::new();
         let mut cursor: Option<u64> = None;
         loop {
-            let mut input = json!({"allProjects": true, "statuses": ACTIVE, "limit": THREAD_PAGE});
+            let mut input = json!({"allProjects": true, "statuses": statuses, "limit": THREAD_PAGE});
             if let Some(c) = cursor {
                 input["cursor"] = json!(c);
             }
             let r = self.t3.call("t3_thread_list", input).await?;
-            let threads = r["threads"].as_array().map(Vec::as_slice).unwrap_or_default();
-            for t in threads {
-                if let Some(id) = t["providerInstanceId"].as_str() {
-                    *out.entry(id.to_string()).or_default() += 1;
-                }
-            }
+            let threads = r["threads"].as_array().cloned().unwrap_or_default();
+            let empty = threads.is_empty();
+            out.extend(threads);
             match r["nextCursor"].as_u64() {
-                Some(c) if !threads.is_empty() && cursor.is_none_or(|p| c > p) => cursor = Some(c),
+                Some(c) if !empty && cursor.is_none_or(|p| c > p) => cursor = Some(c),
                 _ => break,
+            }
+        }
+        Ok(out)
+    }
+
+    async fn running_by_instance(&self) -> Result<BTreeMap<String, u64>> {
+        let mut out = BTreeMap::new();
+        for t in self.threads_with(ACTIVE).await? {
+            if let Some(id) = t["providerInstanceId"].as_str() {
+                *out.entry(id.to_string()).or_default() += 1;
             }
         }
         Ok(out)
@@ -387,12 +467,22 @@ impl Wf {
             "priority" => BTreeMap::new(),
             _ => self.running_by_instance().await?,
         };
+        let ids: Vec<String> = pool.members.iter().map(|m| m.instance_id.clone()).collect();
+        let usage = self.usage_of(&ids).await;
         let _g = self.pool_lock.lock().await;
         let limits = self.store.limits()?;
         let credits = self.store.pool_credits(name)?;
         let now = self.clock.now();
-        let c =
-            choose(&Inputs { name, pool, caps: &caps, running: &running, limits: &limits, credits: &credits, now })?;
+        let c = choose(&Inputs {
+            name,
+            pool,
+            caps: &caps,
+            running: &running,
+            limits: &limits,
+            usage: &usage,
+            credits: &credits,
+            now,
+        })?;
         let at = self.now();
         self.store.pool_credits_put(name, &c.credits)?;
         let seq = self.store.pick_add(&PickRecord {
@@ -418,9 +508,126 @@ impl Wf {
         })
     }
 
+    fn members(&self) -> BTreeSet<String> {
+        self.config.pools.values().flat_map(|p| p.members.iter().map(|m| m.instance_id.clone())).collect()
+    }
+
+    async fn stopped_on_limit(&self, t: &Value, thread: &str, run: &str) -> Result<bool> {
+        let end = t["itemCount"].as_u64().unwrap_or(LAST_POSITION);
+        let r = self
+            .t3
+            .call(
+                "t3_thread_read",
+                json!({"threadId": thread, "view": "activity", "beforePosition": end,
+                       "limit": STOP_ITEMS, "maxCharsPerItem": 300}),
+            )
+            .await?;
+        let items = r["items"].as_array().map(Vec::as_slice).unwrap_or_default();
+        Ok(items.iter().any(|i| i["type"] == "error" && i["title"] == LIMIT_TITLE && i["runId"] == run))
+    }
+
+    async fn limit_from_thread(&self, t: &Value, members: &BTreeSet<String>) -> Result<Option<(String, Limit)>> {
+        let Some(instance) = t["providerInstanceId"].as_str().filter(|i| members.contains(*i)) else {
+            return Ok(None);
+        };
+        let (Some(thread), Some(run)) = (t["threadId"].as_str(), t["latestRunId"].as_str()) else {
+            return Ok(None);
+        };
+        if self.mins(t["updatedAt"].as_str()).is_none_or(|m| m > LOOKBACK_MINUTES) {
+            return Ok(None);
+        }
+        let now = self.clock.now();
+        let stop = match self.store.limit_stop(thread, run)? {
+            Some(s) => s,
+            None => {
+                let limit = self.stopped_on_limit(t, thread, run).await?;
+                let hold = self.config.limit_hold_minutes;
+                let (until, how) = match snooze_until(t) {
+                    _ if !limit => (None, None),
+                    Some(u) => (Some(u), Some("reset time from T3's limit snooze".to_string())),
+                    None => (
+                        Some(iso(plus_minutes(now, hold as f64))),
+                        Some(format!("reset time unknown, held {hold} min")),
+                    ),
+                };
+                let s = LimitStop { limit, seen_at: iso(now), until, how };
+                self.store.limit_stop_put(thread, run, &s)?;
+                s
+            }
+        };
+        let (Some(until), Some(how)) = (stop.until, stop.how) else {
+            return Ok(None);
+        };
+        if parse_ts(&until).is_none_or(|u| u <= now) {
+            return Ok(None);
+        }
+        let title = t["title"].as_str().filter(|s| !s.is_empty()).unwrap_or(thread);
+        let limit = Limit {
+            until,
+            reason: Some(format!("usage limit on thread {title}; {how}")),
+            at: iso(now),
+            thread: Some(thread.to_string()),
+        };
+        Ok(Some((instance.to_string(), limit)))
+    }
+
+    pub async fn mark_limits(&self) -> Result<Vec<String>> {
+        if self.config.pools.is_empty() {
+            return Ok(Vec::new());
+        }
+        let members = self.members();
+        let mut want: BTreeMap<String, Limit> = BTreeMap::new();
+        let mut keep = |id: String, l: Limit| match want.get(&id) {
+            Some(w) if !later(&l.until, &w.until) => {}
+            _ => {
+                want.insert(id, l);
+            }
+        };
+        for t in self.threads_with(&["failed"]).await? {
+            match self.limit_from_thread(&t, &members).await {
+                Ok(Some((id, l))) => keep(id, l),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    "limit check skipped thread {}: {}",
+                    t["threadId"].as_str().unwrap_or("?"),
+                    self.t3.redact(format!("{e:#}"))
+                ),
+            }
+        }
+        let ids: Vec<String> = members.iter().cloned().collect();
+        let now = self.clock.now();
+        for (id, u) in self.usage_of(&ids).await {
+            if let Some(until) = u.resets_at.filter(|r| u.left <= 0.0 && parse_ts(r).is_some_and(|r| r > now)) {
+                let reason = Some("the usage source reports no usage left".to_string());
+                keep(id, Limit { until, reason, at: iso(now), thread: None });
+            }
+        }
+        let mut actions = Vec::new();
+        let _g = self.pool_lock.lock().await;
+        let stored = self.store.limits()?;
+        for (id, l) in &stored {
+            if active_limit(&stored, id, now).is_none() {
+                self.store.limit_clear(id)?;
+                actions.push(format!("limit cleared {id}, reset {} passed", local_clock(&l.until)));
+            }
+        }
+        for (id, l) in want {
+            let replace = active_limit(&stored, &id, now).is_none_or(|s| later(&l.until, &s.until));
+            if replace {
+                actions.push(format!("limited {id} until {}", local_clock(&l.until)));
+                self.store.limit_set(&id, &l)?;
+            }
+        }
+        if !actions.is_empty() {
+            self.changed();
+        }
+        Ok(actions)
+    }
+
     pub async fn pools(&self) -> Result<Value> {
         let running = self.running_by_instance().await;
         let limits = self.store.limits()?;
+        let usage = self.usage_of(&self.members().into_iter().collect::<Vec<_>>()).await;
         let now = self.clock.now();
         let mut out = Vec::new();
         for (name, pool) in &self.config.pools {
@@ -438,9 +645,10 @@ impl Wf {
                 .iter()
                 .map(|m| {
                     let limit = active_limit(&limits, &m.instance_id, now);
+                    let left = usage.get(&m.instance_id);
                     let p = caps.as_ref().ok().and_then(|c| provider(c, &m.instance_id));
                     let state = match (p, limit) {
-                        (Some(p), _) if error.is_none() => Some(member_state(pool, p, limit)),
+                        (Some(p), _) if error.is_none() => Some(member_state(pool, p, limit, left)),
                         (_, Some(l)) => Some(State::Limited(l.until.clone())),
                         _ => None,
                     };
@@ -453,6 +661,8 @@ impl Wf {
                         "reason": state.as_ref().and_then(|s| s.why(pool)),
                         "limitedUntil": limit.map(|l| l.until.clone()),
                         "limitedUntilLocal": limit.map(|l| local_clock(&l.until)),
+                        "limitReason": limit.and_then(|l| l.reason.clone()),
+                        "usageLeft": left.map(|u| u.left),
                         "running": running.as_ref().ok().map(|r| r.get(&m.instance_id).copied().unwrap_or(0)),
                         "picks": picks,
                         "lastPick": last,

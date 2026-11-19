@@ -22,6 +22,11 @@ pub fn spawn(app: Arc<App>) -> tokio::task::JoinHandle<()> {
             if let Err(e) = app.wf.board_tick().await {
                 tracing::warn!("board pass failed: {}", app.t3.redact(format!("{e:#}")));
             }
+            match app.wf.mark_limits().await {
+                Ok(actions) if actions.is_empty() => {}
+                Ok(actions) => tracing::info!(?actions, "pool limits"),
+                Err(e) => tracing::warn!("pool limit pass failed: {}", app.t3.redact(format!("{e:#}"))),
+            }
             if catalog_at.is_none_or(|t| t.elapsed() >= CATALOG_EVERY) {
                 catalog_at = Some(Instant::now());
                 if upstreams.as_ref().is_none_or(|h| h.is_finished()) {
