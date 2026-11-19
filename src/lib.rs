@@ -8,6 +8,7 @@ pub mod contexts;
 pub mod desktop;
 pub mod fake;
 pub mod github;
+pub mod issues;
 pub mod js;
 pub mod mcp;
 pub mod merge;

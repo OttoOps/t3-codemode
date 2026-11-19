@@ -76,7 +76,8 @@ fn body<T: DeserializeOwned>(raw: &Bytes) -> Result<T, String> {
 
 fn failed(app: &App, e: anyhow::Error) -> Response {
     let msg = app.t3.redact(format!("{e:#}"));
-    let missing = ["no open board card", "no board ticket", "no ask"].iter().any(|p| msg.starts_with(p));
+    let missing =
+        ["no open board card", "no board ticket", "no ask", "no new issue"].iter().any(|p| msg.starts_with(p));
     let status = if missing { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
     error(status, msg)
 }
@@ -323,6 +324,46 @@ async fn settle_done(State(web): State<Web>, headers: HeaderMap) -> Response {
     }
 }
 
+async fn list_new_issues(State(web): State<Web>, headers: HeaderMap) -> Response {
+    if let Some(r) = web.reject(&headers, false) {
+        return r;
+    }
+    match web.app.wf.new_issues() {
+        Ok((issues, dismissed)) => json_ok(StatusCode::OK, json!({"issues": issues, "dismissed": dismissed})),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
+    }
+}
+
+async fn launch_new_issue(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    if let Some(r) = web.reject(&headers, true) {
+        return r;
+    }
+    match web.app.wf.launch_new_issue(&id).await {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
+async fn dismiss_new_issue(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    if let Some(r) = web.reject(&headers, true) {
+        return r;
+    }
+    match web.app.wf.dismiss_new_issue(&id) {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
+async fn restore_new_issue(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    if let Some(r) = web.reject(&headers, true) {
+        return r;
+    }
+    match web.app.wf.restore_new_issue(&id) {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
 fn context_failed(app: &App, e: ContextError) -> Response {
     let status = match e {
         ContextError::Invalid(_) => StatusCode::BAD_REQUEST,
@@ -382,6 +423,10 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/asks/{id}/settle", post(settle_ask))
         .route("/api/asks/{id}/restore", post(restore_ask))
         .route("/api/settle-done", post(settle_done))
+        .route("/api/new-issues", get(list_new_issues))
+        .route("/api/new-issues/{id}/launch", post(launch_new_issue))
+        .route("/api/new-issues/{id}/dismiss", post(dismiss_new_issue))
+        .route("/api/new-issues/{id}/restore", post(restore_new_issue))
         .route("/api/open", post(open_link))
         .route("/api/contexts", get(list_contexts))
         .route("/api/contexts/{id}", put(put_context).delete(delete_context))
