@@ -78,7 +78,9 @@ async (page) => {
     { name: "1920-dark", w: 1920, h: 1080, scheme: "dark" },
     { name: "1920-light", w: 1920, h: 1080, scheme: "light" },
     { name: "1366-dark", w: 1366, h: 768, scheme: "dark" },
+    { name: "1366-light", w: 1366, h: 768, scheme: "light" },
     { name: "390-dark", w: 390, h: 844, scheme: "dark" },
+    { name: "390-light", w: 390, h: 844, scheme: "light" },
   ];
   for (const v of views) {
     await page.emulateMedia({ colorScheme: v.scheme, reducedMotion: "reduce" });

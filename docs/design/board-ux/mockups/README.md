@@ -23,8 +23,8 @@ times are fixed to the snapshot (17:26 MST), and it uses the issue titles
 #66 will put in `/api/state`.
 
 `after/` holds the stills taken at the same sizes as
-[`../live/before/`](../live/before/): 1920x1080 dark and light, 1366x768
-dark, and 390x844 dark for each panel, plus the component sheet in both
+[`../live/before/`](../live/before/): 1920x1080 and 1366x768, and 390x844
+for each panel, each in dark and light, plus the component sheet in both
 themes. `report.json` has the same measurements as the before report, from
 `../live/capture.js`, including each phone panel.
 
