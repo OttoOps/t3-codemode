@@ -88,9 +88,12 @@ set separately. The default is `claude-opus-5-5` at `high` effort when T3
 offers Claude, else the provider's default.
 
 **Offer** the models in `providers.enabled`, grouped by provider, with their
-effort values. Ask about the ticket model, then the worker model. The effort
-must be one of the values listed for that model; a model with none listed
-records no `effort`. When the worker's provider is the one the user named for
+effort values, and each t3cm pool from step 1 as `pool <name>` with its model,
+effort and members. A pool spreads launches across the accounts in it, so the
+roles pick a member for each launch with t3cm's `wf.pick`. Show a pool's
+`error` beside it when it has one. Ask about the ticket model, then the
+worker model. The effort must be one of the values listed for that model; a
+model with none listed records no `effort`. When the worker's provider is the one the user named for
 the reviewer, ask whether to change the reviewer or keep the pair.
 
 **T3 did not answer** (`providers.error`): ask for the provider id, the model
@@ -98,7 +101,14 @@ id and the effort, and record what the user gives, leaving out `effort` when
 they give none. Say `t3wf slots` shows them as unverified until T3 is
 reachable.
 
+**A pool chosen:** record `pool` alone; the pool's model and effort come from
+the t3cm config. Tell the user a pool needs t3cm at launch: a role without
+t3cm skips the pool and launches on the provider default. For the ticket
+model, also tell the user that tickets the board launches use the t3cm
+config's `board.pool`, not this slot.
+
 **Records**
 `"models": {"ticket": {"provider": "<id>", "model": "<id>", "effort": "<value>"}}`
 (`effort` only when the model lists effort values, or the user gave one
-while T3 did not answer); `worker` the same way.
+while T3 did not answer), or `"models": {"ticket": {"pool": "<name>"}}` for a
+pool; `worker` the same way.

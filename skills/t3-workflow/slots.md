@@ -9,7 +9,7 @@ The role skills name capabilities, not skills. Each **slot** holds one, and
 | `passes` | cleanup and templating skills a worker runs, in order | none |
 | `credentials` | renewals: a failure pattern and the skill that renews it | none |
 | `delivery` | `merge`, or `tag-deploy` with a deploy skill | `merge` |
-| `models` | `ticket` and `worker` thread models, set separately | `claude-opus-5-5`, effort `high`, when T3 confirms it offers Claude; else the provider's default |
+| `models` | `ticket` and `worker` thread models, set separately, each a model or a t3cm pool | `claude-opus-5-5`, effort `high`, when T3 confirms it offers Claude; else the provider's default |
 
 A slot with no setting uses its default, so a machine with no config at all
 works.
@@ -39,6 +39,10 @@ not offer) is a skip too, and that slot falls back to its default. A
 `config problem (ignored)` line is one note: the file or block it names is
 ignored, and the layers below it decide.
 
+A model line reads `<model> effort <effort> on <provider>`, each part present
+only when set, `provider default`, or `pool <name>`. A pool line needs t3cm at
+launch: [A pool on a model line](#a-pool-on-a-model-line).
+
 **Skip** means carry on without that skill, and say so once per skill per
 run, in one note to the parent:
 `t3wf send --kind note --body 'slot <slot>: <name> skipped, <reason>'`. At
@@ -51,6 +55,31 @@ slot runs on its default. The overseer and the ticket each tell the user
 once per run: "No T3 workflow config yet, so every slot uses its default.
 Run the `setup-t3-workflow` skill to pick a reviewer, passes, delivery and
 models." A ticket with a parent sends that line up as a note.
+
+### A pool on a model line
+
+`model worker: pool <name>` (or `model ticket`) means t3cm picks the T3
+provider instance for each launch from the pool `<name>` in the t3cm config,
+so threads spread across several accounts of one provider. The pool sets the
+model and effort. `t3wf` cannot read t3cm's pools, so it prints the line
+without checking it; the pick checks it.
+
+- **t3cm listed** (`mcp__t3cm__execute`): just before the launch, run one
+  `execute` with `async () => wf.pick({ pool: "<name>" })`. Pass its
+  `modelSelection` to `t3_thread_launch` as it is, and compare the launched
+  thread's model against it. Pick once per launch, and never reuse an
+  earlier pick: each pick moves the pool's balance. Tell the parent (at the
+  root, the user) the picked `instanceId` and its `reason` in the line that
+  reports the launch.
+- **The pick throws** (no member can run; the message names the pool and
+  why each member is out): launch nothing. Send the message as a gate with
+  the action line `reply "retry" once a member is back, or "default" to
+  launch on the provider default`. On "default", launch without
+  `modelSelection`.
+- **No t3cm:** skip the pool, as for a `PROBLEM:`: send
+  `slot model <role>: pool <name> skipped, needs t3cm`, and launch without
+  `modelSelection`, on the provider default. Never guess a member from the
+  pool's name or from `orchestrator_capabilities`.
 
 ## Where settings live
 
@@ -79,6 +108,10 @@ The config file:
 }
 ```
 
+A role set to a pool holds `pool` alone, such as
+`"worker": {"pool": "opus"}`. The pool's model and effort come from the t3cm
+config.
+
 `"review": null` turns review off; leaving `review` out keeps the default.
 `match` is a Python regular expression tried against the failing command's
 output.
@@ -94,7 +127,7 @@ The `AGENTS.md` block reads these bullets and ignores the rest:
 - Delivery: tag-deploy
 - Deploy skill: `deploy`
 - Ticket model: claude-opus-5-5, high effort
-- Worker model: claude-opus-5-5, high effort
+- Worker model: claude-opus-5-5, high effort (or pool `opus`)
 ```
 
 ## Finding skills

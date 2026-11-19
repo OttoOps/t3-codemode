@@ -209,18 +209,23 @@ For PR n:
    in the launch brief below with the final name.
 2. Read the slots again (step 1). The `model worker` line is the
    worker's model: `<model> effort <effort> on <provider>`, each part
-   present only when set, or `provider default`. A `PROBLEM:` on it is a
-   skip, and the worker gets the provider default.
+   present only when set, `provider default`, or `pool <name>`. A
+   `PROBLEM:` on it is a skip, and the worker gets the provider default.
+   For `pool <name>`, pick the instance now with `wf.pick`, as
+   [A pool on a model line](../t3-workflow/slots.md#a-pool-on-a-model-line)
+   says; without t3cm, the worker gets the provider default.
 3. `t3wf open-child --role worker --label '<#n or slug> PR n/N'`. It prints
    the "t3-workflow link" block for the brief. The worker binds the link
    when it joins.
 4. Call `t3_thread_launch` with:
    - `title`: `<#n or slug> PR n/N: <PR title>`
-   - `modelSelection`: `instanceId` the line's provider (`claudeAgent`
-     when it names none), its `model`, and, when it names an effort,
-     `options` carrying it in the shape `orchestrator_capabilities`
-     reports for that model (today `[{"id": "effort", "value":
-     "<effort>"}]`). Leave `modelSelection` out for `provider default`.
+   - `modelSelection`: for a pool, the pick's `modelSelection`, as it
+     is. Otherwise `instanceId` the line's provider (`claudeAgent` when
+     it names none), its `model`, and, when it names an effort, `options`
+     carrying it in the shape `orchestrator_capabilities` reports for that
+     model (today `[{"id": "effort", "value": "<effort>"}]`). Leave
+     `modelSelection` out for `provider default` and for a pool skipped
+     without t3cm.
    - `workspaceStrategy`: `{type: "worktree", baseRef: "main", branch:
      "<branch>", startFromOrigin: true}`
    - `message`: the filled brief.
@@ -228,8 +233,8 @@ For PR n:
    the `threadId` and no `modelSelection`. When they differ from the
    slot's model, call `t3_thread_configure` again with the `modelSelection`
    from item 4 and tell the user.
-6. Tell the user the worker is running, by its `link`, verbatim, and end
-   the turn.
+6. Tell the user the worker is running, by its `link`, verbatim, with the
+   picked instance and its reason for a pool, and end the turn.
 
 ### Launch brief
 

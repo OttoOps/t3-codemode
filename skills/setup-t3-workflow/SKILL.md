@@ -35,8 +35,18 @@ one. The JSON it prints is the interview's only source of facts:
   `repoProblems` from the repository's `AGENTS.md` block, which the user
   fixes in that file.
 
-Show the user the `summary` lines, then one line each for the providers and
-t3cm. When `config.problems` is not empty, the roles ignore the whole file
+When `mcp__t3cm__execute` is listed, also read t3cm's pools, the groups of
+provider instances a launch can be spread across:
+
+```js
+async () => (await wf.pools()).map(p => ({ pool: p.pool, model: p.model, effort: p.effort,
+  error: p.error, members: p.members.map(m => `${m.instanceId} ${m.state}`) }))
+```
+
+Without it, there are no pools to offer.
+
+Show the user the `summary` lines, then one line each for the providers,
+the pools and t3cm. When `config.problems` is not empty, the roles ignore the whole file
 until it is fixed. Show the user the problems and the file. Fix the entry each
 problem names when the user agrees. A fresh file (step 3, `--replace`) drops
 every setting in the old one, so before using it, list what it drops and
