@@ -13,6 +13,8 @@ pub struct Usage {
     pub resets_at: Option<String>,
 }
 
+/// An observation whose `resets_at` has passed describes a window that is over,
+/// so t3cm drops it and treats the instance as reporting no usage.
 pub trait UsageSource: Send + Sync {
     fn usage<'a>(&'a self, instances: &'a [String]) -> BoxFut<'a, Result<BTreeMap<String, Usage>>>;
 }
