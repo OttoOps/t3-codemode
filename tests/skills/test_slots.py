@@ -269,6 +269,29 @@ class Settings(SlotsTestCase):
         r = self.t3wf("slots", "--no-t3")
         self.assertIn("SKIP gone: no longer resolves", r.stdout)
 
+    def test_a_pool_slot_names_the_pool_and_skips_the_t3_check(self):
+        self.caps(CLAUDE_CAPS)
+        self.write_config({"models": {"worker": {"pool": "opus"}}})
+        m = self.slots()["models"]["worker"]
+        self.assertEqual((m["spec"], m["source"]), ({"pool": "opus"}, "user"))
+        self.assertNotIn("problem", m)
+        self.assertIn("wf.pick", m["note"])
+        r = self.t3wf("slots")
+        self.assertIn("model worker: pool opus (t3cm picks the instance at launch with wf.pick) [user]", r.stdout)
+        r = self.t3wf("doctor")
+        self.assertIn("doctor: ok", r.stdout)
+        self.assertNotIn("warn: model worker", r.stdout)
+
+    def test_a_repo_pool_replaces_a_user_model_and_a_repo_model_a_user_pool(self):
+        self.write_config({"models": {"ticket": {"pool": "opus"},
+                                      "worker": {"provider": "codex", "model": "gpt-6.2-sol", "effort": "high"}}})
+        self.agents_md("- Ticket model: claude-opus-5-5, max effort\n"
+                       "- Worker model: pool `opus`\n")
+        models = self.slots("--no-t3")["models"]
+        self.assertEqual(models["ticket"]["spec"], {"model": "claude-opus-5-5", "effort": "max"})
+        self.assertEqual((models["worker"]["spec"], models["worker"]["source"]), ({"pool": "opus"}, "AGENTS.md"))
+        self.agents_md("- Worker model: pool-custom, high effort\n")
+        self.assertEqual(self.slots("--no-t3")["models"]["worker"]["spec"], {"model": "pool-custom", "effort": "high"})
 
 class Doctor(SlotsTestCase):
     def test_reports_a_configured_skill_that_has_been_removed(self):
@@ -340,6 +363,12 @@ class CheckConfig(SlotsTestCase):
         for text in ("unknown keys ['reviewer']", "passes: must be a list", "match: not a regular expression",
                      "'ship' is not one of merge, tag-deploy", "models.boss: unknown role"):
             self.assertIn(text, r.stdout)
+
+    def test_a_pool_stands_alone_and_needs_a_name(self):
+        self.write_config({"models": {"ticket": {"pool": "opus", "effort": "max"}, "worker": {"pool": ""}}})
+        r = self.t3wf("check-config", ok=False)
+        self.assertIn("models.ticket: a pool sets the model and effort, so pool stands alone", r.stdout)
+        self.assertIn("models.worker.pool: must be a non-empty string", r.stdout)
 
     def test_invalid_json_is_named(self):
         self.write_config("{not json")

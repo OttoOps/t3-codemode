@@ -270,6 +270,15 @@ class Write(SetupTestCase):
         r = self.write({"models": {"worker": {"effort": "high"}}}, ok=False)
         self.assertIn("models.worker: names no model", r.stderr)
 
+    def test_a_pool_replaces_a_model_role(self):
+        self.write_config({"models": {"worker": {"model": "claude-opus-5-5", "effort": "high"},
+                                      "ticket": {"model": "claude-opus-5-5"}}})
+        r = self.write({"models": {"worker": {"pool": "opus"}}})
+        self.assertEqual(self.saved()["models"], {"worker": {"pool": "opus"}, "ticket": {"model": "claude-opus-5-5"}})
+        self.assertIn("model worker: pool opus", r.stdout)
+        r = self.write({"models": {"ticket": {"pool": "opus", "model": "claude-opus-5-5"}}}, ok=False)
+        self.assertIn("models.ticket: a pool sets the model and effort", r.stderr)
+
     def test_another_config_version_is_left_alone(self):
         self.write_config({"version": 2, "review": "sol-loop"})
         r = self.write({"passes": []}, ok=False)

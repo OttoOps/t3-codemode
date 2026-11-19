@@ -252,7 +252,7 @@ def cmd_write(a):
         problems.append("delivery: tag-deploy needs a deploy skill")
     if isinstance(cfg.get("models"), dict):
         problems += [f"models.{r}: names no model" for r, spec in cfg["models"].items()
-                     if isinstance(spec, dict) and "model" not in spec]
+                     if isinstance(spec, dict) and "model" not in spec and "pool" not in spec]
     if problems:
         raise Fail("not written:\n" + "\n".join(problems))
     resolver = slots.Resolver(slots.repo_root(a.repo), listed(a))

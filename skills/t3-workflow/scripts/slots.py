@@ -2,9 +2,10 @@
 
 Five slots name capabilities, not skills: an independent review before a PR,
 ordered worker passes, credential renewal, delivery, and the models for ticket
-and worker threads. Settings come from built-in defaults, then the user config
-file, then the repository's `AGENTS.md` "Agent workflow" block; the last one
-that sets a slot wins. A configured skill is found by its bare name in any namespace.
+and worker threads, each a model or a t3cm pool. Settings come from built-in
+defaults, then the user config file, then the repository's `AGENTS.md` "Agent
+workflow" block; the last one that sets a slot wins. A configured skill is
+found by its bare name in any namespace.
 """
 import json
 import os
@@ -20,6 +21,7 @@ DEFAULT_REVIEW = "sol-loop"
 DEFAULT_MODEL = {"provider": "claudeAgent", "model": "claude-opus-5-5", "effort": "high"}
 REVIEW_SUGGESTION = "sol-loop from https://github.com/t3dotgg/tstack"
 SKILL_REF = re.compile(r"^(?:[A-Za-z0-9._/-]+:)?[A-Za-z0-9._-]+$")
+POOL_NOTE = "t3cm picks the instance at launch with wf.pick"
 EFFORT_WORD = re.compile(r"\b(low|medium|high|xhigh|max|ultrathink)\b", re.I)
 
 
@@ -128,8 +130,14 @@ def validate_slots(cfg, where):
                 w = f"{where}.models.{role}"
                 if role not in MODEL_ROLES:
                     problems.append(f"{w}: unknown role; roles are {', '.join(MODEL_ROLES)}")
+                elif isinstance(spec, dict) and "pool" in spec:
+                    if set(spec) != {"pool"}:
+                        problems.append(f"{w}: a pool sets the model and effort, so pool stands alone")
+                    elif not isinstance(spec["pool"], str) or not spec["pool"]:
+                        problems.append(f"{w}.pool: must be a non-empty string")
                 elif not isinstance(spec, dict) or set(spec) - {"model", "effort", "provider"}:
-                    problems.append(f"{w}: must be an object with model, and optionally effort and provider")
+                    problems.append(f"{w}: must be an object with model, and optionally effort and provider, "
+                                    f"or with pool alone")
                 else:
                     for k, v in spec.items():
                         if not isinstance(v, str) or not v:
@@ -208,6 +216,10 @@ def parse_agent_workflow(text):
         elif key == "deploy skill":
             cfg.setdefault("delivery", {})["skill"] = _first_name(value)
         elif key in ("ticket model", "worker model"):
+            pool = re.match(r"^\s*(?:the\s+)?pool(?:\s*:\s*|\s+)(.*)$", value, re.I)
+            if pool:
+                cfg.setdefault("models", {})[key.split()[0]] = {"pool": _first_name(pool.group(1))}
+                continue
             spec = {"model": _first_name(value)}
             rest = value.replace(spec["model"], "", 1)
             effort = EFFORT_WORD.search(rest)
@@ -403,7 +415,8 @@ def merged(root, user_cfg):
         for role, spec in (cfg.get("models") or {}).items():
             if role in MODEL_ROLES and isinstance(spec, dict):
                 prev = eff["models"][role][0] or {}
-                base = prev if spec.get("model") in (None, prev.get("model")) else {}
+                same = spec.get("model") in (None, prev.get("model"))
+                base = prev if same and "pool" not in spec and "pool" not in prev else {}
                 eff["models"][role] = (dict(base, **spec), src)
     return eff, review_set, problems
 
@@ -525,6 +538,9 @@ class Settings:
                                        else "T3 not checked")
             return {"slot": f"model.{role}", "source": "default", "spec": spec, "note": note}
         out = {"slot": f"model.{role}", "source": src, "spec": spec}
+        if "pool" in spec:
+            out["note"] = POOL_NOTE
+            return out
         if "model" not in spec:
             out["problem"] = "names no model"
             return out
@@ -563,6 +579,8 @@ def model_text(m):
     s = m["spec"]
     if s is None:
         text = "provider default"
+    elif "pool" in s:
+        text = f"pool {s['pool']}"
     else:
         text = s.get("model", "?") + (f" effort {s['effort']}" if s.get("effort") else "") + \
             (f" on {s['provider']}" if s.get("provider") else "")
@@ -624,7 +642,7 @@ def doctor(settings):
     for role, m in eff["models"].items():
         if m.get("problem"):
             problems.append(f"model {role}: {m['problem']}")
-        elif m["source"] != "default" and m.get("note"):
+        elif m["source"] != "default" and m.get("note") and "pool" not in (m["spec"] or {}):
             warnings.append(f"model {role}: {m['note']}")
     if eff["review"]["skill"] is None and eff["review"]["source"] == "default":
         warnings.append(f"review: {eff['review']['note']}")

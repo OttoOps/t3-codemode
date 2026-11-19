@@ -105,7 +105,8 @@ acknowledging. Lines under "Notes since your last wake" are the digest.
 ## Slots
 
 The roles' review, passes, credential renewal, delivery and models are
-**slots**, set per user and per repository. `t3wf slots` prints the
+**slots**, set per user and per repository. A model slot can name a t3cm
+pool, which spreads launches across several accounts. `t3wf slots` prints the
 effective settings and how to run each skill; `t3wf doctor` checks them.
 To set or change them, run the `setup-t3-workflow` skill.
 How a role acts on each line, including a skill that no longer resolves:

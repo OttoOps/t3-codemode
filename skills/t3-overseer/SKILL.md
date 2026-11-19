@@ -32,9 +32,15 @@ Boss and its page is the waiting list, so this thread only starts the work:
    throws and also leaves a card on the board). The board launches on its
    own provider (`instanceId` in the t3cm config, `claudeAgent` by
    default) and fills what you leave out from its own `ticketModel` and
-   `ticketEffort`. Pass the `model ticket` line's model and effort only
-   when its provider is the board's or unnamed; otherwise pass neither and
-   tell the user the board's ticket model applies.
+   `ticketEffort`. With `board.pool` set in the t3cm config, the board
+   picks each ticket's instance from that pool, with the pool's model and
+   effort, and a call that passes another model or effort fails. Pass the
+   `model ticket` line's model and effort only when its provider is the
+   board's or unnamed; otherwise pass neither and tell the user the board's
+   ticket model applies. For `pool <name>`, pass neither: `wf.launchTicket`
+   takes no pool, so the board launches from `board.pool`, or on its own
+   instance when that is unset. Tell the user so, and that `board.pool`
+   in the t3cm config is where the board's pool is set.
 3. Reply with the ticket links and
    `**ACTION NEEDED:** answer the tickets' decisions on the board, here: http://127.0.0.1:47731/`,
    then end the turn. Do not open links or watch: the board does both.
@@ -45,7 +51,12 @@ A ticket the user starts in its own thread joins the board through its own
 When the user asks this thread a status question later, answer it from one
 `execute` over `wf.board({ parent: "board", all: true })` and
 `wf.cards({ all: true })`. Everything below this section is the path without
-the service.
+the board: without the service, or when the user asks this thread itself to
+watch the tickets, as
+[codemode.md, Per role](../t3-workflow/codemode.md#per-role) says for an
+overseer thread. With t3cm listed there, run each `t3wf` step below through
+`wf` (`wf.init`, `wf.openChild`, `wf.send`), so each ticket's brief carries
+the `wf.join` line its ticket thread runs.
 
 ## Slots
 
@@ -55,8 +66,11 @@ says, with `--repo` set to the repo's workspace root when you know it (a
 repo's `AGENTS.md` can set its own ticket model), and tell the user its
 skip and no-config lines. The overseer uses one line: `model
 ticket`, the ticket threads' model, as `<model> effort <effort> on
-<provider>` with each part present only when set, or `provider default`.
-A `PROBLEM:` on it is a skip, and tickets get the provider default.
+<provider>` with each part present only when set, `provider default`, or
+`pool <name>`. A `PROBLEM:` on it is a skip, and tickets get the provider
+default. A pool line is picked from at each launch, as
+[A pool on a model line](../t3-workflow/slots.md#a-pool-on-a-model-line)
+says; without t3cm, tickets get the provider default.
 
 ## On the link protocol
 
@@ -93,8 +107,9 @@ For each approved issue:
 2. `t3_thread_launch` with `title` `<repo name>#<n>: <issue title>`, the
    issue's `projectId`, no `workspaceStrategy` (a ticket thread works from
    the project root and edits nothing), the `model ticket` slot as
-   `modelSelection` (built as `t3-ticket` step 3 builds the worker's, left
-   out for `provider default`), and this `message`:
+   `modelSelection` (built as `t3-ticket` step 3 builds the worker's: a
+   fresh `wf.pick` for each ticket from a pool, left out for `provider
+   default` and for a pool skipped without t3cm), and this `message`:
 
    ```markdown
    Work <issue URL> with the t3-ticket skill.
@@ -102,7 +117,8 @@ For each approved issue:
    <the "t3-workflow link" block, verbatim>
    ```
 
-3. Tell the user it is running, by its `link`, verbatim.
+3. Tell the user it is running, by its `link`, verbatim, with the picked
+   instance and its reason for a pool.
 
 Ticket threads in one repo run side by side. Each merges its own PRs; a PR
 that conflicts after another merges is rebased by its worker.
