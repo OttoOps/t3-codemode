@@ -1,0 +1,979 @@
+{
+ "base": "mockups/board.html",
+ "now": "",
+ "views": {
+  "1920-dark": {
+   "viewport": [
+    1920,
+    1080
+   ],
+   "scrollHeight": 1080,
+   "clipped": [
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge via t3cm and reconcile with GitHub",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-page/add",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the work",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its ban",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#654 rebase-merged (99cffc8); deploy/v2.6.66 pushed 17:07 MST carrying #651/#653",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Follow-up PR opened: #654, head 3e8d9d7 (follow-up of #653). Refs #646 #648. Con",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "HOLD all web deploys: main (with #651 + #653) would null the launch page's banne",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/1 updated: #653, head f280174 (remote confirmed; GitHub PR head still catch",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 13,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 140,
+     "left": 0,
+     "width": 439,
+     "height": 646,
+     "scrollHeight": 646
+    },
+    "open": {
+     "top": 140,
+     "left": 440,
+     "width": 1099,
+     "height": 822,
+     "scrollHeight": 822
+    },
+    "feed": {
+     "top": 307,
+     "left": 1540,
+     "width": 380,
+     "height": 3006,
+     "scrollHeight": 3006
+    }
+   }
+  },
+  "1920-light": {
+   "viewport": [
+    1920,
+    1080
+   ],
+   "scrollHeight": 1080,
+   "clipped": [
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge via t3cm and reconcile with GitHub",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-page/add",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the work",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its ban",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#654 rebase-merged (99cffc8); deploy/v2.6.66 pushed 17:07 MST carrying #651/#653",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Follow-up PR opened: #654, head 3e8d9d7 (follow-up of #653). Refs #646 #648. Con",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "HOLD all web deploys: main (with #651 + #653) would null the launch page's banne",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/1 updated: #653, head f280174 (remote confirmed; GitHub PR head still catch",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 13,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 140,
+     "left": 0,
+     "width": 439,
+     "height": 646,
+     "scrollHeight": 646
+    },
+    "open": {
+     "top": 140,
+     "left": 440,
+     "width": 1099,
+     "height": 822,
+     "scrollHeight": 822
+    },
+    "feed": {
+     "top": 307,
+     "left": 1540,
+     "width": 380,
+     "height": 3006,
+     "scrollHeight": 3006
+    }
+   }
+  },
+  "1366-dark": {
+   "viewport": [
+    1366,
+    768
+   ],
+   "scrollHeight": 768,
+   "clipped": [
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge via t3cm and reconcile with GitHub",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "title clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "title clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge #17 PR 5/6 #63 (skills install guide in the README)",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "title clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge via t3cm and reconcile with GitHub",
+     "cls": "title clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge #65 (rebase through the merge queue)",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "You chose \"sections\": build the transcript from each section's heading lines (ta",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 handed off and cleaned up; PR 2/2 worker launched on feat/648-page-build-",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-page/add",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the work",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its ban",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 18,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "13px",
+    "12px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "400",
+    "500"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 140,
+     "left": 0,
+     "width": 439,
+     "height": 646,
+     "scrollHeight": 646
+    },
+    "open": {
+     "top": 140,
+     "left": 440,
+     "width": 545,
+     "height": 822,
+     "scrollHeight": 822
+    },
+    "feed": {
+     "top": 307,
+     "left": 986,
+     "width": 380,
+     "height": 3006,
+     "scrollHeight": 3006
+    }
+   }
+  },
+  "390-dark": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge via t3cm and reconcile with GitHub",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 5,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "12px",
+    "14px",
+    "13px"
+   ],
+   "fontWeights": [
+    "600",
+    "500",
+    "400"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 96,
+     "left": 0,
+     "width": 390,
+     "height": 646,
+     "scrollHeight": 646
+    },
+    "open": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "feed": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    }
+   },
+   "tabs": [
+    "Launch",
+    "Ask",
+    "tab-dec",
+    "tab-tix",
+    "tab-act"
+   ]
+  },
+  "390-dark-launch": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge via t3cm and reconcile with GitHub",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 5,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "12px",
+    "14px",
+    "13px"
+   ],
+   "fontWeights": [
+    "600",
+    "500",
+    "400"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 96,
+     "left": 0,
+     "width": 390,
+     "height": 646,
+     "scrollHeight": 646
+    },
+    "open": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "feed": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    }
+   }
+  },
+  "390-dark-ask": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge via t3cm and reconcile with GitHub",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 5,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "12px",
+    "14px",
+    "13px"
+   ],
+   "fontWeights": [
+    "600",
+    "500",
+    "400"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 96,
+     "left": 0,
+     "width": 390,
+     "height": 646,
+     "scrollHeight": 646
+    },
+    "open": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "feed": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    }
+   }
+  },
+  "390-dark-tab-dec": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Verified: APPROVED and CLEAN at 905fcaa, all checks passed (docs-only, so the ma",
+     "cls": "detail clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge via t3cm and reconcile with GitHub",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 5,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "12px",
+    "14px",
+    "13px"
+   ],
+   "fontWeights": [
+    "600",
+    "500",
+    "400"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 96,
+     "left": 0,
+     "width": 390,
+     "height": 646,
+     "scrollHeight": 646
+    },
+    "open": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "feed": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    }
+   }
+  },
+  "390-dark-tab-tix": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "Release builds for Linux, macOS and Windows",
+     "cls": "title clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Get a Windows signing identity (Azure Artifact Signing, an OV cert, or SignPath)",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Publish T3 workflow skills with a setup skill",
+     "cls": "title clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge #17 PR 5/6 #63 (skills install guide in the README)",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Board drops reply buttons for natural gate lines",
+     "cls": "title clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge via t3cm and reconcile with GitHub",
+     "cls": "title clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Merge #65 (rebase through the merge queue)",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Build a search index from page sections",
+     "cls": "title clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "You chose \"sections\": build the transcript from each section's heading lines (ta",
+     "cls": "clip",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 9,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "12px",
+    "13px",
+    "14px"
+   ],
+   "fontWeights": [
+    "600",
+    "500",
+    "400"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "open": {
+     "top": 96,
+     "left": 0,
+     "width": 390,
+     "height": 982,
+     "scrollHeight": 982
+    },
+    "feed": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    }
+   }
+  },
+  "390-dark-tab-act": {
+   "viewport": [
+    390,
+    844
+   ],
+   "scrollHeight": 844,
+   "clipped": [
+    {
+     "text": "Built: check-pages in prebuild (3 checks + 8 tests), docs in README/add-page/add",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 delivered (#652 merged 4314bff, docs only); worktree and branches cleaned",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "PR 1/2 #651 delivered in deploy/v2.6.66 (pushed by web#646); waiting on the work",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "deploy/v2.6.66 Succeeded (carries #651/#653/#654). launch page now shows its ban",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "#654 rebase-merged (99cffc8); deploy/v2.6.66 pushed 17:07 MST carrying #651/#653",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    },
+    {
+     "text": "Follow-up PR opened: #654, head 3e8d9d7 (follow-up of #653). Refs #646 #648. Con",
+     "cls": "msg",
+     "ellipsis": true,
+     "hasTitle": true,
+     "how": "overflow"
+    }
+   ],
+   "clippedCount": 6,
+   "clippedNoTitle": 0,
+   "fontSizes": [
+    "16px",
+    "12px",
+    "13px"
+   ],
+   "fontWeights": [
+    "600",
+    "500",
+    "400"
+   ],
+   "cards": 4,
+   "panels": {
+    "cards": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "open": {
+     "top": 0,
+     "left": 0,
+     "width": 0,
+     "height": 0,
+     "scrollHeight": 0
+    },
+    "feed": {
+     "top": 96,
+     "left": 0,
+     "width": 390,
+     "height": 3006,
+     "scrollHeight": 3006
+    }
+   }
+  }
+ }
+}
