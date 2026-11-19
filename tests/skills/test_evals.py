@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 EVALS = pathlib.Path(__file__).resolve().parent / "evals"
 sys.path.insert(0, str(EVALS))
@@ -107,6 +108,12 @@ class EvalSets(unittest.TestCase):
         self.assertTrue(evs, "no worker eval configures a slash-only pass")
         checks = evs[0]["checks"]
         self.assertIn({"tool": "Skill", "input": "unslop", "none": True}, checks)
+        read = next(c["input"] for c in checks if c.get("tool") == "*" and "unslop" in c.get("input", ""))
+        for given, reads in [({"file_path": "/box/skills/unslop/SKILL.md"}, True),
+                             ({"command": 'git commit -m "x"\ncat /box/skills/unslop/SKILL.md'}, True),
+                             ({"command": "sed -n 1,40p /box/skills/unslop/SKILL.md"}, True),
+                             ({"command": "ls /box/skills/unslop/SKILL.md"}, False)]:
+            self.assertEqual(live.matches(read, given), reads, given)
 
 
 class SandboxHarness(unittest.TestCase):
@@ -134,6 +141,7 @@ class SandboxHarness(unittest.TestCase):
         for tool in box.bin.iterdir():
             self.assertIn(tool.name, ("python3", "claude", "gh", "systemctl"))
         self.assertEqual(env["T3CODE_THREAD_ID"], live.SELF)
+        self.assertEqual(env["GIT_ALLOW_PROTOCOL"], "file")
         self.assertFalse({"CLAUDE_CONFIG_DIR", "CODEX_HOME", "GH_TOKEN", "GITHUB_TOKEN"} & set(env))
 
     def test_with_skill_installs_every_skill_and_without_installs_none(self):
@@ -166,10 +174,15 @@ class SandboxHarness(unittest.TestCase):
         self.run_in(box, "git", "commit", "-qm", "feat: x")
         r = self.run_in(box, "git", "push", "-q", "origin", "feat/x")
         self.assertEqual(r.returncode, 0, r.stderr)
-        heads = subprocess.run(["git", "--git-dir", str(box.root / "remote.git"), "branch"],
-                               capture_output=True, text=True).stdout
+        bare = box.root / "github.com" / "acme" / "widgets.git"
+        heads = subprocess.run(["git", "--git-dir", str(bare), "branch"], capture_output=True, text=True).stdout
         self.assertIn("feat/x", heads)
-        self.assertIn("github.com/acme/widgets", self.run_in(box, "git", "remote", "get-url", "origin").stdout)
+        self.assertEqual(self.run_in(box, "git", "remote", "get-url", "origin").stdout.strip(), str(bare))
+        self.assertEqual(self.run_in(box, "git", "config", "remote.origin.url").stdout.strip(), live.REPO_URL)
+        self.assertEqual(self.run_in(box, "git", "fetch", "-q", "origin").returncode, 0)
+        r = self.run_in(box, "git", "ls-remote", "https://github.com/acme/other.git")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("not allowed", r.stderr)
 
     def test_the_link_block_is_a_worker_join_line(self):
         box = self.box(setup={"link": "#42 PR 1/2"})
@@ -268,6 +281,27 @@ class Checks(unittest.TestCase):
         report = json.loads((out / "rescore.json").read_text())
         self.assertEqual(report["cost_usd"], 0.35)
         self.assertTrue(report["evals"][0]["pass"])
+        (out / "setup-t3-workflow" / ev["name"] / "without_skill" / "transcript.jsonl").write_text("")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = live.main(["behavior", "--skill", "setup-t3-workflow", "--eval", str(ev["id"]),
+                              "--rescore", str(out)])
+        self.assertEqual(code, 1, "a control run that never finished must not count as a difference")
+
+    def test_a_tool_call_into_the_real_home_or_a_local_server_is_an_escape(self):
+        real = os.path.join(live.REAL_HOME, ".claude", "settings.json")
+        uses = [{"name": "Bash", "input": {"command": f"cat {real}"}},
+                {"name": "Bash", "input": {"command": "curl -s http://127.0.0.1:3773/mcp"}},
+                {"name": "Read", "input": {"file_path": str(self.root / "home" / ".claude" / "x")}}]
+        self.assertEqual(live.escapes({"uses": uses}), uses[:2])
+
+    def test_skill_creator_must_be_named(self):
+        with mock.patch.dict(os.environ, {}, clear=True), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                live.skill_creator_dir(None)
+        sc = self.root / "sc"
+        (sc / "scripts").mkdir(parents=True)
+        (sc / "scripts" / "run_eval.py").write_text("")
+        self.assertEqual(live.skill_creator_dir(str(sc)), sc.resolve())
 
     def test_none_inverts_a_check(self):
         self.assertTrue(self.passes({"tool": "Edit", "none": True}))

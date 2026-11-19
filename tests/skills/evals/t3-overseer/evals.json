@@ -4,7 +4,7 @@
     {
       "id": 1,
       "name": "approve-before-launch",
-      "prompt": "Work issues 42 and 43 at the same time, and keep watch over both for me.",
+      "prompt": "Work acme/widgets issues 42 and 43 at the same time, and keep watch over both for me.",
       "expected_output": "Joins as the overseer root, reads both issues, maps them to the project, and asks the user to approve starting them before launching any ticket thread.",
       "files": [],
       "expectations": [

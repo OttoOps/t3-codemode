@@ -57,6 +57,7 @@
       "expected_output": "Builds the change, then runs the configured slash-only unslop pass inline by reading its SKILL.md, and opens the PR with the pass applied to the description.",
       "files": [],
       "expectations": [
+        "Builds the change the brief asks for",
         "Reads the slash-only unslop skill's SKILL.md",
         "Never calls the Skill tool for unslop",
         "Opens the PR with the unslop pass applied to the description",
@@ -64,8 +65,12 @@
       ],
       "checks": [
         {
+          "file": "widgets.py",
+          "contains": "def shout\\("
+        },
+        {
           "tool": "*",
-          "input": "unslop/SKILL\\.md"
+          "input": "(\\\"file_path\\\": \\\"|(cat|head|less) |sed -n [^ ]+ )[^\\\" ]*unslop/SKILL\\.md"
         },
         {
           "tool": "Skill",
