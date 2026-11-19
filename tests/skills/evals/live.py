@@ -12,7 +12,6 @@ CLAUDE_CODE_OAUTH_TOKEN in the environment.
 """
 import argparse
 import concurrent.futures
-import glob
 import json
 import multiprocessing
 import os
@@ -24,6 +23,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 
@@ -33,6 +33,7 @@ SKILLS = ROOT / "skills"
 T3WF = SKILLS / "t3-workflow" / "scripts" / "t3wf.py"
 DEFAULT_MODEL = "claude-opus-5-5"
 AUTH_VARS = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+REPO_URL = "https://github.com/acme/widgets.git"
 SELF = "thread-eval"
 PARENT = "thread-ticket"
 T0 = "2026-01-05T12:00:00Z"
@@ -43,6 +44,9 @@ DENY = ["WebFetch", "WebSearch", "AskUserQuestion"]
 CHECK_KINDS = ("tool", "bash", "text", "file", "gh", "t3")
 LINK_HEADING = "## t3-workflow link"
 BRIEF_TOOLS = 8
+REAL_HOME = os.path.expanduser("~")
+ESCAPES = [re.escape(os.path.join(REAL_HOME, d)) for d in (".claude", ".agents", ".codex", ".t3")]
+ESCAPE = re.compile("|".join([*ESCAPES, r"(?:127\.0\.0\.1|localhost):\d+"]))
 
 
 def skill_names():
@@ -113,15 +117,15 @@ class Sandbox:
                        env={**self.environ(), "GIT_CONFIG_NOSYSTEM": "1"})
 
     def _repo(self):
-        remote = self.root / "remote.git"
+        remote = self.root / "github.com" / "acme" / "widgets.git"
         subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True,
                        capture_output=True, env={**self.environ(), "GIT_CONFIG_NOSYSTEM": "1"})
         self.repo.mkdir()
         self._git("init", "-q", "-b", "main")
         self._git("config", "user.name", "Eval User")
         self._git("config", "user.email", "eval-user@example.invalid")
-        self._git("remote", "add", "origin", "https://github.com/acme/widgets.git")
-        self._git("remote", "set-url", "--push", "origin", str(remote))
+        self._git("remote", "add", "origin", REPO_URL)
+        self._git("config", f"url.{remote}.insteadOf", REPO_URL)
         files = {"README.md": "# widgets\n\nA small widget library.\n",
                  "widgets.py": "def widget(name):\n    return f\"widget {name}\"\n",
                  **self.setup.get("repo_files", {})}
@@ -175,7 +179,7 @@ class Sandbox:
                 "T3CODE_HOME": str(self.root / "t3home"), "T3CODE_THREAD_ID": SELF,
                 "T3WF_FAKE_T3": str(self.fake_t3), "T3WF_NO_LAZY": "1",
                 "T3WF_SYSTEMCTL": str(self.bin / "systemctl"), "T3CM_PORT": str(free_port()),
-                "GH_FAKE_DIR": str(self.root), "GIT_TERMINAL_PROMPT": "0"}
+                "GH_FAKE_DIR": str(self.root), "GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": "file"}
 
     def prompt(self, text):
         return text.replace("{link_block}", self.link_block).replace("{repo}", str(self.repo))
@@ -191,13 +195,10 @@ def require_auth():
 
 
 def skill_creator_dir(arg):
-    candidates = [arg, os.environ.get("SKILL_CREATOR_DIR")]
-    candidates += sorted(glob.glob(os.path.expanduser(
-        "~/.claude/plugins/cache/*/skill-creator/*/skills/skill-creator")), key=os.path.getmtime, reverse=True)
-    for c in candidates:
-        if c and (pathlib.Path(c) / "scripts" / "run_eval.py").is_file():
-            return pathlib.Path(c)
-    sys.exit("skill-creator not found: pass --skill-creator or set SKILL_CREATOR_DIR")
+    path = arg or os.environ.get("SKILL_CREATOR_DIR")
+    if not path or not (pathlib.Path(path) / "scripts" / "run_eval.py").is_file():
+        sys.exit("pass --skill-creator <dir> or set SKILL_CREATOR_DIR to a skill-creator skill folder")
+    return pathlib.Path(path).resolve()
 
 
 def skill_called(use, clean_name):
@@ -220,11 +221,10 @@ def run_until_skill(query, skill_name, description, timeout, project, model, max
     proc = subprocess.Popen(["claude", "-p", query, "--output-format", "stream-json", "--verbose", "--model", model,
                              "--max-turns", str(max_tools + 2)], cwd=project, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    deadline, seen = time.time() + timeout, 0
+    timer, seen = threading.Timer(timeout, proc.kill), 0
+    timer.start()
     try:
         for line in proc.stdout:
-            if time.time() > deadline:
-                return False
             facts = transcript_facts([line])
             for use in facts["uses"]:
                 if skill_called(use, clean_name):
@@ -236,6 +236,7 @@ def run_until_skill(query, skill_name, description, timeout, project, model, max
                 return False
         return False
     finally:
+        timer.cancel()
         if proc.poll() is None:
             proc.kill()
             proc.wait()
@@ -254,7 +255,7 @@ def one_trigger(job):
         return detect(job["query"], job["name"], job["description"], job["timeout"], job["project"], job["model"])
     except Exception as e:
         print(f"query failed: {e}", file=sys.stderr)
-        return False
+        return None
 
 
 def run_triggers(args):
@@ -263,7 +264,7 @@ def run_triggers(args):
         sys.exit("--description needs exactly one --skill")
     sys.path.insert(0, str(skill_creator_dir(args.skill_creator)))
     from scripts.utils import parse_skill_md
-    out = pathlib.Path(args.out or tempfile.mkdtemp(prefix="t3-trigger-evals-"))
+    out = pathlib.Path(args.out or tempfile.mkdtemp(prefix="t3-trigger-evals-")).resolve()
     report, start = {"model": args.model, "runs_per_query": args.runs, "skills": {}}, time.time()
     claude_bin()
     jobs = []
@@ -288,11 +289,13 @@ def run_triggers(args):
         for i in sorted({j["index"] for j, _ in mine}):
             runs = [f for j, f in mine if j["index"] == i]
             item = next(j["item"] for j, _ in mine if j["index"] == i)
-            rate = sum(runs) / len(runs)
-            ok = rate >= 0.5 if item["should_trigger"] else rate < 0.5
+            errors = runs.count(None)
+            rate = sum(bool(f) for f in runs) / len(runs)
+            ok = not errors and (rate >= 0.5 if item["should_trigger"] else rate < 0.5)
             entry["results"].append({"query": item["query"], "should_trigger": item["should_trigger"],
                                      "form": item.get("form"), "env": item.get("env", "t3"),
-                                     "trigger_rate": rate, "triggers": sum(runs), "runs": len(runs), "pass": ok})
+                                     "trigger_rate": rate, "triggers": sum(bool(f) for f in runs),
+                                     "runs": len(runs), "errors": errors, "pass": ok})
         entry["passed"] = sum(r["pass"] for r in entry["results"])
         entry["total"] = len(entry["results"])
         print(f"{skill}: {entry['passed']}/{entry['total']} passed", file=sys.stderr)
@@ -378,16 +381,21 @@ def behave(ev, skill, mode, out, args):
     facts = transcript_facts(stream.splitlines())
     return {"checks": [check_passes(c, facts, root) for c in ev["checks"]], "cost_usd": facts["cost"],
             "turns": facts["turns"], "seconds": None if args.rescore else round(time.time() - t),
-            "sandbox": str(root)}
+            "completed": facts["turns"] is not None, "escapes": escapes(facts), "sandbox": str(root)}
+
+
+def escapes(facts):
+    """Tool calls that named the real home's agent folders or a local server: the run left its sandbox."""
+    return [u for u in facts["uses"] if ESCAPE.search(json.dumps(u["input"]))]
 
 
 def run_behavior(args):
     if args.rescore:
-        out = pathlib.Path(args.rescore)
+        out = pathlib.Path(args.rescore).resolve()
     else:
         require_auth()
         claude_bin()
-        out = pathlib.Path(args.out or tempfile.mkdtemp(prefix="t3-behavior-evals-"))
+        out = pathlib.Path(args.out or tempfile.mkdtemp(prefix="t3-behavior-evals-")).resolve()
     report, start = {"model": args.model, "evals": []}, time.time()
     for skill in args.skill or [s for s in skill_names() if (HERE / s / "evals.json").exists()]:
         for ev in load(skill, "evals")["evals"]:
@@ -395,12 +403,13 @@ def run_behavior(args):
                 continue
             runs = {mode: behave(ev, skill, mode, out, args) for mode in ("with_skill", "without_skill")}
             w, wo = runs["with_skill"]["checks"], runs["without_skill"]["checks"]
-            row = {"skill": skill, "id": ev["id"], "name": ev["name"], "runs": runs,
-                   "pass": all(w) and not all(wo),
+            valid = all(r["completed"] and not r["escapes"] for r in runs.values())
+            row = {"skill": skill, "id": ev["id"], "name": ev["name"], "runs": runs, "valid": valid,
+                   "pass": valid and all(w) and not all(wo),
                    "expectations": [{"text": x, "with_skill": a, "without_skill": b}
                                     for x, a, b in zip(ev["expectations"], w, wo)]}
             report["evals"].append(row)
-            print(f"{skill}/{ev['name']}: {'PASS' if row['pass'] else 'FAIL'} "
+            print(f"{skill}/{ev['name']}: {'PASS' if row['pass'] else 'FAIL'}{'' if valid else ' (invalid run)'} "
                   f"with {sum(w)}/{len(w)}, without {sum(wo)}/{len(wo)}", file=sys.stderr)
     report["seconds"] = sum(r["runs"][m]["seconds"] or 0 for r in report["evals"] for m in r["runs"]) \
         if args.rescore else round(time.time() - start)

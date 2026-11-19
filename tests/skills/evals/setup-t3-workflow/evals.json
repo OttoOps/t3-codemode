@@ -11,7 +11,8 @@
         "Runs the setup script's detect step",
         "Shows the current setting of each slot, the worker model included",
         "Asks about the reviewer first",
-        "Writes no config before the user answers",
+        "Runs no config write before the user answers",
+        "Leaves the config file unwritten",
         "Edits no file"
       ],
       "checks": [
@@ -26,6 +27,11 @@
         },
         {
           "bash": "setup_workflow\\.py.*write",
+          "none": true
+        },
+        {
+          "file": "../config/t3-workflow/config.json",
+          "contains": ".",
           "none": true
         },
         {

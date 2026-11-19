@@ -28,14 +28,21 @@ stub server, the fake `gh` and the check matchers. None of it calls a model.
 Live runs call Claude, cost money, and run on demand, never in CI. Each run
 gets its own sandbox under `--out` (a temporary folder by default):
 
-- its own `HOME`, XDG config and state, and T3 home, so the real
-  `~/.claude`, `~/.agents`, `~/.codex` and T3 Code are never read or written;
+- its own `HOME`, XDG config and state, and T3 home, so it works on its own
+  copies, not the real `~/.claude`, `~/.agents`, `~/.codex` or T3 Code;
 - `PATH` set to the sandbox's `bin` (a fake `gh`, `python3` and `claude`)
   then `/usr/bin:/bin`;
 - a stub `t3-code` MCP server that logs each call, `t3wf` on its file-backed
   fake T3, and a T3 Code runtime note in the sandbox's `CLAUDE.md`, so a
   prompt runs as it would in a T3 Code thread (`env: "plain"` drops all three);
-- a git repo for `acme/widgets` whose pushes land in a local bare repo.
+- a git repo whose `origin` is `https://github.com/acme/widgets.git`, rewritten
+  with `insteadOf` to a local bare repo, and `GIT_ALLOW_PROTOCOL=file`, so no
+  fetch or push leaves the machine.
+
+The sandbox redirects the run; it is not an OS jail. A behavior run whose tool
+calls name the real `~/.claude`, `~/.agents`, `~/.codex` or `~/.t3`, or a
+local server port, is marked invalid and fails, and so is a run that ended
+without a result.
 
 Auth comes from `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in the
 environment. `claude setup-token` prints a token for the second.
@@ -43,18 +50,19 @@ environment. `claude setup-token` prints a token for the second.
 ### Trigger evals
 
 ```sh
-python3 tests/skills/evals/live.py triggers [--skill t3-ticket] [--runs 3] [--model claude-opus-5-5]
+python3 tests/skills/evals/live.py triggers --skill-creator <dir> [--skill t3-ticket] [--runs 3] [--model claude-opus-5-5]
 ```
 
-The runner needs skill-creator installed (the `skill-creator` plugin), or
-`--skill-creator <dir>`. Each run puts the skill's description in front of
+`<dir>` is the `skill-creator` skill folder, the one holding
+`scripts/run_eval.py` (from the `skill-creator` plugin), or set
+`SKILL_CREATOR_DIR`. Each run puts the skill's description in front of
 the model the way skill-creator's `run_eval.py` does, with the other skills
 from `skills/` installed beside it, and counts it as triggered when the
 model's first tool call invokes it. A prompt with a `## t3-workflow link`
 block is the exception: the block tells the thread to invoke `t3-workflow`
 first, so it counts when the skill is invoked within the first 8 tool calls.
 A query passes when it fires in at least half its runs (or under half, for a
-should-not-trigger query).
+should-not-trigger query) and none of its runs failed to start.
 
 To try a new description before editing `SKILL.md`, pass `--skill <name>
 --description '<text>'`.
