@@ -30,3 +30,25 @@ padding that renders the same, and the fixes from code review, which change
 behavior under live updates but not the stills. Round 7's gate table is
 measured on that final build, named in the report, and `final/` holds stills
 of it.
+
+## Issue #67
+
+Rounds 8 to 10 score the readable board against `main` at `9f8ad45`, with
+the same judges and protocol, plus G5 on the live replay. The judged
+criteria are #28's and G5. The task test (G1), the grayscale check (G3)
+and the other Glanceability gates are measured.
+
+| Round | Judged build | Result | Judged criteria short of the rule | Gates failed or not measured |
+| --- | --- | --- | --- | --- |
+| [8](round-8.md) | `0c85189` with fixes | not met | P5, N4, N5 | none |
+| [9](round-9.md) | round 8 with its evidence applied | not met | N3, N4 | heavy U1 not measured |
+| [10](round-10.md) | round 9 with the label strip | not met | N3, N4 | none on the shipped build, `59b51ca` |
+
+The candidate beat the baseline on every axis in every round. Rounds 9
+and 10 missed only on N3 and N4, each under the reference median: N3 by
+0.17, one judge's point, and N4 by 0.33. The judges' evidence for both
+comes down to two choices the issue's owner settled before this PR:
+tickets that need the user stay in both the Needs you panel and the
+Tickets list, and the board rewrites no ask beyond stripping the action
+line's scaffolding, so a card whose ask names its replies repeats them on
+its buttons.

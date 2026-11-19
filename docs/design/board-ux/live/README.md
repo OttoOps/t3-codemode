@@ -19,6 +19,18 @@ freeze one moment of the live board and replay it.
   so relative ages match the snapshot.
 - `before/` holds the current board (`main` at `49f9731`) replayed against
   `state.json`, with `report.json`.
+- `fields.py` adds the fields PR 2's board reads to `state.json`: each
+  ticket's issue title as #66 sends it, an ISO time beside every clock
+  string, and the feed's `ticketLabel` and `ticketTitle`. It adds, and
+  changes nothing the snapshot held.
+- `glance.js` measures the Glanceability gates that a still cannot show by
+  eye: G4 (where amber, red and the accent appear), G7 (raw slugs), G8
+  (clock times and time zones), G9 (Activity prefixes, long hashes and
+  repeated neighbours), G10 (the empty Answers height) and G11 (text and
+  line contrast, placeholders included), at 1920, 1366 and 390 in both
+  themes.
+- `after/` holds the readable board (`59b51ca`) replayed the same way, with
+  `report.json` from `capture.js` and `glance.json` from `glance.js`.
 
 The replay matches the live board closely. Run minutes apart with the same
 probe, the replay and the live service, read-only, gave the same
@@ -39,7 +51,9 @@ playwright-cli -s=live open about:blank
 playwright-cli -s=live --raw run-code --filename=/tmp/capture.run.js > "$out/report.json"
 ```
 
-PR 2 replays its own `src/board.html` the same way for the after-captures.
+PR 2 replays its own `src/board.html` the same way for the after-captures,
+and runs `glance.js` with the same substitutions, its output in place of
+`report.json`.
 To take a fresh snapshot, save the live service's `/api/state` and run
 `python3 docs/design/board-ux/live/anonymize.py <raw.json> <private.json> docs/design/board-ux/live/state.json`. The private
 file stays outside the repository, because it names what it hides. It holds
