@@ -172,6 +172,9 @@ records why t3cm reads limits this way.
 set, launches use the pool's model and effort, a `wf.launchTicket` call that
 asks for another model or effort fails, and the ask box runs the pool's model
 in place of `askModel`. Skills pick from a pool with [`wf.pick`](globals.md#wf).
+The workflow skills do that for each launch when their `model worker` or
+`model ticket` slot names a pool, as `"worker": {"pool": "opus"}`; see
+[A pool on a model line](https://github.com/OttoOps/t3-codemode/blob/main/skills/t3-workflow/slots.md#a-pool-on-a-model-line).
 Pools are per T3 environment, since instance ids belong to one T3 server.
 
 ### Upstreams
