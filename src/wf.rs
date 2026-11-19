@@ -9,6 +9,8 @@ use serde_json::{Value, json};
 use crate::board::{BOARD, LaunchArgs, NewCard, Remotes, checked_options};
 use crate::clock::{Clock, iso, local_clock, minutes_since};
 use crate::config::{CLOSING, Config, LinkParams, UP_KINDS};
+use crate::github::GitHub;
+use crate::merge::MergeArgs;
 use crate::store::{Link, Pending, Store};
 use crate::t3::{T3Client, T3Error};
 
@@ -201,6 +203,7 @@ pub struct Wf {
     pub(crate) config: Arc<Config>,
     pub(crate) lock: tokio::sync::Mutex<()>,
     pub(crate) remotes: Arc<dyn Remotes>,
+    pub(crate) github: Arc<dyn GitHub>,
     pub(crate) live: Mutex<HashMap<String, Value>>,
     pub(crate) closed_prs: Mutex<HashMap<String, ClosedPrs>>,
     pub(crate) known_projects: Mutex<HashMap<String, Value>>,
@@ -227,6 +230,7 @@ impl Wf {
         clock: Arc<dyn Clock>,
         config: Arc<Config>,
         remotes: Arc<dyn Remotes>,
+        github: Arc<dyn GitHub>,
     ) -> Wf {
         if store.node_role(BOARD).ok().flatten().as_deref() != Some("overseer") {
             let _ = store.node_set(BOARD, "overseer", &iso(clock.now()));
@@ -238,6 +242,7 @@ impl Wf {
             config,
             lock: tokio::sync::Mutex::new(()),
             remotes,
+            github,
             live: Mutex::new(HashMap::new()),
             closed_prs: Mutex::new(HashMap::new()),
             known_projects: Mutex::new(HashMap::new()),
@@ -358,6 +363,7 @@ impl Wf {
                 let a: AnswerArgs = parse(method, args)?;
                 return self.answer(&a.id, &a.text).await;
             }
+            "merge" => return self.merge(caller.filter(|c| !c.is_empty()), parse::<MergeArgs>(method, args)?).await,
             "launchTicket" => {
                 let r = self.launch_ticket(parse::<LaunchArgs>(method, args)?).await?;
                 if r["ok"] == false {

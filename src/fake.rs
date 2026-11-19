@@ -297,3 +297,150 @@ impl T3Client for FakeT3 {
         Box::pin(async move { Ok(self.tools.clone()) })
     }
 }
+
+#[derive(Default)]
+struct GhState {
+    repos: BTreeMap<String, Value>,
+    prs: BTreeMap<(String, u64), Value>,
+    calls: Vec<Value>,
+    errors: BTreeMap<String, String>,
+    down: bool,
+    queue: u64,
+    merges: u64,
+    unknown_reads: usize,
+}
+
+#[derive(Default)]
+pub struct FakeGitHub(Mutex<GhState>);
+
+pub fn github_pr(head: &str, merge_state: &str, queue: bool) -> Value {
+    json!({
+        "state": "OPEN", "isDraft": false, "headRefOid": head, "mergeStateStatus": merge_state,
+        "isMergeQueueEnabled": queue, "isInMergeQueue": false, "mergeQueueEntry": null, "mergeCommit": null
+    })
+}
+
+fn gh_error(message: &str) -> Value {
+    json!({"data": null, "errors": [{"type": "UNPROCESSABLE", "message": message}]})
+}
+
+impl FakeGitHub {
+    fn st(&self) -> std::sync::MutexGuard<'_, GhState> {
+        self.0.lock().unwrap()
+    }
+
+    pub fn set_pr(&self, repo: &str, number: u64, pr: Value) {
+        let mut st = self.st();
+        let mut pr = pr;
+        pr["id"] = json!(format!("PR_{repo}_{number}"));
+        st.repos.entry(repo.into()).or_insert_with(|| json!({"viewerDefaultMergeMethod": "MERGE"}));
+        st.prs.insert((repo.into(), number), pr);
+    }
+
+    pub fn update_pr(&self, repo: &str, number: u64, patch: Value) {
+        let mut st = self.st();
+        let pr = st.prs.get_mut(&(repo.into(), number)).expect("known pull request");
+        for (k, v) in patch.as_object().expect("object patch") {
+            pr[k] = v.clone();
+        }
+    }
+
+    pub fn pr(&self, repo: &str, number: u64) -> Value {
+        self.st().prs[&(repo.into(), number)].clone()
+    }
+
+    pub fn set_default_method(&self, repo: &str, method: &str) {
+        self.st().repos.insert(repo.into(), json!({"viewerDefaultMergeMethod": method}));
+    }
+
+    pub fn set_queue_length(&self, n: u64) {
+        self.st().queue = n;
+    }
+
+    pub fn fail_operation(&self, operation: &str, message: &str) {
+        self.st().errors.insert(operation.into(), message.into());
+    }
+
+    pub fn set_unknown_reads(&self, n: usize) {
+        self.st().unknown_reads = n;
+    }
+
+    pub fn set_down(&self, down: bool) {
+        self.st().down = down;
+    }
+
+    pub fn calls(&self) -> Vec<Value> {
+        self.st().calls.clone()
+    }
+
+    pub fn operations(&self) -> Vec<String> {
+        self.calls().iter().map(|c| c["operation"].as_str().unwrap_or_default().to_string()).collect()
+    }
+}
+
+fn operation(query: &str) -> &'static str {
+    for op in ["enqueuePullRequest", "mergePullRequest", "enablePullRequestAutoMerge"] {
+        if query.contains(op) {
+            return op;
+        }
+    }
+    "read"
+}
+
+impl crate::github::GitHub for FakeGitHub {
+    fn graphql<'a>(&'a self, query: &'a str, variables: Value) -> BoxFut<'a, anyhow::Result<Value>> {
+        Box::pin(async move {
+            let mut st = self.st();
+            let op = operation(query);
+            st.calls.push(json!({"operation": op, "variables": variables}));
+            if st.down {
+                anyhow::bail!("gh api graphql failed: gh: not logged in");
+            }
+            if let Some(message) = st.errors.get(op) {
+                return Ok(gh_error(message));
+            }
+            if op == "read" {
+                let repo = format!("{}/{}", variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap())
+                    .to_ascii_lowercase();
+                let Some(meta) = st.repos.get(&repo).cloned() else {
+                    return Ok(gh_error(&format!("Could not resolve to a Repository with the name '{repo}'.")));
+                };
+                let number = variables["number"].as_u64().unwrap();
+                let mut pr = st.prs.get(&(repo, number)).cloned().unwrap_or(Value::Null);
+                if st.unknown_reads > 0 && !pr.is_null() {
+                    st.unknown_reads -= 1;
+                    pr["mergeStateStatus"] = json!("UNKNOWN");
+                }
+                let mut repository = meta;
+                repository["pullRequest"] = pr;
+                return Ok(json!({"data": {"repository": repository}}));
+            }
+            let id = variables["id"].as_str().unwrap().to_string();
+            let head = variables["head"].as_str().unwrap().to_string();
+            let queue = st.queue;
+            st.merges += 1;
+            let merges = st.merges;
+            let Some(pr) = st.prs.values_mut().find(|p| p["id"] == id.as_str()) else {
+                return Ok(gh_error("Could not resolve to a node"));
+            };
+            if pr["headRefOid"] != head.as_str() {
+                return Ok(gh_error("Head branch was modified. Review and try the merge again."));
+            }
+            match op {
+                "enqueuePullRequest" => {
+                    let position = queue + 1;
+                    pr["isInMergeQueue"] = json!(true);
+                    pr["mergeQueueEntry"] = json!({"position": position});
+                    Ok(json!({"data": {"enqueuePullRequest": {"mergeQueueEntry": {"position": position}}}}))
+                }
+                "mergePullRequest" => {
+                    let oid = format!("{merges:040x}");
+                    pr["state"] = json!("MERGED");
+                    pr["mergeCommit"] = json!({"oid": oid});
+                    Ok(json!({"data": {"mergePullRequest": {"pullRequest": {"mergeCommit": {"oid": oid}}}}}))
+                }
+                _ => Ok(gh_error("the fake does not support this mutation")),
+            }
+        })
+    }
+}

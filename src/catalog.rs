@@ -26,6 +26,7 @@ pub struct Catalog {
 }
 
 const WAKE_RESULT: &str = r#"{ handle: string; delivery: "noted" | "sent" | "queued" | "board"; detail?: string; card?: string; options?: string[]; warning?: string; closed?: boolean }"#;
+const MERGE_SIGNATURE: &str = r#"wf.merge(input: { repo: string; pr: number; head: string; method?: "merge" | "squash" | "rebase" }): Promise<{ repo: string; pr: number; head: string } & ({ status: "queued"; position: number | null } | { status: "merged"; commit: string | null; method?: "merge" | "squash" | "rebase" } | { status: "waiting"; mergeState: string } | { status: "refused"; reason: string })>;"#;
 const CARD: &str = r#"{ id: string; kind: string; label: string | null; ticket: string | null; link: string | null; text: string; handle: string | null; options: string[]; at: string; atLocal: string; resolved?: string; resolution?: string | null; token: string }"#;
 
 fn builtin(name: &str, kind: &'static str, description: &str, sig: &str, input: Value) -> Entry {
@@ -198,6 +199,18 @@ pub fn builtins() -> Vec<Entry> {
                 json!({"issue": {"type": "string", "description": "https://github.com/<owner>/<repo>/issues/<n> or <owner>/<repo>#<n>"},
                        "project": {"type": "string"}, "title": {"type": "string"}, "model": {"type": "string"}, "effort": {"type": "string"}}),
                 &["issue"],
+            ),
+        ),
+        builtin(
+            "wf.merge",
+            "wf",
+            "Merge a GitHub pull request through the service's gh login, only at the approved head commit (refused when the PR's head differs). On a repo with a merge queue: a mergeable PR is enqueued (never auto-merge); one not yet mergeable is recorded as waiting to be queued and returns waiting. Without a merge queue: merged directly with method, or the repo's default method. Throws when gh cannot reach GitHub.",
+            MERGE_SIGNATURE,
+            obj(
+                json!({"repo": {"type": "string", "description": "owner/name"}, "pr": {"type": "integer"},
+                       "head": {"type": "string", "description": "the approved head commit, full 40-character SHA"},
+                       "method": {"enum": ["merge", "squash", "rebase"]}}),
+                &["repo", "pr", "head"],
             ),
         ),
         builtin(

@@ -103,6 +103,10 @@ parent and a child, and the service keeps every link and message in its store.
   [board](board.md).
 - `wf.waiting.add`, `wf.waiting.resolve` and `wf.waiting.list` keep an overseer
   thread's waiting list.
+- `wf.merge({repo, pr, head, method?})` merges a GitHub pull request at the
+  approved head commit. `repo` is `owner/name`, `head` the full 40-character
+  SHA the user approved, and `method` one of `merge`, `squash` or `rebase`.
+  See [wf.merge](#wfmerge).
 
 ```js
 async () => wf.send({ kind: "note", body: "tests green at d4db97c" })
@@ -123,6 +127,44 @@ when it is idle, held at most `maxHoldMinutes` (30). A watcher task runs every
 `watcherIntervalSecs` (60 s): it nudges idle children, reports stalls and
 pending requests once, escalates after repeated misses, and closes links whose
 thread was deleted or archived.
+
+### wf.merge
+
+`wf.merge` reads the pull request in one GraphQL query, then does one of these.
+GitHub computes the merge state lazily, so while an open pull request reports
+`UNKNOWN`, the query runs again, at most three times, one second apart.
+
+| The pull request | What `wf.merge` does | Returns |
+|---|---|---|
+| Is at a head other than `head` | Nothing | `refused` |
+| Is a draft or closed | Nothing | `refused` |
+| Is already merged | Nothing | `merged` with its merge commit |
+| Is already in the merge queue | Nothing | `queued` with its position |
+| Has a merge queue and is mergeable | `enqueuePullRequest` with `expectedHeadOid = head` | `queued` with its position |
+| Has a merge queue and is not mergeable yet | Records it as waiting to be queued | `waiting` with its `mergeState` |
+| Has no merge queue and is mergeable | `mergePullRequest` with `method`, else the repo's default, and `expectedHeadOid = head` | `merged` with the commit |
+| Has no merge queue and is not mergeable | Nothing | `refused` |
+
+Mergeable means a `mergeStateStatus` of `CLEAN`, `HAS_HOOKS` or `UNSTABLE`,
+the states GitHub's own merge button accepts. `wf.merge` never turns on
+auto-merge: on a merge-queue repo, auto-merge set on an already mergeable pull
+request never joins the queue. Every result carries `status`, `repo`, `pr` and
+`head`; `refused` adds a `reason`. When `gh` cannot reach GitHub at all, the
+call throws.
+
+A waiting record holds the repo, the pull request, the approved head, who
+asked (`thread` and `label`), and the merge state it saw. It stays in the store
+until a later `wf.merge` call for the same pull request queues it, merges it,
+or finds it already queued or merged. A repeat call while it still waits
+replaces the record.
+
+The service runs `gh api graphql` with the `gh` login of the user it runs as,
+so `gh` must be on the service's `PATH` and signed in. `execute` code never
+reaches `gh` or the network itself; see [Security](security.md#github).
+
+```js
+async () => wf.merge({ repo: "acme/widgets", pr: 81, head: "d4db97c0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70" })
+```
 
 ## console
 

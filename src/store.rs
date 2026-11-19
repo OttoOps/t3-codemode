@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS waiting (
 CREATE UNIQUE INDEX IF NOT EXISTS waiting_open ON waiting (owner, id) WHERE resolved_at IS NULL;
 CREATE TABLE IF NOT EXISTS asks (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL, open INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS merge_waits (
+  repo TEXT NOT NULL, pr INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (repo, pr));
 "#;
 
 const KEEP_MESSAGES: i64 = 5000;
@@ -113,6 +115,20 @@ impl Message {
         let flat = self.body.split_whitespace().collect::<Vec<_>>().join(" ");
         flat.chars().take(max).collect()
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeWait {
+    pub repo: String,
+    pub pr: u64,
+    pub head: String,
+    pub pull_request_id: String,
+    pub method: Option<String>,
+    pub thread: Option<String>,
+    pub label: Option<String>,
+    pub merge_state: String,
+    pub at: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -325,6 +341,31 @@ impl Store {
     pub fn pending_all(&self) -> Result<Vec<Pending>> {
         let raws: Vec<String> = self.with(|c| {
             let mut st = c.prepare("SELECT data FROM pending ORDER BY rowid")?;
+            st.query_map([], |r| r.get(0))?.collect()
+        })?;
+        raws.iter().map(|s| Ok(serde_json::from_str(s)?)).collect()
+    }
+
+    pub fn merge_wait_put(&self, w: &MergeWait) -> Result<()> {
+        let data = serde_json::to_string(w)?;
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO merge_waits (repo, pr, data) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (repo, pr) DO UPDATE SET data = excluded.data",
+                params![w.repo, w.pr as i64, data],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn merge_wait_remove(&self, repo: &str, pr: u64) -> Result<bool> {
+        Ok(self.with(|c| c.execute("DELETE FROM merge_waits WHERE repo = ?1 AND pr = ?2", params![repo, pr as i64]))?
+            > 0)
+    }
+
+    pub fn merge_waits(&self) -> Result<Vec<MergeWait>> {
+        let raws: Vec<String> = self.with(|c| {
+            let mut st = c.prepare("SELECT data FROM merge_waits ORDER BY rowid")?;
             st.query_map([], |r| r.get(0))?.collect()
         })?;
         raws.iter().map(|s| Ok(serde_json::from_str(s)?)).collect()

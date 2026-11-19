@@ -38,6 +38,16 @@ namespaces, `tools`, `mem`, `vars` and `wf`. The host functions enforce the
 `deny` list themselves, so a denied T3 tool throws however the script reaches
 it, whatever the prompt says. At most `maxConcurrentRuns` (16) runs execute at once.
 
+## GitHub
+
+`wf.merge` is the one host function that reaches GitHub. The service runs
+`gh api graphql` itself, as the user it runs under, with that user's existing
+`gh` login. Sandboxed code cannot run `gh` or send GraphQL of its own: it passes
+a repo, a pull request number, a head SHA and a merge method, the service
+checks their shape, and the service sends one of three fixed operations (read
+the pull request, `enqueuePullRequest`, `mergePullRequest`). The service never
+reads the `gh` token.
+
 ## The T3 token
 
 The token lives only in the store and in memory. It never enters the sandbox,
