@@ -2210,3 +2210,20 @@ return { during, sent, held, undone: ids(), after: answers().length };
     assert_eq!(r["undone"], json!(["a1"]), "{r}");
     assert_eq!(r["after"], 1, "{r}");
 }
+
+#[tokio::test]
+async fn a_project_whose_repo_was_unknown_is_looked_up_again_later() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.fake.update(TICKET, json!({"projectId": "p-widgets"}));
+    join_board(&h, TICKET, "widgets#41").await;
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(by_label(&snapshot(&h)["tree"], "widgets#41")["repo"], Value::Null);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    h.clock.advance_minutes(10);
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(by_label(&snapshot(&h)["tree"], "widgets#41")["repo"], Value::Null);
+    h.clock.advance_minutes(25);
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(by_label(&snapshot(&h)["tree"], "widgets#41")["repo"], "acme/widgets");
+}
