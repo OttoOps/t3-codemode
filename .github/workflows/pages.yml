@@ -35,7 +35,10 @@ jobs:
         uses: lycheeverse/lychee-action@v2
         with:
           lycheeVersion: ${{ env.LYCHEE_VERSION }}
-          args: --no-progress --exclude-path docs/book/404.html 'docs/book/**/*.html'
+          args: >-
+            --no-progress --exclude-path docs/book/404.html
+            --remap '^https://github\.com/OttoOps/t3-codemode/blob/main/ https://github.com/OttoOps/t3-codemode/blob/${{ github.event.pull_request.head.sha || github.sha }}/'
+            'docs/book/**/*.html'
       - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/configure-pages@v6
       - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
