@@ -277,6 +277,9 @@ async fn launch_ticket_maps_the_repo_to_a_project_and_preregisters_the_link() {
     let tree = h.app.wf.tree().unwrap();
     assert_eq!(tree[0]["joined"], false);
     assert_eq!(tree[0]["status"], "running");
+    assert_eq!(tree[0]["repo"], "Acme/widgets");
+    assert_eq!(tree[0]["project"], json!({"id": "p-widgets", "title": "p-widgets"}));
+    assert_eq!(tree[0]["title"], "widgets#41: Fix the grader");
     let again = h.exec("async () => wf.launchTicket({ issue: 'Acme/widgets#41' })").await;
     assert!(err_text(&again).contains("has not joined yet"), "{}", again.text);
     h.wf("launch:1", "join", json!({"parent": BOARD, "label": "widgets#41", "role": "ticket"})).await;
@@ -1890,4 +1893,314 @@ async fn a_worker_that_finishes_with_an_open_pr_shows_its_merge() {
     let before = reads(&h);
     h.app.wf.board_tick().await.unwrap();
     assert_eq!(reads(&h), before);
+}
+
+fn by_label<'a>(items: &'a Value, label: &str) -> &'a Value {
+    items.as_array().unwrap().iter().find(|t| t["label"] == label).unwrap_or_else(|| panic!("no {label} in {items}"))
+}
+
+#[tokio::test]
+async fn the_state_carries_each_tickets_repo_project_and_title() {
+    let mut h = H::new();
+    let mut gadgets = project("p-gadgets", "/src/gadgets");
+    gadgets["title"] = json!("Gadgets");
+    gadgets["repositoryIdentity"] = json!({
+        "canonicalKey": "github.com/acme/gadgets", "owner": "acme", "name": "gadgets",
+        "locator": {"source": "git-remote", "remoteName": "origin", "remoteUrl": "https://github.com/acme/gadgets.git"},
+    });
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets"), gadgets]);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    h.fake.update(TICKET, json!({"projectId": "p-widgets", "title": "widgets#41: Fix the grader"}));
+    h.fake.update(WORKER, json!({"projectId": "p-gadgets"}));
+    join_board(&h, TICKET, "widgets#41").await;
+    join_board(&h, WORKER, "gadgets#7").await;
+    h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": GATE})).await;
+    h.wf(WORKER, "send", json!({"kind": "event", "body": "PR opened"})).await;
+    h.app.wf.board_tick().await.unwrap();
+    let st = snapshot(&h);
+    let w = by_label(&st["tree"], "widgets#41");
+    assert_eq!(w["repo"], "acme/widgets", "{w}");
+    assert_eq!(w["project"], json!({"id": "p-widgets", "title": "p-widgets"}));
+    assert_eq!(w["title"], "widgets#41: Fix the grader");
+    let g = by_label(&st["tree"], "gadgets#7");
+    assert_eq!(g["repo"], "acme/gadgets", "{g}");
+    assert_eq!(g["project"], json!({"id": "p-gadgets", "title": "Gadgets"}));
+    assert_eq!(st["cards"][0]["ticket"], TICKET);
+    assert_eq!(st["cards"][0]["repo"], "acme/widgets");
+    assert_eq!(st["cards"][0]["project"]["id"], "p-widgets");
+    let f = by_label(&st["feed"], "gadgets#7");
+    assert_eq!((&f["ticket"], &f["repo"]), (&json!(WORKER), &json!("acme/gadgets")), "{f}");
+    assert_eq!((&f["ticketLabel"], &f["ticketTitle"]), (&json!("gadgets#7"), &json!(WORKER)), "{f}");
+    h.reopen();
+    assert_eq!(by_label(&snapshot(&h)["tree"], "gadgets#7")["project"]["id"], "p-gadgets");
+    h.app.wf.board_tick().await.unwrap();
+    let again = snapshot(&h);
+    assert_eq!(by_label(&again["tree"], "gadgets#7")["repo"], "acme/gadgets");
+    assert_eq!(by_label(&again["tree"], "widgets#41")["repo"], "acme/widgets");
+}
+
+const FILTER_HELPERS: &str = r##"
+const $$ = (id) => document.getElementById(id);
+const keysOf = (id) => [...$$(id).children].filter((e) => !e.classList.contains("gone")).map((e) => e.dataset.key);
+const facet = (key) => q('[data-facet="' + key + '"]');
+const pick = (key, val) => {
+  if (facet(key).querySelector('[data-part="fpop"]').hidden) facet(key).querySelector('[data-part="fbtn"]').dispatch("click");
+  const box = facet(key).querySelector('[data-val="' + val + '"] input');
+  box.checked = !box.checked;
+  box.dispatch("change");
+};
+const view = () => ({
+  cards: ids(), open: keysOf("open"), done: keysOf("done"), feed: keysOf("feed"), settled: keysOf("settled"),
+  n: ["n-cards", "n-open", "n-done", "n-feed", "n-settled"].map((id) => $$(id).textContent),
+});
+"##;
+
+fn filter_scenario(html: &str, st: &Value, body: &str) -> Value {
+    let wrap = format!(
+        r##"{FILTER_HELPERS}
+const T = "{TICKET}", W = "{WORKER}";
+const repoOf = (t) => t === T ? "acme/widgets" : "acme/gadgets";
+const place = (t) => ({{ repo: repoOf(t), project: {{ id: "p-" + repoOf(t).slice(5), title: repoOf(t).slice(5) }} }});
+const s0 = {{
+  ...base,
+  tree: base.tree.map((t) => ({{ ...t, ...place(t.thread), title: t.thread === T ? "widgets#41: Fix the grader" : "widgets#42: Ship the gadget" }})),
+  cards: base.cards.map((c) => ({{ ...c, ...place(c.ticket) }})),
+  feed: [
+    {{ handle: "m91", at: "10:00 MST", iso: "2026-11-17T17:00:00Z", label: "widgets#41", kind: "note", head: "tests green", ticket: T, ...place(T) }},
+    {{ handle: "m92", at: "10:01 MST", iso: "2026-11-17T17:01:00Z", label: "widgets#42", kind: "event", head: "PR opened", ticket: W, ...place(W) }},
+  ],
+  settled: {{
+    tickets: [{{ thread: "th-s", label: "gadgets#3", status: "done", done: true, settledAt: "09:00 MST", pr: null, link: null, ...place(W) }}],
+    asks: [{{ id: "q1", seq: 1, question: "Which tickets wait?", answer: "None", status: "answered" }}],
+  }},
+  counts: {{ ...base.counts, settled: 2 }},
+}};
+{body}"##
+    );
+    page_scenario(html, st, &wrap)
+}
+
+#[tokio::test]
+async fn a_project_filter_narrows_every_list_and_shows_visible_counts() {
+    let (html, st) = two_gate_page().await;
+    let r = filter_scenario(
+        &html,
+        &st,
+        r##"
+emitState(s0);
+const all = view();
+facet("projects").querySelector('[data-part="fbtn"]').dispatch("click");
+const opts = [...facet("projects").querySelectorAll(".fopt")].map((o) => o.dataset.val);
+const find = facet("projects").querySelector('[data-part="ffind"]');
+find.value = "gadg";
+find.dispatch("input");
+const found = [...facet("projects").querySelectorAll(".fopt")].filter((o) => !o.hidden).map((o) => o.dataset.val);
+find.value = "";
+find.dispatch("input");
+pick("projects", "acme/widgets");
+const one = { ...view(), btn: facet("projects").querySelector('[data-part="fbtn"]').textContent, clear: !$$("filter-clear").hidden };
+pick("projects", "acme/gadgets");
+const two = view();
+$$("filter-clear").dispatch("click");
+return { all, opts, found, one, two, after: view(), btn: facet("projects").querySelector('[data-part="fbtn"]').textContent };
+"##,
+    );
+    let t = json!(TICKET);
+    let w = json!(WORKER);
+    assert_eq!(r["all"]["cards"], json!(["a1", "a2"]), "{r}");
+    assert_eq!(r["all"]["n"], json!(["2", "2", "", "2", "2"]), "{r}");
+    assert_eq!(r["opts"], json!(["acme/gadgets", "acme/widgets"]), "{r}");
+    assert_eq!(r["found"], json!(["acme/gadgets"]), "{r}");
+    assert_eq!(r["one"]["cards"], json!(["a1"]), "{r}");
+    assert_eq!(r["one"]["open"], json!([t]), "{r}");
+    assert_eq!(r["one"]["feed"], json!(["m91"]), "{r}");
+    assert_eq!(r["one"]["settled"], json!([]), "{r}");
+    assert_eq!(r["one"]["n"], json!(["1/2", "1/2", "0/0", "1/2", "0/2"]), "{r}");
+    assert_eq!(r["one"]["btn"], "Project: acme/widgets", "{r}");
+    assert_eq!(r["one"]["clear"], true, "{r}");
+    assert_eq!(r["two"]["cards"], json!(["a1", "a2"]), "{r}");
+    assert_eq!(r["two"]["settled"], json!(["t:th-s"]), "{r}");
+    assert_eq!(r["after"]["open"].as_array().unwrap().len(), 2, "{r}");
+    assert!(r["after"]["open"].as_array().unwrap().contains(&w), "{r}");
+    assert_eq!(r["after"]["n"], r["all"]["n"], "{r}");
+    assert_eq!(r["btn"], "Project", "{r}");
+}
+
+#[tokio::test]
+async fn the_search_box_narrows_after_a_pause_and_esc_clears_it() {
+    let (html, st) = two_gate_page().await;
+    let r = filter_scenario(
+        &html,
+        &st,
+        r##"
+emitState(s0);
+const box = $$("filter-q");
+box.focus();
+typeKeys("42");
+const typing = ids();
+advance(200);
+const number = view();
+box.value = "";
+typeKeys("GRADER fix");
+advance(200);
+const words = view();
+box.value = "";
+typeKeys("gadgets");
+advance(200);
+const repo = view();
+const old = { handle: "m93", at: "09:00 MST", iso: "2026-11-17T16:00:00Z", label: "PR 1/2", kind: "note", head: "rebased", ticket: "th-old", ticketLabel: "gizmos#5", ticketTitle: "gizmos#5: Tune the gizmo", repo: null, project: null };
+emitState({ ...s0, feed: [...s0.feed, old] });
+box.value = "";
+typeKeys("tune");
+advance(200);
+const parent = view().feed;
+box.dispatch("keydown", { key: "Escape", stopPropagation() {} });
+return { typing, number, words, repo, parent, cleared: { value: box.value, ...view() }, focused: document.activeElement === box };
+"##,
+    );
+    let t = json!(TICKET);
+    let w = json!(WORKER);
+    assert_eq!(r["typing"], json!(["a1", "a2"]), "{r}");
+    assert_eq!(r["number"]["cards"], json!(["a2"]), "{r}");
+    assert_eq!(r["number"]["open"], json!([w]), "{r}");
+    assert_eq!(r["number"]["feed"], json!(["m92"]), "{r}");
+    assert_eq!(r["words"]["cards"], json!(["a1"]), "{r}");
+    assert_eq!(r["words"]["open"], json!([t]), "{r}");
+    assert_eq!(r["repo"]["cards"], json!(["a2"]), "{r}");
+    assert_eq!(r["repo"]["settled"], json!(["t:th-s"]), "{r}");
+    assert_eq!(r["parent"], json!(["m93"]), "{r}");
+    assert_eq!(r["cleared"]["value"], "", "{r}");
+    assert_eq!(r["cleared"]["cards"], json!(["a1", "a2"]), "{r}");
+    assert_eq!(r["cleared"]["settled"], json!(["t:th-s", "a:q1"]), "{r}");
+    assert_eq!(r["focused"], true, "{r}");
+}
+
+#[tokio::test]
+async fn a_new_card_outside_the_filter_shows_as_hidden() {
+    let (html, st) = two_gate_page().await;
+    let r = filter_scenario(
+        &html,
+        &st,
+        r##"
+emitState(s0);
+pick("projects", "acme/widgets");
+const before = { hidden: $$("hidden-new").hidden };
+const a3 = { ...s0.cards[1], id: "a3", at: "2026-11-17T12:30:00Z", kind: "blocker", token: "t-a3" };
+emitState({ ...s0, cards: [...s0.cards, a3] });
+const after = { hidden: $$("hidden-new").hidden, text: $$("hidden-new").textContent, urgent: $$("hidden-new").getAttribute("data-urgent"), cards: ids(), n: $$("n-cards").textContent };
+$$("hidden-new").dispatch("click");
+return { before, after, shown: ids(), still: $$("hidden-new").hidden };
+"##,
+    );
+    assert_eq!(r["before"]["hidden"], true, "{r}");
+    assert_eq!(
+        r["after"],
+        json!({"hidden": false, "text": "1 hidden", "urgent": "1", "cards": ["a1"], "n": "1/3"}),
+        "{r}"
+    );
+    assert_eq!(r["shown"], json!(["a3", "a1", "a2"]), "{r}");
+    assert_eq!(r["still"], true, "{r}");
+}
+
+#[tokio::test]
+async fn status_and_kind_filters_pick_tickets_and_cards() {
+    let (html, st) = two_gate_page().await;
+    let r = filter_scenario(
+        &html,
+        &st,
+        r##"
+const a3 = { ...s0.cards[0], id: "a3", kind: "blocker", token: "t-a3" };
+const s1 = { ...s0, cards: [...s0.cards, a3], tree: s0.tree.map((t) => t.thread === W ? { ...t, done: true, status: "done", gate: null } : t) };
+emitState(s1);
+pick("statuses", "done");
+const done = view();
+pick("statuses", "done");
+pick("statuses", "blocked");
+const blocked = view();
+pick("statuses", "blocked");
+pick("kinds", "gate");
+const gates = view();
+return { done, blocked, gates };
+"##,
+    );
+    let t = json!(TICKET);
+    let w = json!(WORKER);
+    assert_eq!(r["done"]["cards"], json!(["a2"]), "{r}");
+    assert_eq!(r["done"]["open"], json!([]), "{r}");
+    assert_eq!(r["done"]["done"], json!([w]), "{r}");
+    assert_eq!(r["done"]["settled"], json!(["t:th-s"]), "{r}");
+    assert_eq!(r["blocked"]["cards"], json!(["a3", "a1"]), "{r}");
+    assert_eq!(r["blocked"]["open"], json!([t]), "{r}");
+    assert_eq!(r["blocked"]["feed"], json!(["m91"]), "{r}");
+    assert_eq!(r["gates"]["cards"], json!(["a1", "a2"]), "{r}");
+    assert_eq!(r["gates"]["open"], json!([t]), "{r}");
+}
+
+#[tokio::test]
+async fn the_f_key_focuses_search_only_with_single_key_shortcuts_on() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+const press = (key) => { for (const f of document.listeners.keydown) f({ key, target: document.body, preventDefault() {} }); };
+press("f");
+const on = document.activeElement === document.getElementById("filter-q");
+document.activeElement = document.body;
+const box = document.getElementById("keys-on");
+box.checked = false;
+box.dispatch("change");
+press("f");
+return { on, off: document.activeElement === document.getElementById("filter-q") };
+"##,
+    );
+    assert_eq!(r, json!({"on": true, "off": false}));
+}
+
+#[tokio::test]
+async fn a_ticket_joined_before_projects_were_stored_gets_its_project_back() {
+    let mut h = H::new();
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    join_board(&h, TICKET, "widgets#41").await;
+    h.wf(TICKET, "send", json!({"kind": "handoff", "body": "done"})).await;
+    assert_eq!(h.app.store.link_get(TICKET).unwrap().unwrap().project, None);
+    h.fake.update(TICKET, json!({"projectId": "p-widgets"}));
+    h.reopen();
+    h.app.wf.board_tick().await.unwrap();
+    assert_eq!(h.app.store.link_get(TICKET).unwrap().unwrap().project.as_deref(), Some("p-widgets"));
+    let st = snapshot(&h);
+    let t = by_label(&st["tree"], "widgets#41");
+    assert_eq!((&t["repo"], &t["project"]["id"]), (&json!("acme/widgets"), &json!("p-widgets")), "{t}");
+}
+
+#[tokio::test]
+async fn a_reply_waiting_on_undo_stays_visible_when_the_filter_changes() {
+    let (html, st) = two_gate_page().await;
+    let r = filter_scenario(
+        &html,
+        &st,
+        r##"
+emitState(s0);
+card("a1").querySelector("[data-opt]").dispatch("click");
+pick("projects", "acme/gadgets");
+const during = { cards: ids(), undo: !card("a1").querySelector('[data-part="undo"]').hidden };
+advance(6000);
+const sent = answers().map((f) => f.url);
+card("a2").querySelector("[data-opt]").dispatch("click");
+pick("projects", "acme/gadgets");
+pick("projects", "acme/widgets");
+const held = ids();
+card("a2").querySelector('[data-part="undo"]').dispatch("click");
+document.activeElement = document.body;
+advance(10);
+return { during, sent, held, undone: ids(), after: answers().length };
+"##,
+    );
+    assert_eq!(r["during"], json!({"cards": ["a1", "a2"], "undo": true}), "{r}");
+    assert_eq!(r["sent"], json!(["/api/cards/a1/answer"]), "{r}");
+    assert_eq!(r["held"], json!(["a1", "a2"]), "{r}");
+    assert_eq!(r["undone"], json!(["a1"]), "{r}");
+    assert_eq!(r["after"], 1, "{r}");
 }
