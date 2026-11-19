@@ -57,9 +57,9 @@ Chosen: option 1 now, with a seam for option 5.
   hours and reads each failed run once for the `Usage limit reached` item.
   t3cm stores the verdict per run, so it never reads a run twice.
 - The reset time is `snoozedUntil` when the thread is snoozed the first time
-  t3cm sees the stop, because that snooze is T3's own limit snooze. Otherwise
-  t3cm cannot know the reset, so it holds the member for `limitHoldMinutes`,
-  60 by default, from when it saw the stop. It ignores a snooze that shows up
+  t3cm sees the stop, on the assumption that the snooze is T3's own limit
+  snooze. With no snooze, t3cm cannot know the reset, so it holds the member
+  for `limitHoldMinutes`, 60 by default, from when it saw the stop. It ignores a snooze that shows up
   later, because that one may be the user's.
 - T3 does not say who set a snooze, so t3cm trusts the first one it sees. If
   the user snoozes a limit-stopped thread before the next watcher pass reads
