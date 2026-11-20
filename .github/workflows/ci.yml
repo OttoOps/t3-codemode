@@ -33,6 +33,7 @@ jobs:
           code=false
           while IFS= read -r path; do
             case "$path" in
+              .github/workflows/ci.yml) code=true ;;
               docs/*|deploy/*|.github/*|LICENSE|.coderabbit.yaml|.gitignore) ;;
               */*) code=true ;;
               *.md) ;;
