@@ -150,9 +150,10 @@ By the header's kind:
 
 When the user answers an item, send the answer to its ticket thread with
 `t3wf reply --to <ticket id or label> --body -`. The thread does not know
-the ids: quote the action and spell out the option, for example `The user
-says "merge": merge #81 now.` A ticket thread acts on a relayed answer as
-the user's word, merge and deploy included.
+the ids: quote the action and spell out the option, with the head when
+the action line names one, for example `The user says "merge": merge #81
+at head d4db97c now.` A ticket thread acts on a relayed answer as the
+user's word, merge and deploy included.
 
 When the user asks for status, give one line per ticket: its last event or
 open item, and its `link`. `t3wf board` holds each link's live status, and

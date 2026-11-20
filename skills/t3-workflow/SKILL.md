@@ -180,7 +180,7 @@ action:
 
 For example:
 
-`**ACTION NEEDED:** reply "merge" to merge #81, or review it first, here: https://github.com/acme/widgets/pull/81`
+`**ACTION NEEDED:** reply "merge" to merge #81 at head d4db97c, or review it first, here: https://github.com/acme/widgets/pull/81`
 
 - The verb phrase names what the user clicks, runs, or answers, in plain
   words. The protocol's own terms, such as "gate", "link" and "nudge", stay

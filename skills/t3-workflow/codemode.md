@@ -42,6 +42,7 @@ nudges idle children and escalates. Only the calls change.
 | Routine progress | `await wf.send({ kind: "note", body: "tests green at d4db97c" })` |
 | The parent must act | `await wf.send({ kind: "event", body })`, or `blocker`, `report` |
 | Waiting on a person | `await wf.send({ kind: "gate", gate: "merge", body: actionLine })`; later `await wf.gate({ clear: true })` |
+| Merging a PR on the user's word | `await wf.merge({ repo: "acme/widgets", pr: 41, head: sha, method: "rebase" })` returns `queued`, `merged`, `waiting` or `refused` |
 | Done | `await wf.send({ kind: "handoff", body })` |
 | Message a child | `await wf.reply({ to: "widgets#41", body })` |
 | Children at a glance | `return (await wf.board()).map(c => `${c.label} ${c.status} ${c.gate ?? ""}`)` |
@@ -103,8 +104,19 @@ async () => {
 and the next worker reads it with
 `(await mem.ns("work:widgets#41").get("handoff:pr1"))`.
 
+A ticket merges every PR with `wf.merge`, never with `gh pr merge` or T3's
+own merge button or PR action: on a repo with a merge queue, T3 turns on
+auto-merge, and a PR whose checks have already passed never joins the
+queue. `wf.merge` reads per PR whether the repo has a queue, so no skill or
+config lists those repos. Its merge gate names the approved head
+(`head <sha>`), and the board holds the approval to that head. After a
+`queued` or `waiting` outcome the ticket polls nothing: the board's GitHub
+reconcile wakes it when the PR merges, closes or leaves the queue, as
+t3-ticket's "The merge wait" says.
+
 **Worker.** Join from the brief, send routine progress as notes, the PR as
-an `event`, the merge request as a `gate`, and the handoff at the end. On a
+an `event`, the merge request as a `gate` that names its head
+(`head <sha>`), and the handoff at the end. It never merges. On a
 `[t3cm nudge`, run the resume step, then send a note, open a gate, or hand
 off.
 
