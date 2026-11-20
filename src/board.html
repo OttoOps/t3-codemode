@@ -28,6 +28,7 @@
   --fail: #a52a22;
   --fail-soft: #fbe5e3;
   --done: #24663d;
+  --flash: rgb(36 102 61 / 0.2);
   --needs-you-surface: #fbf7ef;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
 }
@@ -54,6 +55,7 @@
     --fail: #f2948a;
     --fail-soft: #3d2221;
     --done: #7fcf9b;
+    --flash: rgb(127 207 155 / 0.18);
     --needs-you-surface: #1c1a17;
   }
 }
@@ -214,10 +216,8 @@ textarea { resize: none; display: block; }
 .tixcol { grid-area: tix; display: flex; flex-direction: column; min-height: 0; min-width: 0; border-right: 1px solid var(--line); }
 #p-tix { flex: 1 1 auto; }
 #p-new { flex: none; max-height: min(40%, 240px); border-bottom: 1px solid var(--line); }
-#p-new .ph { height: 40px; }
-#p-new .ph h2 { font-size: 14px; line-height: 20px; }
 #p-new .ph .btn { height: 28px; font-size: 13px; }
-#p-new .ph .btn .n { color: var(--ink-2); font-weight: 500; margin-left: 4px; }
+#p-new .ph .btn .n, #dismissed-open .n { color: var(--ink-2); font-weight: 500; margin-left: 4px; }
 #p-new .pill { border: 1px solid var(--line); }
 #p-new[data-empty] .body { display: none; }
 #p-new .body > .empty { position: static; }
@@ -304,6 +304,8 @@ textarea { resize: none; display: block; }
 .card.gone { align-content: center; }
 .arrive { animation: arrive 1.2s ease-out; }
 @keyframes arrive { from { background-color: var(--accent-soft); } }
+.nrow.arrive, .tk.arrive { animation: flash 4s ease-in; }
+@keyframes flash { 0%, 40% { background-color: var(--flash); } }
 
 .tabs { display: flex; align-self: stretch; gap: 16px; margin-left: 16px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .tab {
@@ -608,7 +610,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .srow .pr { display: none; }
   #p-new { max-height: min(45%, 300px); }
   #p-new .ph { height: 48px; }
-  #p-new .ph .btn { height: 44px; }
+  #p-new .ph .btn, #dismissed-open { height: 44px; }
   .nrow { height: 80px; padding: 8px 12px; grid-template-rows: 18px 44px; column-gap: 8px; row-gap: 2px; }
   .nrow .n2 a { display: inline-flex; align-items: center; min-height: 44px; }
   .nrow .tl a { display: inline; }
@@ -627,6 +629,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before { transition: none !important; animation: none !important; }
+  .nrow.arrive, .tk.arrive { background-color: var(--flash); }
 }
 </style>
 </head>
@@ -687,7 +690,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
     </div>
   </section>
   <div class="tixcol" id="tixcol">
-  <section class="pane nis" id="p-new" aria-labelledby="h-new" data-view="open" data-empty="">
+  <section class="pane nis" id="p-new" aria-labelledby="h-new" data-view="open" data-empty="" hidden>
     <div class="ph">
       <h2 id="h-new"><span id="h-new-t">New issues</span><span class="pill num" id="n-new"></span></h2>
       <button class="btn quiet" type="button" id="new-view" aria-pressed="false" hidden><span id="new-view-t">Show dismissed</span><span class="n num" id="n-dismissed"></span></button>
@@ -726,6 +729,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
       <div class="tp" id="tp-settled" role="tabpanel" aria-labelledby="tab-settled" hidden>
         <div class="sub">
           <input type="text" id="settled-filter" placeholder="Filter by ticket, issue, question or answer" aria-label="Filter settled tickets and asks" autocomplete="off">
+          <button class="btn quiet" type="button" id="dismissed-open" hidden>Dismissed issues<span class="n num" id="n-dismissed-s"></span></button>
         </div>
         <div class="scroll rows" id="settled" role="list" aria-label="Settled tickets and asks"></div>
         <p class="empty" id="settled-empty" hidden>Nothing settled yet.</p>
@@ -1177,7 +1181,7 @@ function sync(list, items, o) {
       o.patch(el, it);
       if (!o.quiet) {
         el.classList.add("arrive");
-        setTimeout(() => el.classList.remove("arrive"), 1300);
+        setTimeout(() => el.classList.remove("arrive"), o.flash ? flashMs() : 1300);
       }
       want.push(el);
     } else held.push(it);
@@ -1197,6 +1201,10 @@ function sync(list, items, o) {
   }
   if (o.rove !== false) rove(list);
   return held;
+}
+
+function flashMs() {
+  return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 1500 : 4100;
 }
 
 function holdStale(el) {
@@ -1854,7 +1862,7 @@ function paintFilterBar(hidden) {
   setAttr(b, "aria-label", n + (n > 1 ? " new decisions" : " new decision") + " hidden by the filter. Clear the filter to show them");
 }
 
-const FILTERED = ["cards", "open", "done", "settled", "feed"];
+const FILTERED = ["cards", "open", "done", "settled", "feed", "newIssues"];
 
 function filterChanged(base) {
   if (!state) { paintFilterBar([]); return; }
@@ -2434,6 +2442,7 @@ function syncTickets(tree, cards, all) {
     }),
     live: lo,
     quiet: firstState || refiltering,
+    flash: true,
   });
   const ld = firstState || isLive(pd);
   const heldDone = sync($("done"), done, {
@@ -2443,6 +2452,7 @@ function syncTickets(tree, cards, all) {
     gone: (el) => goneTicket(el, (l) => allDone.some((t) => t.label === l) ? l + " hidden by the filter" : l + " settled"),
     live: ld,
     quiet: firstState || refiltering,
+    flash: true,
   });
   if (lo) paintGroups($("open"));
   po.heldList = heldOpen;
@@ -2705,9 +2715,9 @@ function syncNew(s) {
   const all = newView.dismissed ? gone : open;
   const list = filtering() ? all.filter((i) => matches(newDesc(i))) : all;
   const live = newLive(p);
-  const quiet = firstState || newView.changed;
+  const quiet = firstState || refiltering || newView.changed;
   newView.changed = false;
-  const held = sync($("nis"), list, { key: (i) => i.id, make: makeNew, patch: patchNew, live, quiet,
+  const held = sync($("nis"), list, { key: (i) => i.id, make: makeNew, patch: patchNew, live, quiet, flash: true,
     gone: (el) => goneRow(el, "nrow gone meta", el._gone || (part(el, "label") || el).textContent + (newView.dismissed ? " restored" : " gone")) });
   showHeld(p, held, null);
   if (newView.dismissed && !gone.length && !items($("nis")).length) {
@@ -2716,6 +2726,15 @@ function syncNew(s) {
     return syncNew(s);
   }
   const sec = $("p-new");
+  const none = !newView.dismissed && !open.length && !items($("nis")).length;
+  if (sec.hidden !== none) {
+    sec.hidden = none;
+    if (lay.on) layRender();
+  }
+  const route = $("dismissed-open");
+  route.hidden = !none || !gone.length;
+  setText($("n-dismissed-s"), String(gone.length || ""));
+  setAttr(route, "aria-label", "Show " + gone.length + " dismissed issues");
   setAttr(sec, "data-view", newView.dismissed ? "dismissed" : "open");
   setAttr(sec, "data-empty", !newView.dismissed && !list.length && !items($("nis")).length ? "" : null);
   const e = $("nis-empty");
@@ -2733,11 +2752,16 @@ function syncNew(s) {
 }
 
 function flipNewView() {
+  const had = focusInside($("p-new"));
   newView.dismissed = !newView.dismissed;
   newView.changed = true;
   const list = $("nis");
   for (const el of items(list)) el.remove();
   if (state) syncNew(state);
+  if (had && $("p-new").hidden) {
+    const r = $("dismissed-open");
+    (r.hidden || $("tp-settled").hidden ? $("tab-" + $("app").dataset.tab) : r).focus();
+  }
 }
 
 const openGroups = new Set();
@@ -3609,14 +3633,19 @@ function layRowResize(ci, ka, kb) {
   };
 }
 
+function layShown(c) {
+  return c.p.filter((k) => !$(LAY_IDS[k]).hidden);
+}
+
 function layApplySizes() {
-  const filled = lay.m.cols.filter((c) => c.p.length);
+  const filled = lay.m.cols.filter((c) => layShown(c).length);
   const wsum = filled.reduce((s, c) => s + (typeof c.w === "number" ? c.w : 0), 0);
   lay.m.cols.forEach((c, i) => {
     const el = lay.cols[i];
-    el.style.flex = c.p.length && typeof c.w === "number" ? c.w + " 1 0px" : "";
-    el.style.minWidth = c.p.length ? LAY_MIN_W + "px" : "";
-    const open = c.p.filter((k) => !lay.m.c[k]);
+    const shown = layShown(c);
+    el.style.flex = shown.length && typeof c.w === "number" ? c.w + " 1 0px" : "";
+    el.style.minWidth = shown.length ? LAY_MIN_W + "px" : "";
+    const open = shown.filter((k) => !lay.m.c[k]);
     const fill = open.some((k) => LAY_GROWS.has(k) || typeof lay.m.h[k] === "number") ? null : open[open.length - 1];
     const hsum = c.p.reduce((s, k) => s + (!lay.m.c[k] && typeof lay.m.h[k] === "number" ? lay.m.h[k] : 0), 0);
     for (const k of c.p) {
@@ -3672,13 +3701,15 @@ function layRender(animate) {
   const top = [];
   lay.m.cols.forEach((c, i) => {
     const col = lay.cols[i];
-    col.classList.toggle("vacant", !c.p.length);
-    if (c.p.length) col.removeAttribute("data-hint"); else col.setAttribute("data-hint", "Drop here for a new column");
+    const shown = layShown(c);
+    col.classList.toggle("vacant", !shown.length);
+    if (shown.length) col.removeAttribute("data-hint"); else col.setAttribute("data-hint", "Drop here for a new column");
     col.setAttribute("aria-label", "Column " + (i + 1));
     const kids = [];
     let prev = null;
-    c.p.forEach((k, j) => {
+    c.p.forEach((k) => {
       const pane = $(LAY_IDS[k]);
+      if (!shown.includes(k)) { kids.push(pane); return; }
       const shut = !!lay.m.c[k];
       pane.classList.toggle("collapsed", shut);
       const head = layHead(k);
@@ -3688,7 +3719,7 @@ function layRender(animate) {
         fold.setAttribute("aria-label", (shut ? "Expand " : "Collapse ") + LAY_NAMES[k]);
         fold.title = shut ? "Expand" : "Collapse";
       }
-      if (j > 0) {
+      if (prev) {
         const pk = prev;
         kids.push(!shut && !lay.m.c[pk]
           ? laySplitter("hsplit", { "aria-orientation": "horizontal", "aria-label": "Resize " + LAY_NAMES[pk] + " and " + LAY_NAMES[k], "aria-valuemin": "0", "aria-valuemax": "100" },
@@ -3699,7 +3730,7 @@ function layRender(animate) {
       prev = k;
     });
     layPlace(col, kids);
-    if (c.p.length) filled.push(i);
+    if (shown.length) filled.push(i);
     top.push(col);
   });
   const withSplits = [];
@@ -3788,6 +3819,10 @@ function wire() {
   track("newIssues", $("nis"), $("new-nis"));
   watchNewColumn($("tixcol"), () => true);
   $("new-view").addEventListener("click", flipNewView);
+  $("dismissed-open").addEventListener("click", () => {
+    if (!newView.dismissed) flipNewView();
+    $("new-view").focus();
+  });
   $("new-err-close").addEventListener("click", () => closeErr("new-err"));
   track("feed", $("feed"), $("new-feed"));
   track("out", $("out"), null);
