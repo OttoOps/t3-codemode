@@ -484,12 +484,35 @@ impl Store {
         clear_pending: bool,
         build: impl FnOnce(Option<Link>) -> Bind,
     ) -> Result<Bind> {
+        self.link_bind_launched(child, clear_pending, None, |current, _| build(current))
+    }
+
+    pub fn link_bind_launched(
+        &self,
+        child: &str,
+        clear_pending: bool,
+        launched_by: Option<&str>,
+        build: impl FnOnce(Option<Link>, Option<&Pending>) -> Bind,
+    ) -> Result<Bind> {
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let raw: Option<String> =
             tx.query_row("SELECT data FROM links WHERE child = ?1", [child], |r| r.get(0)).optional()?;
         let current = raw.map(|s| serde_json::from_str(&s)).transpose()?;
-        let bind = build(current);
+        let launch = match launched_by {
+            Some(parent) => {
+                let mut st = tx.prepare("SELECT data FROM pending WHERE parent = ?1 ORDER BY rowid")?;
+                let raws: Vec<String> = st.query_map([parent], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+                drop(st);
+                raws.iter()
+                    .map(|s| serde_json::from_str::<Pending>(s))
+                    .collect::<serde_json::Result<Vec<_>>>()?
+                    .into_iter()
+                    .find(|p| p.thread.as_deref() == Some(child))
+            }
+            None => None,
+        };
+        let bind = build(current, launch.as_ref());
         if let Bind::Saved(ln) = &bind {
             tx.execute(
                 "INSERT INTO links (child, parent, closed, data) VALUES (?1, ?2, ?3, ?4)
@@ -503,6 +526,9 @@ impl Store {
             )?;
             if clear_pending {
                 tx.execute("DELETE FROM pending WHERE parent = ?1 AND label = ?2", params![ln.parent, ln.label])?;
+            }
+            if let Some(p) = &launch {
+                tx.execute("DELETE FROM pending WHERE parent = ?1 AND label = ?2", params![p.parent, p.label])?;
             }
         }
         tx.commit()?;

@@ -317,6 +317,59 @@ async fn a_failed_project_lookup_leaves_an_error_card() {
 }
 
 #[tokio::test]
+async fn a_ticket_that_joins_before_its_launch_returns_is_not_reported() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/widgets", "git@github.com:o/widgets.git");
+    h.wf("launch:1", "init", json!({"role": "ticket"})).await;
+    h.exec("async () => wf.launchTicket({ issue: 'o/widgets#9' })").await;
+    let again = h.exec("async () => wf.launchTicket({ issue: 'o/widgets#9' })").await;
+    assert!(err_text(&again).contains("widgets#9 is already on the board"), "{}", again.text);
+    assert!(!h.tick(76).await.iter().any(|a| a.starts_with("report never-joined")));
+    assert!(cards(&h).iter().all(|c| c["kind"] != "report"), "{:?}", cards(&h));
+}
+
+#[tokio::test]
+async fn a_launched_ticket_keeps_its_issue_label_over_a_custom_one() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/widgets", "git@github.com:o/widgets.git");
+    h.exec("async () => wf.launchTicket({ issue: 'o/widgets#9' })").await;
+    let r = result(&h.exec_as("launch:1", "async () => wf.init({ role: 'ticket', label: 'Custom' })").await);
+    assert_eq!(r["label"], "widgets#9", "{r}");
+    let again = h.exec("async () => wf.launchTicket({ issue: 'o/widgets#9' })").await;
+    assert!(err_text(&again).contains("widgets#9 is already on the board"), "{}", again.text);
+}
+
+#[tokio::test]
+async fn a_ticket_that_finishes_before_its_launch_returns_is_not_reported() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/widgets", "git@github.com:o/widgets.git");
+    h.wf("launch:1", "init", json!({"role": "ticket"})).await;
+    h.wf("launch:1", "send", json!({"kind": "handoff", "body": "done"})).await;
+    h.exec("async () => wf.launchTicket({ issue: 'o/widgets#9' })").await;
+    assert!(!h.tick(76).await.iter().any(|a| a.starts_with("report never-joined")));
+    assert!(cards(&h).iter().all(|c| c["kind"] != "report"), "{:?}", cards(&h));
+}
+
+#[tokio::test]
+async fn a_launched_ticket_that_calls_init_clears_its_own_launch() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/widgets", "git@github.com:o/widgets.git");
+    h.exec("async () => wf.launchTicket({ issue: 'o/widgets#9', title: 'Fix the grader' })").await;
+    let r = result(&h.exec_as("launch:1", "async () => wf.init({ role: 'ticket' })").await);
+    assert_eq!(r["parent"], BOARD, "{r}");
+    assert_eq!(r["label"], "widgets#9", "{r}");
+    let tree = h.app.wf.tree().unwrap();
+    assert_eq!(tree.len(), 1, "{tree:?}");
+    assert_eq!(tree[0]["joined"], true);
+    assert!(!h.tick(76).await.iter().any(|a| a.starts_with("report never-joined")));
+    assert!(cards(&h).iter().all(|c| c["kind"] != "report"), "{:?}", cards(&h));
+}
+
+#[tokio::test]
 async fn a_never_joined_board_ticket_becomes_a_card() {
     let h = H::new();
     h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);

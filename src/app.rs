@@ -15,7 +15,7 @@ use crate::sandbox::{self, Host, Limits, NoHost, Run};
 use crate::store::Store;
 use crate::t3::{BoxFut, T3Client};
 use crate::upstream::{T3_NAMESPACE, UpstreamManager, qualified, redact_json, split_qualified};
-use crate::wf::{LAST_PASS, Wf};
+use crate::wf::{LAST_PASS, Wf, join_target};
 use crate::{js, truncate};
 
 pub const VARS_KEY: &str = "__vars__";
@@ -591,7 +591,13 @@ impl App {
             return Err(format!("{resolved} is denied by the t3-codemode deny list; do not retry it"));
         }
         let input = object_input(&format!("t3.{resolved}"), input)?;
+        let child = (resolved == "t3_thread_launch").then(|| input["message"].as_str().and_then(join_target)).flatten();
         let value = self.t3.call(&resolved, input).await.map_err(|e| e.to_string())?;
+        if let Some((parent, label)) = child
+            && let Err(e) = self.wf.note_launch(&parent, &label, &value).await
+        {
+            tracing::warn!("t3_thread_launch succeeded, but recording its thread on a pending link failed: {e:#}");
+        }
         Ok(self.redact_value(value))
     }
 }

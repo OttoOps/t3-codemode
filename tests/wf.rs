@@ -546,22 +546,43 @@ fn a_join_from_another_handle_during_a_bind_survives() {
 
 #[tokio::test]
 async fn init_leaves_another_launchs_pending_row_alone() {
+    for thread in [None, Some("launch:7")] {
+        let h = H::new();
+        h.app
+            .store
+            .pending_put(&t3_codemode::store::Pending {
+                parent: "board".into(),
+                label: "widgets#41".into(),
+                role: "ticket".into(),
+                params: t3_codemode::config::LinkParams { down: 75, miss: 2, stall: 480 },
+                at: T0.into(),
+                reported: false,
+                thread: thread.map(String::from),
+                link: thread.map(|t| format!("https://t3/{t}")),
+            })
+            .unwrap();
+        h.fake.update(TICKET, json!({"title": "widgets#41"}));
+        let r = h.wf(TICKET, "init", json!({"role": "ticket"})).await;
+        assert_eq!(r["label"], "widgets#41", "{r}");
+        assert!(h.tick(76).await.contains(&"report never-joined widgets#41".to_string()), "launched as {thread:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_child_launched_from_execute_is_named_in_its_never_joined_report() {
     let h = H::new();
-    h.app
-        .store
-        .pending_put(&t3_codemode::store::Pending {
-            parent: "board".into(),
-            label: "widgets#41".into(),
-            role: "ticket".into(),
-            params: t3_codemode::config::LinkParams { down: 75, miss: 2, stall: 480 },
-            at: T0.into(),
-            reported: false,
-            thread: None,
-            link: None,
-        })
-        .unwrap();
-    h.wf(TICKET, "init", json!({"role": "ticket", "label": "widgets#41"})).await;
-    assert_eq!(h.app.store.pending_all().unwrap().len(), 1);
+    h.wf(TICKET, "init", json!({"role": "ticket", "root": true})).await;
+    let old = h.wf(TICKET, "openChild", json!({"role": "worker", "label": "old"})).await["brief"].clone();
+    let old_join = old.as_str().unwrap().lines().find(|l| l.contains("wf.join(")).unwrap().to_string();
+    let brief = h.wf(TICKET, "openChild", json!({"role": "worker", "label": "lost"})).await["brief"].clone();
+    let message = json!(format!("The last worker ran {old_join}\n\n{}", brief.as_str().unwrap()));
+    let code =
+        format!("async () => t3.call('t3_thread_launch', {{ projectId: 'p', title: 'lost', message: {message} }})");
+    assert_eq!(result(&h.exec_as(TICKET, &code).await)["threadId"], "launch:1");
+    h.tick(46).await;
+    let m = h.last_message();
+    assert!(m.contains("lost was opened 46 min ago and never joined. Its thread: https://t3/launch:1."), "{m}");
+    assert!(m.contains("old was opened 46 min ago and never joined. Check its launch"), "{m}");
 }
 
 #[tokio::test]

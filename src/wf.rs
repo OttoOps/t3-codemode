@@ -190,6 +190,19 @@ pub fn header(kind: &str, from: &str, handle: &str, gate: Option<&str>) -> Strin
     format!("[t3cm {kind} from={} msg={handle}{gate}]", quote_label(from))
 }
 
+pub fn join_target(message: &str) -> Option<(String, String)> {
+    let json_string = |s: &str| {
+        let mut it = serde_json::Deserializer::from_str(s).into_iter::<String>();
+        let v = it.next()?.ok()?;
+        Some((v, s[it.byte_offset()..].to_string()))
+    };
+    let (_, block) = message.rsplit_once("## t3-codemode link\n")?;
+    let (_, rest) = block.split_once("async () => wf.join({ parent: ")?;
+    let (parent, rest) = json_string(rest)?;
+    let (label, _) = json_string(rest.strip_prefix(", label: ")?)?;
+    Some((parent, label))
+}
+
 pub fn capped(body: &str, handle: &str, cap: usize) -> String {
     let n = body.chars().count();
     if n <= cap {
@@ -523,6 +536,20 @@ impl Wf {
         Ok(json!({"brief": brief, "params": params}))
     }
 
+    pub async fn note_launch(&self, parent: &str, label: &str, launched: &Value) -> Result<()> {
+        let Some(thread) = launched["threadId"].as_str() else {
+            return Ok(());
+        };
+        let _g = self.lock.lock().await;
+        let row = self.store.pending_all()?.into_iter().find(|p| p.parent == parent && p.label == label);
+        if let Some(mut p) = row.filter(|p| p.thread.is_none()) {
+            p.thread = Some(thread.into());
+            p.link = launched["link"].as_str().map(String::from);
+            self.store.pending_put(&p)?;
+        }
+        Ok(())
+    }
+
     async fn join(&self, me: &str, a: JoinArgs) -> Result<Value> {
         self.config.check_role(&a.role)?;
         let thread = self.read_thread(me).await.ok();
@@ -543,7 +570,8 @@ impl Wf {
         };
         params.validate().map_err(|e| anyhow!("the brief's link numbers are invalid: {e}"))?;
         let now = self.now();
-        let bound = self.store.link_bind(me, !auto, |current| {
+        let launched_by = auto.then_some(BOARD);
+        let bound = self.store.link_bind_launched(me, !auto, launched_by, |current, launch| {
             if auto && let Some(l) = current.as_ref().filter(|l| !l.closed) {
                 return Bind::Kept(l.clone());
             }
@@ -551,7 +579,7 @@ impl Wf {
             Bind::Saved(Link {
                 child: me.into(),
                 parent: a.parent.clone(),
-                label: a.label.clone(),
+                label: launch.map(|p| p.label.clone()).unwrap_or_else(|| a.label.clone()),
                 role: a.role.clone(),
                 parent_role,
                 params,
@@ -575,11 +603,12 @@ impl Wf {
                 project: project.or_else(|| old.as_ref().and_then(|o| o.project.clone())),
             })
         })?;
-        if let Bind::Kept(l) = bound {
-            return Ok(json!({"parent": l.parent, "label": l.label}));
-        }
+        let ln = match bound {
+            Bind::Kept(l) => return Ok(json!({"parent": l.parent, "label": l.label})),
+            Bind::Saved(l) => l,
+        };
         Ok(json!({
-            "parent": a.parent, "label": a.label, "params": params,
+            "parent": ln.parent, "label": ln.label, "params": params,
             "message": format!("Joined. The watcher nudges this thread after {} idle minutes with no gate open; \
                 there are no timers or check-ins to keep. Routine progress: wf.send({{kind: \"note\"}}).", params.down)
         }))
@@ -1071,8 +1100,14 @@ impl Wf {
                 continue;
             }
             p.reported = true;
+            let thread = p
+                .link
+                .as_deref()
+                .filter(|_| p.parent != BOARD)
+                .map(|l| format!(" Its thread: {l}."))
+                .unwrap_or_default();
             let body = format!(
-                "{} was opened {age:.0} min ago and never joined. Check its launch; wf.sweep() drops it.",
+                "{} was opened {age:.0} min ago and never joined.{thread} Check its launch; wf.sweep() drops it.",
                 p.label
             );
             let now = self.now();
