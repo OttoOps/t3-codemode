@@ -257,8 +257,17 @@ async fn await_version(port: u16, want: &str) -> Result<Duration> {
     }
 }
 
+fn plain(p: &Path) -> String {
+    let s = p.display().to_string();
+    match (s.strip_prefix(r"\\?\UNC\"), s.strip_prefix(r"\\?\")) {
+        (Some(unc), _) => format!(r"\\{unc}"),
+        (None, Some(local)) => local.to_string(),
+        (None, None) => s,
+    }
+}
+
 fn manual_steps(m: Manager, exe: &Path, old: &Path) -> Option<(String, String)> {
-    let (exe, old) = (exe.display(), old.display());
+    let (exe, old) = (plain(exe), plain(old));
     match m {
         Manager::Systemd => None,
         Manager::Launchd => {
@@ -267,7 +276,9 @@ fn manual_steps(m: Manager, exe: &Path, old: &Path) -> Option<(String, String)> 
         }
         Manager::Task => Some((
             format!("schtasks /End /TN {TASK}; schtasks /Run /TN {TASK}"),
-            format!("schtasks /End /TN {TASK}; Move-Item -Force '{old}' '{exe}'; schtasks /Run /TN {TASK}"),
+            format!(
+                "schtasks /End /TN {TASK}; Move-Item -Force -LiteralPath '{old}' -Destination '{exe}'; schtasks /Run /TN {TASK}"
+            ),
         )),
     }
 }
@@ -590,6 +601,16 @@ mod tests {
         let good: String = Sha256::digest(b"hi").iter().map(|b| format!("{b:02x}")).collect();
         assert!(verify_sum(b"hi", &format!("{good}  f\n"), "f").is_ok());
         assert!(verify_sum(b"ho", &format!("{good}  f\n"), "f").unwrap_err().to_string().contains("mismatch"));
+    }
+
+    #[test]
+    fn printed_windows_steps_drop_the_verbatim_prefix() {
+        assert_eq!(plain(Path::new(r"\\?\C:\Users\a\t3cm.exe")), r"C:\Users\a\t3cm.exe");
+        assert_eq!(plain(Path::new(r"\\?\UNC\srv\share\t3cm.exe")), r"\\srv\share\t3cm.exe");
+        assert_eq!(plain(Path::new("/home/a/t3cm")), "/home/a/t3cm");
+        let (_, back) =
+            manual_steps(Manager::Task, Path::new(r"\\?\C:\p\t3cm.exe"), Path::new(r"\\?\C:\p\t3cm.old")).unwrap();
+        assert!(back.contains(r"Move-Item -Force -LiteralPath 'C:\p\t3cm.old' -Destination 'C:\p\t3cm.exe'"), "{back}");
     }
 
     #[test]
