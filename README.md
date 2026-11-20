@@ -26,12 +26,14 @@ With T3 Code running, on Linux or macOS:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/OttoOps/t3-codemode/main/deploy/install.sh
-bash install.sh   # latest release: binary, user service, Claude Code MCP entry
+bash install.sh   # latest release: binary, user service, Claude Code MCP entry, workflow skills
 t3cm status       # t3.connected should be true
 ```
 
-Update it in place with `t3cm update`; `t3cm --version` says when a newer
-release is out. On Windows, use `deploy/install.ps1`. Until the first release is published,
+The installer asks `Use the T3 workflow? [Y/n]`. On yes, the default, it
+installs the workflow skills below. Update it in place with `t3cm update`,
+which brings the skills along; `t3cm --version` says when a newer release is
+out. On Windows, use `deploy/install.ps1`. Until the first release is published,
 Linux and macOS build from a clone with `deploy/install.sh --from-source`. See
 [Getting started](https://ottoops.com/t3-codemode/getting-started.html) for
 every OS, the config, and the `t3cm` commands.
@@ -40,8 +42,8 @@ every OS, the config, and the `t3cm` commands.
 
 The T3 workflow runs on five agent skills in [`skills/`](skills). They need
 T3 Code, whose `t3_thread_launch` tool starts the ticket and worker threads,
-and they load in its Claude Code and Codex threads. They install apart from
-the service. Their scripts need Linux, macOS or WSL, because `t3wf.py` uses
+and they load in its Claude Code and Codex threads. Their scripts need Linux,
+macOS or WSL, because `t3wf.py` uses
 `fcntl`, which native Windows lacks; the `t3cm` service itself also runs on
 Windows.
 
@@ -55,31 +57,29 @@ Windows.
 
 ### 1. Get the skills
 
-With [skills.sh](https://skills.sh):
+Install the [service](#install-the-service) and answer yes to the workflow
+question. The t3cm installer is the only way to get the skills. On a machine
+that already has t3cm, run:
 
 ```bash
-npx skills@latest add OttoOps/t3-codemode
+t3cm skills install
 ```
 
-It asks which skills and which agents to install for. Pick all five skills,
-then Claude Code, Codex or both. For the scope, pick Global, or pass `-g`.
-The skills then go in `~/.agents/skills`, where Codex reads them. For Claude
-Code it offers symlinks from `~/.claude/skills` into that folder; take them,
-so both agents share one copy. Update with `npx skills@latest update`, and run
-`add` again to pick up skills added since.
+Each t3cm binary carries the skills of its own release. `t3cm skills install`
+writes all five to `~/.agents/skills`, where Codex reads them, and links each
+into Claude Code's `~/.claude/skills` when that folder exists. It also applies
+the setup steps that need no answers, such as the filed-issue rule. Rerunning
+the installer or running `t3cm update` brings them to the next release, and
+keeps any file you edited. `t3cm skills status` says whether they are current.
+See [Getting
+started](https://ottoops.com/t3-codemode/getting-started.html#install-the-skills-with-t3cm)
+for the details.
 
-Or copy them by hand:
-
-```bash
-git clone https://github.com/OttoOps/t3-codemode
-mkdir -p ~/.claude/skills ~/.codex/skills
-cp -R t3-codemode/skills/* ~/.claude/skills/   # Claude Code
-cp -R t3-codemode/skills/* ~/.codex/skills/    # Codex
-```
-
-`~/.agents/skills` works as the target too. Symlink the folders instead of
-copying them if you want `git pull` to update them. Each skill is a folder,
-so keep the folders whole.
+When `npx skills` or a copy by hand installed the skills before, the installer
+offers to replace them, and yes is the default. It runs
+`t3cm skills install --take-over`, which writes this release's files and drops
+the skills from the `npx skills` lock file, so `npx skills update` no longer
+overwrites them. Run that command yourself if you answered no.
 
 ### 2. Run the setup skill once
 
@@ -91,8 +91,8 @@ installed, no passes, delivery by merge.
 
 ### Which skills need which
 
-Some skills call others. Install the ones they need too, in the same skills
-folder, because a few read their neighbors' files by relative path:
+Some skills call others, and a few read their neighbors' files by relative
+path, so t3cm installs all five together in one folder:
 
 - Every skill needs `t3-workflow`, whose scripts run the protocol and read
   the slots.
@@ -106,14 +106,12 @@ folder, because a few read their neighbors' files by relative path:
   and a credential renewal skill. Each is optional, and the worker skips a
   slot with no skill.
 
-`t3cm` is optional, and the setup skill offers to install it when it is
-missing. Without it, the `t3-workflow` skill's own script runs the link
-protocol. Its watcher then runs only when a `t3wf` command does, so idle
-threads get no nudges until one runs. To put the watcher on a timer, run
-`python3 ~/.agents/skills/t3-workflow/scripts/t3wf.py daemon install` once,
-with the path to wherever you installed `t3-workflow`. It sets up a systemd
-user timer. macOS has no systemctl, so there a launchd agent that runs
-`t3wf.py tick` every 2 minutes does the same job.
+When the t3cm service is not running, the `t3-workflow` skill's own script
+runs the link protocol. Its watcher then runs only when a `t3wf` command does,
+so idle threads get no nudges until one runs. To put the watcher on a timer,
+run `python3 ~/.agents/skills/t3-workflow/scripts/t3wf.py daemon install`
+once. It sets up a systemd user timer. macOS has no systemctl, so there a
+launchd agent that runs `t3wf.py tick` every 2 minutes does the same job.
 
 ## Contributing
 

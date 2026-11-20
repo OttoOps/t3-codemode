@@ -154,7 +154,12 @@ task) and a user-scope MCP server.
      `powershell -ExecutionPolicy Bypass -File install.ps1`.
    - On macOS, run it from a GUI login. Over SSH alone, add `--files-only`
      and have the user run the `launchctl` command it prints after logging in.
-   - To update later, run it again.
+   - With no terminal to ask on, it also installs the workflow skills with
+     `t3cm skills install`, and replaces an `npx skills` or copied install
+     with `t3cm skills install --take-over`. Pass `--no-workflow`
+     (`-NoWorkflow`) only when the user says to leave the skills alone.
+   - To update later, run `t3cm update` or the installer again. Both bring
+     the skills t3cm installed to the new release.
 2. **No release yet, or an unsupported machine** (the installer says so):
    build from source on Linux or macOS.
    - Check `rustc --version` reports 1.95 or newer. If Rust is missing or
