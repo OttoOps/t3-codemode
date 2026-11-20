@@ -76,6 +76,14 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 pub fn parse_issue(raw: &str) -> Option<Issue> {
+    parse_ref(raw, true)
+}
+
+pub fn parse_issue_only(raw: &str) -> Option<Issue> {
+    parse_ref(raw, false)
+}
+
+fn parse_ref(raw: &str, allow_pull: bool) -> Option<Issue> {
     let s = raw.trim().trim_end_matches('/');
     let make = |owner: &str, repo: &str, n: &str| {
         let number: u64 = n.parse().ok().filter(|n| *n > 0)?;
@@ -94,7 +102,8 @@ pub fn parse_issue(raw: &str) -> Option<Issue> {
     let rest = rest.split(['?', '#']).next()?;
     let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
     match parts.as_slice() {
-        [owner, repo, "issues" | "pull", n, ..] => make(owner, repo, n),
+        [owner, repo, "issues", n, ..] => make(owner, repo, n),
+        [owner, repo, "pull", n, ..] if allow_pull => make(owner, repo, n),
         _ => None,
     }
 }

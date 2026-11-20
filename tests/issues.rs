@@ -54,6 +54,8 @@ async fn wf_issue_needs_a_caller_and_a_real_issue() {
     assert!(err_text(&out).contains("caller's T3 thread id"), "{}", out.text);
     let out = h.exec_as(WORKER, "async () => wf.issue({ url: 'not an issue' })").await;
     assert!(err_text(&out).contains("is not a GitHub issue"), "{}", out.text);
+    let out = h.exec_as(WORKER, "async () => wf.issue({ url: 'https://github.com/Acme/widgets/pull/42' })").await;
+    assert!(err_text(&out).contains("is not a GitHub issue"), "a pull request is not an issue: {}", out.text);
     let long = "x".repeat(301);
     let out = h.exec_as(WORKER, &format!("async () => wf.issue({{ url: 'Acme/widgets#41', title: '{long}' }})")).await;
     assert!(err_text(&out).contains("title is over 300 chars"), "{}", out.text);
