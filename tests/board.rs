@@ -3170,3 +3170,196 @@ return {{ before, after, viaDone, focusMoved, focusStays: document.activeElement
     assert_eq!(r["viaDone"], 4, "{r}");
     assert_eq!((&r["focusMoved"], &r["focusStays"]), (&json!(true), &json!(true)), "{r}");
 }
+
+async fn new_issue_page() -> (String, Value) {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    let report = "async () => wf.issue({ url: 'https://github.com/Acme/widgets/issues/43', title: 'Fix the grader', note: 'found while testing' })";
+    result(&s.h.exec_as(WORKER, report).await);
+    result(&s.h.exec_as(WORKER, "async () => wf.issue({ url: 'Acme/gadgets#7' })").await);
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    (html, st)
+}
+
+const NEW_HELPERS: &str = r##"
+const row = (id) => q('#nis [data-key="' + id + '"]');
+const rows = () => [...document.getElementById("nis").children].map((r) => r.dataset.key);
+const btn = (id, p) => row(id).querySelector('[data-part="' + p + '"]');
+const posts = () => fetches.filter((f) => f.method === "POST").map((f) => f.url);
+const sec = () => document.getElementById("p-new");
+const flush = async () => { for (let i = 0; i < 20; i++) await null; };
+const answer = (body) => async () => ({ ok: true, json: async () => body });
+"##;
+
+fn new_scenario(html: &str, st: &Value, body: &str) -> Value {
+    run_page_async(html, &format!("async () => {{\n{PAGE_HELPERS}\n{NEW_HELPERS}\nconst base = {st};\n{body}\n}}"))
+}
+
+#[tokio::test]
+async fn the_event_stream_pushes_an_issue_as_soon_as_a_thread_reports_it() {
+    let s = start(H::new()).await;
+    let mut r = s.http.get(format!("{}/api/events", s.base)).send().await.unwrap();
+    let mut buf = Vec::new();
+    assert_eq!(next_state(&mut r, &mut buf).await["newIssues"], json!([]));
+    result(&s.h.exec_as(WORKER, "async () => wf.issue({ url: 'Acme/widgets#43', title: 'Fix the grader' })").await);
+    let st = next_state(&mut r, &mut buf).await;
+    assert_eq!(st["newIssues"][0]["label"], "widgets#43", "{st}");
+    assert_eq!(st["counts"]["newIssues"], 1, "{st}");
+}
+
+#[tokio::test]
+async fn new_issues_sit_above_tickets_with_their_links_and_a_count() {
+    let (html, st) = new_issue_page().await;
+    assert!(html.find(r#"id="p-new""#).unwrap() < html.find(r#"id="p-tix""#).unwrap());
+    let r = new_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+const one = row("n1");
+const label = btn("n1", "label").querySelector("a");
+const thread = btn("n1", "th").querySelector("a");
+const shown = {
+  rows: rows(), chip: q("#n-new").textContent, empty: sec().hasAttribute("data-empty"),
+  label: [label.textContent, label.getAttribute("href")], title: btn("n1", "title").textContent,
+  verb: btn("n1", "verb").textContent, at: btn("n1", "when").getAttribute("data-at"),
+  thread: [thread.textContent, thread.getAttribute("href")],
+  names: [btn("n1", "launch").getAttribute("aria-label"), btn("n1", "dismiss").getAttribute("aria-label")],
+  gadget: btn("n2", "title").textContent, view: q("#new-view").hidden,
+};
+emitState({ ...base, newIssues: [], counts: { ...base.counts, newIssues: 0 } });
+return { shown, after: { rows: rows(), chip: q("#n-new").textContent, empty: sec().hasAttribute("data-empty") } };
+"##,
+    );
+    assert_eq!(r["shown"]["rows"], json!(["n2", "n1"]), "{r}");
+    assert_eq!(r["shown"]["chip"], "2", "{r}");
+    assert_eq!(r["shown"]["empty"], false, "{r}");
+    assert_eq!(r["shown"]["label"], json!(["widgets#43", "https://github.com/Acme/widgets/issues/43"]), "{r}");
+    assert_eq!(r["shown"]["title"], "Fix the grader", "{r}");
+    assert_eq!(r["shown"]["verb"], "filed", "{r}");
+    assert_eq!(r["shown"]["at"], T0, "{r}");
+    assert_eq!(r["shown"]["thread"], json!([WORKER, format!("https://t3/{WORKER}")]), "{r}");
+    assert_eq!(r["shown"]["names"], json!(["Launch a ticket for widgets#43", "Dismiss widgets#43"]), "{r}");
+    assert_eq!(r["shown"]["gadget"], "", "{r}");
+    assert_eq!(r["shown"]["view"], true, "{r}");
+    assert_eq!(r["after"], json!({"rows": [], "chip": "", "empty": true}), "{r}");
+}
+
+#[tokio::test]
+async fn launch_and_dismiss_post_to_the_entry_and_a_failed_launch_says_why() {
+    let (html, st) = new_issue_page().await;
+    let r = new_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+fetchReply = answer({ ok: true, label: "widgets#43", thread: "launch:1" });
+btn("n1", "launch").dispatch("click");
+const busy = [btn("n1", "launch").textContent, btn("n1", "launch").getAttribute("aria-disabled")];
+await flush();
+const launched = { posts: posts(), err: q("#new-err").hidden, label: btn("n1", "launch").textContent };
+fetchReply = answer({ ok: true });
+btn("n2", "dismiss").dispatch("click");
+await flush();
+const dismissed = posts().slice(1);
+fetchReply = answer({ ok: false, label: "widgets#43", error: "Cannot launch widgets#43: no T3 project", card: "a3" });
+btn("n1", "launch").dispatch("click");
+await flush();
+const failed = { err: q("#new-err").hidden, text: q("#new-err-text").textContent, enabled: btn("n1", "launch").getAttribute("aria-disabled") };
+return { busy, launched, dismissed, failed };
+"##,
+    );
+    assert_eq!(r["busy"], json!(["Launching...", "true"]), "{r}");
+    assert_eq!(r["launched"], json!({"posts": ["/api/new-issues/n1/launch"], "err": true, "label": "Launch"}), "{r}");
+    assert_eq!(r["dismissed"], json!(["/api/new-issues/n2/dismiss"]), "{r}");
+    assert_eq!(
+        r["failed"],
+        json!({"err": false, "text": "Cannot launch widgets#43: no T3 project (card a3)", "enabled": null}),
+        "{r}"
+    );
+}
+
+#[tokio::test]
+async fn a_launched_issue_leaves_a_placeholder_while_the_reader_is_in_the_column() {
+    let (html, st) = new_issue_page().await;
+    let r = new_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+q("#tixcol").dispatch("pointerenter");
+fetchReply = answer({ ok: true, label: "widgets#43" });
+btn("n1", "launch").dispatch("click");
+await flush();
+emitState({ ...base, newIssues: base.newIssues.filter((i) => i.id !== "n1") });
+const held = { rows: rows(), note: row("n1").textContent, chip: q("#n-new").textContent };
+q("#tixcol").dispatch("pointerleave");
+advance(10);
+return { held, after: rows() };
+"##,
+    );
+    assert_eq!(r["held"], json!({"rows": ["n2", "n1"], "note": "widgets#43 launched", "chip": "1"}), "{r}");
+    assert_eq!(r["after"], json!(["n2"]), "{r}");
+}
+
+#[tokio::test]
+async fn a_new_issue_waits_behind_the_count_while_a_ticket_has_focus() {
+    let (html, st) = new_issue_page().await;
+    let r = new_scenario(
+        &html,
+        &st,
+        r##"
+const none = { ...base, newIssues: [], counts: { ...base.counts, newIssues: 0 } };
+document.getElementById("tixcol").append(document.getElementById("open"));
+emitState(none);
+q("#open .tk").focus();
+emitState(base);
+const held = { rows: rows(), slot: q("#new-nis").textContent, off: q("#new-nis").classList.contains("off") };
+q("#new-nis").dispatch("click");
+return { held, after: rows(), off: q("#new-nis").classList.contains("off") };
+"##,
+    );
+    assert_eq!(r["held"], json!({"rows": [], "slot": "2 new", "off": false}), "{r}");
+    assert_eq!(r["after"], json!(["n2", "n1"]), "{r}");
+    assert_eq!(r["off"], true, "{r}");
+}
+
+#[tokio::test]
+async fn show_dismissed_lists_dismissed_issues_and_restore_brings_one_back() {
+    let s = start(H::new()).await;
+    result(&s.h.exec_as(WORKER, "async () => wf.issue({ url: 'Acme/widgets#43', title: 'Fix the grader' })").await);
+    result(&s.h.exec_as(WORKER, "async () => wf.issue({ url: 'Acme/widgets#44' })").await);
+    s.h.app.wf.dismiss_new_issue("n1").await.unwrap();
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    let r = new_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+const open = { rows: rows(), view: [q("#new-view").hidden, q("#new-view-t").textContent + " " + q("#n-dismissed").textContent, q("#new-view").getAttribute("aria-pressed")] };
+q("#new-view").dispatch("click");
+const view = {
+  rows: rows(), head: q("#h-new-t").textContent, chip: q("#n-new").textContent,
+  launch: btn("n1", "launch").hidden, restore: [btn("n1", "dismiss").textContent, btn("n1", "dismiss").getAttribute("aria-label")],
+  verb: btn("n1", "verb").textContent, toggle: [q("#new-view-t").textContent, q("#n-dismissed").textContent, q("#new-view").getAttribute("aria-pressed")],
+};
+fetchReply = answer({ id: "n1", dismissed: false });
+btn("n1", "dismiss").dispatch("click");
+await flush();
+const restored = { ...base.dismissedIssues[0], dismissed: false, dismissedAt: null };
+emitState({ ...base, newIssues: [restored, ...base.newIssues], dismissedIssues: [] });
+return { open, view, posts: posts(), back: { rows: rows(), head: q("#h-new-t").textContent, toggle: q("#new-view").hidden } };
+"##,
+    );
+    assert_eq!(r["open"], json!({"rows": ["n2"], "view": [false, "Show dismissed 1", "false"]}), "{r}");
+    assert_eq!(
+        r["view"],
+        json!({"rows": ["n1"], "head": "Dismissed issues", "chip": "", "launch": true,
+               "restore": ["Restore", "Restore widgets#43"], "verb": "dismissed", "toggle": ["Show new", "", "true"]}),
+        "{r}"
+    );
+    assert_eq!(r["posts"], json!(["/api/new-issues/n1/restore"]), "{r}");
+    assert_eq!(r["back"], json!({"rows": ["n1", "n2"], "head": "New issues", "toggle": true}), "{r}");
+}
