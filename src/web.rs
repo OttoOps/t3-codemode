@@ -86,6 +86,12 @@ async fn page(State(web): State<Web>, headers: HeaderMap) -> Response {
     if let Some(r) = web.reject(&headers, false) {
         return r;
     }
+    let wf = web.app.wf.clone();
+    tokio::spawn(async move {
+        if let Err(e) = wf.reconcile_soon().await {
+            tracing::warn!("github reconcile on page load failed: {e:#}");
+        }
+    });
     (
         StatusCode::OK,
         [

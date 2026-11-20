@@ -402,7 +402,8 @@ pub struct FakeGitHub(Mutex<GhState>);
 pub fn github_pr(head: &str, merge_state: &str, queue: bool) -> Value {
     json!({
         "state": "OPEN", "isDraft": false, "headRefOid": head, "mergeStateStatus": merge_state,
-        "isMergeQueueEnabled": queue, "isInMergeQueue": false, "mergeQueueEntry": null, "mergeCommit": null
+        "isMergeQueueEnabled": queue, "isInMergeQueue": false, "mergeQueueEntry": null, "mergeCommit": null,
+        "mergedAt": null, "closedAt": null, "timelineItems": {"nodes": []}
     })
 }
 
@@ -435,6 +436,19 @@ impl FakeGitHub {
         self.st().prs[&(repo.into(), number)].clone()
     }
 
+    pub fn remove_pr(&self, repo: &str, number: u64) {
+        self.st().prs.remove(&(repo.into(), number));
+    }
+
+    pub fn drop_from_queue(&self, repo: &str, number: u64, reason: &str, at: &str) {
+        self.update_pr(
+            repo,
+            number,
+            json!({"isInMergeQueue": false, "mergeQueueEntry": null,
+                   "timelineItems": {"nodes": [{"reason": reason, "createdAt": at}]}}),
+        );
+    }
+
     pub fn set_default_method(&self, repo: &str, method: &str) {
         self.st().repos.insert(repo.into(), json!({"viewerDefaultMergeMethod": method}));
     }
@@ -465,6 +479,9 @@ impl FakeGitHub {
 }
 
 fn operation(query: &str) -> &'static str {
+    if query.starts_with("query Reconcile(") {
+        return "reconcile";
+    }
     for op in ["enqueuePullRequest", "mergePullRequest", "enablePullRequestAutoMerge"] {
         if query.contains(op) {
             return op;
@@ -484,6 +501,37 @@ impl crate::github::GitHub for FakeGitHub {
             }
             if let Some(message) = st.errors.get(op) {
                 return Ok(gh_error(message));
+            }
+            if op == "reconcile" {
+                let mut data = serde_json::Map::new();
+                let mut errs = Vec::new();
+                for i in 0.. {
+                    let Some(owner) = variables[format!("o{i}")].as_str() else { break };
+                    let repo = format!("{owner}/{}", variables[format!("r{i}")].as_str().unwrap()).to_ascii_lowercase();
+                    let number = variables[format!("n{i}")].as_u64().unwrap();
+                    let alias = format!("p{i}");
+                    if !st.repos.contains_key(&repo) {
+                        errs.push(
+                            json!({"type": "NOT_FOUND", "path": [alias], "message": format!("no repository {repo}")}),
+                        );
+                        data.insert(alias, Value::Null);
+                        continue;
+                    }
+                    let pr = st.prs.get(&(repo.clone(), number)).cloned().unwrap_or(Value::Null);
+                    if pr.is_null() {
+                        errs.push(
+                            json!({"type": "NOT_FOUND", "path": [alias, "pullRequest"], "message": "no pull request"}),
+                        );
+                    }
+                    let mut repository = st.repos[&repo].clone();
+                    repository["pullRequest"] = pr;
+                    data.insert(alias, repository);
+                }
+                let mut out = json!({"data": data});
+                if !errs.is_empty() {
+                    out["errors"] = json!(errs);
+                }
+                return Ok(out);
             }
             if op == "read" {
                 let repo = format!("{}/{}", variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap())

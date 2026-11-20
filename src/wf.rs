@@ -218,6 +218,7 @@ pub struct Wf {
     pub(crate) changes: tokio::sync::broadcast::Sender<()>,
     pub(crate) asks_lock: tokio::sync::Mutex<()>,
     pub(crate) pool_lock: tokio::sync::Mutex<()>,
+    pub(crate) reconcile_lock: tokio::sync::Mutex<()>,
     pub(crate) usage: Mutex<Option<Arc<dyn UsageSource>>>,
 }
 
@@ -245,6 +246,9 @@ impl Wf {
         if store.node_role(BOARD).ok().flatten().as_deref() != Some("overseer") {
             let _ = store.node_set(BOARD, "overseer", &iso(clock.now()));
         }
+        if store.meta_get(crate::reconcile::SINCE).ok().flatten().is_none() {
+            let _ = store.meta_set(crate::reconcile::SINCE, &iso(clock.now()));
+        }
         Wf {
             store,
             t3,
@@ -259,6 +263,7 @@ impl Wf {
             changes: tokio::sync::broadcast::channel(64).0,
             asks_lock: tokio::sync::Mutex::new(()),
             pool_lock: tokio::sync::Mutex::new(()),
+            reconcile_lock: tokio::sync::Mutex::new(()),
             usage: Mutex::new(None),
         }
     }
@@ -790,6 +795,11 @@ impl Wf {
         }
     }
 
+    pub(crate) async fn flush_to(&self, to: &str) -> Result<()> {
+        let _g = self.lock.lock().await;
+        self.flush_outbox(Some(to), !self.watcher_alive()).await.map(|_| ())
+    }
+
     pub(crate) async fn send_wake(&self, to: &str, text: &str, handle: &str) -> Result<Value> {
         self.store.outbox_push(to, text, handle, &self.now())?;
         let force = !self.watcher_alive();
@@ -898,6 +908,7 @@ impl Wf {
                 body,
                 handle: Some(handle),
                 options: None,
+                pr: None,
             })?;
             return Ok(());
         }
@@ -1065,6 +1076,7 @@ impl Wf {
                     body: &body,
                     handle: Some(&handle),
                     options: None,
+                    pr: None,
                 })?;
             } else {
                 let msg = format!("{}\n{body}", header("report", &p.label, &handle, None));
