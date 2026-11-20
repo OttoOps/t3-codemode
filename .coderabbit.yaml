@@ -6,10 +6,11 @@ reviews:
   profile: chill
   auto_approvals:
     enabled: true
+    min_blocking_severity: major
   auto_review:
     enabled: true
     drafts: false
-    auto_pause_after_reviewed_commits: 0
+    auto_pause_after_reviewed_commits: 2
   high_level_summary_in_walkthrough: true
   review_status: false
   in_progress_fortune: false
