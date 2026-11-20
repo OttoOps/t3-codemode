@@ -104,7 +104,9 @@ The config file:
   "models": {
     "ticket": {"provider": "claudeAgent", "model": "claude-opus-5-5", "effort": "high"},
     "worker": {"model": "claude-opus-5-5", "effort": "high"}
-  }
+  },
+  "writtenBy": "0.6.0",
+  "steps": ["slot:review", "slot:passes", "slot:credentials", "slot:delivery", "slot:models", "rule:filed-issues"]
 }
 ```
 
@@ -115,6 +117,17 @@ config.
 `"review": null` turns review off; leaving `review` out keeps the default.
 `match` is a Python regular expression tried against the failing command's
 output.
+
+Setup and t3cm write the last two keys themselves. `writtenBy` is the release
+that last wrote the file. `steps` lists the setup steps done on this machine,
+by the ids in `setup-t3-workflow/steps.json`. That file lists each release's
+steps: an `interview` step is a slot setup asks about, and an `auto` step
+(the filed-issue rule) needs no answers, so `t3cm skills install` and
+`update` apply it. A file with no `steps` was written before setup recorded
+them, so every step marked `legacy` counts as done. Setup reads its release
+from the stamp `t3cm skills install` puts in its `SKILL.md`, so a copy with
+no stamp, such as one from `npx skills` or a git clone, leaves `writtenBy`
+out.
 
 The `AGENTS.md` block reads these bullets and ignores the rest:
 

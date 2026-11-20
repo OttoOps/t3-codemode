@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "steps": [
+    {"id": "slot:review", "since": "0.3.0", "kind": "interview", "slot": "review", "legacy": true},
+    {"id": "slot:passes", "since": "0.3.0", "kind": "interview", "slot": "passes", "legacy": true},
+    {"id": "slot:credentials", "since": "0.3.0", "kind": "interview", "slot": "credentials", "legacy": true},
+    {"id": "slot:delivery", "since": "0.3.0", "kind": "interview", "slot": "delivery", "legacy": true},
+    {"id": "slot:models", "since": "0.3.0", "kind": "interview", "slot": "models", "legacy": true},
+    {"id": "rule:filed-issues", "since": "0.5.0", "kind": "auto"}
+  ]
+}

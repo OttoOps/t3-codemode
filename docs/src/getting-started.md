@@ -260,6 +260,19 @@ release's and removes them from the `npx skills` lock file, so
 `npx skills update` no longer overwrites them. t3cm never writes through a
 skill folder that is a link, such as one into a git clone.
 
+`install` and `update` also apply the setup steps that need no answers,
+which this release lists in `setup-t3-workflow/steps.json`. The first is the
+filed-issue rule: t3cm writes it for Claude Code
+(`rules/t3-workflow-filed-issues.md` in `$CLAUDE_CONFIG_DIR`, else
+`~/.claude`) and as a marked block in Codex's global `AGENTS.md`
+(`$CODEX_HOME`, else `~/.codex`), skipping an agent with no config folder.
+When `~/.config/t3-workflow/config.json` exists, t3cm records each step it
+applied there under `steps`, with its release under `writtenBy`. A step that
+needs answers, such as a slot a later release added, prints as
+`run setup-t3-workflow: new slot <slot>`; ask your agent to run that skill.
+`status` lists the missing steps too, and exits 1 while a step t3cm can
+apply is missing.
+
 ### Set up the workflow
 
 After installing the skills either way, ask your agent once to "set up the

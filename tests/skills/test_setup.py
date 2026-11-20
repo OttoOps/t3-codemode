@@ -69,6 +69,9 @@ class SetupTestCase(SlotsTestCase):
         return plugin_path, self.skill(self.env.home / ".agents" / "skills", "sol-loop")
 
     def saved(self):
+        return {k: v for k, v in self.raw_saved().items() if k not in ("steps", "writtenBy")}
+
+    def raw_saved(self):
         return json.loads(self.config.read_text())
 
 
@@ -293,7 +296,8 @@ class Write(SetupTestCase):
         self.config.symlink_to(target)
         self.write({"review": None})
         self.assertTrue(self.config.is_symlink())
-        self.assertEqual(json.loads(target.read_text()), {"version": 1, "passes": ["pr"], "review": None})
+        self.assertEqual(self.saved(), {"version": 1, "passes": ["pr"], "review": None})
+        self.assertIn("steps", json.loads(target.read_text()))
 
     def test_a_config_dir_that_cannot_be_made_is_not_written(self):
         self.config.parent.parent.mkdir(parents=True, exist_ok=True)
@@ -406,6 +410,14 @@ class Rule(SetupTestCase):
         self.assertEqual((self.codex / "AGENTS.md").read_text(),
                          f"# Mine\n\n{self.codex_block()}\n## After\n\nStays.\n")
 
+    def test_an_unpaired_codex_marker_is_left_for_the_user(self):
+        self.codex.mkdir()
+        for bad in (f"# Mine\n\n{START}\nold\n\n## After\n", f"old\n{END}\n", f"{END}\n{START}\n"):
+            (self.codex / "AGENTS.md").write_text(bad)
+            r = self.rule(ok=False)
+            self.assertIn("without its pair", r.stderr)
+            self.assertEqual((self.codex / "AGENTS.md").read_text(), bad)
+
     def test_codex_override_file_gets_the_block_when_it_exists(self):
         self.codex.mkdir()
         (self.codex / "AGENTS.override.md").write_text("# Override\n")
@@ -429,3 +441,82 @@ class Rule(SetupTestCase):
         r = self.rule(ok=False)
         self.assertEqual(r.returncode, 1)
         self.assertIn("neither a Claude Code nor a Codex config folder", r.stderr)
+
+
+SLOT_STEPS = ["slot:review", "slot:passes", "slot:credentials", "slot:delivery", "slot:models"]
+
+
+class Steps(SetupTestCase):
+    def missing(self):
+        return [m["id"] for m in self.detect()["steps"]["missing"]]
+
+    def test_a_first_write_records_only_the_slots_it_covers(self):
+        self.write({"review": None}, "--asked", "passes,delivery")
+        self.assertEqual(self.raw_saved()["steps"], ["slot:review", "slot:passes", "slot:delivery"])
+        self.assertNotIn("writtenBy", self.raw_saved(), "an unstamped source tree has no release")
+        self.assertEqual(self.missing(), ["slot:credentials", "slot:models"])
+
+    def test_a_config_from_before_steps_counts_every_slot_as_asked(self):
+        self.write_config({"version": 1, "passes": ["pr"]})
+        self.assertEqual(self.missing(), [])
+        self.write({"review": None})
+        self.assertEqual(self.raw_saved()["steps"], SLOT_STEPS)
+
+    def test_a_slot_recorded_by_no_run_is_missing(self):
+        self.write_config({"version": 1, "steps": SLOT_STEPS[:4]})
+        self.assertEqual(self.detect()["steps"]["missing"],
+                         [{"id": "slot:models", "kind": "interview", "slot": "models"}])
+        self.write({}, "--asked", "models")
+        self.assertEqual(self.raw_saved()["steps"], SLOT_STEPS)
+
+    def test_no_config_misses_every_slot_and_a_missing_rule(self):
+        self.claude.mkdir()
+        self.assertEqual(self.missing(), SLOT_STEPS + ["rule:filed-issues"])
+
+    def test_the_rule_step_is_recorded_in_an_existing_config(self):
+        self.write_config({"version": 1, "passes": ["pr"]})
+        self.claude.mkdir()
+        self.assertEqual(self.missing(), ["rule:filed-issues"])
+        r = self.setup("rule")
+        self.assertIn("recorded rule:filed-issues", r.stdout)
+        self.assertEqual(self.raw_saved()["steps"], SLOT_STEPS + ["rule:filed-issues"])
+        self.assertEqual(self.saved(), {"version": 1, "passes": ["pr"]})
+        self.assertEqual(self.missing(), [])
+
+    def test_the_rule_does_not_create_a_config(self):
+        self.claude.mkdir()
+        self.setup("rule")
+        self.assertFalse(self.config.exists())
+
+    def test_a_write_records_a_rule_that_is_already_current(self):
+        self.claude.mkdir()
+        self.setup("rule")
+        self.write({"review": None})
+        self.assertEqual(self.raw_saved()["steps"], ["slot:review", "rule:filed-issues"])
+
+    def test_stdin_cannot_set_the_record(self):
+        r = self.write({"steps": []}, ok=False)
+        self.assertIn("setup records those itself", r.stderr)
+
+    def test_asked_names_a_slot(self):
+        r = self.write({}, "--asked", "reviewer", ok=False)
+        self.assertIn("--asked reviewer", r.stderr)
+
+    def test_a_stamped_install_records_its_release(self):
+        tree = self.env.tmp / "installed"
+        for name in ("setup-t3-workflow", "t3-workflow"):
+            shutil.copytree(ROOT / "skills" / name, tree / name, ignore=shutil.ignore_patterns("__pycache__"))
+        md = tree / "setup-t3-workflow" / "SKILL.md"
+        md.write_text(md.read_text().replace("\n---\n", '\nmetadata:\n  t3-codemode-release: "9.8.7"\n---\n', 1))
+        env = self.env.environ(PATH=str(self.bin), T3CM_PORT=str(self.port))
+        r = subprocess.run([sys.executable, str(tree / "setup-t3-workflow" / "scripts" / "setup_workflow.py"),
+                            "write", "--repo", str(self.repo)], input="{}", text=True, capture_output=True,
+                           cwd=self.env.tmp, env=env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.raw_saved()["writtenBy"], "9.8.7")
+
+    def test_check_config_accepts_the_record(self):
+        self.write_config({"version": 1, "writtenBy": "0.6.0", "steps": SLOT_STEPS})
+        self.assertEqual(self.env.run("check-config").stdout.strip(), "config ok")
+        self.write_config({"version": 1, "steps": "slot:review"})
+        self.assertIn("steps: must be a list", self.env.run("check-config", ok=False).stdout)

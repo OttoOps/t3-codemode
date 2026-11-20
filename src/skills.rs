@@ -110,7 +110,7 @@ impl Paths {
 }
 
 #[cfg(windows)]
-fn user_home() -> Option<PathBuf> {
+pub(crate) fn user_home() -> Option<PathBuf> {
     let var = |k| std::env::var_os(k).filter(|v| !v.is_empty());
     var("USERPROFILE")
         .map(PathBuf::from)
@@ -123,7 +123,7 @@ fn user_home() -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn user_home() -> Option<PathBuf> {
+pub(crate) fn user_home() -> Option<PathBuf> {
     std::env::var_os("HOME").filter(|v| !v.is_empty()).map(PathBuf::from).or_else(crate::platform::home_dir)
 }
 
@@ -429,14 +429,34 @@ pub struct Report {
     pub also_locked: Vec<String>,
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().context("a file path has a parent")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".t3cm-tmp");
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+    let perms = std::fs::metadata(path).ok().map(|m| m.permissions());
+    let _ = std::fs::remove_file(&tmp);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    if let Some(p) = &perms {
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, std::os::unix::fs::PermissionsExt::mode(p));
+    }
+    let written =
+        opts.open(&tmp).and_then(|mut f| std::io::Write::write_all(&mut f, bytes)).and_then(|()| match perms {
+            Some(p) => std::fs::set_permissions(&tmp, p),
+            None => Ok(()),
+        });
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("writing {}", tmp.display()));
+    }
+    std::fs::rename(&tmp, path)
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
+        .with_context(|| format!("replacing {}", path.display()))
 }
 
 fn remove_with_empty_parents(dir: &Path, rel: &str) -> Result<()> {

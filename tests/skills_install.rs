@@ -10,6 +10,9 @@ fn t3cm(home: &Path, args: &[&str]) -> Output {
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env_remove("XDG_CONFIG_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .env_remove("T3WF_CONFIG")
         .output()
         .unwrap()
 }
