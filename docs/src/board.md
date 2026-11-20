@@ -196,7 +196,10 @@ leaves an error card that names the pool, and launches nothing.
 ## New issues
 
 A thread that files a GitHub issue reports it with `wf.issue`, and the board
-keeps it on a list of new issues until someone acts on it. Each entry records
+keeps it on a list of new issues until someone acts on it. Threads know to
+report because `setup-t3-workflow` installs a short rule that Claude Code and
+Codex load in every session, so it reaches threads that run none of the
+[workflow skills](getting-started.md#the-workflow-skills). Each entry records
 the issue's URL, `repo` and `number`, and the `title` and `note` the thread
 passed. It also records the filing `thread`, with its T3 `threadLink` and
 `threadTitle`, and `at`, the time the thread reported it. An entry's id looks

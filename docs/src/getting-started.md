@@ -176,7 +176,9 @@ and Codex:
 npx skills@latest add OttoOps/t3-codemode -g
 ```
 
-Then ask your agent once to "set up the T3 workflow". The
+Then ask your agent once to "set up the T3 workflow". Setup also installs
+the rule that has every thread report the issues it files to the
+[board](board.md#new-issues). The
 [README](https://github.com/OttoOps/t3-codemode#install-the-workflow-skills)
 covers the manual copy and which skills need which. Without the skills,
 launched threads do not know the workflow, so the board and `wf` are the part
