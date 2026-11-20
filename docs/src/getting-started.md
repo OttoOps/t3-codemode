@@ -19,6 +19,8 @@ The installers fetch the latest release from
 against the release's `SHA256SUMS`, and, when `gh` is signed in, check its
 build provenance with `gh attestation verify`. Then they install the binary and
 a per-user service, start it, and register the MCP server with Claude Code.
+Last, they ask `Use the T3 workflow? [Y/n]`, and on yes run
+`t3cm skills install`, described [below](#install-the-skills-with-t3cm).
 Nothing needs administrator rights. Release builds came in with
 [#2](https://github.com/OttoOps/t3-codemode/issues/2).
 
@@ -86,6 +88,12 @@ no source install; it needs a published release.
 - `--files-only` (`-FilesOnly`) installs or removes the files without touching
   systemd, launchd or Task Scheduler, and prints the command that starts the
   service.
+- `--workflow` and `--no-workflow` (`-Workflow`, `-NoWorkflow`) answer the
+  workflow question for an unattended run. With no terminal to ask on, the
+  answer is yes. When t3cm installed the skills before, the installer brings
+  them to the new release without asking. When `npx skills` or a copy by hand
+  installed them, it asks whether to replace them, yes by default, and on yes
+  runs `t3cm skills install --take-over`.
 
 ### What it installs
 
@@ -104,9 +112,10 @@ dead server comes back within five minutes. To stop it for good, run
 When `~/.local/bin` is not on your `PATH`, the Linux and macOS installer says
 so.
 
-To update, run the installer again. To uninstall, run `bash install.sh
---uninstall` or `install.ps1 -Uninstall`. It stops and removes the service and
-the binary, and keeps the store.
+To update, run the installer again, or run `t3cm update`. Either one also
+brings the skills t3cm installed to the new release. To uninstall, run
+`bash install.sh --uninstall` or `install.ps1 -Uninstall`. It stops and removes
+the service and the binary, and keeps the store and the skills.
 
 Uninstalling also removes Claude Code's user-scope `t3cm` MCP entry, even one
 you added yourself before installing.
@@ -161,6 +170,14 @@ reconnects by itself. It then waits for `/healthz` to report the new version.
 If the service stops or does not report it within 45 seconds, `t3cm update`
 puts the old binary back, restarts the service on it, and exits non-zero. Once
 the new version serves, it deletes `t3cm.old`.
+
+When t3cm installed the workflow skills, `t3cm update` then runs the new
+binary's `t3cm skills update`, so the skills and their setup steps move to the
+new release with the binary. An update that finds t3cm already current still
+runs it when the skills or a setup step have drifted. When that sync fails, the
+new binary stays, `t3cm update` exits non-zero, and it names the command to run
+once you fix the cause. It leaves skills that `npx skills` installed alone and
+prints the `t3cm skills install --take-over` command that replaces them.
 
 `t3cm update` never edits the systemd unit. When a release ships a changed
 unit, it saves the new one as `t3-codemode.service` in the state directory and
@@ -222,12 +239,10 @@ echo 'async () => (await t3.thread_list({ allProjects: true, limit: 5 })).thread
 Agent skills drive the thread-workflow layer. This repo carries five under
 `skills/`: `t3-workflow`, `setup-t3-workflow`, `t3-overseer`, `t3-ticket` and
 `t3-worker`. `t3-workflow` holds the link protocol and routes to the other
-four. They install as agent skills, apart from the service, for Claude Code
-and Codex:
-
-```bash
-npx skills@latest add OttoOps/t3-codemode -g
-```
+four. The installers are the only way to get them. They put them in place
+when you answer yes to the workflow question, and `t3cm update` keeps them
+current. On a machine where t3cm is already installed, `t3cm skills install`
+adds them.
 
 ### Install the skills with t3cm
 
@@ -239,26 +254,34 @@ t3cm skills install
 t3cm skills status
 ```
 
-`install` writes them to `~/.agents/skills`, which Claude Code and Codex
-both read. It stamps the release into each `SKILL.md` under
-`metadata.t3-codemode-release`, and records the release, every file and its
-SHA-256 in `~/.config/t3-workflow/installed.json` (under
-`$XDG_CONFIG_HOME` when that is set). `t3cm skills update` brings the
-skills to the binary's release. It writes the files that changed, removes
-files the release dropped, and keeps any file you edited since t3cm wrote it,
-with a warning; `--force` overwrites those too. `status` lists each skill as
-current, out of date, edited locally or missing, names the command that fixes
-it, and exits 1 unless every skill is current. `--json` prints either result
-as JSON.
+`install` writes them to `~/.agents/skills`. It stamps the release into each
+`SKILL.md` under `metadata.t3-codemode-release`, and records the release,
+every file and its SHA-256 in `~/.config/t3-workflow/installed.json` (under
+`$XDG_CONFIG_HOME` when that is set). `t3cm skills update` brings the skills
+to the binary's release. It writes the files that changed, removes files the
+release dropped, and keeps any file you edited since t3cm wrote it, with a
+warning; `--force` overwrites those too. `status` lists each skill as current,
+out of date, edited locally or missing, names the command that fixes it, and
+exits 1 unless every skill is current. `--json` prints either result as JSON.
 
-When `npx skills` (or a copy by hand) installed the skills, t3cm has no
-manifest for them. `status` reports that install, the commit in
-`~/.agents/.skill-lock.json`, and how many files differ from this release.
-`install` and `update` leave those skills alone until you run
-`t3cm skills install --take-over`. That replaces their files with this
-release's and removes them from the `npx skills` lock file, so
-`npx skills update` no longer overwrites them. t3cm never writes through a
-skill folder that is a link, such as one into a git clone.
+Codex reads `~/.agents/skills`. Claude Code reads `~/.claude/skills`, or
+`$CLAUDE_CONFIG_DIR/skills` when that is set, so when that config folder
+exists, `install` and `update` also link each skill there to its folder in
+`~/.agents/skills`. They never replace a folder or a link already in a skill's
+place, and `status` mentions one that is in an `info:` line, and in
+`claudeLinks` with `--json`, without counting it against the skills being
+current. Where the account cannot make links, as on Windows without Developer
+Mode, they print the copy commands instead.
+
+When `npx skills` (or a copy by hand) installed the skills on an older
+machine, t3cm has no manifest for them. `status` reports that install, the
+commit in `~/.agents/.skill-lock.json`, and how many files differ from this
+release. `install` and `update` leave those skills alone until you run
+`t3cm skills install --take-over`, which the installers offer, yes by default.
+That replaces their files with this release's and removes them from the
+`npx skills` lock file, so `npx skills update` no longer overwrites them. t3cm
+never writes through a skill folder that is a link, such as one into a git
+clone.
 
 `install` and `update` also apply the setup steps that need no answers,
 which this release lists in `setup-t3-workflow/steps.json`. The first is the
@@ -294,10 +317,10 @@ the result, so board updates and `/healthz` cost no file reads.
 
 ### Set up the workflow
 
-After installing the skills either way, ask your agent once to "set up the
+After installing the skills, ask your agent once to "set up the
 T3 workflow". Setup also installs the rule that has every thread report the
 issues it files to the [board](board.md#new-issues). The
 [README](https://github.com/OttoOps/t3-codemode#install-the-workflow-skills)
-covers the manual copy and which skills need which. Without the skills,
+covers which skills need which. Without the skills,
 launched threads do not know the workflow, so the board and `wf` are the part
 of this project that works standalone.
