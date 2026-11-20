@@ -206,7 +206,31 @@ textarea { resize: none; display: block; }
 }
 .pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--panel); }
 #p-dec { grid-area: dec; border-right: 1px solid var(--line); background: var(--needs-you-surface); }
-#p-tix { grid-area: tix; border-right: 1px solid var(--line); }
+.tixcol { grid-area: tix; display: flex; flex-direction: column; min-height: 0; min-width: 0; border-right: 1px solid var(--line); }
+#p-tix { flex: 1 1 auto; }
+#p-new { flex: none; max-height: min(40%, 240px); border-bottom: 1px solid var(--line); }
+#p-new .ph { height: 40px; }
+#p-new .ph h2 { font-size: 14px; line-height: 20px; }
+#p-new .ph .btn { height: 28px; font-size: 13px; }
+#p-new .ph .btn .n { color: var(--ink-2); font-weight: 500; margin-left: 4px; }
+#p-new .pill { border: 1px solid var(--line); }
+#p-new[data-empty] .body { display: none; }
+#p-new .body > .empty { position: static; }
+#p-new[data-view="dismissed"] .ph h2 { color: var(--ink-2); }
+.nrow {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: 18px 18px; column-gap: 12px; row-gap: 2px;
+  align-items: center; height: 56px; padding: 8px 16px; border-bottom: 1px solid var(--line);
+}
+.nrow:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+.nrow .n1 { display: flex; gap: 8px; align-items: baseline; min-width: 0; line-height: 18px; }
+.nrow .tl { font-weight: 600; flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nrow .ttl { flex: 0 1 auto; }
+.nrow .tl a { color: var(--ink); }
+.nrow .n2 { display: flex; gap: 4px; align-items: baseline; min-width: 0; font-size: 13px; line-height: 18px; white-space: nowrap; }
+.nrow .n2 .th { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.nrow .n2 .th a { color: var(--ink-2); }
+.nrow .nacts { grid-column: 2; grid-row: 1 / span 2; display: flex; gap: 8px; align-items: center; }
+.nrow.gone { display: flex; align-items: center; border-bottom: 1px dashed var(--line); }
 #composer { grid-area: cmd; background: var(--panel); border-bottom: 1px solid var(--line); min-width: 0; min-height: 0; overflow-y: auto; }
 #p-act { grid-area: act; }
 #out { order: 1; }
@@ -423,6 +447,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   #p-act { grid-area: tix; align-self: end; height: calc(100% - 48px); z-index: 1; border-right: 1px solid var(--line); }
   #p-act .ph { display: none; }
   .app:not([data-tab="activity"]) #p-act { display: none; }
+  .app[data-tab="activity"] #p-new { display: none; }
   #composer { position: relative; border-bottom: 0; border-top: 1px solid var(--line); z-index: 5; overflow: visible; }
   .dock { position: absolute; left: 0; right: 0; bottom: 0; background: var(--panel); }
   .dock:focus-within, .dock.show-out { border-top: 1px solid var(--line); }
@@ -461,11 +486,11 @@ kbd { font-family: var(--mono); font-size: 12px; }
   }
   .mid-only { display: none !important; }
   .phone-only { display: inline-flex !important; }
-  #p-dec, #p-tix, #p-act { grid-area: main; border-right: 0; align-self: stretch; height: auto; }
+  #p-dec, .tixcol, #p-act { grid-area: main; border-right: 0; align-self: stretch; height: auto; }
   #p-act .ph { display: flex; }
   .app[data-panel="activity"] #p-act { display: flex; }
   .app:not([data-panel="decisions"]) #p-dec,
-  .app:not([data-panel="tickets"]) #p-tix,
+  .app:not([data-panel="tickets"]) .tixcol,
   .app:not([data-panel="activity"]) #p-act { display: none; }
   #p-tix .ph h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
   #p-tix .tabs { margin-left: 0; }
@@ -500,6 +525,12 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .newslot { min-width: 0; }
   .srow { grid-template-columns: minmax(0, 1fr) auto; }
   .srow .pr { display: none; }
+  #p-new { max-height: min(45%, 300px); }
+  #p-new .ph { height: 48px; }
+  #p-new .ph .btn { height: 44px; }
+  .nrow { height: 80px; padding: 8px 12px; grid-template-rows: 18px 44px; column-gap: 8px; row-gap: 2px; }
+  .nrow .n2 a { display: inline-flex; align-items: center; min-height: 44px; }
+  .nrow .tl a { display: inline; }
   .srow.ask { grid-template-columns: minmax(0, 1fr) auto auto; }
   input[type=text], input[type=search], textarea { font-size: 16px; }
   #ask input[type=text] { height: 44px; }
@@ -561,6 +592,19 @@ kbd { font-family: var(--mono); font-size: 12px; }
       <p class="empty" id="cards-empty" data-empty="Nothing needs you right now.">Loading decisions...</p>
     </div>
   </section>
+  <div class="tixcol" id="tixcol">
+  <section class="pane nis" id="p-new" aria-labelledby="h-new" data-view="open" data-empty="">
+    <div class="ph">
+      <h2 id="h-new"><span id="h-new-t">New issues</span><span class="pill num" id="n-new"></span></h2>
+      <button class="btn quiet" type="button" id="new-view" aria-pressed="false" hidden><span id="new-view-t">Show dismissed</span><span class="n num" id="n-dismissed"></span></button>
+      <span class="newslot"><button class="newbtn off" type="button" id="new-nis" tabindex="-1" aria-hidden="true"></button></span>
+    </div>
+    <div class="body">
+      <div class="scroll rows" id="nis" role="list" aria-label="New issues"></div>
+      <p class="empty" id="nis-empty" hidden>No dismissed issues.</p>
+      <div class="err-strip" id="new-err" hidden><span id="new-err-text"></span><button class="btn quiet" type="button" id="new-err-close">Close</button></div>
+    </div>
+  </section>
   <section class="pane" id="p-tix" aria-labelledby="h-tix">
     <div class="ph">
       <h2 id="h-tix">Tickets</h2>
@@ -595,6 +639,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
       <div class="err-strip" id="act-err" hidden><span id="act-err-text"></span><button class="btn quiet" type="button" id="act-err-close">Close</button></div>
     </div>
   </section>
+  </div>
   <section class="pane" id="p-act" aria-labelledby="h-act">
     <div class="ph">
       <h2 id="h-act">Activity<span class="n num" id="n-feed"></span></h2>
@@ -2452,6 +2497,123 @@ function syncSettled(s, force) {
   setText($("n-settled"), shown(list.length, s.counts.settled, true));
 }
 
+const newView = { dismissed: false, changed: false, colPointer: false };
+
+function newDesc(i) {
+  return { project: projectKey(i), phase: null, text: [i.label, i.repo, i.title, i.note, i.threadTitle] };
+}
+
+function newLive(p) {
+  return p.force || newView.changed || firstState || (isLive(p) && !newView.colPointer && !focusInside($("tixcol")));
+}
+
+function makeNew() {
+  return h("div", { class: "nrow", role: "listitem" },
+    h("span", { class: "n1" }, h("span", { class: "tl", "data-part": "label" }), h("span", { class: "ttl clip", "data-part": "title" })),
+    h("span", { class: "n2 meta" }, h("span", { "data-part": "verb" }), h("span", { class: "num", "data-part": "when" }),
+      h("span", { "aria-hidden": "true" }, "·"), h("span", { class: "th", "data-part": "th" })),
+    h("span", { class: "nacts" },
+      h("button", { class: "btn", type: "button", "data-part": "launch" }, "Launch"),
+      h("button", { class: "btn", type: "button", "data-part": "dismiss" }, "Dismiss")));
+}
+
+function patchNew(el, i) {
+  const lab = part(el, "label");
+  if (safeUrl(i.url)) setLink(lab, i.url, i.label, "Open issue " + i.label + " on GitHub");
+  else plainText(lab, i.label);
+  setAttr(lab, "title", i.repo + "#" + i.number);
+  const t = part(el, "title");
+  setText(t, i.title || "");
+  setAttr(t, "title", [i.title, i.note].filter(Boolean).join("\n\n") || null);
+  setText(part(el, "verb"), i.dismissed ? "dismissed" : "filed");
+  paintAge(part(el, "when"), i.dismissed ? i.dismissedAt : i.at, i.dismissed ? i.dismissedAtLocal : i.atLocal);
+  const th = part(el, "th");
+  const who = i.threadTitle || "filing thread";
+  if (safeUrl(i.threadLink)) setLink(th, i.threadLink, who, "Open the thread that filed " + i.label);
+  else plainText(th, i.threadTitle ? who : "thread unknown");
+  setAttr(th, "title", i.threadTitle || null);
+  const go = part(el, "launch");
+  const d = part(el, "dismiss");
+  go.hidden = !!i.dismissed;
+  setText(d, i.dismissed ? "Restore" : "Dismiss");
+  for (const b of [go, d]) setAttr(b, "aria-disabled", b._busy || el.classList.contains("stale-item") ? "true" : null);
+  setAttr(go, "aria-label", "Launch a ticket for " + i.label);
+  setAttr(d, "aria-label", (i.dismissed ? "Restore " : "Dismiss ") + i.label);
+  const path = "/api/new-issues/" + encodeURIComponent(i.id);
+  go.onclick = () => newAct(go, path + "/launch", i, "launched");
+  d.onclick = () => newAct(d, path + (i.dismissed ? "/restore" : "/dismiss"), i, i.dismissed ? "restored" : "dismissed");
+}
+
+async function newAct(btn, path, i, done) {
+  if (btn.getAttribute("aria-disabled") === "true") return;
+  btn._busy = true;
+  setAttr(btn, "aria-disabled", "true");
+  const launch = done === "launched";
+  if (launch) setText(btn, "Launching...");
+  const error = $("new-err");
+  error.hidden = true;
+  try {
+    const r = await post(path);
+    if (launch && r && r.ok === false) throw new Error(r.error + (r.card ? " (card " + r.card + ")" : ""));
+    const row = itemOf($("nis"), btn);
+    if (row) row._gone = i.label + " " + done;
+    announce((launch ? "Launched " : done === "restored" ? "Restored " : "Dismissed ") + i.label + ".");
+  } catch (e) {
+    errFrom.set("new-err", btn);
+    setText($("new-err-text"), e.message);
+    error.hidden = false;
+    announce(e.message, true);
+  } finally {
+    btn._busy = false;
+    if (launch) setText(btn, "Launch");
+    const stale = !!btn.closest(".stale-item");
+    setAttr(btn, "data-stale", stale ? "1" : null);
+    setAttr(btn, "aria-disabled", stale ? "true" : null);
+  }
+}
+
+function syncNew(s) {
+  const p = panels.newIssues;
+  const open = s.newIssues || [];
+  const gone = s.dismissedIssues || [];
+  const all = newView.dismissed ? gone : open;
+  const list = filtering() ? all.filter((i) => matches(newDesc(i))) : all;
+  const live = newLive(p);
+  const quiet = firstState || newView.changed;
+  newView.changed = false;
+  const held = sync($("nis"), list, { key: (i) => i.id, make: makeNew, patch: patchNew, live, quiet,
+    gone: (el) => goneRow(el, "nrow gone meta", el._gone || (part(el, "label") || el).textContent + (newView.dismissed ? " restored" : " gone")) });
+  showHeld(p, held, null);
+  if (newView.dismissed && !gone.length && !items($("nis")).length) {
+    newView.dismissed = false;
+    newView.changed = true;
+    return syncNew(s);
+  }
+  const sec = $("p-new");
+  setAttr(sec, "data-view", newView.dismissed ? "dismissed" : "open");
+  setAttr(sec, "data-empty", !newView.dismissed && !list.length && !items($("nis")).length ? "" : null);
+  const e = $("nis-empty");
+  e.hidden = !newView.dismissed || list.length > 0 || items($("nis")).length > 0;
+  setText(e, gone.length ? "No dismissed issues match the filter." : "No dismissed issues.");
+  setText($("h-new-t"), newView.dismissed ? "Dismissed issues" : "New issues");
+  setText($("n-new"), newView.dismissed ? "" : shown(list.length, open.length, true));
+  setAttr($("n-new"), "aria-label", newView.dismissed || !open.length ? null : (filtering() ? list.length + " of " + open.length : open.length) + " new");
+  const v = $("new-view");
+  v.hidden = !gone.length && !newView.dismissed;
+  setAttr(v, "aria-pressed", newView.dismissed ? "true" : "false");
+  setText($("new-view-t"), newView.dismissed ? "Show new" : "Show dismissed");
+  setText($("n-dismissed"), newView.dismissed ? "" : String(gone.length || ""));
+  setAttr(v, "aria-label", newView.dismissed ? "Show new issues" : "Show " + gone.length + " dismissed issues");
+}
+
+function flipNewView() {
+  newView.dismissed = !newView.dismissed;
+  newView.changed = true;
+  const list = $("nis");
+  for (const el of items(list)) el.remove();
+  if (state) syncNew(state);
+}
+
 const openGroups = new Set();
 
 function whoOf(f) {
@@ -2643,6 +2805,7 @@ function render(s) {
   syncTickets(v.tree, s.cards, s.tree);
   syncAsks(s.asks);
   syncSettled(s);
+  syncNew(s);
   syncFeed(v.feed, s.feed);
   showTicketsHeld();
   const seen = new Set(v.cards.map((c) => c.id));
@@ -2860,7 +3023,7 @@ function jumpToTicket(thread) {
   }
 }
 
-const lists = () => [$("cards"), $("open"), $("done"), $("settled"), $("feed"), $("asks")];
+const lists = () => [$("cards"), $("nis"), $("open"), $("done"), $("settled"), $("feed"), $("asks")];
 
 function listOf(el) {
   for (const l of lists()) if (l.contains(el)) return l;
@@ -2930,6 +3093,14 @@ function wire() {
   $("new-tix").addEventListener("click", () => { const p = $("new-tix")._panel; if (p) applyHeld(p); });
   track("done", $("done"), null);
   track("settled", $("settled"), null);
+  track("newIssues", $("nis"), $("new-nis"));
+  const col = $("tixcol");
+  const flushNew = () => { if (state && newLive(panels.newIssues)) schedule(); };
+  col.addEventListener("pointerenter", () => { newView.colPointer = true; });
+  col.addEventListener("pointerleave", () => { newView.colPointer = false; flushNew(); });
+  col.addEventListener("focusout", () => setTimeout(flushNew, 0));
+  $("new-view").addEventListener("click", flipNewView);
+  $("new-err-close").addEventListener("click", () => closeErr("new-err"));
   track("feed", $("feed"), $("new-feed"));
   track("out", $("out"), null);
   for (const l of lists()) {
