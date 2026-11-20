@@ -237,3 +237,91 @@ fn an_unpaired_codex_marker_stops_before_any_write() {
         assert_eq!(std::fs::read_to_string(codex.join("AGENTS.md")).unwrap(), bad);
     }
 }
+
+#[cfg(unix)]
+fn fake_claude(dir: &Path, claude_json: &Path, fail_add: bool) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let log = dir.join("claude.log");
+    let script = dir.join("claude");
+    let add = if fail_add {
+        "exit 1".to_string()
+    } else {
+        format!(r#"printf '{{"mcpServers":{{"t3cm":%s}}}}' "$6" > '{}'"#, claude_json.display())
+    };
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho \"$2 ${{CLAUDE_CONFIG_DIR:-unset}}\" >> '{}'\ncase \"$2\" in\n  add-json) {add} ;;\nesac\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+#[cfg(unix)]
+fn old_entry(home: &Path) {
+    let entry =
+        json!({"type": "http", "url": "http://127.0.0.1:47731/mcp", "headers": {"X-T3-Thread": "${T3CODE_THREAD_ID}"}});
+    std::fs::write(home.join(".claude.json"), json!({"mcpServers": {"t3cm": entry}, "projects": {}}).to_string())
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn update_reregisters_a_claude_entry_that_sends_no_config_folder() {
+    let home = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    old_entry(home.path());
+    write_config(home.path(), &json!({"version": 1, "passes": ["pr"]}));
+    let env = Env {
+        claude_cmd: fake_claude(bin.path(), &home.path().join(".claude.json"), false),
+        ..Env::under(home.path(), None)
+    };
+    let before = steps::check(&env, &Bundle::embedded()).unwrap();
+    assert!(before.missing.iter().any(|m| m.id == steps::HEADER_STEP && m.fix == "t3cm skills update"));
+    assert!(steps::describe_steps(&before).contains("does not send X-T3-Config-Dir"));
+
+    let applied = steps::apply(&env, &Bundle::embedded()).unwrap();
+    assert_eq!(applied.registered, vec![home.path().join(".claude.json")], "{:?}", applied.notes);
+    assert!(steps::describe_applied(&applied).contains("re-registered Claude Code's t3cm server"));
+    let log = std::fs::read_to_string(bin.path().join("claude.log")).unwrap();
+    assert_eq!(log, "remove unset\nadd-json unset\n");
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(home.path().join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(
+        saved["mcpServers"]["t3cm"]["headers"],
+        json!({"X-T3-Thread": "${T3CODE_THREAD_ID}", "X-T3-Config-Dir": "${CLAUDE_CONFIG_DIR:-}"})
+    );
+    assert!(read_config(home.path())["steps"].as_array().unwrap().contains(&json!(steps::HEADER_STEP)));
+    assert!(!steps::check(&env, &Bundle::embedded()).unwrap().missing.iter().any(|m| m.id == steps::HEADER_STEP));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_registration_that_cannot_be_restored_fails_and_names_the_add_command() {
+    let home = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    old_entry(home.path());
+    let own = home.path().join(".claude-2");
+    let env = Env {
+        claude_cmd: fake_claude(bin.path(), &own.join(".claude.json"), true),
+        claude_json: own.join(".claude.json"),
+        claude_config_dir: Some(own.clone()),
+        claude: own.clone(),
+        ..Env::under(home.path(), None)
+    };
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::copy(home.path().join(".claude.json"), own.join(".claude.json")).unwrap();
+    let err = format!("{:#}", steps::apply(&env, &Bundle::embedded()).unwrap_err());
+    assert!(err.contains("restoring the old entry failed too"), "{err}");
+    assert!(
+        err.contains(&format!("run: CLAUDE_CONFIG_DIR='{}' claude mcp add-json --scope user t3cm", own.display())),
+        "{err}"
+    );
+    assert!(!err.contains("mcp remove"), "{err}");
+    let log = std::fs::read_to_string(bin.path().join("claude.log")).unwrap();
+    let dir = own.display().to_string();
+    assert_eq!(log, format!("remove {dir}\nadd-json {dir}\nadd-json {dir}\n"));
+}

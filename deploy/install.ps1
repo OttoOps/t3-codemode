@@ -57,7 +57,7 @@ $StoreDir = Join-Path $env:LOCALAPPDATA 't3-codemode'
 $Log = Join-Path $StoreDir 'logs\t3cm.log'
 $McpName = 't3cm'
 $McpAdd = @('mcp', 'add', '--transport', 'http', '--scope', 'user', $McpName, 'http://127.0.0.1:47731/mcp',
-    '--header', 'X-T3-Thread: ${T3CODE_THREAD_ID}')
+    '--header', 'X-T3-Thread: ${T3CODE_THREAD_ID}', '--header', 'X-T3-Config-Dir: ${CLAUDE_CONFIG_DIR:-}')
 
 function Fail([string]$Message) {
     throw "install.ps1: $Message"
@@ -166,7 +166,7 @@ function Register-Mcp {
         return
     }
     if ((Invoke-Native claude @('mcp', 'get', $McpName)) -eq 0) {
-        Write-Host "Claude Code already has an MCP server named $McpName; left as is."
+        Write-Host "Claude Code already has an MCP server named $McpName; left as is (t3cm skills update adds X-T3-Config-Dir to it)."
         return
     }
     & claude @McpAdd

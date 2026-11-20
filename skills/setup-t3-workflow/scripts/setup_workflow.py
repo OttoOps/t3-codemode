@@ -31,6 +31,7 @@ RULE_FILE = "t3-workflow-filed-issues.md"
 RULE_START = "<!-- t3-workflow:filed-issues:start -->"
 RULE_END = "<!-- t3-workflow:filed-issues:end -->"
 RULE_STEP = "rule:filed-issues"
+HEADER_STEP = "mcp:config-dir-header"
 STAMP_KEY = "t3-codemode-release"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -120,6 +121,18 @@ def rule_done(plan):
     return "current" in states and all(s in ("current", "no agent") for s in states)
 
 
+def header_missing():
+    base = os.environ.get("CLAUDE_CONFIG_DIR")
+    path = os.path.join(base, ".claude.json") if base else os.path.join(os.path.expanduser("~"), ".claude.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            entry = json.load(f)["mcpServers"]["t3cm"]
+        headers = entry.get("headers") or {}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+    return not any(str(k).lower() == "x-t3-config-dir" for k in headers)
+
+
 def steps_status(slots):
     steps = catalog()
     path = slots.config_path()
@@ -139,7 +152,7 @@ def steps_status(slots):
     for s in steps:
         if s["kind"] == "interview" and s["id"] not in out["recorded"]:
             out["missing"].append({"id": s["id"], "kind": s["kind"], "slot": s.get("slot")})
-        elif s["kind"] == "auto" and rule_missing:
+        elif s["kind"] == "auto" and (header_missing() if s["id"] == HEADER_STEP else rule_missing):
             out["missing"].append({"id": s["id"], "kind": s["kind"]})
     return out
 

@@ -12,6 +12,10 @@ pub const RULE_STEP: &str = "rule:filed-issues";
 pub const RULE_FILE: &str = "t3-workflow-filed-issues.md";
 pub const RULE_START: &str = "<!-- t3-workflow:filed-issues:start -->";
 pub const RULE_END: &str = "<!-- t3-workflow:filed-issues:end -->";
+pub const HEADER_STEP: &str = "mcp:config-dir-header";
+pub const MCP_NAME: &str = "t3cm";
+pub const CONFIG_DIR_HEADER: &str = "X-T3-Config-Dir";
+pub const CONFIG_DIR_VALUE: &str = "${CLAUDE_CONFIG_DIR:-}";
 pub const CONFIG_VERSION: u64 = 1;
 const CATALOG_VERSION: u32 = 1;
 const SETUP_SKILL: &str = "setup-t3-workflow";
@@ -48,7 +52,9 @@ pub fn catalog(bundle: &Bundle) -> Result<Vec<Step>> {
     }
     for s in &c.steps {
         match s.kind {
-            Kind::Auto if s.id != RULE_STEP => bail!("{CATALOG}: t3cm does not know how to apply step {}", s.id),
+            Kind::Auto if s.id != RULE_STEP && s.id != HEADER_STEP => {
+                bail!("{CATALOG}: t3cm does not know how to apply step {}", s.id)
+            }
             Kind::Interview if s.slot.is_none() => bail!("{CATALOG}: interview step {} names no slot", s.id),
             _ => {}
         }
@@ -60,6 +66,9 @@ pub struct Env {
     pub config: PathBuf,
     pub claude: PathBuf,
     pub codex: PathBuf,
+    pub claude_json: PathBuf,
+    pub claude_config_dir: Option<PathBuf>,
+    pub claude_cmd: PathBuf,
 }
 
 impl Env {
@@ -71,7 +80,9 @@ impl Env {
             env.config = p;
         }
         if let Some(p) = var("CLAUDE_CONFIG_DIR") {
-            env.claude = p;
+            env.claude_json = p.join(".claude.json");
+            env.claude = p.clone();
+            env.claude_config_dir = Some(p);
         }
         if let Some(p) = var("CODEX_HOME") {
             env.codex = p;
@@ -85,6 +96,9 @@ impl Env {
             config: config.join("t3-workflow").join("config.json"),
             claude: home.join(".claude"),
             codex: home.join(".codex"),
+            claude_json: home.join(".claude.json"),
+            claude_config_dir: None,
+            claude_cmd: PathBuf::from("claude"),
         }
     }
 }
@@ -187,6 +201,100 @@ pub fn rule_targets(env: &Env, bundle: &Bundle) -> Result<Vec<RuleTarget>> {
     Ok(out)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RegState {
+    Current,
+    Stale,
+    NoEntry,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Registration {
+    pub path: PathBuf,
+    pub status: RegState,
+    #[serde(skip)]
+    entry: Option<Map<String, Value>>,
+}
+
+pub fn registration(env: &Env) -> Registration {
+    let none = || Registration { path: env.claude_json.clone(), status: RegState::NoEntry, entry: None };
+    let Ok(raw) = std::fs::read(&env.claude_json) else { return none() };
+    let Ok(v) = serde_json::from_slice::<Value>(&raw) else { return none() };
+    let Some(entry) = v["mcpServers"][MCP_NAME].as_object() else { return none() };
+    let has = entry
+        .get("headers")
+        .and_then(Value::as_object)
+        .is_some_and(|h| h.keys().any(|k| k.eq_ignore_ascii_case(CONFIG_DIR_HEADER)));
+    let status = if has { RegState::Current } else { RegState::Stale };
+    Registration { path: env.claude_json.clone(), status, entry: Some(entry.clone()) }
+}
+
+fn reg_state(r: &Registration) -> AutoState {
+    match r.status {
+        RegState::Current => AutoState::Done,
+        RegState::Stale => AutoState::Missing,
+        RegState::NoEntry => AutoState::NotApplicable,
+    }
+}
+
+pub fn registered_entry(r: &Registration) -> Option<Value> {
+    let mut entry = r.entry.clone()?;
+    let mut headers = entry.get("headers").and_then(Value::as_object).cloned().unwrap_or_default();
+    headers.insert(CONFIG_DIR_HEADER.into(), Value::String(CONFIG_DIR_VALUE.into()));
+    entry.insert("headers".into(), Value::Object(headers));
+    Some(Value::Object(entry))
+}
+
+fn claude(env: &Env, args: &[&str]) -> Result<(), String> {
+    let mut cmd = std::process::Command::new(&env.claude_cmd);
+    cmd.args(args).stdin(std::process::Stdio::null());
+    match &env.claude_config_dir {
+        Some(d) => cmd.env("CLAUDE_CONFIG_DIR", d),
+        None => cmd.env_remove("CLAUDE_CONFIG_DIR"),
+    };
+    match cmd.output() {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(format!(
+            "claude {} exited {}: {}",
+            args.first().map_or("", |a| a),
+            o.status,
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Err(format!("cannot run {}: {e}", env.claude_cmd.display())),
+    }
+}
+
+enum Reregister {
+    Kept(String),
+    Lost(String),
+}
+
+fn reregister(env: &Env, r: &Registration) -> Result<(), Reregister> {
+    let new = registered_entry(r).ok_or_else(|| Reregister::Kept("no t3cm entry".into()))?.to_string();
+    let old = Value::Object(r.entry.clone().unwrap_or_default()).to_string();
+    claude(env, &["mcp", "remove", "--scope", "user", MCP_NAME]).map_err(Reregister::Kept)?;
+    if let Err(e) = claude(env, &["mcp", "add-json", "--scope", "user", MCP_NAME, &new]) {
+        return Err(match claude(env, &["mcp", "add-json", "--scope", "user", MCP_NAME, &old]) {
+            Ok(()) => Reregister::Kept(format!("{e}; the old entry is back in place")),
+            Err(e2) => Reregister::Lost(format!("{e}; restoring the old entry failed too ({e2})")),
+        });
+    }
+    Ok(())
+}
+
+pub fn reregister_command(env: &Env, r: &Registration, removed: bool) -> String {
+    let json = registered_entry(r).map(|v| v.to_string()).unwrap_or_default().replace('\'', r"'\''");
+    let prefix =
+        env.claude_config_dir.as_ref().map_or(String::new(), |d| format!("CLAUDE_CONFIG_DIR='{}' ", d.display()));
+    let add = format!("{prefix}claude mcp add-json --scope user {MCP_NAME} '{json}'");
+    if removed { add } else { format!("{prefix}claude mcp remove --scope user {MCP_NAME} && {add}") }
+}
+
+fn auto_state(id: &str, rule: &[RuleTarget], reg: &Registration) -> AutoState {
+    if id == HEADER_STEP { reg_state(reg) } else { rule_state(rule) }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AutoState {
     Done,
@@ -278,6 +386,7 @@ pub struct Steps {
     pub recorded: Vec<String>,
     pub missing: Vec<Missing>,
     pub rule: Vec<RuleTarget>,
+    pub registration: Registration,
 }
 
 impl Steps {
@@ -293,6 +402,7 @@ impl Steps {
 pub fn check(env: &Env, bundle: &Bundle) -> Result<Steps> {
     let steps = catalog(bundle)?;
     let rule = rule_targets(env, bundle)?;
+    let reg = registration(env);
     let config = load_config(&env.config);
     let (state, problem, written_by, recorded) = match &config {
         Config::Absent => (ConfigState::Absent, None, None, Vec::new()),
@@ -307,7 +417,7 @@ pub fn check(env: &Env, bundle: &Bundle) -> Result<Steps> {
     let mut missing = Vec::new();
     for s in &steps {
         let fix = match s.kind {
-            Kind::Auto if rule_state(&rule) == AutoState::Missing => "t3cm skills update".to_string(),
+            Kind::Auto if auto_state(&s.id, &rule, &reg) == AutoState::Missing => "t3cm skills update".to_string(),
             Kind::Auto => continue,
             Kind::Interview if recorded.contains(&s.id) || state == ConfigState::Problem => continue,
             Kind::Interview if state == ConfigState::Absent => format!("run {SETUP_SKILL}"),
@@ -324,6 +434,7 @@ pub fn check(env: &Env, bundle: &Bundle) -> Result<Steps> {
         recorded,
         missing,
         rule,
+        registration: reg,
     })
 }
 
@@ -335,6 +446,8 @@ pub fn missing_steps(env: &Env, bundle: &Bundle) -> Result<Vec<Missing>> {
 #[serde(rename_all = "camelCase")]
 pub struct Applied {
     pub wrote: Vec<PathBuf>,
+    pub registered: Vec<PathBuf>,
+    pub notes: Vec<String>,
     pub newly_recorded: Vec<String>,
     pub steps: Steps,
 }
@@ -350,11 +463,29 @@ pub fn apply(env: &Env, bundle: &Bundle) -> Result<Applied> {
             wrote.push(t.path.clone());
         }
     }
+    let (mut registered, mut notes) = (Vec::new(), Vec::new());
+    let mut reg = registration(env);
+    if steps.iter().any(|s| s.id == HEADER_STEP) && reg.status == RegState::Stale {
+        match reregister(env, &reg) {
+            Ok(()) => {
+                registered.push(reg.path.clone());
+                reg = registration(env);
+            }
+            Err(Reregister::Kept(e)) => notes.push(format!(
+                "could not re-register Claude Code's {MCP_NAME} server with the {CONFIG_DIR_HEADER} header ({e}); run: {}",
+                reregister_command(env, &reg, false)
+            )),
+            Err(Reregister::Lost(e)) => bail!(
+                "removed Claude Code's {MCP_NAME} server but could not add it back ({e}); Claude Code has no {MCP_NAME} server until you run: {}",
+                reregister_command(env, &reg, true)
+            ),
+        }
+    }
     let mut newly = Vec::new();
     if let Config::Found { mut cfg, recorded } = load_config(&env.config) {
         let mut ids = done_ids(&steps, &recorded);
         for s in steps.iter().filter(|s| s.kind == Kind::Auto) {
-            if rule_state(&rule) == AutoState::Done && !ids.contains(&s.id) {
+            if auto_state(&s.id, &rule, &reg) == AutoState::Done && !ids.contains(&s.id) {
                 ids.push(s.id.clone());
                 newly.push(s.id.clone());
             }
@@ -370,7 +501,7 @@ pub fn apply(env: &Env, bundle: &Bundle) -> Result<Applied> {
             write_atomic(&real(&env.config), text.as_bytes())?;
         }
     }
-    Ok(Applied { wrote, newly_recorded: newly, steps: check(env, bundle)? })
+    Ok(Applied { wrote, registered, notes, newly_recorded: newly, steps: check(env, bundle)? })
 }
 
 fn setup_lines(s: &Steps, out: &mut String) {
@@ -416,6 +547,12 @@ pub fn describe_steps(s: &Steps) -> String {
                 t.path.display()
             ));
         }
+        if s.registration.status == RegState::Stale {
+            out.push_str(&format!(
+                "setup step {HEADER_STEP}: Claude Code's {MCP_NAME} server in {} does not send {CONFIG_DIR_HEADER}\n",
+                s.registration.path.display()
+            ));
+        }
         out.push_str("fix: t3cm skills update\n");
     }
     setup_lines(s, &mut out);
@@ -429,6 +566,15 @@ pub fn describe_applied(a: &Applied) -> String {
     let mut out = String::new();
     for p in &a.wrote {
         out.push_str(&format!("wrote the filed-issue rule to {}\n", p.display()));
+    }
+    for p in &a.registered {
+        out.push_str(&format!(
+            "re-registered Claude Code's {MCP_NAME} server in {} with the {CONFIG_DIR_HEADER} header; new sessions send it\n",
+            p.display()
+        ));
+    }
+    for n in &a.notes {
+        out.push_str(&format!("warning: {n}\n"));
     }
     if !a.newly_recorded.is_empty() {
         out.push_str(&format!(

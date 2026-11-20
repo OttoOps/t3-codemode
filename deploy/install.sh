@@ -14,7 +14,7 @@ MAC_LOGS="$HOME/Library/Logs/t3-codemode"
 MCP_NAME=t3cm
 MCP_URL=http://127.0.0.1:47731/mcp
 # shellcheck disable=SC2016
-MCP_ADD=(claude mcp add --transport http --scope user "$MCP_NAME" "$MCP_URL" --header 'X-T3-Thread: ${T3CODE_THREAD_ID}')
+MCP_ADD=(claude mcp add --transport http --scope user "$MCP_NAME" "$MCP_URL" --header 'X-T3-Thread: ${T3CODE_THREAD_ID}' --header 'X-T3-Config-Dir: ${CLAUDE_CONFIG_DIR:-}')
 
 usage() {
   cat <<EOF
@@ -186,7 +186,7 @@ register_mcp() {
     return
   fi
   if claude mcp get "$MCP_NAME" >/dev/null 2>&1; then
-    echo "Claude Code already has an MCP server named $MCP_NAME; left as is."
+    echo "Claude Code already has an MCP server named $MCP_NAME; left as is (t3cm skills update adds X-T3-Config-Dir to it)."
   else
     "${MCP_ADD[@]}"
   fi
