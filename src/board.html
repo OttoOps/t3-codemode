@@ -436,11 +436,84 @@ dialog dd { margin: 0; color: var(--ink-2); }
 dialog .row { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
 kbd { font-family: var(--mono); font-size: 12px; }
 
+.lctl { display: none; }
+.panes.lay { display: flex; }
+.lay .tixcol { display: none; }
+.lcol { display: flex; flex-direction: column; min-width: 0; min-height: 0; flex: 1 1 0px; background: var(--panel); position: relative; overflow: hidden; }
+.lcol[data-i="0"] { flex: 0 0 440px; }
+.lcol[data-i="2"] { flex: 0 0 380px; }
+.lcol.vacant { flex: 0 0 0px !important; overflow: hidden; }
+.lay.dragging .lcol.vacant { flex-basis: 160px !important; background: var(--panel-2); }
+.lcol.vacant::before {
+  content: attr(data-hint); display: none; margin: auto; padding: 0 16px; text-align: center;
+  color: var(--ink-2); font-size: 13px; line-height: 18px;
+}
+.lay.dragging .lcol.vacant::before { display: block; }
+.lay.dragging .lcol.vacant.over::before { display: none; }
+#main.lay .lcol > .pane, #main.lay .lcol > #composer { border: 0; flex: 1 1 0px; max-height: none; min-height: 48px; }
+#main.lay .lcol > #p-new { flex: 0 1 auto; max-height: min(40%, 240px); }
+#main.lay .lcol > #composer { flex: 0 1 auto; max-height: 70%; }
+#main.lay .lcol > #p-new { min-height: 40px; }
+#main.lay .newslot { min-width: 0; }
+#main.lay .ph { min-width: 0; flex-wrap: wrap; height: auto; min-height: 48px; }
+#main.lay #p-new .ph { min-height: 40px; }
+#main.lay .form .ph { min-height: 0; }
+#main.lay .lcol > .collapsed { flex: 0 0 auto !important; }
+.lay .collapsed > .body, .lay #composer.collapsed #out, .lay #composer.collapsed #ask,
+.lay #composer.collapsed #launch .row { display: none; }
+#main.lay .lcol > * > .ph, #main.lay #launch .ph { cursor: grab; }
+.lay .lctl { display: flex; align-items: center; gap: 4px; flex: none; margin-left: 4px; }
+.lay #launch .lctl { margin-left: auto; }
+.lctl button {
+  width: 24px; height: 24px; padding: 0; border: 1px solid transparent; border-radius: 4px; background: none; color: var(--ink-2);
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.lctl .grip { cursor: grab; }
+.lctl button:hover { background: var(--panel-2); color: var(--ink); }
+.lctl button:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.lctl svg { width: 16px; height: 16px; }
+.lctl .fold svg { transition: transform 120ms ease-out; }
+.collapsed .lctl .fold svg { transform: rotate(-90deg); }
+.vsplit, .hsplit { flex: none; position: relative; z-index: 2; touch-action: none; background: var(--line); }
+.vsplit { width: 1px; cursor: col-resize; }
+.hsplit { height: 1px; cursor: row-resize; }
+.vsplit::after, .hsplit::after { content: ""; position: absolute; transition: background 120ms ease-out 240ms; }
+.vsplit::after { top: 0; bottom: 0; left: -4px; right: -4px; }
+.hsplit::after { left: 0; right: 0; top: -4px; bottom: -4px; }
+.vsplit:hover::after, .hsplit:not(.fixed):hover::after, .vsplit.on::after, .hsplit.on::after { background: var(--accent); }
+.vsplit:hover::after, .vsplit.on::after { left: -2px; right: -2px; }
+.hsplit:not(.fixed):hover::after, .hsplit.on::after { top: -2px; bottom: -2px; }
+.vsplit.on::after, .hsplit.on::after { transition: none; }
+.vsplit:focus-visible, .hsplit:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.hsplit.fixed { cursor: auto; }
+.hsplit.fixed::after { display: none; }
+.lay.resizing, .lay.resizing * { user-select: none; }
+.lay.resizing.cols, .lay.resizing.cols * { cursor: col-resize !important; }
+.lay.resizing.rows, .lay.resizing.rows * { cursor: row-resize !important; }
+.lay.dragging, .lay.dragging * { user-select: none; cursor: grabbing !important; }
+.dropmark { flex: none; height: 4px; margin: 0 8px; background: var(--accent); border-radius: 4px; position: relative; top: -2px; z-index: 5; pointer-events: none; }
+.lay .dragged { opacity: 0.4; }
+.dropzone {
+  position: absolute; left: 8px; right: 8px; z-index: 4; pointer-events: none; display: flex; align-items: center; justify-content: center;
+  border: 2px dashed var(--accent); border-radius: 4px; background: color-mix(in srgb, var(--accent) 14%, var(--panel));
+  color: var(--accent); font-size: 13px; line-height: 18px; font-weight: 600;
+}
+.lghost {
+  position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; display: flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 12px; border: 1px solid var(--accent); border-radius: 4px; background: var(--panel); color: var(--ink);
+  font-size: 13px; line-height: 18px; font-weight: 600; white-space: nowrap;
+}
+.lghost svg { width: 16px; height: 16px; color: var(--ink-2); }
+
 @media (max-width: 1439px) {
   .panes { grid-template-columns: 400px minmax(0, 1fr) 340px; }
+  .lcol[data-i="0"] { flex-basis: 400px; }
+  .lcol[data-i="2"] { flex-basis: 340px; }
 }
 @media (max-width: 1279px) {
   .panes { grid-template-columns: 360px minmax(0, 1fr) 320px; }
+  .lcol[data-i="0"] { flex-basis: 360px; }
+  .lcol[data-i="2"] { flex-basis: 320px; }
 }
 @media (max-width: 1199px) {
   .panes {
@@ -588,6 +661,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
       </div>
     </span>
     <button class="btn" type="button" id="notify" hidden><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 11V7a4 4 0 0 1 8 0v4l1 1.5H3z"/><path d="M6.5 14h3"/></svg><span class="w" id="notify-text">Notify me</span></button>
+    <button class="btn" type="button" id="lay-reset" hidden>Reset layout</button>
     <button class="btn" type="button" id="keys-btn" aria-haspopup="dialog"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4 7h1M7 7h2M11 7h1M5 9.5h6"/></svg><span class="w">Shortcuts</span></button>
   </span>
 </header>
@@ -723,6 +797,10 @@ kbd { font-family: var(--mono); font-size: 12px; }
     <dt>1 to 9</dt><dd>Focus that option; Enter sends it</dd>
     <dt>Esc</dt><dd>Back to the panel</dd>
     <dt>?</dt><dd>This list</dd>
+    <dt class="lay-only" hidden>Drag a header</dt><dd class="lay-only" hidden>Move a panel; Esc cancels</dd>
+    <dt class="lay-only" hidden>Grip + arrows</dt><dd class="lay-only" hidden>Move the focused panel</dd>
+    <dt class="lay-only" hidden>Double-click a header</dt><dd class="lay-only" hidden>Collapse or expand it</dd>
+    <dt class="lay-only" hidden>Divider + arrows</dt><dd class="lay-only" hidden>Resize; double-click resets</dd>
   </dl>
   <div class="row">
     <label><input type="checkbox" id="keys-on" checked> Single-key shortcuts</label>
@@ -2521,14 +2599,38 @@ function syncSettled(s, force) {
   setText($("n-settled"), shown(list.length, s.counts.settled, true));
 }
 
-const newView = { dismissed: false, changed: false, colPointer: false };
+const newView = { dismissed: false, changed: false, colPointer: false, hover: null };
 
 function newDesc(i) {
   return { project: projectKey(i), phase: null, text: [i.label, i.repo, i.title, i.note, i.threadTitle] };
 }
 
+function newColumn() {
+  return lay.on ? $("p-new").parentNode : $("tixcol");
+}
+
+function flushNew() { if (state && newLive(panels.newIssues)) schedule(); }
+
+function watchNewColumn(col, holds) {
+  col.addEventListener("pointerenter", () => { newView.hover = col; newView.colPointer = holds(); });
+  col.addEventListener("pointerleave", () => {
+    if (newView.hover === col) newView.hover = null;
+    newView.colPointer = false;
+    setTimeout(flushNew, 0);
+  });
+  col.addEventListener("focusout", () => setTimeout(flushNew, 0));
+}
+
+function newPointer() {
+  return lay.on ? !!newView.hover && newView.hover === newColumn() : newView.colPointer;
+}
+
+function newShutScrolled() {
+  return lay.on && !!lay.m.c.new && !!lay.scroll.new && lay.scroll.new.some((t) => t > 2);
+}
+
 function newLive(p) {
-  return p.force || newView.changed || firstState || (isLive(p) && !newView.colPointer && !focusInside($("tixcol")));
+  return p.force || newView.changed || firstState || (isLive(p) && !newShutScrolled() && !newPointer() && !focusInside(newColumn()));
 }
 
 function makeNew() {
@@ -3073,6 +3175,7 @@ function setMode(mode) {
 }
 
 function jump(where) {
+  layReveal(where);
   if (where === "launch" || where === "ask") {
     setMode(where);
     $(where === "launch" ? "issues" : "question").focus();
@@ -3099,6 +3202,7 @@ function focusList(list) {
 }
 
 function jumpToCard(id) {
+  layReveal("decisions");
   selectPanel("decisions");
   let el = cardEl(id);
   if (!el) { applyHeld(panels.cards); el = cardEl(id); }
@@ -3108,6 +3212,7 @@ function jumpToCard(id) {
 
 function jumpToTicket(thread) {
   if (!thread) return;
+  layReveal("tickets");
   selectPanel("tickets");
   for (const tab of ["open", "done"]) {
     const el = $(tab).querySelector('[data-thread="' + CSS.escape(thread) + '"]');
@@ -3184,6 +3289,496 @@ function openKeys() {
   if (d.showModal) d.showModal();
 }
 
+const LAY_KEY = "t3board.layout";
+const LAY_IDS = { dec: "p-dec", new: "p-new", tix: "p-tix", cmd: "composer", act: "p-act" };
+const LAY_NAMES = { dec: "Needs you", new: "New issues", tix: "Tickets", cmd: "Launch and Ask", act: "Activity" };
+const LAY_JUMP = { decisions: "dec", tickets: "tix", activity: "act", launch: "cmd", ask: "cmd" };
+const LAY_MIN_W = 320;
+const LAY_MIN_H = 96;
+const LAY_DRAG_PX = 4;
+const LAY_GROWS = new Set(["dec", "tix", "act"]);
+const lay = { on: false, cols: [], m: null, drag: null, scroll: {} };
+
+function layDefault() {
+  return { cols: [{ w: null, p: ["dec"] }, { w: null, p: ["new", "tix"] }, { w: null, p: ["cmd", "act"] }], h: {}, c: {} };
+}
+
+function layValid(m) {
+  const want = Object.keys(LAY_IDS);
+  if (!m || !Array.isArray(m.cols) || m.cols.length !== 3) return false;
+  if (!m.cols.every((c) => c && Array.isArray(c.p) && (c.w === null || c.w === undefined || (typeof c.w === "number" && c.w > 0)))) return false;
+  const seen = m.cols.flatMap((c) => c.p);
+  return seen.length === want.length && want.every((k) => seen.includes(k));
+}
+
+function layParse(raw) {
+  try {
+    const m = JSON.parse(raw || "null");
+    if (!layValid(m)) return layDefault();
+    const num = (o) => Object.fromEntries(Object.entries(o && typeof o === "object" ? o : {}).filter(([k, v]) => k in LAY_IDS && typeof v === "number" && v > 0));
+    const on = (o) => Object.fromEntries(Object.entries(o && typeof o === "object" ? o : {}).filter(([k, v]) => k in LAY_IDS && v === true));
+    return { cols: m.cols.map((c) => ({ w: typeof c.w === "number" ? c.w : null, p: c.p.slice() })), h: num(m.h), c: on(m.c) };
+  } catch (_) { return layDefault(); }
+}
+
+function layLoad() {
+  try { return layParse(localStorage.getItem(LAY_KEY)); } catch (_) { return layDefault(); }
+}
+
+function layPlain() { return JSON.stringify(lay.m) === JSON.stringify(layDefault()); }
+
+function laySave() {
+  const plain = layPlain();
+  try { if (plain) localStorage.removeItem(LAY_KEY); else localStorage.setItem(LAY_KEY, JSON.stringify(lay.m)); } catch (_) {}
+  $("lay-reset").hidden = !lay.on || plain;
+}
+
+const GRIP_SVG = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="6" cy="3.5" r="1.2"/><circle cx="10" cy="3.5" r="1.2"/><circle cx="6" cy="8" r="1.2"/><circle cx="10" cy="8" r="1.2"/><circle cx="6" cy="12.5" r="1.2"/><circle cx="10" cy="12.5" r="1.2"/></svg>';
+const FOLD_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>';
+
+function layHead(k) {
+  const el = $(LAY_IDS[k]);
+  return k === "cmd" ? el.querySelector("#launch .ph") : el.querySelector(".ph");
+}
+
+function layControls() {
+  for (const k of Object.keys(LAY_IDS)) {
+    const ph = layHead(k);
+    if (!ph || ph.querySelector(".lctl")) continue;
+    const grip = h("button", { class: "grip", type: "button", "data-lay": k, "aria-label": "Move " + LAY_NAMES[k], "aria-describedby": "lay-hint", title: "Move: drag, or use arrow keys" });
+    const fold = h("button", { class: "fold", type: "button", "data-lay": k, "aria-expanded": "true", "aria-label": "Collapse " + LAY_NAMES[k], title: "Collapse" });
+    grip.innerHTML = GRIP_SVG;
+    fold.innerHTML = FOLD_SVG;
+    ph.append(h("span", { class: "lctl" }, grip, fold));
+    fold.addEventListener("click", () => layFold(k));
+    grip.addEventListener("keydown", (e) => layKeyMove(e, k));
+    ph.addEventListener("pointerdown", (e) => layPress(e, k));
+    ph.addEventListener("dblclick", (e) => {
+      if (e.target.closest && e.target.closest("button, a, input, textarea, select, [role=tab]")) return;
+      layFold(k);
+    });
+  }
+}
+
+function layFold(k, open) {
+  if (!lay.on) return;
+  const was = !!lay.m.c[k];
+  const now = open === undefined ? !was : !open;
+  if (now === was) return;
+  const pane = $(LAY_IDS[k]);
+  const lists = [...pane.querySelectorAll(".scroll, #out")];
+  if (now) {
+    lay.scroll[k] = lists.map((el) => el.scrollTop);
+    const a = document.activeElement;
+    const head = layHead(k);
+    if (a && pane.contains(a) && !(head && head.contains(a)) && head) head.querySelector(".fold").focus({ preventScroll: true });
+  }
+  if (now) lay.m.c[k] = true; else delete lay.m.c[k];
+  layRender();
+  if (!now && lay.scroll[k]) lists.forEach((el, i) => { el.scrollTop = lay.scroll[k][i] || 0; });
+  laySave();
+  if (open === undefined) announce(LAY_NAMES[k] + (now ? " collapsed." : " expanded."));
+}
+
+function layWhere(k) {
+  for (let i = 0; i < lay.m.cols.length; i++) {
+    const j = lay.m.cols[i].p.indexOf(k);
+    if (j >= 0) return [i, j];
+  }
+  return [0, 0];
+}
+
+function layMove(k, ci, idx) {
+  const [fi, fj] = layWhere(k);
+  if (fi === ci && fj < idx) idx--;
+  if (fi === ci && fj === idx) return false;
+  lay.m.cols[fi].p.splice(fj, 1);
+  const to = lay.m.cols[ci].p;
+  if (!to.length) {
+    const ws = lay.m.cols.filter((c) => c.p.length && typeof c.w === "number").map((c) => c.w);
+    lay.m.cols[ci].w = ws.length ? ws.reduce((a, b) => a + b, 0) / ws.length : null;
+  }
+  to.splice(Math.max(0, Math.min(idx, to.length)), 0, k);
+  for (const i of new Set([fi, ci])) for (const p of lay.m.cols[i].p) delete lay.m.h[p];
+  if (!lay.m.cols[fi].p.length) lay.m.cols[fi].w = null;
+  layRender(true);
+  laySave();
+  return true;
+}
+
+function laySpot(k) {
+  const [c, j] = layWhere(k);
+  return "column " + (c + 1) + ", position " + (j + 1) + " of " + lay.m.cols[c].p.length;
+}
+
+function layKeyMove(e, k) {
+  if (!lay.on) return;
+  const dirs = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
+  if (e.ctrlKey || e.metaKey || e.altKey || !dirs.includes(e.key)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const [ci, j] = layWhere(k);
+  const n = lay.m.cols.length;
+  let to = null;
+  if (e.key === "ArrowUp" && j > 0) to = [ci, j - 1];
+  else if (e.key === "ArrowDown" && j < lay.m.cols[ci].p.length - 1) to = [ci, j + 2];
+  else if (e.key === "ArrowLeft" && ci > 0) to = [ci - 1, Math.min(j, lay.m.cols[ci - 1].p.length)];
+  else if (e.key === "ArrowRight" && ci < n - 1) to = [ci + 1, Math.min(j, lay.m.cols[ci + 1].p.length)];
+  if (!to) { announce(LAY_NAMES[k] + " is already at " + laySpot(k) + "."); return; }
+  layMove(k, to[0], to[1]);
+  const head = layHead(k);
+  const g = head && head.querySelector(".grip");
+  if (g) g.focus({ preventScroll: true });
+  announce(LAY_NAMES[k] + " moved to " + laySpot(k) + ".");
+}
+
+function layPress(e, k) {
+  if (!lay.on || e.button !== 0 || !e.isPrimary) return;
+  const t = e.target;
+  if (t.closest && t.closest("a, input, textarea, select, [role=tab], button:not(.grip)")) return;
+  e.preventDefault();
+  const ph = e.currentTarget;
+  const x0 = e.clientX, y0 = e.clientY;
+  let started = false;
+  const move = (ev) => {
+    if (!started) {
+      if (Math.abs(ev.clientX - x0) < LAY_DRAG_PX && Math.abs(ev.clientY - y0) < LAY_DRAG_PX) return;
+      started = true;
+      layDragBegin(k, ph, ev);
+    }
+    layDragTo(ev.clientX, ev.clientY);
+  };
+  const stop = (ev, commit) => {
+    ph.removeEventListener("pointermove", move);
+    ph.removeEventListener("pointerup", up);
+    ph.removeEventListener("pointercancel", cancel);
+    try { ph.releasePointerCapture(ev.pointerId); } catch (_) {}
+    if (started) layDragEnd(commit);
+  };
+  const up = (ev) => stop(ev, true);
+  const cancel = (ev) => stop(ev, false);
+  try { ph.setPointerCapture(e.pointerId); } catch (_) {}
+  ph.addEventListener("pointermove", move);
+  ph.addEventListener("pointerup", up);
+  ph.addEventListener("pointercancel", cancel);
+}
+
+function layDragBegin(k, ph, ev) {
+  const ghost = h("div", { class: "lghost", "aria-hidden": "true" }, LAY_NAMES[k]);
+  ghost.insertAdjacentHTML("afterbegin", GRIP_SVG);
+  document.body.append(ghost);
+  const r = ph.getBoundingClientRect();
+  lay.drag = { k, ghost, mark: h("div", { class: "dropmark", "aria-hidden": "true" }), zone: h("div", { class: "dropzone", "aria-hidden": "true" }, LAY_NAMES[k]), to: null, dx: Math.min(ev.clientX - r.left, 160), dy: ev.clientY - r.top, over: null };
+  $(LAY_IDS[k]).classList.add("dragged");
+  $("main").classList.add("dragging");
+}
+
+function layDragTo(x, y) {
+  const d = lay.drag;
+  if (!d) return;
+  d.ghost.style.transform = "translate(" + Math.round(x - d.dx) + "px," + Math.round(y - d.dy) + "px)";
+  let ci = -1;
+  lay.cols.forEach((col, i) => {
+    const r = col.getBoundingClientRect();
+    if (r.width && x >= r.left && x < r.right && y >= r.top && y < r.bottom) ci = i;
+  });
+  if (ci < 0) return layDragClear();
+  const keys = lay.m.cols[ci].p;
+  let idx = keys.length;
+  for (let i = 0; i < keys.length; i++) {
+    const r = $(LAY_IDS[keys[i]]).getBoundingClientRect();
+    if (y < r.top + r.height / 2) { idx = i; break; }
+  }
+  const col = lay.cols[ci];
+  if (d.over !== col) { if (d.over) d.over.classList.remove("over"); col.classList.add("over"); d.over = col; }
+  if (d.to && d.to[0] === ci && d.to[1] === idx) return;
+  d.to = [ci, idx];
+  const before = idx < keys.length ? $(LAY_IDS[keys[idx]]) : null;
+  const prev = before && before.previousElementSibling;
+  col.insertBefore(d.mark, prev && prev.classList.contains("hsplit") ? prev : before);
+  const cr = col.getBoundingClientRect();
+  const lift = (el) => { const r = el.getBoundingClientRect(); return [r.top - cr.top, r.height]; };
+  let top, height;
+  if (!keys.length) { top = 8; height = cr.height - 16; }
+  else if (before) { const [t, hh] = lift(before); top = t + 4; height = Math.min(160, Math.max(48, hh / 2)); }
+  else { const [t, hh] = lift($(LAY_IDS[keys[keys.length - 1]])); height = Math.min(160, Math.max(48, hh / 2)); top = t + hh - height - 4; }
+  d.zone.style.top = Math.round(top) + "px";
+  d.zone.style.height = Math.round(height) + "px";
+  if (d.zone.parentNode !== col) col.append(d.zone);
+}
+
+function layDragClear() {
+  const d = lay.drag;
+  if (d.over) d.over.classList.remove("over");
+  d.over = null;
+  d.to = null;
+  if (d.mark.parentNode) d.mark.remove();
+  if (d.zone.parentNode) d.zone.remove();
+}
+
+function layDragEnd(commit) {
+  const d = lay.drag;
+  if (!d) return;
+  const to = commit ? d.to : null;
+  layDragClear();
+  d.ghost.remove();
+  lay.drag = null;
+  $(LAY_IDS[d.k]).classList.remove("dragged");
+  $("main").classList.remove("dragging");
+  if (to && layMove(d.k, to[0], to[1])) announce(LAY_NAMES[d.k] + " moved to " + laySpot(d.k) + ".");
+}
+
+function layEscape(e) {
+  if (e.key !== "Escape" || !lay.drag) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  layDragEnd(false);
+  announce("Move cancelled.");
+}
+
+function laySplitter(cls, attrs, start, reset) {
+  const s = h("div", Object.assign({ class: cls, role: "separator", tabindex: "0" }, attrs));
+  const rows = cls === "hsplit";
+  s.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || !e.isPrimary) return;
+    e.preventDefault();
+    const go = start();
+    if (!go) return;
+    s.setPointerCapture(e.pointerId);
+    s.classList.add("on");
+    $("main").classList.add("resizing", rows ? "rows" : "cols");
+    const x0 = e.clientX, y0 = e.clientY;
+    const move = (ev) => go(rows ? ev.clientY - y0 : ev.clientX - x0);
+    const up = () => {
+      s.removeEventListener("pointermove", move);
+      s.removeEventListener("pointerup", up);
+      s.removeEventListener("pointercancel", up);
+      s.classList.remove("on");
+      $("main").classList.remove("resizing", "rows", "cols");
+      laySave();
+    };
+    s.addEventListener("pointermove", move);
+    s.addEventListener("pointerup", up);
+    s.addEventListener("pointercancel", up);
+  });
+  s.addEventListener("keydown", (e) => {
+    const step = e.shiftKey ? 96 : 24;
+    const keys = rows ? { ArrowUp: -step, ArrowDown: step } : { ArrowLeft: -step, ArrowRight: step };
+    const dv = keys[e.key];
+    if (dv === undefined) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const go = start();
+    if (go) { go(dv); laySave(); }
+  });
+  s.addEventListener("dblclick", () => { reset(); layApplySizes(); laySave(); announce("Sizes reset."); });
+  return s;
+}
+
+function layColResize(a, b) {
+  return () => {
+    const live = lay.cols.map((el, i) => (lay.m.cols[i].p.length ? el.getBoundingClientRect().width : null));
+    const wa = live[a], wb = live[b];
+    if (wa === null || wb === null || wa + wb < 2 * LAY_MIN_W) return null;
+    lay.m.cols.forEach((c, i) => { c.w = live[i]; });
+    layApplySizes();
+    return (dx) => {
+      const d = Math.max(LAY_MIN_W - wa, Math.min(wb - LAY_MIN_W, dx));
+      lay.m.cols[a].w = wa + d;
+      lay.m.cols[b].w = wb - d;
+      layApplySizes();
+    };
+  };
+}
+
+function layRowResize(ci, ka, kb) {
+  return () => {
+    const keys = lay.m.cols[ci].p.filter((k) => !lay.m.c[k]);
+    const live = {};
+    for (const k of keys) live[k] = $(LAY_IDS[k]).getBoundingClientRect().height;
+    const ha = live[ka], hb = live[kb];
+    if (ha + hb < 2 * LAY_MIN_H || keys.some((k) => !(live[k] > 0))) return null;
+    for (const k of keys) lay.m.h[k] = live[k];
+    layApplySizes();
+    return (dy) => {
+      const d = Math.max(LAY_MIN_H - ha, Math.min(hb - LAY_MIN_H, dy));
+      lay.m.h[ka] = ha + d;
+      lay.m.h[kb] = hb - d;
+      layApplySizes();
+    };
+  };
+}
+
+function layApplySizes() {
+  const filled = lay.m.cols.filter((c) => c.p.length);
+  const wsum = filled.reduce((s, c) => s + (typeof c.w === "number" ? c.w : 0), 0);
+  lay.m.cols.forEach((c, i) => {
+    const el = lay.cols[i];
+    el.style.flex = c.p.length && typeof c.w === "number" ? c.w + " 1 0px" : "";
+    el.style.minWidth = c.p.length ? LAY_MIN_W + "px" : "";
+    const open = c.p.filter((k) => !lay.m.c[k]);
+    const fill = open.some((k) => LAY_GROWS.has(k) || typeof lay.m.h[k] === "number") ? null : open[open.length - 1];
+    const hsum = c.p.reduce((s, k) => s + (!lay.m.c[k] && typeof lay.m.h[k] === "number" ? lay.m.h[k] : 0), 0);
+    for (const k of c.p) {
+      const pane = $(LAY_IDS[k]);
+      const w = lay.m.h[k];
+      const sized = !lay.m.c[k] && typeof w === "number";
+      pane.style.flex = sized ? w + " 1 0px" : k === fill ? "1 1 0px" : "";
+      pane.style.maxHeight = sized || k === fill ? "none" : "";
+      pane.style.minHeight = sized ? LAY_MIN_H + "px" : "";
+    }
+    const sep = el.previousElementSibling;
+    if (sep && sep.classList.contains("vsplit") && wsum) sep.setAttribute("aria-valuenow", String(Math.round(100 * el.getBoundingClientRect().left / Math.max(1, $("main").getBoundingClientRect().width))));
+    for (const s of [...el.children].filter((x) => x.classList.contains("hsplit") && !x.classList.contains("fixed"))) {
+      const above = s.previousElementSibling;
+      if (above && hsum) s.setAttribute("aria-valuenow", String(Math.round(100 * above.getBoundingClientRect().height / Math.max(1, el.getBoundingClientRect().height))));
+    }
+  });
+}
+
+function layFlip(before) {
+  const calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (calm) return;
+  for (const [el, r] of before) {
+    const n = el.getBoundingClientRect();
+    const dx = r.left - n.left, dy = r.top - n.top;
+    if (!dx && !dy) continue;
+    el.style.transition = "none";
+    el.style.transform = "translate(" + dx + "px," + dy + "px)";
+    requestAnimationFrame(() => {
+      el.style.transition = "transform 160ms ease-out";
+      el.style.transform = "";
+      el.addEventListener("transitionend", () => { el.style.transition = ""; }, { once: true });
+    });
+  }
+}
+
+function layPlace(parent, nodes) {
+  nodes.forEach((n, i) => {
+    const at = parent.children[i] || null;
+    if (at !== n) parent.insertBefore(n, at);
+  });
+}
+
+function layRender(animate) {
+  const main = $("main");
+  const panes = Object.values(LAY_IDS).map($);
+  const before = animate ? panes.map((el) => [el, el.getBoundingClientRect()]) : [];
+  const keep = [];
+  for (const el of main.querySelectorAll(".scroll, #out, #composer")) keep.push([el, el.scrollTop]);
+  const active = document.activeElement;
+  for (const s of main.querySelectorAll(".vsplit, .hsplit")) s.remove();
+  const filled = [];
+  const top = [];
+  lay.m.cols.forEach((c, i) => {
+    const col = lay.cols[i];
+    col.classList.toggle("vacant", !c.p.length);
+    if (c.p.length) col.removeAttribute("data-hint"); else col.setAttribute("data-hint", "Drop here for a new column");
+    col.setAttribute("aria-label", "Column " + (i + 1));
+    const kids = [];
+    let prev = null;
+    c.p.forEach((k, j) => {
+      const pane = $(LAY_IDS[k]);
+      const shut = !!lay.m.c[k];
+      pane.classList.toggle("collapsed", shut);
+      const head = layHead(k);
+      const fold = head && head.querySelector(".fold");
+      if (fold) {
+        fold.setAttribute("aria-expanded", shut ? "false" : "true");
+        fold.setAttribute("aria-label", (shut ? "Expand " : "Collapse ") + LAY_NAMES[k]);
+        fold.title = shut ? "Expand" : "Collapse";
+      }
+      if (j > 0) {
+        const pk = prev;
+        kids.push(!shut && !lay.m.c[pk]
+          ? laySplitter("hsplit", { "aria-orientation": "horizontal", "aria-label": "Resize " + LAY_NAMES[pk] + " and " + LAY_NAMES[k], "aria-valuemin": "0", "aria-valuemax": "100" },
+            layRowResize(i, pk, k), () => { for (const x of c.p) delete lay.m.h[x]; })
+          : h("div", { class: "hsplit fixed", "aria-hidden": "true" }));
+      }
+      kids.push(pane);
+      prev = k;
+    });
+    layPlace(col, kids);
+    if (c.p.length) filled.push(i);
+    top.push(col);
+  });
+  const withSplits = [];
+  top.forEach((col, i) => {
+    const n = filled.indexOf(i);
+    if (n > 0) {
+      const a = filled[n - 1];
+      withSplits.push(laySplitter("vsplit", { "aria-orientation": "vertical", "aria-label": "Resize column " + (a + 1) + " and column " + (i + 1), "aria-valuemin": "0", "aria-valuemax": "100" },
+        layColResize(a, i), () => { for (const c of lay.m.cols) c.w = null; }));
+    }
+    withSplits.push(col);
+  });
+  layPlace(main, withSplits);
+  layApplySizes();
+  for (const [el, t] of keep) if (el.scrollTop !== t) el.scrollTop = t;
+  if (active && active !== document.body && document.activeElement !== active && active.isConnected) active.focus({ preventScroll: true });
+  if (animate) layFlip(before);
+}
+
+function layEnter() {
+  if (lay.on) return;
+  lay.on = true;
+  layControls();
+  $("main").classList.add("lay");
+  for (const el of document.querySelectorAll(".lay-only, #lay-hint")) el.hidden = false;
+  layRender();
+  laySave();
+}
+
+function layLeave() {
+  if (!lay.on) return;
+  if (lay.drag) layDragEnd(false);
+  lay.on = false;
+  const active = document.activeElement;
+  const main = $("main"), ref = $("mtabs"), tix = $("tixcol");
+  for (const s of main.querySelectorAll(".vsplit, .hsplit")) s.remove();
+  main.insertBefore($("p-dec"), ref);
+  main.insertBefore(tix, ref);
+  tix.append($("p-new"), $("p-tix"));
+  main.insertBefore($("p-act"), ref);
+  main.insertBefore($("composer"), ref);
+  for (const c of lay.cols) c.remove();
+  for (const id of Object.values(LAY_IDS)) {
+    const el = $(id);
+    el.classList.remove("collapsed");
+    for (const p of ["flex", "maxHeight", "minHeight", "transform", "transition"]) el.style[p] = "";
+  }
+  main.classList.remove("lay");
+  for (const el of document.querySelectorAll(".lay-only, #lay-hint")) el.hidden = true;
+  $("lay-reset").hidden = true;
+  if (active && active.closest && active.closest("#ask, #launch")) setMode(active.closest("#ask") ? "ask" : "launch");
+  if (active && active !== document.body && document.activeElement !== active && active.isConnected) active.focus({ preventScroll: true });
+}
+
+function layReveal(where) {
+  const k = LAY_JUMP[where];
+  if (lay.on && k && lay.m.c[k]) layFold(k, true);
+}
+
+function layInit() {
+  if (!window.matchMedia) return;
+  lay.m = layLoad();
+  lay.cols = [0, 1, 2].map((i) => h("div", { class: "lcol", "data-i": String(i), role: "group" }));
+  for (const col of lay.cols) watchNewColumn(col, () => col.contains($("p-new")));
+  $("main").prepend(h("p", { class: "sr", id: "lay-hint", hidden: true }, "Arrow keys move the panel between columns and positions. You can also drag the panel's header."));
+  document.addEventListener("keydown", layEscape, true);
+  $("lay-reset").addEventListener("click", () => {
+    lay.m = layDefault();
+    layRender(true);
+    laySave();
+    announce("Layout reset.");
+    $("keys-btn").focus();
+  });
+  const mq = window.matchMedia("(min-width: 1200px)");
+  const sync = () => (mq.matches ? layEnter() : layLeave());
+  mq.addEventListener("change", sync);
+  sync();
+}
+
 function wire() {
   track("cards", $("cards"), $("new-cards"));
   track("open", $("open"), null);
@@ -3191,11 +3786,7 @@ function wire() {
   track("done", $("done"), null);
   track("settled", $("settled"), null);
   track("newIssues", $("nis"), $("new-nis"));
-  const col = $("tixcol");
-  const flushNew = () => { if (state && newLive(panels.newIssues)) schedule(); };
-  col.addEventListener("pointerenter", () => { newView.colPointer = true; });
-  col.addEventListener("pointerleave", () => { newView.colPointer = false; flushNew(); });
-  col.addEventListener("focusout", () => setTimeout(flushNew, 0));
+  watchNewColumn($("tixcol"), () => true);
   $("new-view").addEventListener("click", flipNewView);
   $("new-err-close").addEventListener("click", () => closeErr("new-err"));
   track("feed", $("feed"), $("new-feed"));
@@ -3301,6 +3892,7 @@ function wire() {
   window.addEventListener("beforeunload", (e) => {
     if ([...pending.values()].some((p) => !p.sent)) { e.preventDefault(); e.returnValue = ""; }
   });
+  layInit();
   loadHash();
 }
 

@@ -17,9 +17,18 @@ class Element extends Node {
     this._value = "";
     this.sel = null;
     this.scrollTop = 0;
+    this.style = {};
   }
   get children() { return this.childNodes.filter((n) => n.nodeType === 1); }
   get firstChild() { return this.childNodes[0] || null; }
+  get previousElementSibling() { const p = this.parentNode; if (!p) return null; const k = p.children; return k[k.indexOf(this) - 1] || null; }
+  getBoundingClientRect() { return this.rect || { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }; }
+  prepend(n) { this.insertBefore(n, this.firstChild); }
+  insertAdjacentHTML() {}
+  set innerHTML(_) {}
+  setPointerCapture() {}
+  releasePointerCapture() {}
+  blur() { if (document.activeElement === this) document.activeElement = document.body; }
   get nextSibling() { const p = this.parentNode; return p ? p.childNodes[p.childNodes.indexOf(this) + 1] || null : null; }
   get className() { return this.attrs.get("class") || ""; }
   set className(v) { this.attrs.set("class", v); }
@@ -155,6 +164,7 @@ const console = { error: (e) => { throw e; }, log: () => {}, warn: () => {} };
 const CSS = { escape: (s) => String(s).replace(/["\\]/g, "\\$&") };
 const intervals = [];
 const setInterval = (f) => intervals.push(f);
+const requestAnimationFrame = (f) => setTimeout(f, 16);
 let fakeNow = 0;
 let timerSeq = 0;
 const timers = [];
