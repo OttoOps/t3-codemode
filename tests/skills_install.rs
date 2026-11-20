@@ -332,3 +332,118 @@ fn npx_skew_counts_only_the_skills_it_installed() {
     let f = skills::status(&paths, &b).unwrap().foreign.unwrap();
     assert_eq!((f.skills.as_slice(), f.differing_files, f.matches_release), (&["a".to_string()][..], 0, true));
 }
+
+#[cfg(unix)]
+const SKILLS: [&str; 5] = ["setup-t3-workflow", "t3-overseer", "t3-ticket", "t3-worker", "t3-workflow"];
+
+#[cfg(unix)]
+fn claude_skill(home: &Path, name: &str) -> PathBuf {
+    home.join(".claude").join("skills").join(name)
+}
+
+#[cfg(unix)]
+#[test]
+fn install_links_every_skill_into_claude_codes_folder() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir(home.path().join(".claude")).unwrap();
+    let out = t3cm(home.path(), &["skills", "install"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("for Claude Code"), "{}", text(&out));
+    for name in SKILLS {
+        let link = claude_skill(home.path(), name);
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "{name}");
+        assert_eq!(
+            std::fs::canonicalize(&link).unwrap(),
+            std::fs::canonicalize(skills_dir(home.path()).join(name)).unwrap()
+        );
+    }
+    let (ok, st) = status_json(home.path());
+    assert!(ok);
+    assert!(st["claudeLinks"].as_array().unwrap().iter().all(|l| l["state"] == "linked"), "{st}");
+    let again = t3cm(home.path(), &["skills", "update", "--json"]);
+    let v: Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(v["claudeLinks"]["made"], json!([]));
+}
+
+#[test]
+fn no_claude_folder_means_no_links_and_no_complaint() {
+    let home = tempfile::tempdir().unwrap();
+    let out = t3cm(home.path(), &["skills", "install"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!home.path().join(".claude").exists());
+    let out = t3cm(home.path(), &["skills", "status"]);
+    assert!(out.status.success());
+    assert!(!text(&out).contains("Claude Code"), "{}", text(&out));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_real_folder_in_claudes_place_is_kept_and_only_reported() {
+    let home = tempfile::tempdir().unwrap();
+    let mine = claude_skill(home.path(), "t3-ticket");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(mine.join("SKILL.md"), "mine\n").unwrap();
+    let out = t3cm(home.path(), &["skills", "install"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(std::fs::read_to_string(mine.join("SKILL.md")).unwrap(), "mine\n");
+    assert!(!std::fs::symlink_metadata(&mine).unwrap().file_type().is_symlink());
+    assert!(std::fs::symlink_metadata(claude_skill(home.path(), "t3-worker")).unwrap().file_type().is_symlink());
+    let out = t3cm(home.path(), &["skills", "status"]);
+    assert!(out.status.success(), "a Claude Code copy never fails the status: {}", text(&out));
+    assert!(text(&out).contains("is not a link to"), "{}", text(&out));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_elsewhere_is_left_alone_and_a_removed_link_is_reported() {
+    let home = tempfile::tempdir().unwrap();
+    let other = home.path().join("elsewhere");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::create_dir_all(home.path().join(".claude").join("skills")).unwrap();
+    std::os::unix::fs::symlink(&other, claude_skill(home.path(), "t3-overseer")).unwrap();
+    assert!(t3cm(home.path(), &["skills", "install"]).status.success());
+    assert_eq!(std::fs::read_link(claude_skill(home.path(), "t3-overseer")).unwrap(), other);
+    std::fs::remove_file(claude_skill(home.path(), "t3-worker")).unwrap();
+    let out = t3cm(home.path(), &["skills", "status"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("Claude Code does not see t3-worker"), "{}", text(&out));
+    let (_, st) = status_json(home.path());
+    assert_eq!(st["current"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_config_dir_picks_the_folder_to_link_into() {
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join("claude-2");
+    std::fs::create_dir(&cfg).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_t3cm"))
+        .args(["skills", "install"])
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("CLAUDE_CONFIG_DIR", &cfg)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("CODEX_HOME")
+        .env_remove("T3WF_CONFIG")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(std::fs::symlink_metadata(cfg.join("skills").join("t3-workflow")).is_ok());
+    assert!(!home.path().join(".claude").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn npx_relative_links_count_as_linked_after_a_take_over() {
+    let home = tempfile::tempdir().unwrap();
+    npx_install(home.path(), false);
+    std::fs::create_dir_all(home.path().join(".claude").join("skills")).unwrap();
+    for name in SKILLS {
+        std::os::unix::fs::symlink(format!("../../.agents/skills/{name}"), claude_skill(home.path(), name)).unwrap();
+    }
+    let out = t3cm(home.path(), &["skills", "install", "--take-over", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["claudeLinks"]["made"], json!([]));
+    assert!(v["claudeLinks"]["links"].as_array().unwrap().iter().all(|l| l["state"] == "linked"), "{v}");
+}

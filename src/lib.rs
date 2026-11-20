@@ -2,6 +2,7 @@ pub mod app;
 pub mod bench;
 pub mod board;
 pub mod catalog;
+pub mod claude_link;
 pub mod clock;
 pub mod config;
 pub mod contexts;
