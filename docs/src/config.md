@@ -165,7 +165,7 @@ A stop with a later reset extends a member's mark, and one with an earlier
 reset leaves it as it is. The
 pass clears a mark once its reset passes, and the member is picked again.
 Marks live in `store.db`, so they survive a restart. `wf.pools()` shows each
-mark's reset time and the thread that set it. [ADR 0001](https://github.com/OttoOps/t3-codemode/blob/main/docs/decisions/0001-usage-signal-for-pools.md)
+mark's reset time and the thread that set it. [ADR 0001](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0001-usage-signal-for-pools.md)
 records why t3cm reads limits this way.
 
 `board.pool` covers `wf.launchTicket`, the launch box and the ask box. With it

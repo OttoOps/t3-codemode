@@ -277,7 +277,7 @@ nothing. A check runs every `board.reconcileActiveMinutes`, 2 by default, while
 a tracked pull request is queued or waiting, and every
 `board.reconcileIdleMinutes`, 10 by default, otherwise. Loading the page runs
 one too, at most once every 30 seconds.
-`docs/decisions/0002-github-reconcile.md` in the repository has the reasoning.
+`docs/adr/0002-github-reconcile.md` in the repository has the reasoning.
 
 Each check compares what GitHub shows now with the board's state now, and
 makes them agree:
