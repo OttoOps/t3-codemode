@@ -128,6 +128,19 @@ parent and a child, and the service keeps every link and message in its store.
   `skills`, the check of the installed T3 workflow skills and setup steps
   described in [Install the skills with t3cm](getting-started.md#install-the-skills-with-t3cm).
   It needs no caller and reads the skills fresh.
+- `wf.slot(name, { repo?, instance?, skills? })` returns one
+  [slot](getting-started.md#slots), `review`, `passes`, `delivery`, `models` or
+  `credentials`, resolved for the caller's T3 instance and project: its
+  `source` layer, each skill with `how` to run it (`Skill tool`, or
+  `inline: read <path> and apply it`, or why it is skipped), a one-line `line`,
+  and `warnings`. For `models`, each role carries a `modelSelection` for
+  `t3_thread_launch`, or the pool to pass to `wf.pick`. `repo` overrides the
+  project's workspace root, for example with a worktree.
+- `wf.renewal({ output, repo? })` matches a failed command's output against
+  the `credentials` patterns and returns `{ match, skill, how, skipped }`, or
+  `null` when none matches.
+- `wf.slots({ repo?, instance? })` returns every slot at once, as
+  `t3cm slots --json` prints it, with the caller `context` and `warnings`.
 - `wf.waiting.add`, `wf.waiting.resolve` and `wf.waiting.list` keep an overseer
   thread's waiting list.
 - `wf.merge({repo, pr, head, method?})` merges a GitHub pull request at the

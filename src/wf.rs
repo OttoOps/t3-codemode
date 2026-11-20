@@ -222,6 +222,8 @@ pub struct Wf {
     pub(crate) usage: Mutex<Option<Arc<dyn UsageSource>>>,
     pub(crate) release: Mutex<Option<crate::release::Version>>,
     pub(crate) skills: crate::drift::Cache,
+    pub(crate) slot_folders: Mutex<Option<crate::slots::Folders>>,
+    pub(crate) drivers: Mutex<HashMap<String, String>>,
 }
 
 const MAX_PR_PAGES: usize = 20;
@@ -269,6 +271,8 @@ impl Wf {
             usage: Mutex::new(None),
             release: Mutex::new(None),
             skills: crate::drift::Cache::default(),
+            slot_folders: Mutex::new(None),
+            drivers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -362,6 +366,19 @@ impl Wf {
     }
 
     pub async fn dispatch(&self, method: &str, caller: Option<&str>, args: Value) -> Result<Value> {
+        self.dispatch_from(method, caller, &crate::wf_slots::Reported::default(), args).await
+    }
+
+    pub async fn dispatch_from(
+        &self,
+        method: &str,
+        caller: Option<&str>,
+        reported: &crate::wf_slots::Reported,
+        args: Value,
+    ) -> Result<Value> {
+        if matches!(method, "slot" | "slots" | "renewal") {
+            return self.slot_call(method, caller.filter(|c| !c.is_empty()), reported, args).await;
+        }
         let out = self.dispatch_inner(method, caller, args).await;
         if out.is_ok()
             && !matches!(method, "show" | "inbox" | "board" | "cards" | "feed" | "waiting.list" | "pools" | "status")

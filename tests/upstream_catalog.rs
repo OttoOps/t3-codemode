@@ -220,7 +220,15 @@ async fn setup() -> U {
 
 impl U {
     async fn exec(&self, code: &str) -> ToolOutput {
-        self.app.execute(ExecuteRequest { code: code.into(), session: None, timeout_ms: None, caller: None }).await
+        self.app
+            .execute(ExecuteRequest {
+                code: code.into(),
+                session: None,
+                timeout_ms: None,
+                caller: None,
+                reported: Default::default(),
+            })
+            .await
     }
 
     async fn ok(&self, code: &str) -> Value {
@@ -540,7 +548,13 @@ async fn a_hung_upstream_does_not_stall_search_or_execute() {
     for _ in 0..2 {
         let started = std::time::Instant::now();
         let out = app
-            .execute(ExecuteRequest { code: "async () => 1".into(), session: None, timeout_ms: None, caller: None })
+            .execute(ExecuteRequest {
+                code: "async () => 1".into(),
+                session: None,
+                timeout_ms: None,
+                caller: None,
+                reported: Default::default(),
+            })
             .await;
         assert_eq!(result(&out), json!(1));
         assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());

@@ -12,6 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
 use crate::app::App;
+use crate::wf_slots::Reported;
 use crate::{mcp, web};
 
 pub const THREAD_HEADER: &str = "x-t3-thread";
@@ -59,6 +60,7 @@ async fn post_mcp(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) 
         return json_response(StatusCode::FORBIDDEN, json!({"error": "cross-origin requests are refused"}));
     }
     let caller = mcp::caller_from_header(headers.get(THREAD_HEADER).and_then(|v| v.to_str().ok()));
+    let reported = Reported::from_header_map(&headers);
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -73,13 +75,13 @@ async fn post_mcp(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) 
         Value::Array(batch) => {
             let mut out = Vec::new();
             for m in batch {
-                if let Some(r) = mcp::handle(&app, m, caller.as_deref()).await {
+                if let Some(r) = mcp::handle_with(&app, m, caller.as_deref(), &reported).await {
                     out.push(r);
                 }
             }
             if out.is_empty() { None } else { Some(Value::Array(out)) }
         }
-        m => mcp::handle(&app, m, caller.as_deref()).await,
+        m => mcp::handle_with(&app, m, caller.as_deref(), &reported).await,
     };
     let Some(reply) = reply else {
         return StatusCode::ACCEPTED.into_response();
@@ -140,6 +142,7 @@ pub async fn stdio(app: Arc<App>, caller: Option<String>) -> std::io::Result<()>
             }
         }
     });
+    let reported = Reported::from_env();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
@@ -152,9 +155,9 @@ pub async fn stdio(app: Arc<App>, caller: Option<String>) -> std::io::Result<()>
                 continue;
             }
         };
-        let (app, tx, caller) = (app.clone(), tx.clone(), caller.clone());
+        let (app, tx, caller, reported) = (app.clone(), tx.clone(), caller.clone(), reported.clone());
         tokio::spawn(async move {
-            if let Some(r) = mcp::handle(&app, msg, caller.as_deref()).await {
+            if let Some(r) = mcp::handle_with(&app, msg, caller.as_deref(), &reported).await {
                 let _ = tx.send(r);
             }
         });
