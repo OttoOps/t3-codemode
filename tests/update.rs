@@ -225,6 +225,80 @@ async fn an_unpublished_version_fails_cleanly() {
     assert!(text(&out).contains("404"), "{}", text(&out));
 }
 
+const SKILLS_STUB: &str = r#"#!/bin/sh
+case "$1" in
+  --version) echo 't3cm 9.9.9' ;;
+  skills) echo "$*" > "$HOME/skills-call"; exit "${STUB_EXIT:-0}" ;;
+esac
+"#;
+
+fn install_skills(env: &Env) {
+    let out = env.t3cm(&["skills", "install"]);
+    assert!(out.status.success(), "{}", text(&out));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_brings_managed_skills_to_the_new_release() {
+    let env = serve_release(SKILLS_STUB, None, false, "bin").await;
+    let (out, call) = tokio::task::spawn_blocking(move || {
+        install_skills(&env);
+        let out = env.t3cm(&["update", "--no-restart", "--port", "9"]);
+        (out, std::fs::read_to_string(env.dir.path().join("skills-call")).unwrap_or_default())
+    })
+    .await
+    .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(call.trim(), "skills update", "the new binary syncs the skills it carries");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_leaves_skills_alone_when_t3cm_did_not_install_them() {
+    let env = serve_release(SKILLS_STUB, None, false, "bin").await;
+    let (out, called) = tokio::task::spawn_blocking(move || {
+        let out = env.t3cm(&["update", "--no-restart", "--port", "9"]);
+        (out, env.dir.path().join("skills-call").exists())
+    })
+    .await
+    .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!called, "a user who declined the workflow gets no skills from an update");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_skills_sync_fails_the_update_but_keeps_the_new_binary() {
+    let env = serve_release(&SKILLS_STUB.replace("${STUB_EXIT:-0}", "1"), None, false, "bin").await;
+    let (out, after) = tokio::task::spawn_blocking(move || {
+        install_skills(&env);
+        let out = env.t3cm(&["update", "--no-restart", "--port", "9"]);
+        (out, Command::new(&env.bin).arg("--version").output().unwrap())
+    })
+    .await
+    .unwrap();
+    let t = text(&out);
+    assert!(!out.status.success(), "{t}");
+    assert!(t.contains("skills update failed") && t.contains("run: t3cm skills update"), "{t}");
+    assert_eq!(String::from_utf8_lossy(&after.stdout).trim(), format!("t3cm {NEW}"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_up_to_date_update_still_repairs_the_skills() {
+    let env = setup(NEW, false).await;
+    let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let (out, back) = tokio::task::spawn_blocking(move || {
+        install_skills(&env);
+        let file = env.dir.path().join(".agents/skills/t3-worker/procedure.md");
+        std::fs::remove_file(&file).unwrap();
+        let out = env.t3cm(&["update", "--no-restart", "--version", &current]);
+        (out, file.is_file())
+    })
+    .await
+    .unwrap();
+    let t = text(&out);
+    assert!(out.status.success(), "{t}");
+    assert!(t.contains("is up to date") && t.contains("synced the skills"), "{t}");
+    assert!(back, "the missing skill file is written again");
+}
+
 #[cfg(target_os = "linux")]
 mod service {
     use super::*;
