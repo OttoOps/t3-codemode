@@ -331,3 +331,101 @@ class Write(SetupTestCase):
         self.assertIn("--replace", r.stderr)
         self.write({"passes": []}, "--replace")
         self.assertEqual(self.saved(), {"passes": [], "version": 1})
+
+
+RULE = (ROOT / "skills" / "t3-workflow" / "rules" / "report-filed-issues.md").read_text()
+START, END = "<!-- t3-workflow:filed-issues:start -->", "<!-- t3-workflow:filed-issues:end -->"
+
+
+class Rule(SetupTestCase):
+    def setUp(self):
+        super().setUp()
+        self.codex = self.env.home / ".codex"
+        self.claude_rule = self.claude / "rules" / "t3-workflow-filed-issues.md"
+
+    def rule(self, ok=True, **extra):
+        return self.setup("rule", ok=ok, **extra)
+
+    def codex_block(self):
+        return f"{START}\n{RULE.rstrip()}\n{END}\n"
+
+    def test_the_rule_tells_every_thread_to_report_with_wf_issue(self):
+        for text in ("wf.issue(", "`gh issue create`", "GitHub MCP", "every thread", "`t3cm exec -`"):
+            self.assertIn(text, RULE)
+
+    def test_installs_the_rule_for_claude_code(self):
+        self.claude.mkdir()
+        r = self.rule()
+        self.assertEqual(self.claude_rule.read_text(), RULE)
+        self.assertIn(f"claude: wrote {self.claude_rule}", r.stdout)
+        self.assertIn("codex: skipped", r.stdout)
+
+    def test_follows_claude_config_dir(self):
+        other = self.env.tmp / "claude-2"
+        other.mkdir()
+        self.rule(CLAUDE_CONFIG_DIR=str(other))
+        self.assertEqual((other / "rules" / "t3-workflow-filed-issues.md").read_text(), RULE)
+        self.assertFalse(self.claude_rule.exists())
+
+    def test_a_symlinked_rules_folder_is_written_through(self):
+        shared = self.env.tmp / "shared-rules"
+        shared.mkdir()
+        self.claude.mkdir()
+        (self.claude / "rules").symlink_to(shared)
+        self.rule()
+        self.assertTrue((self.claude / "rules").is_symlink())
+        self.assertEqual((shared / "t3-workflow-filed-issues.md").read_text(), RULE)
+
+    def test_a_second_run_changes_nothing(self):
+        self.claude.mkdir()
+        self.rule()
+        self.assertIn("is current", self.rule().stdout)
+        self.assertEqual(self.claude_rule.read_text(), RULE)
+
+    def test_a_stale_rule_is_rewritten(self):
+        self.claude_rule.parent.mkdir(parents=True)
+        self.claude_rule.write_text("# Old rule\n")
+        self.assertEqual(self.detect()["rule"]["claude"]["status"], "stale")
+        self.rule()
+        self.assertEqual(self.claude_rule.read_text(), RULE)
+        self.assertEqual(self.detect()["rule"]["claude"]["status"], "current")
+
+    def test_appends_a_block_to_codex_agents_md_and_keeps_the_rest(self):
+        self.codex.mkdir()
+        (self.codex / "AGENTS.md").write_text("# Mine\n\nKeep this.\n")
+        self.rule()
+        self.assertEqual((self.codex / "AGENTS.md").read_text(), "# Mine\n\nKeep this.\n\n" + self.codex_block())
+        self.rule()
+        self.assertEqual((self.codex / "AGENTS.md").read_text().count(START), 1)
+
+    def test_replaces_a_stale_codex_block_in_place(self):
+        self.codex.mkdir()
+        (self.codex / "AGENTS.md").write_text(f"# Mine\n\n{START}\nold\n{END}\n\n## After\n\nStays.\n")
+        self.assertEqual(self.detect()["rule"]["codex"]["status"], "stale")
+        self.rule()
+        self.assertEqual((self.codex / "AGENTS.md").read_text(),
+                         f"# Mine\n\n{self.codex_block()}\n## After\n\nStays.\n")
+
+    def test_codex_override_file_gets_the_block_when_it_exists(self):
+        self.codex.mkdir()
+        (self.codex / "AGENTS.override.md").write_text("# Override\n")
+        self.rule()
+        self.assertIn(START, (self.codex / "AGENTS.override.md").read_text())
+        self.assertFalse((self.codex / "AGENTS.md").exists())
+
+    def test_detect_reports_each_agent(self):
+        self.claude.mkdir()
+        rule = self.detect()["rule"]
+        self.assertEqual(rule["claude"], {"status": "missing", "path": str(self.claude_rule)})
+        self.assertEqual(rule["codex"]["status"], "no agent")
+
+    def test_an_unreadable_rule_target_leaves_the_rest_of_detect(self):
+        (self.claude / "rules" / "t3-workflow-filed-issues.md").mkdir(parents=True)
+        out = self.detect()
+        self.assertIn("cannot read", out["rule"]["error"])
+        self.assertIn("summary", out)
+
+    def test_no_agent_folder_is_an_error(self):
+        r = self.rule(ok=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("neither a Claude Code nor a Codex config folder", r.stderr)

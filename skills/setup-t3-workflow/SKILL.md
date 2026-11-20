@@ -31,6 +31,10 @@ one. The JSON it prints is the interview's only source of facts:
 - `providers.enabled`: each T3 provider and its models with their effort
   values; `providers.error` when T3 did not answer.
 - `t3cm`: the binary, and whether the service runs and reaches T3.
+- `rule`: the filed-issue rule for `claude` and `codex`, each with its
+  `path` and a `status` of `current`, `stale`, `missing` or `no agent`;
+  `rule.error` in their place when the rule could not be checked, which you
+  show the user.
 - `platform`, and `config`: its path, whether it exists, its `problems`, and
   `repoProblems` from the repository's `AGENTS.md` block, which the user
   fixes in that file.
@@ -97,7 +101,25 @@ in `[AGENTS.md]` is set by that repository's "Agent workflow" block, which
 wins over the user config there; tell the user, and offer to edit the block
 when they want the change in that repository.
 
-## 4. Offer t3cm
+## 4. Install the filed-issue rule
+
+Every thread on the machine reports the GitHub issues it files to the t3cm
+board, whether or not it runs a T3 role skill
+([Filed issues](../t3-workflow/SKILL.md#filed-issues)). Step 1's `rule`
+says where that rule stands for each agent. When either agent's `status`
+is `missing` or `stale`, install it, on a one-slot change too:
+
+```bash
+setup rule
+```
+
+It writes the rule to `rules/t3-workflow-filed-issues.md` in the Claude
+Code config folder and as a marked block in Codex's global `AGENTS.md`
+(`AGENTS.override.md` when that file exists), and leaves the rest of that
+file as it was. An agent with no config folder is skipped. Tell the user in
+one line what it wrote; new sessions load it.
+
+## 5. Offer t3cm
 
 t3cm runs the same protocol as `t3wf` through code mode, with fewer tokens
 and a board in the browser. Act on `t3cm` from step 1:
@@ -115,4 +137,5 @@ and a board in the browser. Act on `t3cm` from step 1:
   [Installing t3cm](../t3-workflow/codemode.md#installing-t3cm).
 
 Setup is done when the config holds every answer (or the user kept every
-slot), the user has seen the summary, and t3cm is running or was offered.
+slot), the user has seen the summary, the filed-issue rule is current for
+each installed agent, and t3cm is running or was offered.
