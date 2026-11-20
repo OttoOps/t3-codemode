@@ -13,7 +13,7 @@ use t3_codemode::config::{self, Config};
 use t3_codemode::release::{self, Version};
 use t3_codemode::store::Store;
 use t3_codemode::t3_http::HttpT3;
-use t3_codemode::{bench, platform, server, upgrade, watcher};
+use t3_codemode::{bench, platform, server, skills, upgrade, watcher};
 
 #[derive(Parser)]
 #[command(
@@ -114,6 +114,11 @@ enum Cmd {
         #[command(flatten)]
         state: StateArgs,
     },
+    /// Install, update or check the T3 workflow skills this binary carries
+    Skills {
+        #[command(subcommand)]
+        cmd: SkillsCmd,
+    },
     #[command(hide = true)]
     Bench {
         #[arg(short, default_value_t = 1000)]
@@ -121,6 +126,63 @@ enum Cmd {
         #[arg(long)]
         tools: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum SkillsCmd {
+    /// Write the skills to ~/.agents/skills and record them in ~/.config/t3-workflow/installed.json
+    Install {
+        /// Replace skills another tool (npx skills, a copy) installed, and drop them from its lock file
+        #[arg(long)]
+        take_over: bool,
+        /// Overwrite files edited since t3cm installed them
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Bring installed skills to this binary's release, keeping locally edited files
+    Update {
+        /// Overwrite files edited since t3cm installed them
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare the installed skills with this binary's release; exits 1 unless all are current
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn run_skills(cmd: SkillsCmd) -> Result<ExitCode> {
+    let paths = skills::Paths::from_env()?;
+    let bundle = skills::Bundle::embedded();
+    let (opts, json) = match cmd {
+        SkillsCmd::Status { json } => {
+            let st = skills::status(&paths, &bundle)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&st)?);
+            } else {
+                print!("{}", skills::describe_status(&st));
+            }
+            return Ok(if st.current { ExitCode::SUCCESS } else { ExitCode::FAILURE });
+        }
+        SkillsCmd::Install { take_over, force, json } => {
+            (skills::Options { mode: skills::Mode::Install, force, take_over }, json)
+        }
+        SkillsCmd::Update { force, json } => {
+            (skills::Options { mode: skills::Mode::Update, force, take_over: false }, json)
+        }
+    };
+    let report = skills::sync(&paths, &bundle, opts)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", skills::describe_report(&report));
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn state_dir(a: &StateArgs) -> PathBuf {
@@ -415,6 +477,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             })
             .await?;
         }
+        Cmd::Skills { cmd } => return run_skills(cmd),
         Cmd::Bench { n, tools } => bench::run(n, tools.as_deref()).await?,
     }
     Ok(ExitCode::SUCCESS)
