@@ -33,7 +33,7 @@ jobs:
           code=false
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/ci.yml) code=true ;;
+              .github/workflows/ci.yml|deploy/t3-codemode.service) code=true ;;
               docs/*|deploy/*|.github/*|LICENSE|.coderabbit.yaml|.gitignore) ;;
               */*) code=true ;;
               *.md) ;;
