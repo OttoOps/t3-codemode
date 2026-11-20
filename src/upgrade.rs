@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
-use crate::platform;
 use crate::release::{self, Checked, REPO, Version};
+use crate::{drift, platform, skills, steps};
 
 const HEALTH_WAIT: Duration = Duration::from_secs(45);
 const DOWNLOAD_DEADLINE: Duration = Duration::from_secs(300);
@@ -394,6 +394,45 @@ impl Swap {
     }
 }
 
+fn skills_managed() -> Result<Option<skills::Paths>> {
+    let paths = skills::Paths::from_env()?;
+    Ok(skills::Manifest::load(&paths.manifest)?.is_some().then_some(paths))
+}
+
+fn skills_behind() -> Result<bool> {
+    let Some(paths) = skills_managed()? else { return Ok(false) };
+    let bundle = skills::Bundle::embedded();
+    let st = skills::status(&paths, &bundle)?;
+    Ok(!drift::current(&st, &steps::check(&steps::Env::from_env()?, &bundle)?))
+}
+
+async fn sync_skills(exe: &Path, release: &Version) -> Result<()> {
+    if skills_managed()?.is_none() {
+        let paths = skills::Paths::from_env()?;
+        if let Some(f) = skills::status(&paths, &skills::Bundle::embedded())?.foreign {
+            println!(
+                "The workflow skills in {} came from {}, so t3cm left them alone. To have t3cm keep them current: t3cm skills install --take-over",
+                paths.dir.display(),
+                f.tool
+            );
+        }
+        return Ok(());
+    }
+    let done = tokio::process::Command::new(exe)
+        .args(["skills", "update"])
+        .env(release::NO_CHECK_ENV, "1")
+        .stdin(Stdio::null())
+        .status()
+        .await
+        .with_context(|| format!("could not run {} skills update", exe.display()))?;
+    if !done.success() {
+        bail!(
+            "t3cm {release} is installed, but its skills update failed; fix what it printed, then run: t3cm skills update"
+        );
+    }
+    Ok(())
+}
+
 pub async fn run(o: Opts) -> Result<()> {
     let releases = release::releases_url()?;
     let current = Version::current();
@@ -418,6 +457,9 @@ pub async fn run(o: Opts) -> Result<()> {
     }
     if want == current || (asked.is_none() && want < current) {
         println!("t3cm {current} is up to date (latest release: {want}).");
+        if skills_behind()? {
+            return sync_skills(&std::env::current_exe()?, &current).await;
+        }
         return Ok(());
     }
     if want < current {
@@ -537,7 +579,7 @@ pub async fn run(o: Opts) -> Result<()> {
             }
             None => {}
         }
-        return Ok(());
+        return sync_skills(&exe, &want).await;
     }
 
     println!("Restarting the service; runs in flight finish first.");
@@ -552,7 +594,7 @@ pub async fn run(o: Opts) -> Result<()> {
                 "t3cm updated: {current} -> {want}. The service answered on the new version in {:.1}s.",
                 took.as_secs_f64()
             );
-            Ok(())
+            sync_skills(&exe, &want).await
         }
         Err(e) => {
             let back = async {
