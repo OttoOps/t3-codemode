@@ -87,6 +87,7 @@ class MergeRouteTests(unittest.TestCase):
         self.assertIn("head:", word)
         for status in ("merged", "queued", "waiting", "refused"):
             self.assertIn(f"- `{status}`:", word, status)
+        self.assertIn("that no check\n   failed", word)
 
     def test_the_t3wf_path_keeps_gh_pr_merge_and_its_merge_watch(self):
         word = section(self.ticket, "### On the user's word")
@@ -122,6 +123,10 @@ class MergeRouteTests(unittest.TestCase):
         wait = " ".join(section(self.ticket, "#### The merge wait").split())
         self.assertIn("does not poll GitHub", wait)
         self.assertIn('wf.gate({ open: "merge" })', wait)
+        self.assertIn("`board.reconcileIdleMinutes` to `0`", wait)
+        watch = section(self.ticket, "#### The merge watch")
+        self.assertIn("`wf.cards()`", watch)
+        self.assertIn("call `wf.merge` again", watch)
         for phrase in ("merged on GitHub at", "Run your post-merge steps.", "was closed on GitHub without merging"):
             self.assertIn(phrase, wait)
             self.assertIn(phrase, self.reconcile, f"src/reconcile.rs no longer sends {phrase!r}")
