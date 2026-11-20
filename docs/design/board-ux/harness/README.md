@@ -51,6 +51,28 @@ PR 2 added the scripts that score the redesign against
 - `judge-stills.js` captures the blinded stills the judges score, for any
   subject. It needs `__EMPTY_URL__` as well.
 
+Issue #93 added the scripts for the [Dynamic layout](../rubric.md#dynamic-layout)
+criteria. They run against the live replay in [`../live/`](../live/README.md),
+not the demo harness, and only at desktop widths (1200 px and up), where
+panels can be moved:
+
+- `layout-gates.js` measures L1 to L7 and returns JSON with a `summary` line.
+  Besides `__BOARD_URL__` it needs `__MAIN_URL__`, a second replay serving
+  `main`'s `src/board.html`, for L5's comparison, and `__CAPTURE_DIR__`, where
+  it saves the narrow-width screenshots it compares.
+- `layout-stills.js` captures the candidate's stills for L8 to L13 at
+  1600x1000 (the references' size) and two 1920x1080 stills of a rearranged
+  board, light and dark.
+- `layout-packets.py` builds one blinded packet per judge from those stills
+  and [`../references/panels/`](../references/panels/README.md), and writes
+  the letter key next to the packets:
+  `python3 layout-packets.py <stills> ../references/panels <out> opus sonnet sol`.
+- `layout-score.py` turns the key and each judge's JSON into the round's
+  table: `python3 layout-score.py <out>/key.json opus=<file> sonnet=<file> sol=<file>`.
+
+The replay server reads the page once when it starts, so restart it after
+every change to `src/board.html`.
+
 ## Run it
 
 The harness is an ignored integration test, kept here so it does not run in
