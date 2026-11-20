@@ -183,10 +183,13 @@ request never joins the queue. Every result carries `status`, `repo`, `pr` and
 call throws.
 
 A waiting record holds the repo, the pull request, the approved head, who
-asked (`thread` and `label`), and the merge state it saw. It stays in the store
-until a later `wf.merge` call for the same pull request queues it, merges it,
-or finds it already queued or merged. A repeat call while it still waits
-replaces the record.
+asked (`thread` and `label`), and the merge state it saw. A `queued` result
+keeps the record too, marked as sent, so the board follows the pull request
+until it merges or leaves the queue. The board's
+[GitHub reconcile](board.md#github-reconcile) queues a waiting pull request
+once GitHub shows it mergeable at the approved head, and opens a new merge gate
+if the head moves first. A merge, here or on GitHub, drops the record. A
+repeat call replaces the record, and the board acts only on the latest one.
 
 The service runs `gh api graphql` with the `gh` login of the user it runs as,
 so `gh` must be on the service's `PATH` and signed in. `execute` code never

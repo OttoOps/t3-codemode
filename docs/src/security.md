@@ -48,6 +48,12 @@ checks their shape, and the service sends one of three fixed operations (read
 the pull request, `enqueuePullRequest`, `mergePullRequest`). The service never
 reads the `gh` token.
 
+The board's [GitHub reconcile](board.md#github-reconcile) uses the same `gh`
+login. It sends one fixed read query, with each tracked pull request's owner,
+name and number as GraphQL variables, and the same two fixed mutations, only
+for a pull request someone approved through `wf.merge` and only at the head
+they approved.
+
 ## The T3 token
 
 The token lives only in the store and in memory. It never enters the sandbox,

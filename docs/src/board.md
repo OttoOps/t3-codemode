@@ -210,6 +210,62 @@ owner's repo of the same name counts as having that ticket.
 - **Dismiss** takes an entry off the list without touching GitHub. Dismissed
   entries stay in the store, and **Restore** puts one back.
 
+## GitHub reconcile
+
+The board checks what it believes against GitHub on a timer, so a pull request
+merged, closed or dropped from a merge queue outside T3 still reaches the board
+and its ticket. It tracks:
+
+- each pull request of an open worker link,
+- each pull request an open card names, read once when the card opens: from
+  its action line, or else from its whole message, and only when it names
+  exactly one,
+- each pull request `wf.merge` saved as waiting to be queued, or sent to
+  GitHub,
+- each pull request it last saw in a merge queue, until it leaves.
+
+It reads them with `gh` as the user the service runs as, in one GraphQL query
+for every 100 pull requests it tracks, and makes no GitHub call when it tracks
+nothing. A check runs every `board.reconcileActiveMinutes`, 2 by default, while
+a tracked pull request is queued or waiting, and every
+`board.reconcileIdleMinutes`, 10 by default, otherwise. Loading the page runs
+one too, at most once every 30 seconds.
+`docs/decisions/0002-github-reconcile.md` in the repository has the reasoning.
+
+Each check compares what GitHub shows now with the board's state now, and
+makes them agree:
+
+| GitHub shows | The board |
+|---|---|
+| Merged | Resolves the pull request's cards opened before the merge, with the note "merged on GitHub at `<sha>`, `<time>`". Clears the ticket's `merge` gate when no other gate card stays open for it. Sends each ticket tracking the pull request one `event` to run its post-merge steps |
+| Closed without merging | Resolves its cards opened before the close and sends each ticket one `event`. Reopening and closing it again sends another |
+| Dropped from the merge queue for `merge_conflict`, `failed_checks` or `manual` removal | Opens a `report` card per ticket that gives the reason, with `requeue` and `hold` buttons, or one card with no buttons and the steps to take by hand when no ticket tracks it. An approval older than the removal is dropped, so the board never queues the pull request again on its own |
+| Waiting to be queued, now mergeable at the approved head | Sends `enqueuePullRequest` with the approved head as `expectedHeadOid`. If the repository has turned its merge queue off since, sends `mergePullRequest` the same way, with the approval's method or else the repository's default |
+| Approved at one head, now at another | Opens one new card per ticket: a `merge` gate for the new head, or a `report` when GitHub already has the new head in its queue. Resolves the old gate and drops the old approval |
+
+A gate names its head with the word `head` and the SHA, such as
+`head d4db97c`. The board holds a gate that names none to the head the first
+check sees, so a push before that check goes unnoticed.
+
+The board records each wake and each removal report per ticket, under the
+merge commit, the close time or the removal time, so a later check never
+repeats it. It saves a wake and its delivery in one transaction, so a T3 outage
+delays a wake but never loses it. An event from before the board started tracking the pull
+request, or from before this version of the service first started, stays
+quiet.
+
+When GitHub refuses the enqueue or the merge, or cannot find the pull request,
+the approval stays for the next check. After 3 failures in a row the board
+opens a `report` card with GitHub's last message and drops the approval. A pull
+request sent to the queue that leaves it with no removal GitHub recorded gets
+the same 3 checks. Every fix goes on the activity feed from `github`.
+
+The tree shows a pull request in the merge queue as `queued`, next to `open`,
+`merged` and `closed`. When `gh` cannot reach GitHub, the check logs a warning,
+changes nothing, and runs again at the next interval. When one pull request
+cannot be fixed, for example because the waiting list is full, the check still
+fixes the others, and that pull request keeps its approval for the next check.
+
 ## Settling
 
 The board settles finished tickets and answered asks and never deletes them. A ticket that
