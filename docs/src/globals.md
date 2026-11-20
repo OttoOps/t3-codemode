@@ -77,14 +77,20 @@ parent and a child, and the service keeps every link and message in its store.
 - `wf.init({role, label?, root?})` starts a thread with no parent link. A role
   that `roles.overseer.children` lists, which is only `ticket` by default, joins
   the board the way `wf.join({ parent: "board", label, role: "ticket" })` does,
-  under its T3 title or under `label`. The result names `parent: "board"` and
-  the label. `root: true` keeps the thread off the board as a standalone root.
-  Every other role starts as a root. `wf.init` is for a ticket started on its
-  own. A ticket launched from the board runs its brief's `wf.join` call
-  instead, which clears the launch from the board's pending list.
+  under the board launch's label, `label`, or its T3 title, in that order. The
+  result names `parent: "board"` and the label. `root: true` keeps the thread
+  off the board as a standalone root. Every other role starts as a root.
+  `wf.init` is for a ticket started on its own, but a ticket launched from the
+  board that calls it instead of its brief's `wf.join` still clears its launch
+  from the board's pending list. The service matches the launch by the thread
+  T3 created for it, never by label, so a ticket started by hand under the
+  same title leaves another launch on the pending list.
 - `wf.openChild({role, label})` returns a `brief` block the parent pastes into
   the child's launch brief; the child runs the
-  `wf.join({parent, label, role, down, miss, stall})` call it contains.
+  `wf.join({parent, label, role, down, miss, stall})` call it contains. When
+  the parent launches the child with `t3.t3_thread_launch` in `execute`, the
+  service records the new thread on its launch in the pending list, and the
+  watcher's never-joined report links to it.
 - `wf.send({kind, body, gate?, wake?, options?})`, kinds `note | event | gate |
   blocker | report | handoff | closed`, to the caller's parent. Returns
   `{handle, delivery}`: `noted`, `sent`, `queued` (the parent is mid-turn, or

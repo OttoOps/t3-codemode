@@ -1021,7 +1021,14 @@ impl Wf {
         let link = r["link"].as_str().map(String::from);
         {
             let _g = self.lock.lock().await;
-            if let Some(mut p) = self.store.pending_all()?.into_iter().find(|p| p.parent == BOARD && p.label == label) {
+            let early = self.store.link_get(&thread)?.filter(|l| l.parent == BOARD);
+            if let Some(mut ln) = early {
+                self.store.pending_remove(BOARD, &label)?;
+                ln.label = label.clone();
+                self.store.link_save(&ln)?;
+            } else if let Some(mut p) =
+                self.store.pending_all()?.into_iter().find(|p| p.parent == BOARD && p.label == label)
+            {
                 p.thread = Some(thread.clone());
                 p.link = link.clone();
                 self.store.pending_put(&p)?;
