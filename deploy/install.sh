@@ -18,23 +18,29 @@ MCP_ADD=(claude mcp add --transport http --scope user "$MCP_NAME" "$MCP_URL" --h
 
 usage() {
   cat <<EOF
-usage: $0 [--version vX.Y.Z] [--target TRIPLE] [--files-only]
-       $0 --archive FILE --sums SHA256SUMS [--files-only]
-       $0 --from-source [--files-only]
+usage: $0 [--version vX.Y.Z] [--target TRIPLE] [--files-only] [--workflow | --no-workflow]
+       $0 --archive FILE --sums SHA256SUMS [--files-only] [--workflow | --no-workflow]
+       $0 --from-source [--files-only] [--workflow | --no-workflow]
        $0 --uninstall [--files-only]
 
 Installs t3cm to ~/.local/bin and its user service (a systemd user unit on
 Linux, a launchd agent on macOS), then registers the MCP server with Claude
 Code. By default it downloads the latest release from $REPO and checks
 it against the release's SHA256SUMS, and with gh signed in, its build
-provenance too.
+provenance too. Then it asks whether to use the T3 workflow, and on yes runs
+t3cm skills install, which writes the release's workflow skills and applies
+their setup steps. Skills that npx skills or a copy by hand installed are
+replaced (t3cm skills install --take-over) unless you say no. A rerun brings
+skills t3cm installed to the new release without asking.
 
   --version vX.Y.Z   install that release instead of the latest
   --target TRIPLE    release build to fetch (default: musl on Linux, the Mac's own arch)
   --archive, --sums  install a release archive already on disk, checked against SHA256SUMS
   --from-source      build this checkout with cargo instead
   --files-only       install or remove the files without touching systemd or launchd
-  --uninstall        stop and remove the service, the binary and the MCP entry; keep the store
+  --workflow         install, take over or update the workflow skills without asking (the default with no terminal)
+  --no-workflow      leave the workflow skills alone
+  --uninstall        stop and remove the service, the binary and the MCP entry; keep the store and the skills
 EOF
 }
 
@@ -49,7 +55,8 @@ case "$(uname -s)" in
   *) die "unsupported OS $(uname -s); on Windows run deploy/install.ps1" ;;
 esac
 
-MODE=release VERSION="" TARGET="" ARCHIVE="" SUMS="" FILES_ONLY=""
+MODE=release VERSION="" TARGET="" ARCHIVE="" SUMS="" FILES_ONLY="" WORKFLOW=""
+set_workflow() { if [ -n "$WORKFLOW" ] && [ "$WORKFLOW" != "$1" ]; then die "--workflow and --no-workflow cannot be combined"; fi; WORKFLOW="$1"; }
 need() { if [ "$#" -lt 2 ] || [ -z "$2" ]; then die "$1 needs a value"; fi; }
 set_mode() { if [ "$MODE" != release ] && [ "$MODE" != "$1" ]; then die "--from-source and --uninstall cannot be combined"; fi; MODE="$1"; }
 while [ "$#" -gt 0 ]; do
@@ -61,6 +68,8 @@ while [ "$#" -gt 0 ]; do
     --from-source) set_mode source; shift ;;
     --uninstall) set_mode uninstall; shift ;;
     --files-only) FILES_ONLY=1; shift ;;
+    --workflow) set_workflow yes; shift ;;
+    --no-workflow) set_workflow no; shift ;;
     -h | --help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -71,6 +80,9 @@ if [ -n "$ARCHIVE$SUMS" ]; then
 fi
 if [ "$MODE" != release ] && [ -n "$VERSION$TARGET" ]; then
   die "--version and --target pick a release; they do not apply to --from-source or --uninstall"
+fi
+if [ "$MODE" = uninstall ] && [ -n "$WORKFLOW" ]; then
+  die "--workflow and --no-workflow do not apply to --uninstall"
 fi
 
 WORK="$(mktemp -d)"
@@ -180,6 +192,57 @@ register_mcp() {
   fi
 }
 
+skills_state() {
+  "$BIN_DIR/t3cm" skills status --json 2>/dev/null || true
+}
+
+ask() {
+  local answer
+  if [ ! -t 0 ]; then
+    echo "$1 Yes: there is no terminal to ask on (--no-workflow says no)."
+    return 0
+  fi
+  read -r -p "$1 [Y/n] " answer || answer=""
+  case "$answer" in
+    [nN]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+install_workflow() {
+  local state question
+  local -a cmd
+  state="$(skills_state)"
+  case "$state" in
+    *'"installed": "'*) cmd=(update) ;;
+    *'"foreign": {'*)
+      cmd=(install --take-over)
+      question="npx skills or a copy by hand installed the T3 workflow skills here. Replace them with this release's, and have t3cm keep them current?"
+      ;;
+    *)
+      cmd=(install)
+      question="Use the T3 workflow?"
+      ;;
+  esac
+  case "$WORKFLOW:${cmd[0]}" in
+    no:*)
+      echo "Left the T3 workflow skills alone; to have t3cm manage them, run: t3cm skills ${cmd[*]}"
+      return
+      ;;
+    yes:*) ;;
+    :update) echo "t3cm installed the T3 workflow skills here, so this install brings them to its release (--no-workflow skips that)." ;;
+    *)
+      if ! ask "$question"; then
+        echo "Left the T3 workflow skills alone; to have t3cm manage them, run: t3cm skills ${cmd[*]}"
+        return
+      fi
+      ;;
+  esac
+  if ! "$BIN_DIR/t3cm" skills "${cmd[@]}"; then
+    SKILLS_FAILED=1
+  fi
+}
+
 install_files() {
   local bin="$1" svc="$2"
   case "$OS" in
@@ -220,12 +283,16 @@ install_files() {
       LOGS_HINT="$MAC_LOGS/t3cm.log"
       ;;
   esac
+  install_workflow
   register_mcp
   echo "t3-codemode $("$BIN_DIR/t3cm" --version | awk '{print $2}') installed. Check it with: t3cm status   Logs: $LOGS_HINT"
   case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *) echo "$BIN_DIR is not on your PATH; add it to run t3cm by name." ;;
   esac
+  if [ -n "${SKILLS_FAILED:-}" ]; then
+    die "t3cm is installed, but its workflow skills are not; fix what t3cm skills install printed, then run it again"
+  fi
 }
 
 install_release() {
