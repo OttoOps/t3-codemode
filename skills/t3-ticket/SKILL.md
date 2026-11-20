@@ -351,12 +351,13 @@ End the turn.
 **"merge"** (or "merge and deploy"):
 
 1. Check the PR against the head the answered gate names. Through t3cm,
-   check that it is open, not a draft, and at that head, that no check
-   failed, and take the full SHA from its `headRefOid`. A failing check
-   goes back to the worker, even when GitHub would merge the PR anyway
-   (`UNSTABLE`). `wf.merge` handles the merge state and any check still
-   pending. Without t3cm, run the "Ready to merge" checks again. A head
-   that moved since that gate gets a new gate, not a merge.
+   check that it is open, not a draft, and at that head, that every check
+   has finished and none failed, and take the full SHA from its
+   `headRefOid`. A pending check is waited out (end the turn; the worker
+   reports again). A failing check goes back to the worker, even when
+   GitHub would merge the PR anyway (`UNSTABLE`). `wf.merge` handles the
+   merge state. Without t3cm, run the "Ready to merge" checks again. A
+   head that moved since that gate gets a new gate, not a merge.
 2. Merge at that head. Never use T3's merge button or PR action (Hard
    rules).
    - **Through t3cm** (`mcp__t3cm__execute` is listed): call
@@ -480,11 +481,16 @@ Each merge-watch run reads the item 3 fields, plus `headRefOid` and
 - **`OPEN` and out of the queue, after a `waiting` outcome, at the
   approved head, with "Seen queued: no", and no open board card names
   the PR:** the board has not queued it yet. End the turn quietly. Look
-  for the card with `wf.cards()`: one whose `text` has the PR URL means
-  the board gave up on the approval or wants a decision on it, so the
-  next case applies. With the reconcile off, nothing queues it for you:
-  once `mergeStateStatus` is `CLEAN` or `HAS_HOOKS`, call `wf.merge` again
-  at the approved head and act on its outcome as item 2 says.
+  for the card with `wf.cards()`: one whose `text` has the PR's label,
+  `<owner>/<name>#<number>` in lower case and not followed by a digit,
+  means the board gave up on the approval or wants a decision on it, so
+  the next case applies. The board puts the label before any GitHub
+  error, which it may cut short. With
+  the reconcile off, nothing queues it for you: once `mergeStateStatus` is
+  `CLEAN` or `HAS_HOOKS`, call `wf.merge` again at the approved head and
+  act on its outcome as item 2 says, except that a `queued` or `waiting`
+  outcome updates this task's prompt with the new outcome and starts no
+  new watch.
 - **`OPEN`, out of the queue, with no `autoMergeRequest`, in any other
   case:** delete the task and send the gate "reply \"merge\" to queue
   #<number> again at head <sha>, or check why it left the queue, here: <PR
