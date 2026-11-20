@@ -127,7 +127,7 @@ The `AGENTS.md` block reads these bullets and ignores the rest:
 - Delivery: tag-deploy
 - Deploy skill: `deploy`
 - Ticket model: claude-opus-5-5, high effort
-- Worker model: claude-opus-5-5, high effort (or pool `opus`)
+- Worker model: pool `opus`
 ```
 
 ## Finding skills
