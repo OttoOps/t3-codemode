@@ -110,7 +110,10 @@ the triage labels.
 ## Development setup
 
 **Requirements.** Use Linux, macOS or Windows, Git, and Rust 1.95 or newer. CI
-runs the checks on all three. To change the installers or workflows, also
+runs the checks on Linux and macOS. Windows CI is paused until we have a
+code-signing certificate
+([#123](https://github.com/OttoOps/t3-codemode/issues/123)), so run the checks
+yourself when you change Windows code. To change the installers or workflows, also
 install [ShellCheck](https://www.shellcheck.net/) and
 [actionlint](https://github.com/rhysd/actionlint); `deploy/install.ps1` must
 run on Windows PowerShell 5.1.
@@ -130,7 +133,7 @@ live run of the service (`deploy/install.sh` or `cargo run -- serve`) needs a
 running T3 Code server.
 
 **Installer changes.** The release workflow's `install` job installs this run's
-own archives on Linux, macOS and Windows, starts the service, checks
+own archives on Linux and macOS, starts the service, checks
 `t3cm status`, and uninstalls. It runs on pull requests that touch `deploy/`,
 the workflow or the Cargo files. To try `install.sh` locally without replacing
 your own install, run it in a clean environment with a scratch `HOME`, so it
