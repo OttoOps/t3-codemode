@@ -388,9 +388,19 @@ jobs:
             sleep 1
           done
           exit 1
+      - name: The install set up the workflow skills (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: |
+          test -f "$HOME/.agents/skills/t3-workflow/SKILL.md"
+          "$HOME/.local/bin/t3cm" skills status
       - name: Reinstall from the local archive (Linux, macOS)
         if: runner.os != 'Windows'
         run: deploy/install.sh --archive "dist/$ARCHIVE" --sums dist/SHA256SUMS
+      - name: The reinstall kept the workflow skills current (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: |
+          "$HOME/.local/bin/t3cm" skills status --json > skills.json || { cat skills.json; exit 1; }
+          grep -q "\"installed\": \"$VERSION\"" skills.json
       - name: The systemd unit verifies
         if: runner.os == 'Linux'
         run: systemd-analyze --user verify "$HOME/.config/systemd/user/t3-codemode.service"
@@ -445,10 +455,24 @@ jobs:
             Start-Sleep -Seconds 1
           }
           exit 1
+      - name: The install set up the workflow skills (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          if (-not (Test-Path "$env:USERPROFILE\.agents\skills\t3-workflow\SKILL.md")) { throw 'the t3-workflow skill is not installed' }
+          & "$env:LOCALAPPDATA\Programs\t3-codemode\t3cm.exe" skills status
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Reinstall from the local archive (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: '& ./deploy/install.ps1 -Archive "dist/$env:ARCHIVE" -Sums dist/SHA256SUMS'
+      - name: The reinstall kept the workflow skills current (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $st = (& "$env:LOCALAPPDATA\Programs\t3-codemode\t3cm.exe" skills status --json) -join "`n"
+          if ($LASTEXITCODE -ne 0) { $st; exit 1 }
+          if (($st | ConvertFrom-Json).installed -ne $env:VERSION) { throw "the skills record release $(($st | ConvertFrom-Json).installed)" }
       - name: The installed binary runs and the task is registered (Windows)
         if: runner.os == 'Windows'
         shell: powershell
