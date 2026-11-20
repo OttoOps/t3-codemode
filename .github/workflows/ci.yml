@@ -77,8 +77,7 @@ jobs:
           RESULT: ${{ needs.platform.result }}
         run: |
           test "$CHANGES" = success
-          if [ "$CODE" = true ]; then
-            test "$RESULT" = success
-          else
-            test "$RESULT" = skipped
-          fi
+          case "$CODE/$RESULT" in
+            true/success|false/skipped) ;;
+            *) exit 1 ;;
+          esac
