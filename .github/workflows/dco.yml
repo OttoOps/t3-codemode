@@ -21,8 +21,16 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
         run: |
+          if [ -z "$BASE" ] || [ -z "$HEAD" ]; then
+            echo "::error::The event gave no base or head commit to check"
+            exit 1
+          fi
+          if ! commits=$(git rev-list --no-merges "$BASE..$HEAD"); then
+            echo "::error::Could not list the commits in $BASE..$HEAD"
+            exit 1
+          fi
           fail=0
-          for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+          for c in $commits; do
             name=$(git log -1 --format=%an "$c")
             email=$(git log -1 --format=%ae "$c")
             case "$email" in *"[bot]@users.noreply.github.com") continue ;; esac
