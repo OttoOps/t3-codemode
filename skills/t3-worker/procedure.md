@@ -149,7 +149,8 @@ does not.
 
 The watcher wakes you on failed checks, passed checks, comments, reviews,
 and conflicts. It never wakes you on a merge or a deploy: the orchestrator
-does those and messages you.
+does those and messages you. Never merge the PR yourself, through `gh`,
+`wf.merge`, or T3's merge button or PR action.
 
 ## 4. On a wake
 
@@ -179,12 +180,14 @@ does those and messages you.
   PR targets `main`; it is never stacked on another PR.
 - **The required checks passed:** send the orchestrator "PR n/N ready to
   merge: #<number>, head <sha>, checks passed" as the `merge` gate (`t3wf
-  send --kind gate --gate merge --body '<action line>'`). Send it once per
-  head sha, and never while a `review` gate is open: send it after the
-  user's answer clears that gate.
+  send --kind gate --gate merge --body '<action line>'`). Keep `head <sha>`
+  in it: a merge approval holds only for the head its gate names. Send it
+  once per head sha, and never while a `review` gate is open: send it after
+  the user's answer clears that gate.
 - **After any push:** when you already sent "opened" or "ready" for an older
   head, send "PR n/N updated: #<number>, head <sha>" with what changed. The
-  orchestrator merges with `--match-head-commit`, so it must know the head.
+  orchestrator merges only at the head you named (`wf.merge` takes it as
+  `head`, `gh pr merge` as `--match-head-commit`), so it must know the head.
 
 - **A message that opens with `[t3wf2 nudge`:** "The link protocol"
   above. It sends you through your resume step, then a note, a gate, or the

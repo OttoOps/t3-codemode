@@ -24,6 +24,11 @@ link that `wf.init` opens.
 - This thread edits no code and makes no commits. All repo changes happen in
   a worker's worktree. Merging a PR and pushing a deploy tag are this
   thread's, and only on the user's word (Gates).
+- Never merge through T3's own merge button or its PR action. On a repo
+  with a merge queue, T3 turns on auto-merge, and a PR whose checks have
+  already passed then never joins the queue. This thread does not need to
+  know which repos have a queue: it merges every PR as "On the user's word"
+  says, and `wf.merge` finds out per PR.
 - Invoking this skill, or a repo rule that routes issue work to it, is the
   user's request to launch one new thread per PR with `t3_thread_launch`.
   Do not stop to ask for a new thread at step 3.
@@ -62,7 +67,7 @@ per action:
 
 For example:
 
-`**ACTION NEEDED:** reply "merge and deploy" to merge #81 and push content/v1.4.2, or review it first, here: https://github.com/acme/widgets/pull/81`
+`**ACTION NEEDED:** reply "merge and deploy" to merge #81 at head d4db97c and push content/v1.4.2, or review it first, here: https://github.com/acme/widgets/pull/81`
 
 - The verb phrase names what the user clicks, runs, or answers, in plain
   words. This skill's own terms, such as "gate" and "slot", stay out of it.
@@ -135,7 +140,7 @@ parent (an overseer), three more rules hold:
    | Setting | Values | Inferred when the repo does not say |
    |---|---|---|
    | Tracker | `github-issues`, `none` | `github-issues` when the user named an issue, else `none` |
-   | Merge method | `merge`, `squash`, `rebase` | what the repo documents (`gh pr merge --merge`), else the method its recent merged PRs show |
+   | Merge method | `merge`, `squash`, `rebase` | what the repo documents (`gh pr merge --merge`, or "Rebase and merge"), else the method its recent merged PRs show |
    | PR format | a skill or template | the `pr` skill when it is available, else `.github/pull_request_template.md`, else none |
    | Checks | commands | the test commands the repo documents |
    | In-progress label | a label | the label the repo documents for work under way, else none |
@@ -325,13 +330,19 @@ path>`), and name the result.
 
 Then send the gate:
 
-- Delivery `merge`: "reply \"merge\" to merge #<number>, or review it
-  first, here: <PR URL>".
+- Delivery `merge`: "reply \"merge\" to merge #<number> at head <sha>, or
+  review it first, here: <PR URL>".
 - Delivery `tag-deploy`: "reply \"merge and deploy\" to merge #<number>
-  and push <family>/v<next version>, or \"merge\" alone, or review it
-  first, here: <PR URL>". Take the family and the next version from the
-  deploy skill (its rules for choosing the pipeline and the version,
-  applied to the PR's `files`), and say they are recomputed at deploy time.
+  at head <sha> and push <family>/v<next version>, or \"merge\" alone, or
+  review it first, here: <PR URL>". Take the family and the next version
+  from the deploy skill (its rules for choosing the pipeline and the
+  version, applied to the PR's `files`), and say they are recomputed at
+  deploy time.
+
+The action line names the head the user approves as `head <sha>`, with
+the SHA at least 7 characters long. Through t3cm, the board holds the
+approval to that head: when the PR moves to another head first, the board
+drops the approval and opens a new merge gate for the new head.
 
 End the turn.
 
@@ -339,14 +350,40 @@ End the turn.
 
 **"merge"** (or "merge and deploy"):
 
-1. Run the "Ready to merge" checks again. A head that moved since the gate
-   gets a new gate, not a merge.
-2. `gh pr merge <number> -R <repo> --<merge method> --match-head-commit
-   <sha>`. Never pass `--delete-branch`: it checks out the default branch
-   wherever it runs. On a branch with a merge queue this queues the PR, or
-   sets it to auto-merge, and the PR merges later.
-3. Read where the PR stands, in one query so a merge cannot land between
-   two reads: `gh api graphql -f query='query{repository(owner:"<owner>",
+1. Check the PR against the head the answered gate names. Through t3cm,
+   check that it is open, not a draft, and at that head, and take the full
+   SHA from its `headRefOid`; `wf.merge` handles the merge state. Without
+   t3cm, run the "Ready to merge" checks again. A head that moved since
+   that gate gets a new gate, not a merge.
+2. Merge at that head. Never use T3's merge button or PR action (Hard
+   rules).
+   - **Through t3cm** (`mcp__t3cm__execute` is listed): call
+     `wf.merge({ repo: "<owner>/<name>", pr: <number>, head: "<sha>",
+     method: "<merge method>" })`. It reads per PR whether the repo has a
+     merge queue. It queues the PR where there is one, merges it directly
+     where there is none, and never turns on auto-merge. Tell the user the
+     outcome in one line with the PR URL, and send it to the parent as a
+     note. Then act on its `status`:
+     - `merged`: go on to item 4 with its `commit`.
+     - `queued`: name its `position`. End the turn and wait as "The merge
+       wait" says.
+     - `waiting`: GitHub does not show the PR mergeable yet; name its
+       `mergeState`. The board queues it once GitHub shows it mergeable at
+       this head. End the turn and wait as "The merge wait" says.
+     - `refused`: name its `reason`. A moved head goes through "Ready to
+       merge" again for a new gate. A draft, or a PR that is not mergeable
+       yet, goes back to the worker. A closed PR gets item 3's `CLOSED`
+       gate. End the turn.
+     - The call throws: the service's `gh` cannot reach GitHub. Tell the
+       user what it says and end the turn. Their next "merge" runs this
+       step again.
+   - **Without t3cm** (`t3wf`): `gh pr merge <number> -R <repo> --<merge
+     method> --match-head-commit <sha>`. Never pass `--delete-branch`: it
+     checks out the default branch wherever it runs. On a branch with a
+     merge queue this queues the PR, or sets it to auto-merge, and the PR
+     merges later. Go on to item 3.
+3. Without t3cm, read where the PR stands, in one query so a merge cannot
+   land between two reads: `gh api graphql -f query='query{repository(owner:"<owner>",
    name:"<name>"){pullRequest(number:<number>){state mergeCommit{oid}
    isInMergeQueue autoMergeRequest{enabledAt}}}}'`.
    - `MERGED`: go on to item 4.
@@ -355,7 +392,7 @@ End the turn.
    - `OPEN` with neither: nothing will merge it. Tell the user what
      `gh pr merge` printed, and end the turn.
    - `CLOSED`: send the gate "reopen #<number>, then reply \"merge\" to
-     queue it again, here: <PR URL>", and end the turn.
+     queue it again at head <sha>, here: <PR URL>", and end the turn.
 4. Only now that GitHub shows it merged, delete its branch:
    `git -C <main workspace root> push origin --delete <branch>`. Deleting
    the head branch of an open PR closes the PR. The worker's worktree still
@@ -370,24 +407,71 @@ End the turn.
    it is merged but not deployed.
 
 A user who merged the PR on GitHub themselves counts as "merge": verify
-the merged state and continue from item 4.
+the merged state and continue from item 4. Through t3cm, the board's
+merged event (below) tells this thread.
+
+#### The merge wait
+
+Through t3cm, the board's GitHub reconcile follows the PR after
+`wf.merge`. It reads every PR of an open worker link, every PR `wf.merge`
+queued or holds waiting, and every PR an open gate card names: every 2
+minutes while one is queued or waiting, every 10 minutes otherwise. It
+wakes this thread once per event, so this thread starts no merge watch
+and does not poll GitHub. Hold `wf.gate({ open: "merge" })` while it
+waits, so the watcher does not nudge it, and clear it
+(`wf.gate({ clear: true })`) when the merged or closed event or the user's
+answer arrives. What reaches this thread:
+
+- **Merged:** an `event` from `github`, "<repo>#<number> merged on GitHub
+  at <sha>, <time> (merge commit <sha>). Run your post-merge steps.". The
+  board has resolved the merge card. Confirm on GitHub (`gh pr view
+  <number> -R <repo> --json state,mergeCommit`), then go on from item 4.
+- **Closed without merging:** an `event` from `github`, "<repo>#<number>
+  was closed on GitHub without merging". Send item 3's `CLOSED` gate.
+- **Dropped from the queue, moved to a new head, or refused by GitHub 3
+  checks in a row:** the board opens a card for this thread itself, with
+  the reason and the answers the user can give. The answer arrives as a
+  `[t3cm reply]`, "The user says \"<answer>\" about <card>: <card
+  text>". Under a thread parent (an overseer thread) there is no card:
+  the board wakes this thread with the action line itself, as a `gate` or
+  `report`. Send it up as a gate, as "On the link protocol" says, and act
+  on the relayed answer the same way:
+  - "merge" or "requeue": run "On the user's word" from item 1, at the
+    head the card names, else at the head this thread last passed to
+    `wf.merge`. With neither, run "Ready to merge" for the PR's current
+    head, which sends a new gate.
+  - "ok" (GitHub queued the PR at a head other than the approved one):
+    the user accepts that head. Keep waiting.
+  - "hold": nothing merges the PR now. End the turn. The worker's next
+    "ready to merge" starts a new gate.
+
+The reconcile wakes only a thread on a link. A ticket with no parent (the
+`wf.init` result has no `parent`, as with `root: true`) starts the merge
+watch after `queued` or `waiting` instead.
 
 #### The merge watch
 
+The merge watch serves the `t3wf` path and a ticket with no parent.
 Create it as items 1 and 2 of "The deploy watch" say, with `title` `<#n or
 slug> PR n/N merge watch`, and a prompt that names the task id, the PR
 number and URL, its head SHA and branch, the main workspace root, the
-user's reply ("merge" or "merge and deploy"), and ends with "Follow 'Each
+user's reply ("merge" or "merge and deploy"), the `wf.merge` outcome when
+there was one, and the flag "Seen queued: no". End it with "Follow 'Each
 merge-watch run' in the t3-ticket skill."
 
-Each merge-watch run reads the item 3 fields:
+Each merge-watch run reads the item 3 fields, plus `headRefOid`:
 
 - **`MERGED`:** delete the task with `delete_scheduled_task`, then go on
   from item 4.
-- **Still queued, or waiting on auto-merge:** end the turn quietly.
-- **`OPEN`, out of the queue, with no `autoMergeRequest`:** delete the
-  task and send the gate "reply \"merge\" to queue #<number> again, or
-  check why it left the queue, here: <PR URL>". End the turn.
+- **Still queued, or waiting on auto-merge:** when the flag says "Seen
+  queued: no", update it to "yes". End the turn quietly.
+- **`OPEN` and out of the queue, after a `waiting` outcome, at the
+  approved head, with "Seen queued: no":** the board has not queued it
+  yet. End the turn quietly.
+- **`OPEN`, out of the queue, with no `autoMergeRequest`, in any other
+  case:** delete the task and send the gate "reply \"merge\" to queue
+  #<number> again at head <sha>, or check why it left the queue, here: <PR
+  URL>". End the turn.
 - **`CLOSED`:** delete the task and send item 3's `CLOSED` gate. End the
   turn.
 

@@ -68,5 +68,67 @@ class RoleSkillTests(unittest.TestCase):
             self.assertNotIn("disable-model-invocation", frontmatter(path.read_text()), path)
 
 
+
+def section(text, heading):
+    start = text.index(heading)
+    level = heading.split(" ", 1)[0]
+    nxt = re.search(rf"^#{{1,{len(level)}}} ", text[start + len(heading):], re.M)
+    return text[start:start + len(heading) + nxt.start()] if nxt else text[start:]
+
+
+class MergeRouteTests(unittest.TestCase):
+    ticket = (SKILLS / "t3-ticket" / "SKILL.md").read_text()
+    reconcile = (ROOT / "src" / "reconcile.rs").read_text()
+
+    def test_the_ticket_merges_through_wf_merge_and_reports_each_outcome(self):
+        word = section(self.ticket, "### On the user's word")
+        self.assertIn("**Through t3cm**", word)
+        self.assertIn("wf.merge({ repo:", word)
+        self.assertIn("head:", word)
+        for status in ("merged", "queued", "waiting", "refused"):
+            self.assertIn(f"- `{status}`:", word, status)
+
+    def test_the_t3wf_path_keeps_gh_pr_merge_and_its_merge_watch(self):
+        word = section(self.ticket, "### On the user's word")
+        self.assertIn("**Without t3cm**", word)
+        self.assertIn("--match-head-commit <sha>", word)
+        self.assertIn("#### The merge watch", word)
+        self.assertIn("Each merge-watch run", word)
+
+    def test_no_skill_merges_through_t3s_merge_button_or_pr_action(self):
+        rules = section(self.ticket, "## Hard rules")
+        self.assertIn("Never merge through T3's own merge button or its PR action", rules)
+        self.assertIn("merge queue", rules)
+        codemode = (SKILLS / "t3-workflow" / "codemode.md").read_text()
+        self.assertIn("never with `gh pr merge` or T3's\nown merge button or PR action", codemode)
+        worker = (SKILLS / "t3-worker" / "procedure.md").read_text()
+        self.assertIn("Never merge the PR yourself", worker)
+
+    def test_every_merge_action_line_names_the_approved_head(self):
+        lines = []
+        for path in [*ROLE_FILES, *(SKILLS / "t3-workflow").glob("*.md")]:
+            text = " ".join(path.read_text().split())
+            lines += [(path, m) for m in re.findall(r'reply \\?"merge(?: and deploy)?\\?" to (?:merge|queue) #?[^,]+', text)]
+        self.assertGreaterEqual(len(lines), 6)
+        for path, line in lines:
+            self.assertRegex(line, r"at head (<sha>|[0-9a-f]{7,40})", f"{path.relative_to(ROOT)}: {line}")
+
+    def test_the_worker_merge_gate_names_its_head(self):
+        worker = (SKILLS / "t3-worker" / "procedure.md").read_text()
+        self.assertIn('ready to\n  merge: #<number>, head <sha>, checks passed"', worker)
+        self.assertIn("Keep `head <sha>`", worker)
+
+    def test_the_merge_wait_reads_what_the_reconcile_sends(self):
+        wait = " ".join(section(self.ticket, "#### The merge wait").split())
+        self.assertIn("does not poll GitHub", wait)
+        self.assertIn('wf.gate({ open: "merge" })', wait)
+        for phrase in ("merged on GitHub at", "Run your post-merge steps.", "was closed on GitHub without merging"):
+            self.assertIn(phrase, wait)
+            self.assertIn(phrase, self.reconcile, f"src/reconcile.rs no longer sends {phrase!r}")
+        for answer in ("merge", "requeue", "ok", "hold"):
+            self.assertIn(f'\\"{answer}\\"', self.reconcile, answer)
+            self.assertIn(f'"{answer}"', wait, answer)
+
+
 if __name__ == "__main__":
     unittest.main()
