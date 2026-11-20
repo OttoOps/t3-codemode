@@ -348,7 +348,7 @@ async fn dismiss_new_issue(State(web): State<Web>, headers: HeaderMap, Path(id):
     if let Some(r) = web.reject(&headers, true) {
         return r;
     }
-    match web.app.wf.dismiss_new_issue(&id) {
+    match web.app.wf.dismiss_new_issue(&id).await {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => failed(&web.app, e),
     }
@@ -358,7 +358,7 @@ async fn restore_new_issue(State(web): State<Web>, headers: HeaderMap, Path(id):
     if let Some(r) = web.reject(&headers, true) {
         return r;
     }
-    match web.app.wf.restore_new_issue(&id) {
+    match web.app.wf.restore_new_issue(&id).await {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => failed(&web.app, e),
     }

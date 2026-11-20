@@ -180,7 +180,8 @@ impl Wf {
         Ok(r)
     }
 
-    pub fn dismiss_new_issue(&self, id: &str) -> Result<Value> {
+    pub async fn dismiss_new_issue(&self, id: &str) -> Result<Value> {
+        let _g = self.lock.lock().await;
         let (seq, mut i) = self.new_issue_row(id)?;
         if i.dismissed_at.is_some() {
             bail!("new issue {id} is already dismissed");
@@ -191,7 +192,8 @@ impl Wf {
         Ok(json!({"id": id, "dismissed": true}))
     }
 
-    pub fn restore_new_issue(&self, id: &str) -> Result<Value> {
+    pub async fn restore_new_issue(&self, id: &str) -> Result<Value> {
+        let _g = self.lock.lock().await;
         let (seq, mut i) = self.new_issue_row(id)?;
         if i.dismissed_at.is_none() {
             bail!("new issue {id} is not dismissed");
