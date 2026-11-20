@@ -21,6 +21,7 @@ struct State {
     calls: Vec<String>,
     send_fails: bool,
     prs_fail: bool,
+    projects_fail: bool,
     read_fails: bool,
     pr_page: usize,
     organize_fails: bool,
@@ -175,6 +176,10 @@ impl FakeT3 {
         self.st().prs_fail = fails;
     }
 
+    pub fn set_projects_fail(&self, fails: bool) {
+        self.st().projects_fail = fails;
+    }
+
     pub fn set_pr_page(&self, size: usize) {
         self.st().pr_page = size;
     }
@@ -298,6 +303,7 @@ impl FakeT3 {
                 let next = (end < prs.len()).then(|| end.to_string());
                 Ok(json!({"pullRequests": prs[start.min(end)..end], "chains": [], "nextCursor": next}))
             }
+            "t3_project_list" if st.projects_fail => Err(T3Error::Unavailable("T3 unreachable (fake)".into())),
             "t3_project_list" => Ok(json!({"projects": st.projects, "nextCursor": null})),
             "orchestrator_capabilities" => {
                 let search = args["search"].as_str();
