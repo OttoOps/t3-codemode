@@ -163,14 +163,16 @@ does those and messages you.
   bot's reviews, one per distinct `commit_id`).
   - Fix only the Critical and Major findings that still hold against the
     current code, all of them in one push. When you dispute one, reply
-    once with why and leave the code.
+    once with why, leave the code, and send it as the `review` gate below
+    without waiting for another round.
   - Do not change code for a Minor, Trivial or nitpick finding. Reply in
     one line that it is advisory and not fixed, then resolve the thread.
     A finding with no severity counts as Minor unless it names data loss,
     a security hole, or a crash on a normal path.
-  - After the bot's second round, push nothing more for bot findings. Send
-    the orchestrator any open Critical or Major finding, both sides in 2-3
-    lines each, as the `review` gate, and end the turn. The user decides.
+  - After the bot's second round, push nothing more for bot findings.
+  - Send the orchestrator each open Critical or Major finding you dispute
+    or, after the second round, have not fixed, both sides in 2-3 lines
+    each, as the `review` gate, and end the turn. The user decides.
   - Replies go through Publishing.
 - **A conflict:** `git fetch origin`, rebase on `origin/main`, re-run the
   done-checks, push with `--force-with-lease=<branch>:<old head sha>`. The
@@ -178,7 +180,8 @@ does those and messages you.
 - **The required checks passed:** send the orchestrator "PR n/N ready to
   merge: #<number>, head <sha>, checks passed" as the `merge` gate (`t3wf
   send --kind gate --gate merge --body '<action line>'`). Send it once per
-  head sha.
+  head sha, and never while a `review` gate is open: send it after the
+  user's answer clears that gate.
 - **After any push:** when you already sent "opened" or "ready" for an older
   head, send "PR n/N updated: #<number>, head <sha>" with what changed. The
   orchestrator merges with `--match-head-commit`, so it must know the head.
