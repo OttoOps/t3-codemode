@@ -1,0 +1,26 @@
+{
+  "opus": {
+    "R": "dockview",
+    "M": "jetbrains",
+    "T": "candidate",
+    "F": "grafana",
+    "V": "goldenlayout",
+    "K": "vscode"
+  },
+  "sonnet": {
+    "M": "dockview",
+    "W": "candidate",
+    "D": "grafana",
+    "X": "goldenlayout",
+    "H": "vscode",
+    "T": "jetbrains"
+  },
+  "sol": {
+    "P": "goldenlayout",
+    "X": "vscode",
+    "B": "dockview",
+    "H": "grafana",
+    "W": "jetbrains",
+    "D": "candidate"
+  }
+}

@@ -52,3 +52,13 @@ tickets that need the user stay in both the Needs you panel and the
 Tickets list, and the board rewrites no ask beyond stripping the action
 line's scaffolding, so a card whose ask names its replies repeats them on
 its buttons.
+
+## Issue #93
+
+The Dynamic layout criteria (L1 to L13) judge moving, collapsing and
+resizing panels against best-in-class dynamic-panel apps, not against a
+baseline board, since `main` cannot move panels at all.
+
+| Round | Judged build | Result | Judged criteria short of the rule | Gates failed or not measured |
+| --- | --- | --- | --- | --- |
+| [1](layout-round-1.md) | `1d9e785` | met | none | none |

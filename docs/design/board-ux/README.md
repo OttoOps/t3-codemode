@@ -11,6 +11,11 @@ readability pass on top: a critique of the shipped board under the live
 load, a Glanceability axis in the rubric, and mockups of the proposed
 direction.
 
+[Issue #93](https://github.com/OttoOps/t3-codemode/issues/93) lets the
+panels be moved, collapsed and resized at desktop widths. It adds a Dynamic
+layout axis to the rubric, references from apps with dynamic panels, and
+judges the board against them.
+
 | Path | What it holds |
 | --- | --- |
 | [`review.md`](review.md) | The paired design review of the current board: verdict, findings by area with evidence, what must survive, the functionality inventory, and how the two reviewers settled their disagreements. |
@@ -20,10 +25,12 @@ direction.
 | [`references/`](references/README.md) | Sixteen screenshots of comparable products, with source URLs, the basis for keeping each, and notes on what each does well. |
 | [`current/`](current/) | Captures of the current board (commit `7e29c9d`) under realistic load, plus `report.json` with the measurements the review cites. |
 | [`harness/`](harness/README.md) | The seeded demo board and the capture scripts, so every capture and measurement here can be rerun. |
-| [`judging/`](judging/README.md) | The blind-judging rounds for the redesign (1 to 7) and for issue #67's readability pass (8 to 10): each round's gates, judged scores with evidence, and letter key. |
+| [`judging/`](judging/README.md) | The blind-judging rounds for the redesign (1 to 7) issue #67's readability pass (8 to 10), and issue #93's dynamic layout (`layout-round-*`): each round's gates, judged scores with evidence, and letter key. |
 | [`critique.md`](critique.md) | Issue #67: the readability critique under the live load, the task-test baseline, and the proposed direction for the decision card, ticket row and Activity row. |
 | [`live/`](live/README.md) | Issue #67: an anonymized snapshot of the live board, a read-only replay server, the capture and glance scripts, and the before- and after-stills at 1920, 1366 and 390. |
 | [`mockups/`](mockups/README.md) | Issue #67: a static mockup of the direction under the same load, a component sheet, and the after-stills. |
+| [`panels/`](panels/README.md) | Issue #93: the mockups filed with the issue, captured from the first candidate. |
+| [`references/panels/`](references/panels/README.md) | Issue #93: sixteen screenshots of apps whose panels move, collapse and resize (VS Code for the Web, Dockview, Golden Layout, Grafana, JetBrains IDEs), with sources and notes on the feedback each shows. |
 | [`new-issues/`](new-issues/README.md) | Issue #57: before and after stills of the New issues section above Tickets, with the script that adds the issues to the live snapshot. |
 
 ## Method
