@@ -6,6 +6,7 @@ use serde_json::Value;
 use t3_codemode::app::{App, ExecuteRequest, ToolOutput};
 use t3_codemode::clock::FakeClock;
 use t3_codemode::config::Config;
+use t3_codemode::drift::Home;
 use t3_codemode::fake::{FakeDesktop, FakeGitHub, FakeRemotes, FakeT3, thread};
 use t3_codemode::store::Store;
 
@@ -64,6 +65,7 @@ impl H {
             github.clone(),
             desktop.clone(),
         );
+        app.wf.set_skills_home(Home::under(&dir.path().join("home")));
         H { dir, fake, clock, app, remotes, github, desktop, config }
     }
 
@@ -82,6 +84,7 @@ impl H {
             self.github.clone(),
             self.desktop.clone(),
         );
+        self.app.wf.set_skills_home(Home::under(&self.dir.path().join("home")));
     }
 
     pub async fn exec(&self, code: &str) -> ToolOutput {

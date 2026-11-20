@@ -221,6 +221,7 @@ pub struct Wf {
     pub(crate) reconcile_lock: tokio::sync::Mutex<()>,
     pub(crate) usage: Mutex<Option<Arc<dyn UsageSource>>>,
     pub(crate) release: Mutex<Option<crate::release::Version>>,
+    pub(crate) skills: crate::drift::Cache,
 }
 
 const MAX_PR_PAGES: usize = 20;
@@ -267,6 +268,7 @@ impl Wf {
             reconcile_lock: tokio::sync::Mutex::new(()),
             usage: Mutex::new(None),
             release: Mutex::new(None),
+            skills: crate::drift::Cache::default(),
         }
     }
 
@@ -361,7 +363,9 @@ impl Wf {
 
     pub async fn dispatch(&self, method: &str, caller: Option<&str>, args: Value) -> Result<Value> {
         let out = self.dispatch_inner(method, caller, args).await;
-        if out.is_ok() && !matches!(method, "show" | "inbox" | "board" | "cards" | "feed" | "waiting.list" | "pools") {
+        if out.is_ok()
+            && !matches!(method, "show" | "inbox" | "board" | "cards" | "feed" | "waiting.list" | "pools" | "status")
+        {
             self.changed();
         }
         out
@@ -386,6 +390,11 @@ impl Wf {
             "pools" => {
                 parse::<Empty>(method, args)?;
                 return self.pools().await;
+            }
+            "status" => {
+                parse::<Empty>(method, args)?;
+                self.refresh_skills();
+                return Ok(self.service_view());
             }
             "merge" => return self.merge(caller.filter(|c| !c.is_empty()), parse::<MergeArgs>(method, args)?).await,
             "launchTicket" => {

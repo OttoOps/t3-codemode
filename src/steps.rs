@@ -380,18 +380,28 @@ fn setup_lines(s: &Steps, out: &mut String) {
             s.config.display()
         ));
     }
-    let slots: Vec<&str> = s.needs_setup().filter_map(|m| m.slot.as_deref()).collect();
-    if slots.is_empty() {
-        return;
-    }
-    if s.config_state == ConfigState::Absent {
+    if s.config_state == ConfigState::Absent && s.needs_setup().next().is_some() {
         out.push_str(&format!(
             "no T3 workflow config at {} yet: run {SETUP_SKILL} to pick the reviewer, passes, delivery and models\n",
             s.config.display()
         ));
-    } else {
-        let noun = if slots.len() == 1 { "slot" } else { "slots" };
-        out.push_str(&format!("run {SETUP_SKILL}: new {noun} {}\n", slots.join(", ")));
+    } else if let Some(fix) = new_slots(s) {
+        out.push_str(&fix);
+        out.push('\n');
+    }
+}
+
+fn new_slots(s: &Steps) -> Option<String> {
+    let slots: Vec<&str> = s.needs_setup().filter_map(|m| m.slot.as_deref()).collect();
+    let noun = if slots.len() == 1 { "slot" } else { "slots" };
+    (!slots.is_empty()).then(|| format!("run {SETUP_SKILL}: new {noun} {}", slots.join(", ")))
+}
+
+pub fn setup_fix(s: &Steps) -> Option<String> {
+    match s.config_state {
+        ConfigState::Problem => Some(format!("fix {}, then run {SETUP_SKILL}", s.config.display())),
+        ConfigState::Absent if s.needs_setup().next().is_some() => Some(format!("run {SETUP_SKILL}")),
+        _ => new_slots(s),
     }
 }
 

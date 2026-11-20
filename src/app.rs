@@ -76,7 +76,7 @@ const EXEC_PRELUDE: &str = r#"
     gate: m("gate"), close: m("close"), inbox: m("inbox"), board: m("board"), adopt: m("adopt"), sweep: m("sweep"),
     show: (handle) => call("wf.show", { handle }),
     launchTicket: m("launchTicket"), cards: m("cards"), feed: m("feed"), merge: m("merge"),
-    pick: m("pick"), pools: m("pools"), issue: m("issue"),
+    pick: m("pick"), pools: m("pools"), issue: m("issue"), status: m("status"),
     answer: (id, text) => call("wf.answer", { id, text }),
     waiting: Object.freeze({
       add: m("waiting.add"),
@@ -486,6 +486,7 @@ impl App {
             "store": self.store.path().display().to_string(),
             "upstreams": self.upstreams.status(),
             "update": self.wf.update_view(),
+            "skills": self.wf.skills_view(),
         })
     }
 

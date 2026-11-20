@@ -173,6 +173,11 @@ textarea { resize: none; display: block; }
 .upd-pop { left: auto; right: 0; width: 300px; gap: 8px; font-size: 13px; line-height: 18px; }
 .upd-pop code { display: block; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; user-select: all; }
 #upd-hide { justify-content: flex-start; }
+.drift-btn { border-color: var(--need); color: var(--need); font-weight: 600; }
+.drift-pop { width: 340px; }
+.drift-pop p { margin: 0; }
+.drift-fix { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.drift-fix code { overflow-wrap: anywhere; }
 
 .fbar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0;
@@ -558,6 +563,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .fpop { left: 12px; right: 12px; width: auto; top: calc(100% - 4px); }
   .top { position: relative; }
   .upd { position: static; }
+  .drift-pop { width: auto; left: 12px; right: 12px; }
   .upd-pop { top: calc(100% + 4px); }
   .top { gap: 8px; padding: 0 12px; }
   .counts .runc, #keys-btn, .conn .facts, .needc .w, .tools .btn .w { display: none !important; }
@@ -661,6 +667,13 @@ kbd { font-family: var(--mono); font-size: 12px; }
           <a id="upd-notes" target="_blank" rel="noopener noreferrer">Release notes</a>
         </div>
         <button class="btn quiet" type="button" id="upd-hide">Hide until the next release</button>
+      </div>
+    </span>
+    <span class="upd" id="drift" hidden>
+      <button class="btn drift-btn" type="button" id="drift-btn" aria-expanded="false" aria-controls="drift-pop" aria-haspopup="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 1.75 14.75 13.5H1.25z"/><path d="M8 6v3.5M8 11.25v.5"/></svg><span class="w" id="drift-text">Skills out of date</span></button>
+      <div class="fpop upd-pop drift-pop" id="drift-pop" role="group" aria-label="T3 workflow skills" hidden>
+        <div id="drift-msg"></div>
+        <div id="drift-fixes"></div>
       </div>
     </span>
     <button class="btn" type="button" id="notify" hidden><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 11V7a4 4 0 0 1 8 0v4l1 1.5H3z"/><path d="M6.5 14h3"/></svg><span class="w" id="notify-text">Notify me</span></button>
@@ -817,6 +830,7 @@ const CSRF = "{{CSRF}}";
 const PAGE_VERSION = "{{VERSION}}";
 const UPD_KEY = "t3board.update.hidden";
 const upd = { hidden: "", announced: "", reload: false };
+const drift = { key: "", announced: "" };
 try { upd.hidden = localStorage.getItem(UPD_KEY) || ""; } catch (_) {}
 const SEND_DELAY = 5000;
 const $ = (id) => document.getElementById(id);
@@ -2994,6 +3008,105 @@ function initUpdate() {
   });
 }
 
+const SKILL_STEP_NAMES = { "rule:filed-issues": "The filed-issue rule" };
+
+function driftOf(k) {
+  if (!k || !k.present) return null;
+  if (k.error) {
+    return { label: "Skills check failed", lines: ["t3cm could not read the T3 workflow skills: " + k.error], fixes: ["t3cm skills status"] };
+  }
+  if (!k.fixes || !k.fixes.length) return null;
+  const lines = [];
+  let label = "";
+  if (k.foreign) {
+    label = "Skills not managed";
+    lines.push("The T3 workflow skills were installed by " + k.foreign.tool +
+      (k.foreign.matchesRelease ? " and match t3cm " + k.release + "." :
+        ", and " + k.foreign.differingFiles + " of their files differ from t3cm " + k.release + ".") +
+      " t3cm can take them over and keep them on its release.");
+  } else if (k.fix && !k.installed) {
+    label = "Skills not managed";
+    lines.push("The T3 workflow skills are not recorded by t3cm, so it cannot keep them on release " + k.release + ".");
+  } else if (k.fix && k.installed !== k.release) {
+    label = "Skills out of date";
+    lines.push("The T3 workflow skills are at " + k.installed + "; t3cm runs " + k.release + ".");
+  } else if (k.fix && /--force$/.test(k.fix)) {
+    label = "Skills edited";
+    lines.push("Some T3 workflow skill files were edited locally. The update below discards those edits.");
+  } else if (k.fix) {
+    label = "Skills out of date";
+    lines.push("Some T3 workflow skill files are missing or out of date for " + k.release + ".");
+  }
+  for (const m of k.missingSteps || []) {
+    if (m.kind !== "auto") continue;
+    lines.push((SKILL_STEP_NAMES[m.id] || "Setup step " + m.id) + " is missing or out of date.");
+  }
+  const slots = (k.missingSteps || []).filter((m) => m.kind === "interview").map((m) => m.slot || m.id);
+  if (k.problem) lines.push("The T3 workflow config is ignored: " + k.problem + ".");
+  else if (slots.length && k.configState === "absent") lines.push("The T3 workflow is not set up yet: setup picks its reviewer, passes, delivery and models.");
+  else if (slots.length) lines.push("Setup has " + (slots.length === 1 ? "a new slot" : "new slots") + " to pick: " + slots.join(", ") + ".");
+  if (!label) label = k.problem ? "Workflow config ignored" : "Setup step missing";
+  return { label, lines, fixes: k.fixes };
+}
+
+function paintDrift(s) {
+  const d = driftOf(s.service && s.service.skills);
+  const wrap = $("drift");
+  wrap.hidden = !d;
+  if (!d) { drift.key = ""; closeDrift(false); return; }
+  const key = JSON.stringify(d);
+  const tip = d.lines.join(" ") + " Fix: " + d.fixes.join(", then ");
+  setText($("drift-text"), d.label);
+  setAttr($("drift-btn"), "aria-label", d.label + ". Fix: " + d.fixes.join(", then "));
+  setAttr($("drift-btn"), "title", tip);
+  if (drift.key !== key) {
+    drift.key = key;
+    $("drift-msg").replaceChildren(...d.lines.map((l) => h("p", {}, l)),
+      h("p", {}, d.fixes.length === 1 ? "Run this to fix it:" : "Run these, in order:"));
+    $("drift-fixes").replaceChildren(...d.fixes.map((f) => h("div", { class: "drift-fix" }, h("code", {}, f),
+      h("button", { class: "btn", type: "button", "data-cmd": f, onclick: (e) => copyCmd(e.currentTarget, f) }, "Copy"))));
+  }
+  if (drift.announced !== tip) { drift.announced = tip; if (!firstState) announce(d.label + ". " + tip); }
+}
+
+async function copyCmd(b, text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    setText(b, "Copied");
+  } catch (_) {
+    const r = document.createRange && document.createRange();
+    if (r) { r.selectNodeContents(b.parentNode.querySelector("code")); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); }
+    setText(b, "Press Ctrl+C to copy");
+  }
+  setTimeout(() => setText(b, "Copy"), 2000);
+}
+
+function closeDrift(focus) {
+  const pop = $("drift-pop");
+  if (pop.hidden) return;
+  pop.hidden = true;
+  setAttr($("drift-btn"), "aria-expanded", "false");
+  if (focus) $("drift-btn").focus();
+}
+
+function initDrift() {
+  const pop = $("drift-pop");
+  pop.hidden = true;
+  $("drift-btn").addEventListener("click", () => {
+    if (!pop.hidden) { closeDrift(true); return; }
+    pop.hidden = false;
+    setAttr($("drift-btn"), "aria-expanded", "true");
+    const first = pop.querySelector("button");
+    if (first) first.focus();
+  });
+  pop.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    e.preventDefault();
+    e.stopPropagation();
+    closeDrift(true);
+  });
+}
+
 function runningIn(tree) {
   let n = 0;
   for (const t of tree) {
@@ -3057,6 +3170,7 @@ function render(s) {
     (filtering() ? running + " of " + runAll : runAll) + " threads running");
   paintService(s);
   paintUpdate(s);
+  paintDrift(s);
   document.title = (s.counts.cards ? "(" + s.counts.cards + ") " : "") + "t3 board";
   firstState = false;
 }
@@ -3875,8 +3989,10 @@ function wire() {
     for (const f of FACETS) if (!facetEl(f.key).contains(e.target)) closeFacet(f.key, false);
     if (!$("ctx").contains(e.target)) closeCtx(false);
     if (!$("upd").contains(e.target)) closeUpd(false);
+    if (!$("drift").contains(e.target)) closeDrift(false);
   });
   initUpdate();
+  initDrift();
   $("settled-filter").addEventListener("input", () => {
     if (state) { panels.settled.filterChanged = true; syncSettled(state, true); }
   });

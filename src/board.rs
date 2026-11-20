@@ -427,6 +427,23 @@ impl Wf {
         }
     }
 
+    pub fn set_skills_home(&self, home: crate::drift::Home) {
+        self.skills.set_home(home);
+        self.refresh_skills();
+    }
+
+    pub fn skills_view(&self) -> Value {
+        self.skills.view()
+    }
+
+    pub fn refresh_skills(&self) -> Value {
+        let (v, changed) = self.skills.refresh();
+        if changed {
+            self.changed();
+        }
+        v
+    }
+
     pub fn update_view(&self) -> Value {
         let latest = self.release.lock().unwrap().clone();
         let releases = crate::release::releases_url().unwrap_or_else(|_| crate::release::RELEASES.to_string());
@@ -1440,8 +1457,6 @@ impl Wf {
         let (settled, settled_total) = self.settled()?;
         let contexts = self.contexts()?;
         let (new_issues, dismissed_issues) = self.new_issues()?;
-        let t3 = self.t3.status();
-        let last = self.store.meta_get(crate::wf::LAST_PASS)?;
         let open = tree.iter().filter(|t| t["done"] == false).count();
         let running = tree.iter().filter(|t| t["status"] == "running").count();
         Ok(json!({
@@ -1455,15 +1470,22 @@ impl Wf {
             "dismissedIssues": dismissed_issues,
             "counts": {"cards": cards.len(), "tickets": open, "running": running, "settled": settled_total,
                        "newIssues": new_issues.len()},
-            "service": {
-                "version": env!("CARGO_PKG_VERSION"),
-                "t3": {"connected": t3.connected, "lastError": t3.last_error},
-                "tokenExpiresAt": t3.token_expires_at.as_deref().map(local_clock_date),
-                "watcher": {"lastPass": last.as_deref().map(local_clock), "lastPassAt": last, "alive": self.watcher_alive()},
-                "openLinks": self.config.board.open_links,
-                "update": self.update_view(),
-            },
+            "service": self.service_view(),
         }))
+    }
+
+    pub fn service_view(&self) -> Value {
+        let t3 = self.t3.status();
+        let last = self.store.meta_get(crate::wf::LAST_PASS).ok().flatten();
+        json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "t3": {"connected": t3.connected, "lastError": t3.last_error},
+            "tokenExpiresAt": t3.token_expires_at.as_deref().map(local_clock_date),
+            "watcher": {"lastPass": last.as_deref().map(local_clock), "lastPassAt": last, "alive": self.watcher_alive()},
+            "openLinks": self.config.board.open_links,
+            "update": self.update_view(),
+            "skills": self.skills_view(),
+        })
     }
 
     pub async fn board_view(&self, root: &str, all: bool) -> Result<Value> {

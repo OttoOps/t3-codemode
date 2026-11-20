@@ -6,6 +6,7 @@ pub mod clock;
 pub mod config;
 pub mod contexts;
 pub mod desktop;
+pub mod drift;
 pub mod fake;
 pub mod github;
 pub mod issues;

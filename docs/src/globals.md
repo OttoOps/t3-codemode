@@ -123,6 +123,11 @@ parent and a child, and the service keeps every link and message in its store.
   reset time came from. `usageLeft` stays `null` until t3cm has a usage
   source. The watcher sets and clears the marks, as
   [Limits](config.md#limits) describes.
+- `wf.status()` returns the service's state as the board header shows it:
+  `version`, `t3`, `tokenExpiresAt`, `watcher`, `openLinks`, `update` and
+  `skills`, the check of the installed T3 workflow skills and setup steps
+  described in [Install the skills with t3cm](getting-started.md#install-the-skills-with-t3cm).
+  It needs no caller and reads the skills fresh.
 - `wf.waiting.add`, `wf.waiting.resolve` and `wf.waiting.list` keep an overseer
   thread's waiting list.
 - `wf.merge({repo, pr, head, method?})` merges a GitHub pull request at the
