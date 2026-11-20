@@ -51,6 +51,11 @@ CREATE TABLE IF NOT EXISTS limit_stops (
   thread TEXT NOT NULL, run TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (thread, run));
 CREATE TABLE IF NOT EXISTS new_issues (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS pr_seen (
+  repo TEXT NOT NULL, pr INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (repo, pr));
+CREATE TABLE IF NOT EXISTS pr_events (
+  repo TEXT NOT NULL, pr INTEGER NOT NULL, event TEXT NOT NULL, ticket TEXT NOT NULL, at TEXT NOT NULL,
+  PRIMARY KEY (repo, pr, event, ticket));
 "#;
 
 const KEEP_MESSAGES: i64 = 5000;
@@ -144,6 +149,46 @@ pub struct MergeWait {
     pub label: Option<String>,
     pub merge_state: String,
     pub at: String,
+    #[serde(default)]
+    pub status: WaitStatus,
+    #[serde(default)]
+    pub approval: String,
+    #[serde(default)]
+    pub failures: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WaitStatus {
+    #[default]
+    Waiting,
+    Sent,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PrSeen {
+    pub repo: String,
+    pub pr: u64,
+    pub state: String,
+    pub head: String,
+    pub queued: bool,
+    pub since: String,
+    pub tickets: Vec<(String, String)>,
+    pub at: String,
+}
+
+pub struct Wake<'a> {
+    pub repo: &'a str,
+    pub pr: u64,
+    pub event: Option<&'a str>,
+    pub ticket: &'a str,
+    pub from: &'a str,
+    pub kind: &'a str,
+    pub body: &'a str,
+    pub at: &'a str,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -475,18 +520,112 @@ impl Store {
         raws.iter().map(|s| Ok(serde_json::from_str(s)?)).collect()
     }
 
-    pub fn msg_new(&self, from: &str, to: &str, kind: &str, body: &str, at: &str) -> Result<String> {
-        let seq = self.with(|c| {
-            c.execute(
-                "INSERT INTO messages (from_id, to_id, kind, body, at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![from, to, kind, body, at],
-            )?;
-            let seq = c.last_insert_rowid();
-            if seq % 100 == 0 {
-                c.execute("DELETE FROM messages WHERE seq <= ?1", [seq - KEEP_MESSAGES])?;
-            }
-            Ok(seq)
+    pub fn merge_wait_get(&self, repo: &str, pr: u64) -> Result<Option<MergeWait>> {
+        let raw: Option<String> = self.with(|c| {
+            c.query_row("SELECT data FROM merge_waits WHERE repo = ?1 AND pr = ?2", params![repo, pr as i64], |r| {
+                r.get(0)
+            })
+            .optional()
         })?;
+        raw.map(|s| Ok(serde_json::from_str(&s)?)).transpose()
+    }
+
+    pub fn merge_wait_swap(&self, w: &MergeWait) -> Result<bool> {
+        let data = serde_json::to_string(w)?;
+        let sql = "UPDATE merge_waits SET data = ?3 WHERE repo = ?1 AND pr = ?2 \
+                   AND COALESCE(json_extract(data, '$.approval'), '') = ?4";
+        Ok(self.with(|c| c.execute(sql, params![w.repo, w.pr as i64, data, w.approval]))? > 0)
+    }
+
+    pub fn merge_wait_retire(&self, w: &MergeWait) -> Result<bool> {
+        let sql = "DELETE FROM merge_waits WHERE repo = ?1 AND pr = ?2 \
+                   AND COALESCE(json_extract(data, '$.approval'), '') = ?3";
+        Ok(self.with(|c| c.execute(sql, params![w.repo, w.pr as i64, w.approval]))? > 0)
+    }
+
+    pub fn pr_seen_put(&self, p: &PrSeen) -> Result<()> {
+        let data = serde_json::to_string(p)?;
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO pr_seen (repo, pr, data) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (repo, pr) DO UPDATE SET data = excluded.data",
+                params![p.repo, p.pr as i64, data],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn pr_seen_all(&self) -> Result<Vec<PrSeen>> {
+        let raws: Vec<String> = self.with(|c| {
+            let mut st = c.prepare("SELECT data FROM pr_seen ORDER BY rowid")?;
+            st.query_map([], |r| r.get(0))?.collect()
+        })?;
+        raws.iter().map(|s| Ok(serde_json::from_str(s)?)).collect()
+    }
+
+    pub fn pr_seen_get(&self, repo: &str, pr: u64) -> Result<Option<PrSeen>> {
+        let raw: Option<String> = self.with(|c| {
+            c.query_row("SELECT data FROM pr_seen WHERE repo = ?1 AND pr = ?2", params![repo, pr as i64], |r| r.get(0))
+                .optional()
+        })?;
+        raw.map(|s| Ok(serde_json::from_str(&s)?)).transpose()
+    }
+
+    pub fn pr_seen_any_queued(&self) -> Result<bool> {
+        let sql = "SELECT EXISTS (SELECT 1 FROM pr_seen WHERE json_extract(data, '$.queued') = 1 \
+                   AND json_extract(data, '$.state') = 'OPEN')";
+        self.with(|c| c.query_row(sql, [], |r| r.get(0)))
+    }
+
+    pub fn pr_seen_remove(&self, repo: &str, pr: u64) -> Result<()> {
+        self.with(|c| c.execute("DELETE FROM pr_seen WHERE repo = ?1 AND pr = ?2", params![repo, pr as i64]))?;
+        Ok(())
+    }
+
+    pub fn pr_event_seen(&self, repo: &str, pr: u64, event: &str, ticket: &str) -> Result<bool> {
+        let sql = "SELECT EXISTS (SELECT 1 FROM pr_events WHERE repo = ?1 AND pr = ?2 AND event = ?3 AND ticket = ?4)";
+        self.with(|c| c.query_row(sql, params![repo, pr as i64, event, ticket], |r| r.get(0)))
+    }
+
+    pub fn pr_event_mark(&self, repo: &str, pr: u64, event: &str, ticket: &str, at: &str) -> Result<bool> {
+        let sql = "INSERT OR IGNORE INTO pr_events (repo, pr, event, ticket, at) VALUES (?1, ?2, ?3, ?4, ?5)";
+        Ok(self.with(|c| c.execute(sql, params![repo, pr as i64, event, ticket, at]))? > 0)
+    }
+
+    pub fn pr_event_wake(&self, w: &Wake, text: impl FnOnce(&str) -> String) -> Result<Option<String>> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some(event) = w.event {
+            let fresh = tx.execute(
+                "INSERT OR IGNORE INTO pr_events (repo, pr, event, ticket, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![w.repo, w.pr as i64, event, w.ticket, w.at],
+            )? > 0;
+            if !fresh {
+                return Ok(None);
+            }
+        }
+        let handle = Self::msg_insert(&tx, w.from, w.ticket, w.kind, w.body, w.at)?;
+        tx.execute(
+            "INSERT INTO outbox (to_id, text, handle, queued) VALUES (?1, ?2, ?3, ?4)",
+            params![w.ticket, text(&handle), handle, w.at],
+        )?;
+        tx.commit()?;
+        Ok(Some(handle))
+    }
+
+    pub fn msg_new(&self, from: &str, to: &str, kind: &str, body: &str, at: &str) -> Result<String> {
+        self.with(|c| Self::msg_insert(c, from, to, kind, body, at))
+    }
+
+    fn msg_insert(c: &Connection, from: &str, to: &str, kind: &str, body: &str, at: &str) -> rusqlite::Result<String> {
+        c.execute(
+            "INSERT INTO messages (from_id, to_id, kind, body, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![from, to, kind, body, at],
+        )?;
+        let seq = c.last_insert_rowid();
+        if seq % 100 == 0 {
+            c.execute("DELETE FROM messages WHERE seq <= ?1", [seq - KEEP_MESSAGES])?;
+        }
         Ok(format!("m{seq}"))
     }
 
@@ -632,6 +771,16 @@ impl Store {
                 "INSERT INTO waiting (owner, id, text, from_label, link, opened_at, data)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![owner, item.id, item.text, item.from, item.link, item.at, data],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn waiting_set_data(&self, owner: &str, seq: i64, data: &Value) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE waiting SET data = ?3 WHERE owner = ?1 AND seq = ?2",
+                params![owner, seq, data.to_string()],
             )
         })?;
         Ok(())

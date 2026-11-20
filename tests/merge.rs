@@ -19,6 +19,10 @@ fn args(pr: u64) -> Value {
     json!({"repo": REPO, "pr": pr, "head": HEAD})
 }
 
+fn wait_status(h: &H) -> Vec<Value> {
+    h.app.store.merge_waits().unwrap().iter().map(|w| serde_json::to_value(w).unwrap()["status"].clone()).collect()
+}
+
 fn mutations(h: &H) -> Vec<String> {
     h.github.operations().into_iter().filter(|op| op != "read").collect()
 }
@@ -36,7 +40,7 @@ async fn a_clean_pr_on_a_merge_queue_repo_is_enqueued_at_the_approved_head() {
     let enqueue = &h.github.calls()[1]["variables"];
     assert_eq!(enqueue["head"], HEAD);
     assert_eq!(enqueue["id"], h.github.pr(REPO, 7)["id"]);
-    assert!(h.app.store.merge_waits().unwrap().is_empty());
+    assert_eq!(wait_status(&h), ["sent"]);
 }
 
 #[tokio::test]
@@ -64,7 +68,7 @@ async fn a_merge_queue_pr_that_is_not_ready_waits_and_is_never_set_to_auto_merge
 }
 
 #[tokio::test]
-async fn a_waiting_pr_is_queued_and_its_record_dropped_once_it_is_clean() {
+async fn a_waiting_pr_is_queued_and_its_record_marked_sent_once_it_is_clean() {
     let h = H::new();
     h.github.set_pr(REPO, 7, github_pr(HEAD, "DIRTY", true));
     assert_eq!(merge(&h, json!({"repo": "ACME/widgets", "pr": 7, "head": HEAD})).await["status"], "waiting");
@@ -75,7 +79,7 @@ async fn a_waiting_pr_is_queued_and_its_record_dropped_once_it_is_clean() {
 
     assert_eq!(r["status"], "queued");
     assert_eq!(r["position"], 1);
-    assert!(h.app.store.merge_waits().unwrap().is_empty());
+    assert_eq!(wait_status(&h), ["sent"]);
     assert_eq!(mutations(&h), ["enqueuePullRequest"]);
 }
 

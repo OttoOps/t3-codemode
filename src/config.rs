@@ -68,6 +68,8 @@ pub struct BoardConfig {
     pub ask_timeout_minutes: u64,
     pub feed: usize,
     pub settle_after_hours: u64,
+    pub reconcile_active_minutes: u64,
+    pub reconcile_idle_minutes: u64,
     pub open_links: OpenLinks,
 }
 
@@ -140,6 +142,8 @@ pub fn builtin_defaults() -> Value {
             "askTimeoutMinutes": 15,
             "feed": 50,
             "settleAfterHours": 24,
+            "reconcileActiveMinutes": 2,
+            "reconcileIdleMinutes": 10,
             "openLinks": "desktop"
         }
     })
@@ -205,6 +209,10 @@ impl Config {
             bail!("maxConcurrentRuns must be at least 1");
         }
         self.link.validate().context("link")?;
+        let (active, idle) = (self.board.reconcile_active_minutes, self.board.reconcile_idle_minutes);
+        if idle > 0 && !(1..=idle).contains(&active) {
+            bail!("board.reconcileActiveMinutes must be from 1 to reconcileIdleMinutes ({idle}), got {active}");
+        }
         if !self.roles.get("overseer").is_some_and(|r| r.children.contains_key("ticket")) {
             bail!("the board needs the overseer role to open ticket links");
         }
