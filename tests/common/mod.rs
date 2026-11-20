@@ -87,6 +87,20 @@ impl H {
         self.app.wf.set_skills_home(Home::under(&self.dir.path().join("home")));
     }
 
+    pub fn peer(&self) -> Arc<App> {
+        let app = App::with_host(
+            self.config.clone(),
+            Arc::new(Store::open(self.dir.path()).unwrap()),
+            self.fake.clone(),
+            self.clock.clone(),
+            self.remotes.clone(),
+            self.github.clone(),
+            self.desktop.clone(),
+        );
+        app.wf.set_skills_home(Home::under(&self.dir.path().join("home")));
+        app
+    }
+
     pub async fn exec(&self, code: &str) -> ToolOutput {
         self.run(None, code, None).await
     }

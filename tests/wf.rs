@@ -2,6 +2,7 @@ mod common;
 
 use common::*;
 use serde_json::{Value, json};
+use t3_codemode::store::{Bind, Link, Store};
 use t3_codemode::wf::LAST_PASS;
 
 async fn link_ticket_worker(h: &H) -> String {
@@ -468,6 +469,79 @@ async fn init_of_a_joined_ticket_keeps_its_overseer() {
     assert_eq!(r["root"], false);
     assert_eq!(r["parent"], BOSS);
     assert_eq!(link(&h, TICKET).parent, BOSS);
+}
+
+#[tokio::test]
+async fn init_keeps_a_link_another_process_opened() {
+    let h = H::new();
+    link_boss_ticket(&h).await;
+    let peer = h.peer();
+    let r = peer.wf.dispatch("init", Some(TICKET), json!({"role": "ticket"})).await.unwrap();
+    assert_eq!(r["root"], false);
+    assert_eq!(r["parent"], BOSS);
+    assert_eq!(r["label"], "widgets#41");
+    assert_eq!(link(&h, TICKET).parent, BOSS);
+}
+
+fn bare_link(child: &str, parent: &str, label: &str) -> Link {
+    Link {
+        child: child.into(),
+        parent: parent.into(),
+        label: label.into(),
+        role: "ticket".into(),
+        parent_role: None,
+        params: t3_codemode::config::LinkParams { down: 75, miss: 2, stall: 480 },
+        link: None,
+        opened: T0.into(),
+        last_up: T0.into(),
+        last_seen: None,
+        last_nudge: None,
+        nudges: 0,
+        escalated: false,
+        reported: Vec::new(),
+        gate: None,
+        gate_since: None,
+        closed: false,
+        closed_at: None,
+        closed_how: None,
+        unread: Vec::new(),
+        bad_run: None,
+        settled_at: None,
+        restored_at: None,
+        project: None,
+    }
+}
+
+#[test]
+fn a_join_from_another_handle_during_a_bind_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let attach = Store::open(dir.path()).unwrap();
+    let joiner = Store::open(dir.path()).unwrap();
+    let racer = rusqlite::Connection::open(attach.path()).unwrap();
+    racer.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let bound = attach
+        .link_bind(TICKET, false, |current| {
+            assert!(current.is_none());
+            let err = racer
+                .execute("INSERT INTO links (child, parent, closed, data) VALUES (?1, ?2, 0, '{}')", [TICKET, BOSS])
+                .unwrap_err();
+            assert_eq!(err.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseBusy), "{err}");
+            Bind::Saved(bare_link(TICKET, "board", TICKET))
+        })
+        .unwrap();
+    assert!(matches!(bound, Bind::Saved(_)));
+    let joined = joiner.link_bind(TICKET, true, |_| Bind::Saved(bare_link(TICKET, BOSS, "widgets#41"))).unwrap();
+    assert!(matches!(joined, Bind::Saved(_)));
+    assert_eq!(attach.link_get(TICKET).unwrap().unwrap().parent, BOSS);
+
+    let kept = attach
+        .link_bind(TICKET, false, |current| match current {
+            Some(l) if !l.closed => Bind::Kept(l),
+            _ => Bind::Saved(bare_link(TICKET, "board", TICKET)),
+        })
+        .unwrap();
+    assert!(matches!(kept, Bind::Kept(l) if l.parent == BOSS));
+    assert_eq!(joiner.link_get(TICKET).unwrap().unwrap().parent, BOSS);
 }
 
 #[tokio::test]
