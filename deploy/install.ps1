@@ -7,10 +7,17 @@ By default it downloads the latest release from OttoOps/t3-codemode, checks it a
 release's SHA256SUMS and, with gh signed in, its build provenance. The task runs at logon as
 the current user, so no administrator rights are needed.
 
+Then it asks whether to use the T3 workflow, and on yes runs t3cm skills install, which writes
+the release's workflow skills and applies their setup steps. Skills that npx skills or a copy
+by hand installed are replaced (t3cm skills install --take-over) unless you say no. A rerun
+brings skills t3cm installed to the new release without asking. -Workflow and -NoWorkflow
+answer for unattended runs; with no console to ask on, the answer is yes.
+
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File install.ps1
 powershell -ExecutionPolicy Bypass -File install.ps1 -Version v0.4.0
 powershell -ExecutionPolicy Bypass -File install.ps1 -Archive t3cm-0.4.0-x86_64-pc-windows-msvc.zip -Sums SHA256SUMS
+powershell -ExecutionPolicy Bypass -File install.ps1 -NoWorkflow
 powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall
 #>
 [CmdletBinding(DefaultParameterSetName = 'Release')]
@@ -23,6 +30,12 @@ param(
     [string]$Sums,
     [Parameter(ParameterSetName = 'Uninstall', Mandatory = $true)]
     [switch]$Uninstall,
+    [Parameter(ParameterSetName = 'Release')]
+    [Parameter(ParameterSetName = 'Archive')]
+    [switch]$Workflow,
+    [Parameter(ParameterSetName = 'Release')]
+    [Parameter(ParameterSetName = 'Archive')]
+    [switch]$NoWorkflow,
     [switch]$FilesOnly
 )
 
@@ -31,6 +44,9 @@ $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 
 $Mode = $PSCmdlet.ParameterSetName
+if ($Workflow -and $NoWorkflow) {
+    throw 'install.ps1: -Workflow and -NoWorkflow cannot be combined'
+}
 $Repo = 'OttoOps/t3-codemode'
 $Releases = if ($env:T3CM_RELEASES_URL) { $env:T3CM_RELEASES_URL } else { "https://github.com/$Repo/releases" }
 $Target = 'x86_64-pc-windows-msvc'
@@ -159,6 +175,69 @@ function Register-Mcp {
     }
 }
 
+function Get-SkillsState {
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $json = (& $Exe skills status --json 2> $null) -join "`n"
+    } finally {
+        $ErrorActionPreference = $saved
+    }
+    try {
+        return $json | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+}
+
+function Test-CanAsk {
+    if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) {
+        return $false
+    }
+    return -not ([Environment]::GetCommandLineArgs() | Where-Object { $_ -match '^-noni' })
+}
+
+function Confirm-Yes([string]$Question) {
+    if (-not (Test-CanAsk)) {
+        Write-Host "$Question Yes: there is no console to ask on (-NoWorkflow says no)."
+        return $true
+    }
+    try {
+        $answer = Read-Host "$Question [Y/n]"
+    } catch {
+        $answer = ''
+    }
+    return $answer -notmatch '^\s*n'
+}
+
+function Install-Workflow {
+    $state = Get-SkillsState
+    if ($state -and $state.installed) {
+        $cmd = @('update')
+    } elseif ($state -and $state.foreign) {
+        $cmd = @('install', '--take-over')
+        $question = "npx skills or a copy by hand installed the T3 workflow skills here. Replace them with this release's, and have t3cm keep them current?"
+    } else {
+        $cmd = @('install')
+        $question = 'Use the T3 workflow?'
+    }
+    $leave = "Left the T3 workflow skills alone; to have t3cm manage them, run: & '$Exe' skills $($cmd -join ' ')"
+    if ($NoWorkflow) {
+        Write-Host $leave
+        return $true
+    }
+    if (-not $Workflow) {
+        if ($cmd[0] -eq 'update') {
+            Write-Host 't3cm installed the T3 workflow skills here, so this install brings them to its release (-NoWorkflow skips that).'
+        } elseif (-not (Confirm-Yes $question)) {
+            Write-Host $leave
+            return $true
+        }
+    }
+    & $Exe skills @cmd | Out-Host
+    return $LASTEXITCODE -eq 0
+}
+
 function Install-T3cm {
     $work = Join-Path ([IO.Path]::GetTempPath()) ("t3cm-install-" + [Guid]::NewGuid())
     New-Item -ItemType Directory -Path $work | Out-Null
@@ -227,9 +306,13 @@ function Install-T3cm {
     } finally {
         Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
     }
+    $skillsOk = Install-Workflow
     Register-Mcp
     $installed = (& $Exe --version) -replace '^t3cm ', ''
     Write-Host "t3-codemode $installed installed. Check it with: & '$Exe' status   Logs: $Log"
+    if (-not $skillsOk) {
+        Fail "t3cm is installed, but its workflow skills are not; fix what t3cm skills install printed, then run: & '$Exe' skills install"
+    }
 }
 
 function Uninstall-T3cm {
