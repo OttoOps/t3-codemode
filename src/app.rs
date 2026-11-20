@@ -77,6 +77,8 @@ const EXEC_PRELUDE: &str = r#"
     show: (handle) => call("wf.show", { handle }),
     launchTicket: m("launchTicket"), cards: m("cards"), feed: m("feed"), merge: m("merge"),
     pick: m("pick"), pools: m("pools"), issue: m("issue"), status: m("status"),
+    slot: (name, x) => call("wf.slot", Object.assign({}, input(x) || {}, { name })),
+    slots: m("slots"), renewal: m("renewal"),
     answer: (id, text) => call("wf.answer", { id, text }),
     waiting: Object.freeze({
       add: m("waiting.add"),
@@ -96,6 +98,7 @@ pub struct ExecuteRequest {
     pub session: Option<String>,
     pub timeout_ms: Option<u64>,
     pub caller: Option<String>,
+    pub reported: crate::wf_slots::Reported,
 }
 
 #[derive(Debug, Clone)]
@@ -387,7 +390,7 @@ impl App {
         let catalog = self.catalog_for_run().await;
         let names = serde_json::to_string(&catalog.t3_names).unwrap_or_else(|_| "[]".into());
         let upstreams: Vec<Value> = namespaces.iter().map(|n| json!([n, aliases(&catalog.tools_of(n))])).collect();
-        let host = Arc::new(ExecHost { app: self.clone(), caller, ns: ns.clone(), catalog });
+        let host = Arc::new(ExecHost { app: self.clone(), caller, reported: req.reported, ns: ns.clone(), catalog });
         let _slot = match self.run_slot().await {
             Ok(p) => p,
             Err(e) => return error_output(&e, Vec::new(), &globals),
@@ -495,6 +498,7 @@ impl App {
         op: &str,
         args: Value,
         caller: Option<&str>,
+        reported: &crate::wf_slots::Reported,
         ns: &str,
         catalog: &Catalog,
     ) -> Result<Value, String> {
@@ -553,7 +557,7 @@ impl App {
                 Ok(json!(keys.into_iter().filter(|k| k != VARS_KEY).collect::<Vec<_>>()))
             }
             other => match other.strip_prefix("wf.") {
-                Some(method) => self.wf.dispatch(method, caller, args).await.map_err(|e| e.to_string()),
+                Some(method) => self.wf.dispatch_from(method, caller, reported, args).await.map_err(|e| e.to_string()),
                 None => Err(format!("unknown host operation {other}")),
             },
         }
@@ -605,6 +609,7 @@ impl App {
 struct ExecHost {
     app: Arc<App>,
     caller: Option<String>,
+    reported: crate::wf_slots::Reported,
     ns: String,
     catalog: Arc<Catalog>,
 }
@@ -613,10 +618,11 @@ impl Host for ExecHost {
     fn call(&self, op: String, args: Value) -> BoxFut<'static, Result<Value, String>> {
         let app = self.app.clone();
         let caller = self.caller.clone();
+        let reported = self.reported.clone();
         let ns = self.ns.clone();
         let catalog = self.catalog.clone();
-        Box::pin(
-            async move { app.host_op(&op, args, caller.as_deref(), &ns, &catalog).await.map_err(|e| app.redact(e)) },
-        )
+        Box::pin(async move {
+            app.host_op(&op, args, caller.as_deref(), &reported, &ns, &catalog).await.map_err(|e| app.redact(e))
+        })
     }
 }

@@ -53,6 +53,10 @@ CREATE TABLE IF NOT EXISTS new_issues (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS pr_seen (
   repo TEXT NOT NULL, pr INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY (repo, pr));
+CREATE TABLE IF NOT EXISTS instance_folders (
+  instance TEXT PRIMARY KEY, driver TEXT NOT NULL, folder TEXT NOT NULL, at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS slot_resolutions (
+  key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, data TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS pr_events (
   repo TEXT NOT NULL, pr INTEGER NOT NULL, event TEXT NOT NULL, ticket TEXT NOT NULL, at TEXT NOT NULL,
   PRIMARY KEY (repo, pr, event, ticket));
@@ -319,6 +323,14 @@ pub struct Store {
     path: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceFolder {
+    pub instance: String,
+    pub driver: String,
+    pub folder: String,
+    pub at: String,
+}
+
 fn handle_seq(handle: &str) -> Option<i64> {
     handle.strip_prefix('m')?.parse().ok()
 }
@@ -391,6 +403,63 @@ impl Store {
             c.execute(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
                 params![key, value],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn instance_folder(&self, instance: &str) -> Result<Option<InstanceFolder>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT instance, driver, folder, at FROM instance_folders WHERE instance = ?1",
+                [instance],
+                |r| Ok(InstanceFolder { instance: r.get(0)?, driver: r.get(1)?, folder: r.get(2)?, at: r.get(3)? }),
+            )
+            .optional()
+        })
+    }
+
+    pub fn instance_folders(&self) -> Result<Vec<InstanceFolder>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT instance, driver, folder, at FROM instance_folders ORDER BY instance")?;
+            st.query_map([], |r| {
+                Ok(InstanceFolder { instance: r.get(0)?, driver: r.get(1)?, folder: r.get(2)?, at: r.get(3)? })
+            })?
+            .collect()
+        })
+    }
+
+    pub fn instance_folder_set(&self, f: &InstanceFolder) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO instance_folders (instance, driver, folder, at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (instance) DO UPDATE SET driver = excluded.driver, folder = excluded.folder, at = excluded.at",
+                params![f.instance, f.driver, f.folder, f.at],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn slot_resolution(&self, key: &str) -> Result<Option<(String, Value)>> {
+        let row: Option<(String, String)> = self.with(|c| {
+            c.query_row("SELECT fingerprint, data FROM slot_resolutions WHERE key = ?1", [key], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()
+        })?;
+        Ok(match row {
+            Some((fp, data)) => Some((fp, serde_json::from_str(&data)?)),
+            None => None,
+        })
+    }
+
+    pub fn slot_resolution_set(&self, key: &str, fingerprint: &str, data: &Value, at: &str) -> Result<()> {
+        let s = data.to_string();
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO slot_resolutions (key, fingerprint, data, at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (key) DO UPDATE SET fingerprint = excluded.fingerprint, data = excluded.data, at = excluded.at",
+                params![key, fingerprint, s, at],
             )
         })?;
         Ok(())

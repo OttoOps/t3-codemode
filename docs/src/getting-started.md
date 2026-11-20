@@ -232,16 +232,49 @@ when `CI` is set.
 | `t3cm update [--check] [--version vX.Y.Z] [--no-restart]` | Install the latest (or a given) release in place, and on Linux restart the service on it; see [Update](#update) |
 | `t3cm types [--from tools.json]` | Print the generated TypeScript declarations and their size |
 | `t3cm skills install\|update\|status` | Install the workflow skills this binary carries, bring them to its release, or check them ([below](#install-the-skills-with-t3cm)) |
+| `t3cm slots [--repo D] [--json] [--no-t3]` | The T3 workflow slots as the service resolves them for this shell's agent and repository ([Slots](#slots)) |
+| `t3cm doctor [--repo D] [--json] [--no-t3] [--resolve NAME]` | Check the whole workflow install; exits 1 on any problem ([Slots](#slots)) |
 
 `--port` also reads `T3CM_PORT` (default `47731`), and `--state-dir` reads
 `T3CM_STATE_DIR`. `--log-file` appends the log to a file instead of stderr and
 rolls it to `<file>.1` at start once it passes 10 MB; the macOS and Windows
 services use it. `t3cm exec` takes `--session`, `--timeout-ms` and `--thread`
-(default `$T3CODE_THREAD_ID`), and exits non-zero when the script fails.
+(default `$T3CODE_THREAD_ID`), and exits non-zero when the script fails. It
+also sends its own `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, so `wf.slot` resolves
+for the agent whose shell runs it.
 
 ```bash
 echo 'async () => (await t3.thread_list({ allProjects: true, limit: 5 })).threads.map(t => t.title)' | t3cm exec -
 ```
+
+## Slots
+
+The workflow roles' review, passes, credential renewal, delivery and models
+are slots. The service resolves them, from the user config
+(`~/.config/t3-workflow/config.json`, or `$T3WF_CONFIG`), the repository's
+`AGENTS.md` "Agent workflow" block, and the skills the calling agent has
+installed. It reads the calling thread's T3 instance and project, and takes
+the agent's config folder from what the call reports: the `X-T3-Config-Dir`
+header, or `t3cm exec`'s environment. It records each instance's folder, so a
+call that reports none falls back to that record, then to the default folder,
+and says so in its warnings. Plugins that the folder's `settings.json` (or the
+project's `.claude/settings.json` and `.claude/settings.local.json`) leave out
+of `enabledPlugins` do not resolve. Resolutions are stored per project and
+instance and rebuilt when one of their input files changes.
+
+- `wf.slot(name, { repo? })` gives one slot for the step that needs it, each
+  skill with `how` to run it or why it is skipped. See [wf](globals.md#wf).
+- `wf.renewal({ output })` matches a failed command's output against the
+  `credentials` patterns. The patterns use Python's regular-expression syntax,
+  lookaround and backreferences included; `t3cm doctor` names one t3cm cannot
+  compile.
+- `t3cm slots` prints the same resolution for a person. `t3cm doctor` checks
+  the slot config's shape, that every configured skill resolves (for this
+  agent and for each recorded instance), the models and pools, t3cm's own
+  config, the service and its T3 connection, the skills and setup steps,
+  stale copies of the workflow skills, and leftovers of the `t3wf` script.
+  `t3cm doctor --resolve NAME` lists every installed skill a name matches, in
+  search order.
 
 ## The workflow skills
 

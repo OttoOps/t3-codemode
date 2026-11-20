@@ -58,6 +58,7 @@ async fn an_explicit_session_names_the_namespace() {
             session: Some(session.into()),
             timeout_ms: None,
             caller: Some(WORKER.into()),
+            reported: Default::default(),
         })
     };
     assert_eq!(result(&run("s1").await), json!(1));

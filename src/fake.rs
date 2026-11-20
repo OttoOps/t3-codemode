@@ -23,6 +23,7 @@ struct State {
     prs_fail: bool,
     projects_fail: bool,
     read_fails: bool,
+    caps_fail: bool,
     pr_page: usize,
     short_list: usize,
     organize_fails: bool,
@@ -213,6 +214,10 @@ impl FakeT3 {
         self.st().projects = projects;
     }
 
+    pub fn set_caps_fail(&self, fails: bool) {
+        self.st().caps_fail = fails;
+    }
+
     pub fn set_providers(&self, providers: Vec<Value>) {
         self.st().providers = providers;
     }
@@ -310,6 +315,7 @@ impl FakeT3 {
             }
             "t3_project_list" if st.projects_fail => Err(T3Error::Unavailable("T3 unreachable (fake)".into())),
             "t3_project_list" => Ok(json!({"projects": st.projects, "nextCursor": null})),
+            "orchestrator_capabilities" if st.caps_fail => Err(T3Error::Unavailable("T3 unreachable (fake)".into())),
             "orchestrator_capabilities" => {
                 let search = args["search"].as_str();
                 let providers: Vec<Value> = st

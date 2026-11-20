@@ -66,6 +66,7 @@ impl H {
             desktop.clone(),
         );
         app.wf.set_skills_home(Home::under(&dir.path().join("home")));
+        app.wf.set_slot_folders(t3_codemode::slots::Folders::under(&dir.path().join("home"), None));
         H { dir, fake, clock, app, remotes, github, desktop, config }
     }
 
@@ -85,6 +86,7 @@ impl H {
             self.desktop.clone(),
         );
         self.app.wf.set_skills_home(Home::under(&self.dir.path().join("home")));
+        self.app.wf.set_slot_folders(t3_codemode::slots::Folders::under(&self.dir.path().join("home"), None));
     }
 
     pub fn peer(&self) -> Arc<App> {
@@ -111,7 +113,13 @@ impl H {
 
     pub async fn run(&self, caller: Option<&str>, code: &str, timeout_ms: Option<u64>) -> ToolOutput {
         self.app
-            .execute(ExecuteRequest { code: code.into(), session: None, timeout_ms, caller: caller.map(String::from) })
+            .execute(ExecuteRequest {
+                code: code.into(),
+                session: None,
+                timeout_ms,
+                caller: caller.map(String::from),
+                reported: Default::default(),
+            })
             .await
     }
 

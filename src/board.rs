@@ -837,7 +837,7 @@ impl Wf {
         Ok(all.into_iter().filter(|p| p["deletedAt"].is_null() && p["archivedAt"].is_null()).collect())
     }
 
-    async fn project_list(&self) -> Result<Vec<Value>> {
+    pub(crate) async fn project_list(&self) -> Result<Vec<Value>> {
         let mut out = Vec::new();
         let mut cursor: Option<u64> = None;
         for _ in 0..20 {

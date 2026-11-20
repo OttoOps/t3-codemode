@@ -11,9 +11,11 @@ use t3_codemode::catalog::Catalog;
 use t3_codemode::clock::{SystemClock, local_datetime, parse_ts};
 use t3_codemode::config::{self, Config};
 use t3_codemode::release::{self, Version};
+use t3_codemode::slots::{self, Caps, Enabled, Folders, Inputs, Resolved};
 use t3_codemode::store::Store;
 use t3_codemode::t3_http::HttpT3;
-use t3_codemode::{bench, claude_link, platform, server, skills, steps, upgrade, watcher};
+use t3_codemode::wf_slots::Reported;
+use t3_codemode::{bench, claude_link, doctor, platform, server, skills, steps, upgrade, watcher};
 
 #[derive(Parser)]
 #[command(
@@ -106,6 +108,41 @@ enum Cmd {
         port: PortArgs,
         #[command(flatten)]
         state: StateArgs,
+    },
+    /// Print the T3 workflow slots as the service resolves them for this shell's agent and repository
+    Slots {
+        /// The repository (default: the current directory's)
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+        /// Resolve in this process without the service, and skip the model checks
+        #[arg(long)]
+        no_t3: bool,
+        #[command(flatten)]
+        port: PortArgs,
+        #[arg(long, env = "T3CODE_THREAD_ID")]
+        thread: Option<String>,
+    },
+    /// Check the T3 workflow install: slots, skills, setup steps, t3cm's config and the service; exits 1 on any problem
+    Doctor {
+        /// The repository (default: the current directory's)
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+        /// Check without the service: no model, T3 or service checks
+        #[arg(long)]
+        no_t3: bool,
+        /// List every installed skill NAME matches, in search order; exits 1 when none does
+        #[arg(long, value_name = "NAME")]
+        resolve: Option<String>,
+        #[command(flatten)]
+        port: PortArgs,
+        #[command(flatten)]
+        state: StateArgs,
+        #[arg(long, env = "T3CODE_THREAD_ID")]
+        thread: Option<String>,
     },
     /// Print the generated TypeScript declarations for the catalog
     Types {
@@ -386,12 +423,27 @@ fn read_source(file: &str) -> Result<String> {
     }
 }
 
-async fn call_service(port: u16, tool: &str, args: Value, thread: Option<&str>) -> Result<(bool, String)> {
+async fn call_service(
+    port: u16,
+    tool: &str,
+    args: Value,
+    thread: Option<&str>,
+    deadline: Option<std::time::Duration>,
+) -> Result<(bool, String)> {
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": args}});
     let mut req =
         reqwest::Client::builder().no_proxy().build()?.post(format!("http://127.0.0.1:{port}/mcp")).json(&body);
+    if let Some(d) = deadline {
+        req = req.timeout(d);
+    }
     if let Some(t) = thread {
         req = req.header(server::THREAD_HEADER, t);
+    }
+    let own = std::env::var("T3CODE_THREAD_ID").ok().filter(|t| !t.is_empty());
+    if tool == "execute" && (thread.is_none() || thread == own.as_deref()) {
+        for (name, value) in Reported::from_env().headers() {
+            req = req.header(name, reqwest::header::HeaderValue::from_bytes(value.as_bytes())?);
+        }
     }
     let v: Value = req.send().await.with_context(|| not_serving(port))?.json().await?;
     if let Some(e) = v.get("error") {
@@ -400,6 +452,177 @@ async fn call_service(port: u16, tool: &str, args: Value, thread: Option<&str>) 
     let r = &v["result"];
     let text = r["content"][0]["text"].as_str().unwrap_or_default().to_string();
     Ok((r["isError"] == true, text))
+}
+
+async fn exec_value(port: u16, code: String, thread: Option<&str>) -> Result<Value> {
+    let (is_error, text) = call_service(
+        port,
+        "execute",
+        json!({"code": code, "timeout_ms": EXEC_BUDGET_MS}),
+        thread,
+        Some(std::time::Duration::from_millis(EXEC_BUDGET_MS + 10_000)),
+    )
+    .await?;
+    if is_error {
+        bail!("{text}");
+    }
+    let v: Value = serde_json::from_str(&text).with_context(|| format!("the service answered {text}"))?;
+    if let Some(note) = v["truncated"].as_str() {
+        bail!("the service cut its answer, so it is incomplete ({note}); pass --no-t3 to resolve here in full");
+    }
+    Ok(v["result"].clone())
+}
+
+async fn service_slots(port: u16, root: &Path, thread: Option<&str>) -> Result<Value> {
+    let code = format!("async () => wf.slots({{ repo: {} }})", serde_json::to_string(&root.to_string_lossy())?);
+    exec_value(port, code, thread).await.map_err(|e| {
+        if format!("{e}").contains("not a function") {
+            anyhow::anyhow!(
+                "the t3cm service on 127.0.0.1:{port} is older than this t3cm and has no wf.slots; restart it on this binary, or pass --no-t3"
+            )
+        } else {
+            e
+        }
+    })
+}
+
+fn repo_root(repo: Option<&Path>) -> Result<PathBuf> {
+    let start = match repo {
+        Some(r) => r.to_path_buf(),
+        None => std::env::current_dir()?,
+    };
+    Ok(slots::git_root(&start))
+}
+
+fn local_slots(folders: &Folders, root: &Path) -> Resolved {
+    let enabled = Enabled::load(&folders.claude, root);
+    Resolved::build(&Inputs { folders, root, listed: &[], enabled: &enabled })
+}
+
+fn local_view(r: &Resolved, caps: &Caps) -> Value {
+    let mut v = r.all(caps);
+    v["problems"] = json!(r.problems());
+    v["warnings"] = json!([]);
+    v
+}
+
+fn strings(v: &Value) -> Vec<String> {
+    v.as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect()
+}
+
+async fn run_slots(
+    repo: Option<PathBuf>,
+    json: bool,
+    no_t3: bool,
+    port: u16,
+    thread: Option<String>,
+) -> Result<ExitCode> {
+    let root = repo_root(repo.as_deref())?;
+    let v = if no_t3 {
+        local_view(&local_slots(&Folders::from_env()?, &root), &Caps::Unchecked)
+    } else {
+        service_slots(port, &root, thread.as_deref()).await?
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    let mut lines: Vec<String> =
+        strings(&v["problems"]).iter().map(|p| format!("config problem (ignored): {p}")).collect();
+    lines.extend(slots::report_lines(&v));
+    lines.extend(strings(&v["warnings"]).iter().map(|w| format!("warn: {w}")));
+    println!("{}", lines.join("\n"));
+    Ok(ExitCode::SUCCESS)
+}
+
+const EXEC_BUDGET_MS: u64 = 60_000;
+
+async fn health(port: u16) -> Result<Value> {
+    Ok(reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?
+        .get(format!("http://127.0.0.1:{port}/healthz"))
+        .send()
+        .await
+        .with_context(|| not_serving(port))?
+        .json()
+        .await?)
+}
+
+struct DoctorArgs {
+    repo: Option<PathBuf>,
+    json: bool,
+    no_t3: bool,
+    resolve: Option<String>,
+    port: u16,
+    state: StateArgs,
+    thread: Option<String>,
+}
+
+async fn run_doctor(a: DoctorArgs) -> Result<ExitCode> {
+    let folders = Folders::from_env()?;
+    let root = repo_root(a.repo.as_deref())?;
+    if let Some(name) = a.resolve {
+        let enabled = Enabled::load(&folders.claude, &root);
+        let resolver = slots::Resolver::new(&slots::search_roots(&folders, &root, &enabled), &[]);
+        let cands = resolver.candidates(&name);
+        let resolved = resolver.resolve(&name);
+        if a.json {
+            let list: Vec<Value> = cands.iter().map(slots::Skill::to_json).collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({"ref": name, "resolved": resolved, "candidates": list}))?
+            );
+        } else {
+            println!("{}", doctor::resolve_lines(&name, &resolved, &cands).join("\n"));
+        }
+        return Ok(if resolved["status"] == "missing" { ExitCode::FAILURE } else { ExitCode::SUCCESS });
+    }
+    let mut f = doctor::Findings::default();
+    let mut caps = None;
+    let eff = if a.no_t3 {
+        local_view(&local_slots(&folders, &root), &Caps::Unchecked)
+    } else {
+        match service_slots(a.port, &root, a.thread.as_deref()).await {
+            Ok(v) => {
+                match health(a.port).await {
+                    Ok(h) => f.extend(doctor::service(Some(&h), None)),
+                    Err(e) => f.extend(doctor::service(None, Some(&format!("{e:#}")))),
+                }
+                caps = exec_value(a.port, "async () => t3.orchestrator_capabilities({})".into(), None).await.ok();
+                v
+            }
+            Err(e) => {
+                f.extend(doctor::service(None, Some(&format!("{e:#}"))));
+                local_view(&local_slots(&folders, &root), &Caps::Failed("the t3cm service is not reachable".into()))
+            }
+        }
+    };
+    let (problems, warnings) = slots::doctor_eff(strings(&eff["problems"]), &eff);
+    f.problems.splice(0..0, problems);
+    f.warnings.splice(0..0, warnings.into_iter().chain(strings(&eff["warnings"])));
+    let (cfg, found) = doctor::t3cm_config(&config::default_path());
+    f.extend(found);
+    f.extend(doctor::pools(&eff, cfg.as_ref()));
+    let home = t3_codemode::drift::Home::from_env()?;
+    let bundle = skills::Bundle::embedded();
+    f.extend(doctor::skills(&home, &bundle));
+    f.extend(doctor::stale_copies(&home, &bundle, &folders.codex));
+    f.extend(doctor::t3wf_leftovers(&folders));
+    match Store::open(&state_dir(&a.state)).and_then(|s| s.instance_folders()) {
+        Ok(records) => f.extend(doctor::instances(&records, &folders, &root, caps.as_ref())),
+        Err(e) => f.warnings.push(format!("instances: cannot read t3cm's store ({e:#})")),
+    }
+    if a.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({"problems": f.problems, "warnings": f.warnings, "settings": eff}))?
+        );
+    } else {
+        println!("{}", doctor::lines(&eff, &f).join("\n"));
+    }
+    Ok(if f.problems.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
 async fn run(cli: Cli) -> Result<ExitCode> {
@@ -460,13 +683,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             if let Some(t) = timeout_ms {
                 args["timeout_ms"] = json!(t);
             }
-            let (is_error, text) = call_service(port.port, "execute", args, thread.as_deref()).await?;
+            let (is_error, text) = call_service(port.port, "execute", args, thread.as_deref(), None).await?;
             println!("{text}");
             return Ok(if is_error { ExitCode::FAILURE } else { ExitCode::SUCCESS });
         }
         Cmd::Search { file, port } => {
             let (is_error, text) =
-                call_service(port.port, "search", json!({"code": read_source(&file)?}), None).await?;
+                call_service(port.port, "search", json!({"code": read_source(&file)?}), None, None).await?;
             println!("{text}");
             return Ok(if is_error { ExitCode::FAILURE } else { ExitCode::SUCCESS });
         }
@@ -506,6 +729,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             .await?;
         }
         Cmd::Skills { cmd } => return run_skills(cmd),
+        Cmd::Slots { repo, json, no_t3, port, thread } => return run_slots(repo, json, no_t3, port.port, thread).await,
+        Cmd::Doctor { repo, json, no_t3, resolve, port, state, thread } => {
+            return run_doctor(DoctorArgs { repo, json, no_t3, resolve, port: port.port, state, thread }).await;
+        }
         Cmd::Bench { n, tools } => bench::run(n, tools.as_deref()).await?,
     }
     Ok(ExitCode::SUCCESS)

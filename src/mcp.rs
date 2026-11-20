@@ -3,6 +3,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::app::{App, ExecuteRequest, ToolOutput};
+use crate::wf_slots::Reported;
 
 pub const SUPPORTED_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
@@ -107,6 +108,10 @@ pub fn caller_from_header(raw: Option<&str>) -> Option<String> {
 }
 
 pub async fn handle(app: &Arc<App>, msg: Value, caller: Option<&str>) -> Option<Value> {
+    handle_with(app, msg, caller, &Reported::default()).await
+}
+
+pub async fn handle_with(app: &Arc<App>, msg: Value, caller: Option<&str>, reported: &Reported) -> Option<Value> {
     let Some(method) = msg.get("method").and_then(Value::as_str) else {
         return msg.get("id").map(|id| err(id.clone(), -32600, "invalid request: no method"));
     };
@@ -149,6 +154,7 @@ pub async fn handle(app: &Arc<App>, msg: Value, caller: Option<&str>) -> Option<
                         session: args["session"].as_str().map(String::from),
                         timeout_ms: args["timeout_ms"].as_u64(),
                         caller: caller.map(String::from).or(thread),
+                        reported: reported.clone(),
                     })
                     .await
                 }

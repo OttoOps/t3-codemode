@@ -42,6 +42,7 @@ async fn time_exec(app: &Arc<App>, code: &str, n: usize) -> (f64, f64) {
                 session: Some("bench".into()),
                 timeout_ms: None,
                 caller: Some("bench:thread".into()),
+                reported: Default::default(),
             })
             .await;
         t.push(s.elapsed().as_secs_f64() * 1e3);

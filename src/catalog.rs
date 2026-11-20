@@ -243,6 +243,42 @@ pub fn builtins() -> Vec<Entry> {
             obj(json!({}), &[]),
         ),
         builtin(
+            "wf.slot",
+            "wf",
+            "One T3 workflow slot, looked up by the step that uses it: review before opening a PR, passes when publishing, delivery for the merge gate, models when launching. The service resolves it for your thread's T3 instance and project, the way your own session would see it: the user config, the repo's AGENTS.md Agent workflow block, and the skills your agent's config folder has installed and enabled. Each skill carries how to run it (the Skill tool, or the inline SKILL.md to read) or why it is skipped. line is the one-line summary; warnings names config problems and a connection that reported no config folder. repo overrides the project's workspace root, for example with your worktree.",
+            &format!(
+                "wf.slot(name: \"review\" | \"passes\" | \"delivery\" | \"models\" | \"credentials\", input?: {{ repo?: string; instance?: string; skills?: string[] }}): Promise<{}>;",
+                slot_result()
+            ),
+            obj(
+                json!({"name": {"enum": ["review", "passes", "delivery", "models", "credentials"]}, "repo": {"type": "string"},
+                       "instance": {"type": "string"}, "skills": {"type": "array", "items": {"type": "string"}}}),
+                &["name"],
+            ),
+        ),
+        builtin(
+            "wf.renewal",
+            "wf",
+            "A command failed: pass its output, and the service matches it against the credentials slot's patterns. Returns the renewal skill to run, then retry the command once, or null when no pattern matches. skipped is true when the matching renewal skill no longer resolves; carry on as if none were configured.",
+            &format!(
+                "wf.renewal(input: {{ output: string; repo?: string; instance?: string }}): Promise<{{ match: string; skill: {SLOT_SKILL}; how: string; skipped: boolean; reason?: string; warnings: string[] }} | null>;"
+            ),
+            obj(
+                json!({"output": {"type": "string"}, "repo": {"type": "string"}, "instance": {"type": "string"}}),
+                &["output"],
+            ),
+        ),
+        builtin(
+            "wf.slots",
+            "wf",
+            "Every T3 workflow slot at once, as setup and the board need them, in the shape `t3cm slots --json` prints. A role looks up the one slot its step needs with wf.slot instead.",
+            "wf.slots(input?: { repo?: string; instance?: string; skills?: string[] }): Promise<{ repo: string; config: string | null; review: object; passes: object; credentials: object; delivery: object; models: { ticket: object; worker: object }; problems: string[]; warnings: string[]; context: { instance: string | null; driver: string | null; claudeDir: string; codexHome: string; folderFrom: \"reported\" | \"recorded\" | \"default\"; config: string } }>;",
+            obj(
+                json!({"repo": {"type": "string"}, "instance": {"type": "string"}, "skills": {"type": "array", "items": {"type": "string"}}}),
+                &[],
+            ),
+        ),
+        builtin(
             "wf.merge",
             "wf",
             "Merge a GitHub pull request through the service's gh login, only at the approved head commit (refused when the PR's head differs). On a repo with a merge queue: a mergeable PR is enqueued (never auto-merge); one not yet mergeable is recorded as waiting to be queued and returns waiting. Without a merge queue: merged directly with method, or the repo's default method. Throws when gh cannot reach GitHub.",
@@ -300,6 +336,16 @@ pub fn builtins() -> Vec<Entry> {
 }
 
 const SKILLS: &str = "{ release: string; installed: string | null; present: boolean; current: boolean; fix: string | null; foreign: { tool: string; lock: string | null; commit: string | null; skills: string[]; matchesRelease: boolean; differingFiles: number } | null; missingSteps: { id: string; kind: \"auto\" | \"interview\"; since: string; slot?: string; fix: string }[]; configState: \"absent\" | \"legacy\" | \"recorded\" | \"problem\" | null; problem?: string; fixes: string[]; error?: string }";
+
+const SLOT_SKILL: &str = "{ ref: string; status: \"ok\" | \"ambiguous\" | \"missing\"; name?: string; path?: string | null; where?: string; invoke?: \"skill\" | \"inline\"; others?: string[]; how?: string } | null";
+
+const SLOT_MODEL: &str = "{ slot: string; source: string; spec: { model?: string; effort?: string; provider?: string; pool?: string } | null; note?: string | null; problem?: string; modelSelection: { instanceId: string; model: string; options?: { id: string; value: string }[] } | { pool: string; pick: string } | null }";
+
+fn slot_result() -> String {
+    "{ slot: string; source?: string; line: string; warnings: string[]; skill?: SlotSkill; note?: string; skills?: SlotSkill[]; renewals?: { match: string; skill: SlotSkill }[]; mode?: string; problem?: string; ticket?: SlotModel; worker?: SlotModel }"
+        .replace("SlotSkill", SLOT_SKILL)
+        .replace("SlotModel", SLOT_MODEL)
+}
 
 const CALL_SIGNATURE: &str = "call(name: string, input?: object): Promise<unknown>;";
 
