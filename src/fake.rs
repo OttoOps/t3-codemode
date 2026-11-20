@@ -391,6 +391,7 @@ struct GhState {
     calls: Vec<Value>,
     errors: BTreeMap<String, String>,
     read_errors: BTreeMap<(String, u64), String>,
+    field_errors: BTreeMap<(String, u64), (String, String)>,
     down: bool,
     queue: u64,
     merges: u64,
@@ -466,6 +467,16 @@ impl FakeGitHub {
         self.st().read_errors.insert((repo.into(), number), message.into());
     }
 
+    pub fn fail_field(&self, repo: &str, number: u64, field: &str, message: &str) {
+        self.st().field_errors.insert((repo.into(), number), (field.into(), message.into()));
+    }
+
+    pub fn clear_read_errors(&self) {
+        let mut st = self.st();
+        st.read_errors.clear();
+        st.field_errors.clear();
+    }
+
     pub fn set_unknown_reads(&self, n: usize) {
         self.st().unknown_reads = n;
     }
@@ -526,6 +537,9 @@ impl crate::github::GitHub for FakeGitHub {
                     if let Some(message) = st.read_errors.get(&(repo.clone(), number)) {
                         errs.push(json!({"path": [alias, "pullRequest"], "message": message}));
                         pr = Value::Null;
+                    } else if let Some((field, message)) = st.field_errors.get(&(repo.clone(), number)) {
+                        errs.push(json!({"path": [alias, "pullRequest", field], "message": message}));
+                        pr[field.as_str()] = Value::Null;
                     } else if pr.is_null() {
                         errs.push(
                             json!({"type": "NOT_FOUND", "path": [alias, "pullRequest"], "message": "no pull request"}),

@@ -911,3 +911,38 @@ async fn a_waiting_approval_is_never_sent_to_another_pr_under_the_same_number() 
     assert_eq!(open.len(), 1, "{open:?}");
     assert!(open[0]["text"].as_str().unwrap().contains("no longer the pull request that was approved"), "{open:?}");
 }
+
+#[tokio::test]
+async fn a_read_with_a_field_error_is_retried_and_wakes_the_ticket_once() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.fake.set_prs(WORKER, vec![pull_request(REPO, 7, "open")]);
+    h.tick(0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+    h.github.update_pr(REPO, 7, merged_at(1));
+    h.github.fail_field(REPO, 7, "mergeCommit", "Something went wrong while resolving mergeCommit");
+    h.clock.set(&at(2));
+
+    let err = h.app.wf.reconcile().await.unwrap_err();
+    h.github.clear_read_errors();
+    check(&h, 4).await;
+
+    assert!(format!("{err:#}").contains("resolving mergeCommit"), "{err:#}");
+    assert_eq!(github_events(&h).len(), 1, "{:?}", github_events(&h));
+}
+
+#[tokio::test]
+async fn a_waiting_approval_with_no_github_node_id_is_never_sent() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+    h.github.update_pr(REPO, 7, json!({"id": ""}));
+    assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "waiting");
+    h.github.update_pr(REPO, 7, json!({"mergeStateStatus": "CLEAN"}));
+
+    check(&h, 2).await;
+
+    assert!(h.github.operations().iter().all(|o| !o.ends_with("PullRequest")));
+    assert!(h.app.store.merge_waits().unwrap().is_empty());
+    assert_eq!(cards(&h, false).len(), 1);
+}

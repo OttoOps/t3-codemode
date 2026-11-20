@@ -281,13 +281,14 @@ impl Wf {
                     .filter(|e| e["path"][0] == alias.as_str())
                     .collect();
                 let why = errs.iter().filter_map(|e| e["message"].as_str()).collect::<Vec<_>>().join("; ");
-                let done = if repo["pullRequest"].is_object() {
+                let found = repo["pullRequest"].is_object();
+                let done = if found && errs.is_empty() {
                     self.fix(t, repo, &mut pass).await
-                } else if errs.iter().any(|e| e["type"] == "NOT_FOUND") {
+                } else if !found && errs.iter().any(|e| e["type"] == "NOT_FOUND") {
                     self.missing(t, &why, &mut pass).await
                 } else {
                     Err(anyhow!(
-                        "GitHub returned no pull request: {}",
+                        "GitHub returned an incomplete read: {}",
                         if why.is_empty() { "no error given" } else { &why }
                     ))
                 };
@@ -569,14 +570,14 @@ impl Wf {
                 Ok(None)
             }
             (WaitStatus::Waiting, false) if !o.draft && MERGEABLE.contains(&o.merge_state.as_str()) => {
-                if w.pull_request_id.is_empty() || w.pull_request_id == o.id {
+                if !w.pull_request_id.is_empty() && w.pull_request_id == o.id {
                     return Ok(Some(w));
                 }
                 let ask = Ask {
                     what: format!("{} is no longer the pull request that was approved", t.label()),
                     reply: "reply \"merge\" to approve it again, or \"hold\" to leave it",
                     context: format!(
-                        "The approval was for GitHub node {}. That number now resolves to {}.",
+                        "The approval was for GitHub node \"{}\". That number now resolves to \"{}\".",
                         w.pull_request_id, o.id
                     ),
                 };
