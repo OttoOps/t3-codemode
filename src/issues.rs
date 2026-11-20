@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::board::{BOARD, Issue, LaunchArgs, parse_issue};
+use crate::board::{BOARD, Issue, LaunchArgs, parse_issue_only};
 use crate::clock::local_clock;
 use crate::store::NewIssue;
 use crate::wf::Wf;
@@ -114,7 +114,7 @@ impl Wf {
     }
 
     pub async fn report_issue(&self, me: &str, a: IssueArgs) -> Result<Value> {
-        let issue = parse_issue(&a.url).ok_or_else(|| {
+        let issue = parse_issue_only(&a.url).ok_or_else(|| {
             anyhow!(
                 "wf.issue: {:?} is not a GitHub issue; use https://github.com/<owner>/<repo>/issues/<n> or <owner>/<repo>#<n>",
                 a.url
