@@ -101,7 +101,15 @@ impl PartialOrd for Version {
 
 pub fn releases_url() -> Result<String> {
     let url = std::env::var(RELEASES_ENV).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| RELEASES.to_string());
+    checked_releases(&url)
+}
+
+fn checked_releases(url: &str) -> Result<String> {
     let url = url.trim_end_matches('/').to_string();
+    let Ok(parsed) = reqwest::Url::parse(&url) else { bail!("{RELEASES_ENV} is not a URL") };
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        bail!("{RELEASES_ENV} must not carry a user name or password");
+    }
     if !(url.starts_with("https://") || is_loopback(&url)) {
         bail!("{RELEASES_ENV} must be https (plain http only on 127.0.0.1 or localhost): {url}");
     }
@@ -343,5 +351,19 @@ mod tests {
         assert!(!is_loopback("http://localhost@evil.test/x"));
         assert!(!is_loopback("http://evil.test\\@127.0.0.1/x"));
         assert!(is_loopback("http://LOCALHOST:8/x"));
+    }
+
+    #[test]
+    fn release_urls_with_credentials_are_refused_without_echoing_them() {
+        assert_eq!(checked_releases("https://example.test/r/").unwrap(), "https://example.test/r");
+        for url in [
+            "https://me:hunter2@example.test/r",
+            "http://me:hunter2@localhost/r",
+            "https://tok@example.test/r",
+            "hunter2",
+        ] {
+            let err = checked_releases(url).unwrap_err().to_string();
+            assert!(!err.contains("hunter2") && !err.contains("tok@"), "{err}");
+        }
     }
 }
