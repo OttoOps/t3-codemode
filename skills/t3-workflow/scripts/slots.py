@@ -216,7 +216,7 @@ def parse_agent_workflow(text):
         elif key == "deploy skill":
             cfg.setdefault("delivery", {})["skill"] = _first_name(value)
         elif key in ("ticket model", "worker model"):
-            pool = re.match(r"^\s*(?:the\s+)?pool(?:\s*:\s*|\s+)(.*)$", value, re.I)
+            pool = re.match(r"^\s*(?:the\s+)?pool:?\s+(.*)$", value, re.I)
             if pool:
                 cfg.setdefault("models", {})[key.split()[0]] = {"pool": _first_name(pool.group(1))}
                 continue

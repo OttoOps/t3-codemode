@@ -292,6 +292,10 @@ class Settings(SlotsTestCase):
         self.assertEqual((models["worker"]["spec"], models["worker"]["source"]), ({"pool": "opus"}, "AGENTS.md"))
         self.agents_md("- Worker model: pool-custom, high effort\n")
         self.assertEqual(self.slots("--no-t3")["models"]["worker"]["spec"], {"model": "pool-custom", "effort": "high"})
+        self.agents_md("- Worker model: pool:custom, high effort\n")
+        self.assertEqual(self.slots("--no-t3")["models"]["worker"]["spec"], {"model": "pool:custom", "effort": "high"})
+        self.agents_md("- Worker model: pool: `opus`\n")
+        self.assertEqual(self.slots("--no-t3")["models"]["worker"]["spec"], {"pool": "opus"})
 
 class Doctor(SlotsTestCase):
     def test_reports_a_configured_skill_that_has_been_removed(self):
