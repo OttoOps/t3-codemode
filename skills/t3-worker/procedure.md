@@ -155,8 +155,23 @@ does those and messages you.
 
 - **A check failed:** read the run log (`gh run view <run id> --log-failed`),
   fix the cause, push.
-- **A comment or review:** answer it in the PR or change the code, push. A
-  reply posted on the PR goes through Publishing.
+- **A comment or review from a person:** answer it in the PR or change the
+  code, push. A reply posted on the PR goes through Publishing.
+- **A review from a bot reviewer** (CodeRabbit or any other automated
+  reviewer): a round is one bot review of one head. Count the rounds this
+  PR has had (`gh api repos/<owner>/<repo>/pulls/<number>/reviews`, the
+  bot's reviews, one per distinct `commit_id`).
+  - Fix only the Critical and Major findings that still hold against the
+    current code, all of them in one push. When you dispute one, reply
+    once with why and leave the code.
+  - Do not change code for a Minor, Trivial or nitpick finding. Reply in
+    one line that it is advisory and not fixed, then resolve the thread.
+    A finding with no severity counts as Minor unless it names data loss,
+    a security hole, or a crash on a normal path.
+  - After the bot's second round, push nothing more for bot findings. Send
+    the orchestrator any open Critical or Major finding, both sides in 2-3
+    lines each, as the `review` gate, and end the turn. The user decides.
+  - Replies go through Publishing.
 - **A conflict:** `git fetch origin`, rebase on `origin/main`, re-run the
   done-checks, push with `--force-with-lease=<branch>:<old head sha>`. The
   PR targets `main`; it is never stacked on another PR.
