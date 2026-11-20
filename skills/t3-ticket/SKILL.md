@@ -351,10 +351,12 @@ End the turn.
 **"merge"** (or "merge and deploy"):
 
 1. Check the PR against the head the answered gate names. Through t3cm,
-   check that it is open, not a draft, and at that head, and take the full
-   SHA from its `headRefOid`; `wf.merge` handles the merge state. Without
-   t3cm, run the "Ready to merge" checks again. A head that moved since
-   that gate gets a new gate, not a merge.
+   check that it is open, not a draft, and at that head, that no check
+   failed, and take the full SHA from its `headRefOid`. A failing check
+   goes back to the worker, even when GitHub would merge the PR anyway
+   (`UNSTABLE`). `wf.merge` handles the merge state and any check still
+   pending. Without t3cm, run the "Ready to merge" checks again. A head
+   that moved since that gate gets a new gate, not a merge.
 2. Merge at that head. Never use T3's merge button or PR action (Hard
    rules).
    - **Through t3cm** (`mcp__t3cm__execute` is listed): call
@@ -414,9 +416,9 @@ merged event (below) tells this thread.
 
 Through t3cm, the board's GitHub reconcile follows the PR after
 `wf.merge`. It reads every PR of an open worker link, every PR `wf.merge`
-queued or holds waiting, and every PR an open gate card names: every 2
-minutes while one is queued or waiting, every 10 minutes otherwise. It
-wakes this thread once per event, so this thread starts no merge watch
+queued or holds waiting, and every PR an open gate card names: by default
+every 2 minutes while one is queued or waiting, every 10 minutes
+otherwise. It wakes this thread once per event, so this thread starts no merge watch
 and does not poll GitHub. Hold `wf.gate({ open: "merge" })` while it
 waits, so the watcher does not nudge it, and clear it
 (`wf.gate({ clear: true })`) when the merged or closed event or the user's
@@ -445,13 +447,22 @@ answer arrives. What reaches this thread:
   - "hold": nothing merges the PR now. End the turn. The worker's next
     "ready to merge" starts a new gate.
 
-The reconcile wakes only a thread on a link. A ticket with no parent (the
-`wf.init` result has no `parent`, as with `root: true`) starts the merge
-watch after `queued` or `waiting` instead.
+The reconcile wakes only a thread on a link, and only while it runs. Start
+the merge watch after `queued` or `waiting` instead when:
+
+- this ticket has no parent (the `wf.init` result has no `parent`, as with
+  `root: true`), or
+- t3cm's `config.json` sets `board.reconcileIdleMinutes` to `0`, which
+  turns the reconcile off. The file is at `$T3CM_CONFIG`, else in the
+  t3-codemode config directory (`~/.config/t3-codemode/` on Linux,
+  `~/Library/Application Support/t3-codemode/` on macOS,
+  `%LOCALAPPDATA%\t3-codemode\` on Windows). No file or no key means the
+  default, 10.
 
 #### The merge watch
 
-The merge watch serves the `t3wf` path and a ticket with no parent.
+The merge watch serves the `t3wf` path, and the t3cm cases "The merge
+wait" names.
 Create it as items 1 and 2 of "The deploy watch" say, with `title` `<#n or
 slug> PR n/N merge watch`, and a prompt that names the task id, the PR
 number and URL, its head SHA and branch, the main workspace root, the
@@ -459,15 +470,21 @@ user's reply ("merge" or "merge and deploy"), the `wf.merge` outcome when
 there was one, and the flag "Seen queued: no". End it with "Follow 'Each
 merge-watch run' in the t3-ticket skill."
 
-Each merge-watch run reads the item 3 fields, plus `headRefOid`:
+Each merge-watch run reads the item 3 fields, plus `headRefOid` and
+`mergeStateStatus`:
 
 - **`MERGED`:** delete the task with `delete_scheduled_task`, then go on
   from item 4.
 - **Still queued, or waiting on auto-merge:** when the flag says "Seen
   queued: no", update it to "yes". End the turn quietly.
 - **`OPEN` and out of the queue, after a `waiting` outcome, at the
-  approved head, with "Seen queued: no":** the board has not queued it
-  yet. End the turn quietly.
+  approved head, with "Seen queued: no", and no open board card names
+  the PR:** the board has not queued it yet. End the turn quietly. Look
+  for the card with `wf.cards()`: one whose `text` has the PR URL means
+  the board gave up on the approval or wants a decision on it, so the
+  next case applies. With the reconcile off, nothing queues it for you:
+  once `mergeStateStatus` is `CLEAN` or `HAS_HOOKS`, call `wf.merge` again
+  at the approved head and act on its outcome as item 2 says.
 - **`OPEN`, out of the queue, with no `autoMergeRequest`, in any other
   case:** delete the task and send the gate "reply \"merge\" to queue
   #<number> again at head <sha>, or check why it left the queue, here: <PR
