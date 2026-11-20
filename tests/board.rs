@@ -303,6 +303,20 @@ async fn an_unmapped_repo_leaves_an_error_card() {
 }
 
 #[tokio::test]
+async fn a_failed_project_lookup_leaves_an_error_card() {
+    let h = H::new();
+    h.fake.set_projects_fail(true);
+    let out = h.exec("async () => wf.launchTicket({ issue: 'Acme/widgets#41' })").await;
+    assert!(err_text(&out).contains("Cannot launch widgets#41: "), "{}", out.text);
+    let c = cards(&h);
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0]["kind"], "error");
+    assert_eq!(c[0]["label"], "widgets#41");
+    assert!(h.fake.launched().is_empty());
+    assert!(h.app.store.pending_all().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn a_never_joined_board_ticket_becomes_a_card() {
     let h = H::new();
     h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);

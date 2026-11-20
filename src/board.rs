@@ -899,7 +899,11 @@ impl Wf {
         let wanted = nonempty(a.project);
         let model_arg = nonempty(a.model);
         let effort_arg = nonempty(a.effort);
-        let project = match self.find_project(&issue, wanted.as_deref()).await? {
+        let found = match self.find_project(&issue, wanted.as_deref()).await {
+            Ok(found) => found,
+            Err(e) => return self.launch_failed(&label, &format!("Cannot launch {label}: {e:#}")),
+        };
+        let project = match found {
             Some(p) => p,
             None => {
                 let text = format!(
