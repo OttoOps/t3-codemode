@@ -1554,6 +1554,7 @@ impl Wf {
                 (Some(text), false) => {
                     data["status"] = json!("answered");
                     data["answer"] = json!(truncate_chars(text, ANSWER_CAP));
+                    data["answerCut"] = json!(text.chars().count() > ANSWER_CAP);
                     data["answeredAt"] = json!(self.now());
                     let archived =
                         self.t3.call("t3_thread_organize", json!({"threadId": thread, "action": "archive"})).await;
@@ -2646,5 +2647,8 @@ pub fn ask_view(seq: i64, d: &Value) -> Value {
     v["id"] = json!(format!("q{seq}"));
     v["seq"] = json!(seq);
     v["atLocal"] = json!(d["at"].as_str().map(local_clock));
+    if let (None, Some(a)) = (d.get("answerCut"), d["answer"].as_str()) {
+        v["answerCut"] = json!(a.ends_with("...") && a.chars().count() == ANSWER_CAP + 3);
+    }
     v
 }
