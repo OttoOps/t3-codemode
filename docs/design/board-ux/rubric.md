@@ -173,3 +173,46 @@ from [`live/before/report.json`](live/before/report.json) and the
 | G10 | **Space goes to content.** | Gate | An empty Answers area is at most one line (40 px) under Ask; Activity takes the rest of the column. A ticket list shorter than its panel leaves no reserved empty block above Activity or Launch. | Fails: at 1920 the empty Answers area takes about 290 px, so Activity gets 461 of the column's 1,040 px; Decisions and Tickets each leave about 480 px empty below their last item. |
 | G11 | **All text meets AA.** | Gate | Every visible text, secondary and placeholder text included, is at least 4.5:1 against its rendered background in both themes, and 3:1 for 18 px+ bold text and for borders and focus rings. Extends P1 to all text. | Text passes (lowest 5.38:1). Fails for lines: `--line` dividers and borders are 1.27 to 1.38:1 in light and 1.89 to 2.13:1 in dark, and stale text at 0.55 opacity would be 2.50:1. |
 
+
+## Dynamic layout
+
+Added for [issue #93](https://github.com/OttoOps/t3-codemode/issues/93):
+moving, collapsing and resizing panels at desktop widths (1200 px and up).
+The gates are measured by [`harness/layout-gates.js`](harness/README.md) on
+the *Live* replay at 1440x900 unless a test says otherwise. The judged
+criteria are scored blind against the panel references in
+[`references/panels/`](references/panels/README.md): VS Code for the Web,
+Dockview, Golden Layout, Grafana and JetBrains IDEs.
+
+**Subjects and packets.** Each judged subject is a set of stills: the
+candidate's from [`harness/layout-stills.js`](harness/README.md), and each
+reference product's images. [`harness/layout-packets.py`](harness/README.md)
+builds one packet per judge: every subject under a random letter, in a
+random order, with images renamed and captioned neutrally (state only, no
+product names), and the candidate's page title and heading blanked. Judges
+are not told which subject is under test. Headless captures show no mouse
+pointer, in the candidate's stills and the live references alike.
+
+**Decision rule.** The candidate passes every L gate, and on every judged
+criterion its mean across judges is at least the median of the reference
+subjects' means. A subject whose images cannot show a criterion is scored
+`n/a` and left out of that criterion's median. Where fewer than two
+reference subjects are scored on a criterion, the bar is 4 ("good; matches
+the better references"). The issue's owner also
+reviews the stills and the scores before merge.
+
+| ID | Criterion | Kind | Test |
+| --- | --- | --- | --- |
+| L1 | **Every panel moves anywhere.** | Gate | Each of the five panels reaches the top and the bottom of each of the three columns by pointer drag of its header, and each column by keyboard alone (its grip and the arrow keys). After a keyboard move, focus stays on the moved panel's grip. |
+| L2 | **Every panel collapses and expands.** | Gate | The chevron collapses and expands by click and by Enter, with `aria-expanded` kept in step; a double-click on the header's empty area collapses; a shortcut that jumps to a collapsed panel (`g a`) expands it. |
+| L3 | **Columns and stacked panels resize, within limits.** | Gate | A 100 px pointer drag of a column divider widens the column by 100 px, and a 60 px drag of a panel divider grows the panel by 60 px; the arrow keys move a focused divider by 24 px. At 1200x700, 1280x800, 1440x900 and 1920x1080, with both dividers dragged to either extreme, and with all five panels in one column: no column is narrower than 320 px, the page does not scroll, and no panel heading or layout control is cut by its column's edge. |
+| L4 | **The layout persists and resets.** | Gate | A moved, collapsed layout survives a reload. Reset layout shows only when the layout differs from the default, restores the default and clears the saved value. A saved value that is not JSON, lists a panel twice, has the wrong number of columns, or holds a negative width loads the default. |
+| L5 | **Narrow widths are untouched.** | Gate | At 1024x768, 768x1024 and 390x844, in both themes, every rendered element's box matches `main` exactly, with or without a saved custom layout. Going narrow and back to 1440 restores the saved layout. |
+| L6 | **Rearranging keeps the reader's place.** | Gate | With Activity scrolled to 300 px and an item in it focused: dragging another panel into Activity's column, and dragging Activity itself to another column, keep its scroll offset and its focus. After a column resize and a collapse, the first visible Activity item is unchanged. |
+| L7 | **The controls are accessible.** | Gate | Every grip, chevron and divider has an accessible name; chevrons carry `aria-expanded`; dividers are `role="separator"` with `aria-orientation`. A keyboard move, a collapse and a cancelled drag (Esc) are each announced once. Mid-drag shows a drag preview, a drop marker and a landing area, and Esc cancels the drag with nothing moved. Grip and chevron icons and divider lines are at least 3:1 against their background in both themes. |
+| L8 | **Discoverable at rest.** | Judged | From the resting stills. 1: nothing says panels can move, collapse or resize. 3: some affordances show, or only on hover, and a user would have to guess at the rest. 5: move, collapse and resize controls are visible and legible at rest without adding clutter. |
+| L9 | **Drag feedback.** | Judged | From the mid-drag stills. 1: nothing shows what moves or where it will land. 3: either the moving item or the landing spot is shown, or the landing spot is ambiguous. 5: what is moving, the exact landing area, and the source's state are all unmistakable. |
+| L10 | **Resize affordance and feedback.** | Judged | From the divider stills. 1: no visible divider or handle. 3: a divider is visible, but its hover or active state is weak, or the layout does not visibly follow. 5: a clear divider with a distinct hover and active state, and the layout follows the drag live. |
+| L11 | **Collapsed state.** | Judged | From the collapsed stills. 1: collapsed panels vanish, or collapsed and expanded look alike. 3: the collapsed state is clear, but the way back or the reclaimed space is not. 5: a collapsed panel keeps its name (and its count where it has one), the way to expand it is obvious, and its space goes to the rest. |
+| L12 | **A rearranged layout still reads.** | Judged | From stills of a non-default arrangement. 1: rearranging leaves the screen cramped, misaligned or broken. 3: usable, with visible seams. 5: the rearranged layout looks designed, in both themes where shown. |
+| L13 | **Layout chrome is polished and restrained.** | Judged | From all stills. 1: handles, chevrons, dividers and drop targets are noisy or inconsistent. 3: consistent but plain or slightly heavy. 5: cohesive and restrained; the chrome stays out of the content's way until it is needed. |
