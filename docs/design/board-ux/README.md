@@ -24,6 +24,7 @@ direction.
 | [`critique.md`](critique.md) | Issue #67: the readability critique under the live load, the task-test baseline, and the proposed direction for the decision card, ticket row and Activity row. |
 | [`live/`](live/README.md) | Issue #67: an anonymized snapshot of the live board, a read-only replay server, the capture and glance scripts, and the before- and after-stills at 1920, 1366 and 390. |
 | [`mockups/`](mockups/README.md) | Issue #67: a static mockup of the direction under the same load, a component sheet, and the after-stills. |
+| [`new-issues/`](new-issues/README.md) | Issue #57: before and after stills of the New issues section above Tickets, with the script that adds the issues to the live snapshot. |
 
 ## Method
 

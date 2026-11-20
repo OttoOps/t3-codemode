@@ -27,6 +27,14 @@ and the threads running. Only the lists scroll.
   Answering a card sends the ticket one reply and resolves the card. A ticket
   that clears its gate, or sends a newer `gate` message, resolves its older
   gate cards, and its handoff resolves all of its open cards.
+- **New issues,** at the top of the Tickets column: the issues threads have
+  filed and reported with `wf.issue` that have no ticket yet, newest first.
+  Each row shows the issue's `repo#n` linked to GitHub, its title, how long ago
+  it was filed and a link to the thread that filed it, with Launch and Dismiss.
+  A count beside the heading says how many wait, and the section shrinks to
+  its heading when none do. Show dismissed swaps the list for the dismissed
+  issues, each with Restore. [New issues](#new-issues) covers what each button
+  does.
 - **Tickets,** in Open, Done and Settled tabs, grouped by state. A ticket
   takes the most urgent state of its own thread and its workers, so a ticket
   whose worker runs reads running:
@@ -209,6 +217,12 @@ owner's repo of the same name counts as having that ticket.
   from the Launch tickets box also takes its entry off the list.
 - **Dismiss** takes an entry off the list without touching GitHub. Dismissed
   entries stay in the store, and **Restore** puts one back.
+
+The page gets a reported issue within seconds, on the same event stream as
+everything else. While the pointer or focus is in the Tickets column, a new
+entry waits behind an "N new" button in the section's heading, and an entry
+that leaves stays as a placeholder ("widgets#43 launched") until you move
+away, so nothing under your pointer shifts.
 
 ## GitHub reconcile
 
