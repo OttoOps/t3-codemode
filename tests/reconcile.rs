@@ -6,7 +6,7 @@ use common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::BOARD;
 use t3_codemode::config::Config;
-use t3_codemode::fake::{github_pr, pull_request};
+use t3_codemode::fake::{check_run, github_pr, pull_request};
 use t3_codemode::server;
 
 const REPO: &str = "acme/widgets";
@@ -945,4 +945,95 @@ async fn a_waiting_approval_with_no_github_node_id_is_never_sent() {
     assert!(h.github.operations().iter().all(|o| !o.ends_with("PullRequest")));
     assert!(h.app.store.merge_waits().unwrap().is_empty());
     assert_eq!(cards(&h, false).len(), 1);
+}
+
+#[tokio::test]
+async fn a_waiting_pr_with_a_failed_optional_check_is_held_with_one_card_until_the_check_passes() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+    assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "waiting");
+
+    h.github.update_pr(REPO, 7, json!({"mergeStateStatus": "UNSTABLE"}));
+    h.github.set_checks(REPO, 7, json!([check_run("CodeRabbit", "CANCELLED"), check_run("lint", "FAILURE")]));
+    check(&h, 2).await;
+    check(&h, 4).await;
+
+    assert!(h.github.operations().iter().all(|o| !o.ends_with("PullRequest")), "{:?}", h.github.operations());
+    assert_eq!(wait_status(&h), ["waiting"]);
+    let open = cards(&h, false);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0]["kind"], "report");
+    let text = open[0]["text"].as_str().unwrap();
+    assert!(text.contains("acme/widgets#7 has a failing check at its approved head 1111111: lint (FAILURE)"), "{text}");
+    assert!(!text.contains("CodeRabbit"), "{text}");
+    assert_eq!(open[0]["options"], json!(["fix"]));
+    assert!(feed_heads(&h).iter().any(|f| f.starts_with("acme/widgets#7 is held: a check failed")));
+
+    h.github.set_checks(REPO, 7, json!([check_run("CodeRabbit", "CANCELLED"), check_run("lint", "SUCCESS")]));
+    check(&h, 6).await;
+
+    let mutations: Vec<String> = h.github.operations().into_iter().filter(|o| o.ends_with("PullRequest")).collect();
+    assert_eq!(mutations, ["enqueuePullRequest"]);
+    assert_eq!(h.github.calls().last().unwrap()["variables"]["head"], HEAD);
+    assert_eq!(wait_status(&h), ["sent"]);
+    assert!(cards(&h, false).is_empty(), "the held card resolves once the pull request is queued");
+}
+
+#[tokio::test]
+async fn a_waiting_pr_unstable_only_from_a_cancelled_bot_check_is_queued() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+    wf_merge(&h, 7, HEAD).await;
+
+    h.github.update_pr(REPO, 7, json!({"mergeStateStatus": "UNSTABLE"}));
+    h.github.set_checks(REPO, 7, json!([check_run("build", "SUCCESS"), check_run("CodeRabbit", "CANCELLED")]));
+    check(&h, 2).await;
+
+    let mutations: Vec<String> = h.github.operations().into_iter().filter(|o| o.ends_with("PullRequest")).collect();
+    assert_eq!(mutations, ["enqueuePullRequest"]);
+    assert_eq!(wait_status(&h), ["sent"]);
+    assert!(cards(&h, false).is_empty());
+}
+
+#[tokio::test]
+async fn a_waiting_pr_with_a_running_check_at_unstable_is_neither_queued_nor_reported() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+    wf_merge(&h, 7, HEAD).await;
+
+    h.github.update_pr(REPO, 7, json!({"mergeStateStatus": "UNSTABLE"}));
+    let running = json!({"__typename": "CheckRun", "name": "e2e", "status": "QUEUED", "conclusion": null});
+    h.github.set_checks(REPO, 7, json!([running]));
+    check(&h, 2).await;
+
+    assert!(h.github.operations().iter().all(|o| !o.ends_with("PullRequest")), "{:?}", h.github.operations());
+    assert_eq!(wait_status(&h), ["waiting"]);
+    assert!(cards(&h, false).is_empty());
+}
+
+#[tokio::test]
+async fn a_held_card_resolves_when_the_pr_is_queued_outside_the_board() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "UNSTABLE", true));
+    h.github.set_checks(REPO, 7, json!([{"__typename": "CheckRun", "name": "lint", "status": "IN_PROGRESS"}]));
+    assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "waiting");
+    h.github.set_checks(REPO, 7, json!([check_run("lint", "FAILURE")]));
+    check(&h, 2).await;
+    assert_eq!(cards(&h, false).len(), 1);
+
+    h.github.set_checks(REPO, 7, json!([check_run("lint", "SUCCESS")]));
+    h.github.update_pr(
+        REPO,
+        7,
+        json!({"mergeStateStatus": "CLEAN", "isInMergeQueue": true, "mergeQueueEntry": {"position": 1}}),
+    );
+    check(&h, 4).await;
+
+    assert!(cards(&h, false).is_empty());
+    assert!(h.github.operations().iter().all(|o| !o.ends_with("PullRequest")), "{:?}", h.github.operations());
+    assert_eq!(wait_status(&h), ["sent"]);
 }

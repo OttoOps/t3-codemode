@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::board::{BOARD, Card, NewCard, gh_name};
 use crate::clock::{local_clock, parse_ts};
 use crate::github::errors;
-use crate::merge::{ENQUEUE_PR, MERGE_PR, MERGEABLE};
+use crate::merge::{CHECKS, ENQUEUE_PR, MERGE_PR, Ready, ready};
 use crate::store::{MergeWait, PrSeen, WaitStatus, Wake};
 use crate::wf::{Wf, header};
 
@@ -21,7 +21,8 @@ const EXIT_WINDOW_MINS: f64 = 30.0;
 const PR_FIELDS: &str = "fragment F on PullRequest { id state isDraft headRefOid mergeStateStatus \
 isMergeQueueEnabled isInMergeQueue mergeQueueEntry { position } mergeCommit { oid } mergedAt closedAt \
 timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) { nodes { ... on RemovedFromMergeQueueEvent { \
-reason createdAt } } } }";
+reason createdAt } } } ...Checks }";
+const HELD: &str = "has a failing check at its approved head";
 const NO_TICKET: &str =
     "no ticket tracks it to take a reply, so act on it on GitHub or with wf.merge and then dismiss this card";
 
@@ -112,6 +113,7 @@ struct Obs {
     queued: bool,
     draft: bool,
     merge_state: String,
+    ready: Ready,
     queue: bool,
     id: String,
     commit: String,
@@ -132,6 +134,7 @@ impl Obs {
             queued: pr["isInMergeQueue"] == true,
             draft: pr["isDraft"] == true,
             merge_state: pr["mergeStateStatus"].as_str().unwrap_or("UNKNOWN").into(),
+            ready: ready(pr),
             queue: pr["isMergeQueueEnabled"] == true,
             id: s("id"),
             commit: pr["mergeCommit"]["oid"].as_str().unwrap_or_default().into(),
@@ -214,7 +217,7 @@ fn batch_query(chunk: &[&Tracked]) -> (String, Value) {
         vars.insert(format!("r{i}"), json!(name));
         vars.insert(format!("n{i}"), json!(t.number));
     }
-    let query = format!("query Reconcile({}) {{ {} }} {PR_FIELDS}", params.join(", "), fields.join(" "));
+    let query = format!("query Reconcile({}) {{ {} }} {PR_FIELDS} {CHECKS}", params.join(", "), fields.join(" "));
     (query, Value::Object(vars))
 }
 
@@ -523,6 +526,11 @@ impl Wf {
         {
             self.store.merge_wait_retire(&w)?;
         }
+        if o.queued || o.ready == Ready::Yes {
+            let this_pr = |c: &Card| c.pr.as_ref().is_some_and(|p| p.repo == t.repo && p.number == t.number);
+            let note = if o.queued { "it is in the merge queue" } else { "it is ready to merge" };
+            self.resolve_cards(|c| c.kind == "report" && this_pr(c) && c.text.contains(HELD), note)?;
+        }
         let mut moved: Vec<(Option<String>, String, Vec<i64>)> = Vec::new();
         for c in cards.iter().filter(|c| c.kind == "gate") {
             let Some(ticket) = c.ticket.as_deref() else { continue };
@@ -569,7 +577,13 @@ impl Wf {
                 }
                 Ok(None)
             }
-            (WaitStatus::Waiting, false) if !o.draft && MERGEABLE.contains(&o.merge_state.as_str()) => {
+            (WaitStatus::Waiting, false) if !o.draft && o.ready != Ready::Yes => {
+                if let Ready::Failing(why) = &o.ready {
+                    self.held(t, o, &w, why, pass)?;
+                }
+                Ok(None)
+            }
+            (WaitStatus::Waiting, false) if !o.draft => {
                 if !w.pull_request_id.is_empty() && w.pull_request_id == o.id {
                     return Ok(Some(w));
                 }
@@ -597,6 +611,26 @@ impl Wf {
             }
             _ => Ok(None),
         }
+    }
+
+    fn held(&self, t: &Tracked, o: &Obs, w: &MergeWait, why: &str, pass: &mut Pass) -> Result<()> {
+        let event = format!("checks:{}", w.approval);
+        let ticket = w.thread.as_deref();
+        if self.store.pr_event_seen(&t.repo, t.number, &event, ticket.unwrap_or(BOARD))? {
+            return Ok(());
+        }
+        let ask = Ask {
+            what: format!("{} {HELD} {}: {why}", t.label(), short(&o.head)),
+            reply: "reply \"fix\" to send it back to the worker, or re-run the check on GitHub",
+            context: "The approval stays. The board queues or merges the pull request once every check at this \
+head has passed or ended cancelled, skipped or neutral. A push drops the approval."
+                .into(),
+        };
+        self.raise(t, ticket, "report", &ask, &o.head, Some(&event), pass)?;
+        let text = format!("{} is held: a check failed at its approved head {}", t.label(), short(&o.head));
+        self.feed_note(ticket, &text)?;
+        pass.actions.push(text);
+        Ok(())
     }
 
     fn dropped(&self, t: &Tracked, o: &Obs, pass: &mut Pass) -> Result<bool> {

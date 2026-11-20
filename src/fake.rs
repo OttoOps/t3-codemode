@@ -405,8 +405,18 @@ pub fn github_pr(head: &str, merge_state: &str, queue: bool) -> Value {
     json!({
         "state": "OPEN", "isDraft": false, "headRefOid": head, "mergeStateStatus": merge_state,
         "isMergeQueueEnabled": queue, "isInMergeQueue": false, "mergeQueueEntry": null, "mergeCommit": null,
-        "mergedAt": null, "closedAt": null, "timelineItems": {"nodes": []}
+        "mergedAt": null, "closedAt": null, "timelineItems": {"nodes": []}, "commits": head_commit(head, json!([]))
     })
+}
+
+pub fn head_commit(head: &str, checks: Value) -> Value {
+    json!({"nodes": [{"commit": {"oid": head, "statusCheckRollup": {
+        "contexts": {"pageInfo": {"hasNextPage": false}, "nodes": checks}
+    }}}]})
+}
+
+pub fn check_run(name: &str, conclusion: &str) -> Value {
+    json!({"__typename": "CheckRun", "name": name, "status": "COMPLETED", "conclusion": conclusion})
 }
 
 fn gh_error(message: &str) -> Value {
@@ -432,6 +442,11 @@ impl FakeGitHub {
         for (k, v) in patch.as_object().expect("object patch") {
             pr[k] = v.clone();
         }
+    }
+
+    pub fn set_checks(&self, repo: &str, number: u64, checks: Value) {
+        let head = self.pr(repo, number)["headRefOid"].as_str().unwrap_or_default().to_string();
+        self.update_pr(repo, number, json!({"commits": head_commit(&head, checks)}));
     }
 
     pub fn pr(&self, repo: &str, number: u64) -> Value {
