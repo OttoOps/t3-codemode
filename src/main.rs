@@ -164,7 +164,7 @@ fn run_skills(cmd: SkillsCmd) -> Result<ExitCode> {
         SkillsCmd::Status { json } => {
             let st = skills::status(&paths, &bundle)?;
             let setup = steps::check(&env, &bundle)?;
-            let ok = st.current && !setup.needs_update();
+            let ok = t3_codemode::drift::current(&st, &setup);
             if json {
                 let mut v = serde_json::to_value(&st)?;
                 v["current"] = Value::Bool(ok);
@@ -393,6 +393,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 release_own_console();
             }
             let (app, t3) = build(&state)?;
+            app.wf.refresh_skills();
             let (listener, addr) =
                 server::bind(port.port).await.with_context(|| format!("binding 127.0.0.1:{}", port.port))?;
             tracing::info!(%addr, store = %app.store.path().display(), "t3-codemode serving MCP at /mcp");
@@ -407,6 +408,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Cmd::Stdio { state, watcher: with_watcher } => {
             init_logging(None)?;
             let (app, t3) = build(&state)?;
+            app.wf.refresh_skills();
             tokio::spawn(warm_up(app.clone(), t3));
             if with_watcher {
                 watcher::spawn(app.clone());

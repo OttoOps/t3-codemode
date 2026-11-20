@@ -3944,3 +3944,178 @@ return {{ shown, hidden, back: kids() }};
     assert_eq!(r["hidden"], json!({"kids": ["p-new", "p-tix"], "vacant": false}), "{r}");
     assert_eq!(r["back"], json!(["p-new", "hsplit", "p-tix"]), "{r}");
 }
+
+fn skills_home(h: &H) -> std::path::PathBuf {
+    h.dir.path().join("home")
+}
+
+fn install_skills(home: &std::path::Path, release: &str) {
+    use t3_codemode::skills::{self, Bundle, Mode, Options, Paths};
+    let emb = Bundle::embedded();
+    let files: Vec<(String, Vec<u8>)> =
+        emb.expected().keys().map(|p| (p.clone(), emb.raw(p).unwrap().to_vec())).collect();
+    let opts = Options { mode: Mode::Install, force: false, take_over: false };
+    skills::sync(&Paths::under(home, None), &Bundle::new(release, files), opts).unwrap();
+}
+
+fn legacy_setup(home: &std::path::Path) {
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    let cfg = home.join(".config").join("t3-workflow").join("config.json");
+    std::fs::write(cfg, r#"{"version":1,"passes":["pr"]}"#).unwrap();
+}
+
+async fn state_and_health(s: &Srv) -> (Value, Value) {
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    let health: Value = s.http.get(format!("{}/healthz", s.base)).send().await.unwrap().json().await.unwrap();
+    (st, health)
+}
+
+const DRIFT_SCENARIO: &str = r#"() => {
+  const $ = (id) => document.getElementById(id);
+  emitState(base);
+  const out = { shown: !$("drift").hidden, label: $("drift-text").textContent, aria: $("drift-btn").getAttribute("aria-label") };
+  if (!out.shown) return out;
+  $("drift-btn").dispatch("click");
+  out.opened = !$("drift-pop").hidden && $("drift-btn").getAttribute("aria-expanded");
+  out.msg = $("drift-msg").textContent;
+  out.cmds = $("drift-fixes").querySelectorAll("code").map((c) => c.textContent);
+  for (const f of document.listeners.click) f({ type: "click", target: $("counts") });
+  out.outside = $("drift-pop").hidden;
+  emitState({ ...base, service: { ...base.service, skills: { ...base.service.skills, fixes: [], missingSteps: [], fix: null, foreign: null, current: true, installed: base.service.skills.release } } });
+  out.cleared = $("drift").hidden && $("drift-pop").hidden;
+  return out;
+}"#;
+
+fn drift_page(html: &str, st: &Value) -> Value {
+    run_page(html, &format!("(() => {{ const base = {st}; return ({DRIFT_SCENARIO})(); }})"))
+}
+
+#[tokio::test]
+async fn stale_skills_and_a_missing_rule_show_in_healthz_and_the_header() {
+    let s = start(H::new()).await;
+    let home = skills_home(&s.h);
+    install_skills(&home, "0.0.1");
+    legacy_setup(&home);
+    s.h.app.wf.refresh_skills();
+    let (st, health) = state_and_health(&s).await;
+    let k = &health["skills"];
+    assert_eq!(k, &st["service"]["skills"], "/healthz and /api/state report one view");
+    assert_eq!(
+        (k["release"].as_str(), k["installed"].as_str()),
+        (Some(env!("CARGO_PKG_VERSION")), Some("0.0.1")),
+        "{k}"
+    );
+    assert_eq!((k["present"].as_bool(), k["current"].as_bool()), (Some(true), Some(false)), "{k}");
+    assert_eq!(k["fixes"], json!(["t3cm skills update"]), "{k}");
+    let missing: Vec<(&str, &str)> = k["missingSteps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| (m["id"].as_str().unwrap(), m["fix"].as_str().unwrap()))
+        .collect();
+    assert_eq!(missing, [("rule:filed-issues", "t3cm skills update")], "{k}");
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let r = drift_page(&html, &st);
+    assert_eq!(r["label"], "Skills out of date", "{r}");
+    assert_eq!(r["aria"], "Skills out of date. Fix: t3cm skills update", "{r}");
+    assert_eq!(r["opened"], "true", "{r}");
+    let msg = r["msg"].as_str().unwrap();
+    assert!(msg.contains("are at 0.0.1; t3cm runs") && msg.contains("The filed-issue rule is missing"), "{r}");
+    assert_eq!(r["cmds"], json!(["t3cm skills update"]), "{r}");
+    assert_eq!(r["outside"], true, "a click elsewhere closes the panel: {r}");
+    assert_eq!(r["cleared"], true, "{r}");
+}
+
+#[tokio::test]
+async fn the_rule_alone_missing_is_a_setup_step_and_clears_after_update() {
+    let s = start(H::new()).await;
+    let home = skills_home(&s.h);
+    install_skills(&home, env!("CARGO_PKG_VERSION"));
+    legacy_setup(&home);
+    let st = s.h.exec("async () => wf.status()").await;
+    let k = result(&st)["skills"].clone();
+    assert_eq!((k["fix"].is_null(), k["current"].as_bool()), (true, Some(false)), "{k}");
+    assert_eq!(k["fixes"], json!(["t3cm skills update"]), "{k}");
+    let (state, health) = state_and_health(&s).await;
+    assert_eq!(health["skills"], k);
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let r = drift_page(&html, &state);
+    assert_eq!(r["label"], "Setup step missing", "{r}");
+    assert_eq!(r["cmds"], json!(["t3cm skills update"]), "{r}");
+    t3_codemode::steps::apply(&t3_codemode::steps::Env::under(&home, None), &t3_codemode::skills::Bundle::embedded())
+        .unwrap();
+    let (_, health) = state_and_health(&s).await;
+    assert_eq!(health["skills"]["current"], false, "a read between watcher passes is served from the cache");
+    let mut events = s.h.app.wf.subscribe();
+    let fresh = result(&s.h.exec("async () => (await wf.status()).skills").await);
+    assert_eq!((fresh["current"].as_bool(), &fresh["fixes"]), (Some(true), &json!([])), "{fresh}");
+    assert!(events.try_recv().is_ok(), "a changed report pushes a board update");
+    let (state, health) = state_and_health(&s).await;
+    assert_eq!(health["skills"], fresh);
+    assert_eq!(drift_page(&html, &state)["shown"], false);
+}
+
+#[tokio::test]
+async fn an_npx_skills_install_shows_as_skew_with_the_take_over_fix() {
+    let s = start(H::new()).await;
+    let home = skills_home(&s.h);
+    install_skills(&home, env!("CARGO_PKG_VERSION"));
+    std::fs::remove_file(home.join(".config").join("t3-workflow").join("installed.json")).unwrap();
+    let lock = json!({"version": 3, "skills": {"t3-worker": {"source": "OttoOps/t3-codemode", "commit": "8e179c3"}}});
+    std::fs::write(home.join(".agents").join(".skill-lock.json"), lock.to_string()).unwrap();
+    s.h.app.wf.refresh_skills();
+    let (st, health) = state_and_health(&s).await;
+    let k = &health["skills"];
+    assert_eq!(k["foreign"]["tool"], "npx skills", "{k}");
+    assert_eq!(k["installed"], Value::Null, "{k}");
+    assert_eq!(k["fixes"][0], "t3cm skills install --take-over", "{k}");
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let r = drift_page(&html, &st);
+    assert_eq!(r["label"], "Skills not managed", "{r}");
+    assert!(r["msg"].as_str().unwrap().contains("installed by npx skills and match t3cm"), "{r}");
+    assert_eq!(r["cmds"][0], "t3cm skills install --take-over", "{r}");
+}
+
+#[tokio::test]
+async fn a_machine_without_the_skills_shows_no_skills_chip() {
+    let s = start(H::new()).await;
+    let (st, health) = state_and_health(&s).await;
+    let k = &health["skills"];
+    assert_eq!((k["present"].as_bool(), k["current"].as_bool()), (Some(false), Some(false)), "{k}");
+    assert_eq!(k["fixes"][0], "t3cm skills install", "{k}");
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    assert_eq!(drift_page(&html, &st)["shown"], false);
+}
+
+#[tokio::test]
+async fn a_new_slot_or_a_broken_config_names_the_setup_skill() {
+    let s = start(H::new()).await;
+    let home = skills_home(&s.h);
+    install_skills(&home, env!("CARGO_PKG_VERSION"));
+    legacy_setup(&home);
+    let env = t3_codemode::steps::Env::under(&home, None);
+    t3_codemode::steps::apply(&env, &t3_codemode::skills::Bundle::embedded()).unwrap();
+    let mut cfg: Value = serde_json::from_str(&std::fs::read_to_string(&env.config).unwrap()).unwrap();
+    cfg["steps"].as_array_mut().unwrap().retain(|id| id != "slot:models");
+    std::fs::write(&env.config, cfg.to_string()).unwrap();
+    let k = result(&s.h.exec("async () => (await wf.status()).skills").await);
+    assert_eq!(
+        (k["current"].as_bool(), &k["fixes"]),
+        (Some(true), &json!(["run setup-t3-workflow: new slot models"])),
+        "{k}"
+    );
+    let (st, _) = state_and_health(&s).await;
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let r = drift_page(&html, &st);
+    assert_eq!(r["label"], "Setup step missing", "{r}");
+    assert!(r["msg"].as_str().unwrap().contains("Setup has a new slot to pick: models."), "{r}");
+    std::fs::write(&env.config, "{not json").unwrap();
+    let k = result(&s.h.exec("async () => (await wf.status()).skills").await);
+    assert_eq!(k["configState"], "problem", "{k}");
+    let fix = k["fixes"][0].as_str().unwrap();
+    assert!(fix.starts_with("fix ") && fix.ends_with("config.json, then run setup-t3-workflow"), "{k}");
+    let (st, _) = state_and_health(&s).await;
+    let r = drift_page(&html, &st);
+    assert_eq!(r["label"], "Workflow config ignored", "{r}");
+    assert!(r["msg"].as_str().unwrap().contains("The T3 workflow config is ignored: not JSON"), "{r}");
+}

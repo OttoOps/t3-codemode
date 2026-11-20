@@ -234,6 +234,15 @@ pub fn builtins() -> Vec<Entry> {
             obj(json!({}), &[]),
         ),
         builtin(
+            "wf.status",
+            "wf",
+            "The service's own state, as the board header shows it: version, T3 connection, watcher, the release check, and skills, which compares the installed T3 workflow skills and recorded setup steps against this release. skills.current is false when the skills are behind, edited, missing, installed by npx skills, or an automatic setup step is missing; present is false when no skills are installed at all; fixes lists the commands to run, in order. Reads the skills fresh on each call.",
+            &format!(
+                "wf.status(): Promise<{{ version: string; t3: {{ connected: boolean; lastError: string | null }}; tokenExpiresAt: string | null; watcher: {{ lastPass: string | null; lastPassAt: string | null; alive: boolean }}; openLinks: \"desktop\" | \"tab\"; update: {{ current: string; latest: string; available: boolean; notes: string; command: string }} | null; skills: {SKILLS} }}>;"
+            ),
+            obj(json!({}), &[]),
+        ),
+        builtin(
             "wf.merge",
             "wf",
             "Merge a GitHub pull request through the service's gh login, only at the approved head commit (refused when the PR's head differs). On a repo with a merge queue: a mergeable PR is enqueued (never auto-merge); one not yet mergeable is recorded as waiting to be queued and returns waiting. Without a merge queue: merged directly with method, or the repo's default method. Throws when gh cannot reach GitHub.",
@@ -289,6 +298,8 @@ pub fn builtins() -> Vec<Entry> {
         ),
     ]
 }
+
+const SKILLS: &str = "{ release: string; installed: string | null; present: boolean; current: boolean; fix: string | null; foreign: { tool: string; lock: string | null; commit: string | null; skills: string[]; matchesRelease: boolean; differingFiles: number } | null; missingSteps: { id: string; kind: \"auto\" | \"interview\"; since: string; slot?: string; fix: string }[]; configState: \"absent\" | \"legacy\" | \"recorded\" | \"problem\" | null; problem?: string; fixes: string[]; error?: string }";
 
 const CALL_SIGNATURE: &str = "call(name: string, input?: object): Promise<unknown>;";
 

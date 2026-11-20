@@ -273,6 +273,25 @@ needs answers, such as a slot a later release added, prints as
 `status` lists the missing steps too, and exits 1 while a step t3cm can
 apply is missing.
 
+The running service checks the same things. `/healthz`, `wf.status()` and the
+board's `/api/state` (under `service`) carry a `skills` object:
+
+| Field | Meaning |
+| --- | --- |
+| `release` | The release this t3cm binary carries |
+| `installed` | The release `installed.json` records, or `null` when t3cm did not install the skills |
+| `present` | `false` when no skills are installed at all; the board then shows nothing |
+| `current` | `true` when `t3cm skills status` would exit 0 |
+| `fix`, `foreign` | As in `t3cm skills status --json` |
+| `missingSteps` | The setup steps not applied or recorded, each with its `id`, `kind`, `since`, `slot` and `fix` |
+| `configState`, `problem` | Whether `config.json` is absent, legacy (no `steps`), recorded, or ignored, and why |
+| `fixes` | The commands to run, in order |
+| `error` | Set when the check itself failed |
+
+The service reads the files at startup and on each watcher pass and keeps
+the result, so board updates and `/healthz` cost no file reads.
+`wf.status()` reads them fresh.
+
 ### Set up the workflow
 
 After installing the skills either way, ask your agent once to "set up the

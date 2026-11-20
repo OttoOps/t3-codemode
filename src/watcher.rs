@@ -22,6 +22,10 @@ pub fn spawn(app: Arc<App>) -> tokio::task::JoinHandle<()> {
             if let Err(e) = app.wf.board_tick().await {
                 tracing::warn!("board pass failed: {}", app.t3.redact(format!("{e:#}")));
             }
+            let wf = app.wf.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || wf.refresh_skills()).await {
+                tracing::warn!("skills check failed: {e}");
+            }
             match app.wf.mark_limits().await {
                 Ok(actions) if actions.is_empty() => {}
                 Ok(actions) => tracing::info!(?actions, "pool limits"),
