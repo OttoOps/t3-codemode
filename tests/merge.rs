@@ -3,7 +3,7 @@ mod common;
 use common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::BOARD;
-use t3_codemode::fake::github_pr;
+use t3_codemode::fake::{check_run, github_pr};
 use t3_codemode::github::{errors, gh_response};
 
 const REPO: &str = "acme/widgets";
@@ -119,6 +119,7 @@ async fn without_a_merge_queue_the_pr_merges_with_the_repo_method_at_the_head() 
 async fn an_explicit_method_overrides_the_repo_default() {
     let h = H::new();
     h.github.set_pr(REPO, 8, github_pr(HEAD, "UNSTABLE", false));
+    h.github.set_checks(REPO, 8, json!([check_run("CodeRabbit", "CANCELLED")]));
 
     let r = merge(&h, json!({"repo": REPO, "pr": 8, "head": HEAD, "method": "squash"})).await;
 
@@ -279,4 +280,92 @@ fn gh_output_with_graphql_errors_still_parses() {
     assert_eq!(errors(&v).as_deref(), Some("Could not resolve"));
     let e = gh_response(false, b"", b"gh: not logged in").unwrap_err();
     assert!(e.to_string().contains("not logged in"), "{e}");
+}
+
+fn status(context: &str, state: &str) -> Value {
+    json!({"__typename": "StatusContext", "context": context, "state": state})
+}
+
+#[tokio::test]
+async fn an_unstable_pr_with_a_failed_optional_check_is_refused_with_or_without_a_queue() {
+    let failed = [
+        check_run("lint", "FAILURE"),
+        status("ci/legacy", "ERROR"),
+        check_run("e2e", "TIMED_OUT"),
+        check_run("deploy-preview", "ACTION_REQUIRED"),
+        check_run("audit", "STALE"),
+    ];
+    for check in failed {
+        let h = H::new();
+        h.github.set_pr(REPO, 7, github_pr(HEAD, "UNSTABLE", true));
+        h.github.set_pr(REPO, 8, github_pr(HEAD, "UNSTABLE", false));
+        for pr in [7, 8] {
+            h.github.set_checks(
+                REPO,
+                pr,
+                json!([check_run("build", "SUCCESS"), check_run("CodeRabbit", "CANCELLED"), check]),
+            );
+            let r = merge(&h, args(pr)).await;
+            assert_eq!(r["status"], "refused", "{r}");
+            let reason = r["reason"].as_str().unwrap();
+            assert!(reason.starts_with("a check failed at head 1111111: "), "{reason}");
+            assert!(!reason.contains("CodeRabbit") && !reason.contains("build"), "{reason}");
+        }
+        assert!(mutations(&h).is_empty(), "{:?}", h.github.operations());
+        assert!(h.app.store.merge_waits().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_cancelled_bot_check_alone_does_not_block_an_unstable_pr() {
+    let h = H::new();
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "UNSTABLE", true));
+    h.github.set_pr(REPO, 8, github_pr(HEAD, "UNSTABLE", false));
+    let checks = json!([
+        check_run("build", "SUCCESS"),
+        check_run("CodeRabbit", "CANCELLED"),
+        check_run("docs", "SKIPPED"),
+        check_run("labeler", "NEUTRAL"),
+        status("ci/legacy", "SUCCESS"),
+    ]);
+    h.github.set_checks(REPO, 7, checks.clone());
+    h.github.set_checks(REPO, 8, checks);
+
+    assert_eq!(merge(&h, args(7)).await["status"], "queued");
+    assert_eq!(merge(&h, args(8)).await["status"], "merged");
+    assert_eq!(mutations(&h), ["enqueuePullRequest", "mergePullRequest"]);
+}
+
+#[tokio::test]
+async fn an_unstable_pr_with_a_running_check_waits_or_is_refused_until_it_finishes() {
+    let h = H::new();
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "UNSTABLE", true));
+    h.github.set_pr(REPO, 8, github_pr(HEAD, "UNSTABLE", false));
+    let running = json!({"__typename": "CheckRun", "name": "e2e", "status": "IN_PROGRESS", "conclusion": null});
+    h.github.set_checks(REPO, 7, json!([check_run("CodeRabbit", "CANCELLED"), running]));
+    h.github.set_checks(REPO, 8, json!([check_run("CodeRabbit", "CANCELLED"), status("ci/legacy", "PENDING")]));
+
+    let queued = merge(&h, args(7)).await;
+    assert_eq!(queued["status"], "waiting", "{queued}");
+    assert_eq!(queued["mergeState"], "UNSTABLE");
+    let direct = merge(&h, args(8)).await;
+    assert_eq!(direct["status"], "refused", "{direct}");
+    assert_eq!(direct["reason"], "not mergeable yet (merge state UNSTABLE, checks still running: ci/legacy)");
+    assert!(mutations(&h).is_empty());
+}
+
+#[tokio::test]
+async fn an_unstable_pr_whose_checks_are_missing_or_not_for_its_head_is_not_merged() {
+    let h = H::new();
+    h.github.set_pr(REPO, 8, github_pr(MOVED, "UNSTABLE", false));
+    h.github.set_checks(REPO, 8, json!([check_run("CodeRabbit", "CANCELLED")]));
+    h.github.update_pr(REPO, 8, json!({"headRefOid": HEAD}));
+    h.github.set_pr(REPO, 9, github_pr(HEAD, "UNSTABLE", false));
+
+    for pr in [8, 9] {
+        let r = merge(&h, args(pr)).await;
+        assert_eq!(r["status"], "refused");
+        assert!(r["reason"].as_str().unwrap().contains("checks could not be read"), "{r}");
+    }
+    assert!(mutations(&h).is_empty());
 }

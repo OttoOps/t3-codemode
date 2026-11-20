@@ -179,9 +179,16 @@ GitHub computes the merge state lazily, so while an open pull request reports
 | Has a merge queue and is not mergeable yet | Records it as waiting to be queued | `waiting` with its `mergeState` |
 | Has no merge queue and is mergeable | `mergePullRequest` with `method`, else the repo's default, and `expectedHeadOid = head` | `merged` with the commit |
 | Has no merge queue and is not mergeable | Nothing | `refused` |
+| Has a check on its head that failed | Nothing | `refused`, naming the check |
 
-Mergeable means a `mergeStateStatus` of `CLEAN`, `HAS_HOOKS` or `UNSTABLE`,
-the states GitHub's own merge button accepts. `wf.merge` never turns on
+Mergeable means a `mergeStateStatus` of `CLEAN` or `HAS_HOOKS`, or `UNSTABLE`
+when every check on the head that did not pass ended `CANCELLED`, `SKIPPED` or
+`NEUTRAL`. GitHub's own merge button accepts any `UNSTABLE` pull request, but
+`UNSTABLE` also covers a failed optional check, so `wf.merge` reads the
+checks. A check that ended `FAILURE`, `ERROR`, `TIMED_OUT`, `ACTION_REQUIRED`,
+`STALE` or any other outcome makes it refuse, and a check still running makes
+the pull request not mergeable yet. [ADR 0003](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0003-unstable-merge-state.md)
+has the reasoning. `wf.merge` never turns on
 auto-merge: on a merge-queue repo, auto-merge set on an already mergeable pull
 request never joins the queue. Every result carries `status`, `repo`, `pr` and
 `head`; `refused` adds a `reason`. When `gh` cannot reach GitHub at all, the
