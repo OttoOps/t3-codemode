@@ -717,10 +717,14 @@ async fn done_ticket(h: &H, who: &str, label: &str) {
 }
 
 async fn closed_ask(h: &H, question: &str) -> String {
+    answered_ask(h, question, "all quiet").await
+}
+
+async fn answered_ask(h: &H, question: &str, answer: &str) -> String {
     let a = h.app.wf.ask(question).await.unwrap();
     let thread = a["thread"].as_str().unwrap().to_string();
     h.fake.update(&thread, json!({"status": "completed"}));
-    h.fake.set_items(&thread, vec![json!({"type": "assistant_message", "position": 1, "text": "all quiet"})]);
+    h.fake.set_items(&thread, vec![json!({"type": "assistant_message", "position": 1, "text": answer})]);
     h.app.wf.check_asks(None).await.unwrap();
     a["id"].as_str().unwrap().to_string()
 }
@@ -8058,4 +8062,235 @@ Notification.permission = "granted";
     );
     assert_eq!(r["label"], "Notifications unavailable", "{r}");
     assert_eq!(r["disabled"], "true", "{r}");
+}
+
+const WAITING: &str = "Four tickets wait on you:
+
+1. [widgets#2](https://app.t3.codes/threads/env-1/launch%3Aa1) waits on a **merge** of `a1`.
+2. [widgets#17](https://app.t3.codes/threads/env-1/launch%3Ab2) is blocked on a login.
+3. [gadgets#657](https://app.t3.codes/threads/env-1/launch%3Ac3) waits on review.
+4. [widgets#96](https://app.t3.codes/threads/env-1/launch%3Ad4) waits on a deploy.";
+
+const ANSWER_PROBE: &str = r##"
+emitState({ ...base, asks: [] });
+emitState(base);
+advance(100);
+const aa = q("#asks .aa");
+const links = (el) => el.querySelectorAll("a").map((a) => [a.textContent, a.getAttribute("href"), a.getAttribute("title"), a.getAttribute("target"), a.getAttribute("rel")]);
+"##;
+
+async fn ask_page(answers: &[(&str, &str)]) -> (String, Value) {
+    let s = start(H::new()).await;
+    for (q, a) in answers {
+        answered_ask(&s.h, q, a).await;
+    }
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    (html, st)
+}
+
+#[tokio::test]
+async fn an_ask_answer_shows_its_links_as_labels_with_no_urls() {
+    let (html, st) = ask_page(&[("Which tickets wait on me and why?", WAITING)]).await;
+    assert!(html.contains(".md ol { list-style: decimal; }") && html.contains(".md ul { list-style: disc; }"));
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"{ANSWER_PROBE}
+return {{
+  items: aa.querySelectorAll("ol li").map((li) => li.textContent),
+  lead: aa.querySelector("p").textContent,
+  links: links(aa),
+  bold: aa.querySelector("strong").textContent,
+  code: aa.querySelector("code").textContent,
+  text: aa.textContent,
+  title: aa.getAttribute("title"),
+  more: !q('#asks [data-part="more"]').hidden,
+  live: document.getElementById("live").textContent,
+}};"##
+        ),
+    );
+    let thread = |id: &str| format!("https://app.t3.codes/threads/env-1/launch%3A{id}");
+    let link = |label: &str, id: &str| json!([label, thread(id), thread(id), "_blank", "noopener noreferrer"]);
+    assert_eq!(
+        r["items"],
+        json!([
+            "widgets#2 waits on a merge of a1.",
+            "widgets#17 is blocked on a login.",
+            "gadgets#657 waits on review.",
+            "widgets#96 waits on a deploy."
+        ]),
+        "{r}"
+    );
+    assert_eq!(r["lead"], "Four tickets wait on you:");
+    assert_eq!(
+        r["links"],
+        json!([link("widgets#2", "a1"), link("widgets#17", "b2"), link("gadgets#657", "c3"), link("widgets#96", "d4")])
+    );
+    assert_eq!((&r["bold"], &r["code"], &r["more"]), (&json!("merge"), &json!("a1"), &json!(true)));
+    for key in ["text", "title", "live"] {
+        let t = r[key].as_str().unwrap();
+        assert!(!t.contains("http") && !t.contains("](") && !t.contains("**"), "{key}: {t}");
+    }
+    assert!(r["live"].as_str().unwrap().contains("1. widgets#2 waits on a merge of a1.\n2. widgets#17"), "{r}");
+}
+
+#[tokio::test]
+async fn bare_urls_link_and_unsafe_hrefs_show_only_their_label() {
+    let answer = "See https://github.com/acme/widgets/pull/41. Skip [the trap](javascript:alert(1)) and [ftp](ftp://files.example/x).";
+    let (html, st) = ask_page(&[("Where is the PR?", answer)]).await;
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"{ANSWER_PROBE}
+return {{ links: links(aa), text: aa.textContent, live: document.getElementById("live").textContent }};"##
+        ),
+    );
+    let pr = "https://github.com/acme/widgets/pull/41";
+    assert_eq!(r["links"], json!([[pr, pr, pr, "_blank", "noopener noreferrer"]]));
+    assert_eq!(r["text"], format!("See {pr}. Skip the trap and ftp."));
+    assert_eq!(r["live"], "Answer to “Where is the PR?”: See github.com. Skip the trap and ftp.");
+}
+
+#[tokio::test]
+async fn a_link_the_cap_cut_shows_as_its_label_in_plain_text() {
+    let item = "\n\n1. [widgets#96](https://app.t3.codes/threads/env-1/launch%3Ad4) waits on a deploy.";
+    let in_url = format!("{}{item}", "x".repeat(1460));
+    let in_label = format!("{}{item}", "x".repeat(1490));
+    let after_label = format!("{}{item}", "x".repeat(1483));
+    let in_parens = format!("{}\n\n1. [widgets#96](https://acme.example/w(1)/x) waits.", "x".repeat(1457));
+    let spaced = format!("{}\n\n1. [widgets#96]( https://acme.example/docs) waits.", "x".repeat(1470));
+    let titled = format!("{}\n\n1. [widgets#96](https://acme.example/docs \"Docs page\") waits.", "x".repeat(1450));
+    let bare = format!("{} https://github.com/acme/widgets/pull/41", "x".repeat(1480));
+    let (html, st) = ask_page(&[
+        ("In the URL?", &in_url),
+        ("In the label?", &in_label),
+        ("After the label?", &after_label),
+        ("After the parens?", &in_parens),
+        ("After a space?", &spaced),
+        ("In the title?", &titled),
+        ("Bare?", &bare),
+    ])
+    .await;
+    let stored: Vec<&Value> = st["asks"].as_array().unwrap().iter().collect();
+    assert!(
+        stored.iter().all(|a| a["answerCut"] == true && a["answer"].as_str().unwrap().chars().count() == 1503),
+        "{stored:?}"
+    );
+    assert!(stored.iter().any(|a| a["answer"].as_str().unwrap().ends_with("[widgets#96]...")));
+    assert!(stored.iter().any(|a| a["answer"].as_str().unwrap().ends_with("/w(1)...")));
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+return [...document.getElementById("asks").children].map((li) => {
+  const aa = li.querySelector(".aa");
+  return { q: li.querySelector(".aq").textContent, anchors: aa.querySelectorAll("a").length, tail: aa.textContent.slice(-16) };
+});"##,
+    );
+    let mut tails: Vec<(String, u64, String)> = r
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| (a["q"].as_str().unwrap().into(), a["anchors"].as_u64().unwrap(), a["tail"].as_str().unwrap().into()))
+        .collect();
+    tails.sort();
+    assert_eq!(
+        tails,
+        [
+            ("After a space?".into(), 0, format!("{}widgets#96...", "x".repeat(3))),
+            ("After the label?".into(), 0, format!("{}widgets#96...", "x".repeat(3))),
+            ("After the parens?".into(), 0, format!("{}widgets#96...", "x".repeat(3))),
+            ("Bare?".into(), 0, format!("{} ...", "x".repeat(12))),
+            ("In the URL?".into(), 0, format!("{}widgets#96...", "x".repeat(3))),
+            ("In the label?".into(), 0, format!("{}widg...", "x".repeat(9))),
+            ("In the title?".into(), 0, format!("{}widgets#96...", "x".repeat(3))),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_cut_answer_keeps_the_text_after_a_closed_parenthesis() {
+    let answer = format!("[note](see above) and {}", "more ".repeat(400));
+    let (html, st) = ask_page(&[("Anything else?", &answer)]).await;
+    assert_eq!(st["asks"][0]["answerCut"], true);
+    let r = page_scenario(&html, &st, &format!(r##"{ANSWER_PROBE}return aa.textContent.slice(0, 32);"##));
+    assert_eq!(r, "[note](see above) and more more ");
+}
+
+#[tokio::test]
+async fn code_and_bold_in_a_link_label_render_without_their_markers() {
+    let answer = "See [`src/board.rs`](https://acme.example/board), [**the PR**](https://acme.example/pr) and [`setup`](file:setup).";
+    let (html, st) = ask_page(&[("Where is it?", answer)]).await;
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"{ANSWER_PROBE}
+return {{ links: aa.querySelectorAll("a").map((a) => a.textContent), code: aa.querySelectorAll("code").map((c) => c.textContent),
+  bold: aa.querySelector("strong") && aa.querySelector("strong").textContent, text: aa.textContent, live: document.getElementById("live").textContent }};"##
+        ),
+    );
+    assert_eq!(r["links"], json!(["src/board.rs", "the PR"]));
+    assert_eq!(r["code"], json!(["src/board.rs", "setup"]));
+    assert_eq!(r["bold"], "the PR");
+    assert_eq!(r["text"], "See src/board.rs, the PR and setup.");
+    assert!(r["live"].as_str().unwrap().ends_with("See src/board.rs, the PR and setup."), "{r}");
+}
+
+#[tokio::test]
+async fn settled_ask_rows_render_the_answer_on_one_line() {
+    let s = start(H::new()).await;
+    answered_ask(&s.h, "Which tickets wait on me and why?", WAITING).await;
+    s.h.clock.advance_minutes(24 * 60);
+    s.h.app.wf.board_tick().await.unwrap();
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(st["settled"]["asks"].as_array().unwrap().len(), 1, "{st}");
+    let r = page_scenario(
+        &html,
+        &st,
+        r#"
+emitState(base);
+const an = q('#settled .srow [data-part="a"]');
+return { text: an.textContent, blocks: an.querySelectorAll("li, p, ol, br").length, labels: an.querySelectorAll("a").map((a) => a.textContent), title: an.getAttribute("title") };"#,
+    );
+    assert_eq!(
+        r["text"],
+        "Four tickets wait on you: 1. widgets#2 waits on a merge of a1. 2. widgets#17 is blocked on a login. 3. gadgets#657 waits on review. 4. widgets#96 waits on a deploy."
+    );
+    assert_eq!(r["blocks"], 0);
+    assert_eq!(r["labels"], json!(["widgets#2", "widgets#17", "gadgets#657", "widgets#96"]));
+    assert!(!r["title"].as_str().unwrap().contains("http"), "{r}");
+}
+
+#[tokio::test]
+async fn a_short_answer_keeps_a_link_before_dots_and_shows_all_lines() {
+    let (html, st) = ask_page(&[("Docs?", "See https://acme.example/docs...\nsecond\nthird")]).await;
+    assert_eq!(st["asks"][0]["answerCut"], false);
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"{ANSWER_PROBE}
+return {{ links: links(aa), more: !q('#asks [data-part="more"]').hidden, title: aa.getAttribute("title") }};"##
+        ),
+    );
+    let docs = "https://acme.example/docs";
+    assert_eq!(r["links"], json!([[docs, docs, docs, "_blank", "noopener noreferrer"]]));
+    assert_eq!(r["more"], true);
+    assert_eq!(r["title"], "See acme.example...\nsecond\nthird");
+}
+
+#[test]
+fn answers_stored_before_the_cut_flag_infer_it_from_their_shape() {
+    let view = |d: Value| t3_codemode::board::ask_view(1, &d)["answerCut"].clone();
+    let capped = format!("{}...", "x".repeat(1500));
+    assert_eq!(view(json!({"answer": capped})), true);
+    assert_eq!(view(json!({"answer": "See https://acme.example/docs..."})), false);
+    assert_eq!(view(json!({"answer": capped, "answerCut": false})), false);
+    assert_eq!(view(json!({"answer": null})), Value::Null);
 }

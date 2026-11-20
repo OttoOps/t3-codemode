@@ -458,6 +458,14 @@ select:disabled { opacity: 0.55; cursor: default; }
   font-size: 13px; line-height: 18px; max-height: 36px; white-space: pre-wrap; overflow: hidden; overflow-wrap: anywhere;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
 }
+.ask .aa.md { white-space: normal; }
+.md p, .md ol, .md ul { margin: 0; }
+.md ol, .md ul { padding-left: 20px; }
+.md ol { list-style: decimal; }
+.md ul { list-style: disc; }
+.md > * + * { margin-top: 4px; }
+.md code { font-family: var(--mono); font-size: 12px; }
+.md a { color: var(--accent); }
 .ask.open .aa { max-height: none; display: block; }
 .ask .aa.wait { color: var(--ink-2); }
 .ask .btn { height: 24px; }
@@ -681,6 +689,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .act .opts { min-width: 0; max-width: 100%; }
   .ph { padding: 0 12px; }
   .ctx a, .tr a, .ws a, .ask a, .srow a, .act a, .fullbox a { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; }
+  .md a { display: inline; min-height: 0; min-width: 0; }
   .tr .tn, .tr .t1, .ws { align-items: center; }
   .ctx { align-items: center; }
   #cards { padding: 8px; gap: 8px; }
@@ -1122,6 +1131,106 @@ function setLink(slot, href, text, name) {
     return;
   }
   slot.replaceChildren(threadLink(u, text, name));
+}
+
+function mdInline(s, tail, inLabel) {
+  const out = [];
+  let buf = "";
+  const text = (t) => { buf += t; };
+  const push = (n) => { if (buf) out.push({ t: "text", s: buf }); buf = ""; out.push(n); };
+  let i = 0;
+  while (i < s.length) {
+    const rest = s.slice(i);
+    let m;
+    if ((m = /^`([^`\n]+)`/.exec(rest))) { push({ t: "code", s: m[1] }); i += m[0].length; continue; }
+    if ((m = /^\*\*(?=\S)(.*?\S)\*\*/.exec(rest))) { push({ t: "b", kids: mdInline(m[1], false, inLabel) }); i += m[0].length; continue; }
+    if (!inLabel && (m = /^\[([^\]\n]*)\]\(\s*<?((?:[^\s<>()]|\([^\s<>()]*\))*)>?\s*\)/.exec(rest))) { push({ t: "a", kids: mdInline(m[1], false, true), href: m[2] }); i += m[0].length; continue; }
+    if (tail && (m = /^\[([^\]\n]*)(\](?:\((?:[^()\n]|\([^()\n]*\))*(?:\([^()\n]*)?|\.\.\.))?$/.exec(rest))) {
+      for (const n of mdInline(m[1], false, true)) n.t === "text" ? text(n.s) : push(n);
+      if (m[2] && m[2].endsWith("...")) text("...");
+      break;
+    }
+    if (!inLabel && /^https?:\/\//.test(rest) && !/[\w/]$/.test(s.slice(0, i))) {
+      let u = /^[^\s<>]+/.exec(rest)[0];
+      while (/[.,;:!?'"*)\]]$/.test(u) && !(u.endsWith(")") && (u.match(/\(/g) || []).length >= (u.match(/\)/g) || []).length)) u = u.slice(0, -1);
+      if (tail && rest.slice(u.length) === "...") { text("..."); break; }
+      push({ t: "a", href: u, bare: true });
+      i += u.length;
+      continue;
+    }
+    text(rest[0]);
+    i += 1;
+  }
+  if (buf) out.push({ t: "text", s: buf });
+  return out;
+}
+
+function mdBlocks(src, cut) {
+  const lines = String(src || "").replace(/\r\n?/g, "\n").replace(/\s+$/, "").split("\n");
+  const blocks = [];
+  cut = !!cut && /\.\.\.$/.test(lines[lines.length - 1]);
+  let cur = null;
+  lines.forEach((raw, n) => {
+    const tail = cut && n === lines.length - 1;
+    const line = raw.replace(/\s+$/, "");
+    let m;
+    if (!line.trim()) cur = null;
+    else if ((m = /^\s*(\d{1,9})[.)]\s+(.*)$/.exec(line)) || (m = /^\s*([-*+])\s+(.*)$/.exec(line))) {
+      const t = /\d/.test(m[1]) ? "ol" : "ul";
+      if (!cur || cur.t !== t) blocks.push((cur = { t, start: t === "ol" ? Number(m[1]) : 0, items: [] }));
+      cur.items.push([mdInline(m[2], tail)]);
+    } else if (cur && cur.t !== "p" && /^\s/.test(raw)) cur.items[cur.items.length - 1].push(mdInline(line.trim(), tail));
+    else if (cur && cur.t === "p") cur.lines.push(mdInline(line, tail));
+    else blocks.push((cur = { t: "p", lines: [mdInline(line, tail)] }));
+  });
+  return blocks;
+}
+
+function mdLinkText(n) {
+  return n.bare ? (/^https?:\/\/([^/?#]+)/.exec(n.href) || [])[1] || "link" : mdPlain(n.kids) || "link";
+}
+
+function mdNodes(inl) {
+  return inl.flatMap((n) => {
+    if (n.t === "text") return n.s;
+    if (n.t === "code") return h("code", null, n.s);
+    if (n.t === "b") return h("strong", null, mdNodes(n.kids));
+    const u = safeUrl(n.href);
+    if (!u) return mdNodes(n.kids);
+    const a = threadLink(u, n.bare || !n.kids.length ? u : mdNodes(n.kids), null);
+    a.setAttribute("title", u);
+    return a;
+  });
+}
+
+function mdPlain(inl) {
+  return inl.map((n) => n.t === "text" || n.t === "code" ? n.s : n.t === "b" ? mdPlain(n.kids) : safeUrl(n.href) ? mdLinkText(n) : mdPlain(n.kids)).join("");
+}
+
+const mdMark = (b, k) => b.t === "ol" ? (b.start + k) + ". " : "• ";
+
+function answerPlain(src, cut) {
+  return mdBlocks(src, cut).flatMap((b) => b.t === "p" ? [b.lines.map(mdPlain).join("\n")]
+    : b.items.map((it, k) => mdMark(b, k) + it.map(mdPlain).join("\n"))).join("\n");
+}
+
+function plainAnswer(el, text) {
+  if (el._md !== undefined) { el._md = undefined; el.replaceChildren(); }
+  setText(el, text);
+}
+
+function renderAnswer(el, src, cut, flat) {
+  src = String(src || "");
+  const key = src + (cut ? "\u0000cut" : "") + (flat ? "\u0000flat" : "");
+  if (el._md === key) return;
+  el._md = key;
+  const lines = (ls) => ls.flatMap((l, k) => k ? [flat ? " " : h("br"), ...mdNodes(l)] : mdNodes(l));
+  el.replaceChildren(...mdBlocks(src, cut).flatMap((b, k) => {
+    const sep = flat && k ? [" "] : [];
+    if (b.t === "p") return [...sep, h(flat ? "span" : "p", null, lines(b.lines))];
+    if (flat) return [...sep, h("span", null, b.items.flatMap((it, j) => [j ? " " : null, mdMark(b, j), ...lines(it)]))];
+    return [h(b.t, { start: b.t === "ol" && b.start !== 1 ? String(b.start) : null }, b.items.map((it) => h("li", null, lines(it))))];
+  }));
 }
 
 async function openThread(href) {
@@ -2782,7 +2891,7 @@ function makeAsk() {
       mark("idle", ""),
       h("span", { "data-part": "th" }),
       h("button", { class: "btn", type: "button", "data-part": "settle", hidden: true }, "Settle")),
-    h("p", { class: "aa", "data-part": "a" }),
+    h("div", { class: "aa", "data-part": "a" }),
     h("button", { class: "linkish meta", type: "button", "data-part": "more", hidden: true }, "Show all"));
   return el;
 }
@@ -2799,16 +2908,17 @@ function patchAsk(el, a) {
   setAttr(s, "aria-label", "Settle the question " + quote(a.question));
   s.onclick = () => act(s, "/api/asks/" + encodeURIComponent(a.id) + "/settle");
   const ans = part(el, "a");
-  setAttr(ans, "title", a.answer || null);
+  const plain = a.answer ? answerPlain(a.answer, a.answerCut) : "";
+  setAttr(ans, "title", plain || null);
   if (a.answer) {
-    setText(ans, a.answer);
-    setAttr(ans, "class", "aa");
+    renderAnswer(ans, a.answer, a.answerCut);
+    setAttr(ans, "class", "aa md");
   } else {
-    setText(ans, a.status === "running" ? "No answer yet." : a.status === "waiting" ? "The thread is waiting for input." : "No answer (" + (a.status || "failed") + ").");
+    plainAnswer(ans, a.status === "running" ? "No answer yet." : a.status === "waiting" ? "The thread is waiting for input." : "No answer (" + (a.status || "failed") + ").");
     setAttr(ans, "class", "aa wait");
   }
   const more = part(el, "more");
-  const long = !!a.answer && (a.answer.length > 120 || a.answer.indexOf("\n") >= 0);
+  const long = !!a.answer && (a.answer.length > 120 || plain.indexOf("\n") >= 0);
   more.hidden = !long;
   more.onclick = () => {
     const o = el.classList.toggle("open");
@@ -2828,7 +2938,7 @@ function syncAsks(asks) {
   for (const a of asks) {
     if (a.status === "answered" && a.answer && !answered.has(a.id)) {
       answered.add(a.id);
-      if (!firstState) announce("Answer to " + quote(a.question) + ": " + a.answer.slice(0, 300));
+      if (!firstState) announce("Answer to " + quote(a.question) + ": " + answerPlain(a.answer, a.answerCut).slice(0, 300));
     }
   }
   sync($("asks"), asks, { key: (a) => a.id, make: makeAsk, patch: patchAsk, live, quiet: firstState || refiltering,
@@ -2858,7 +2968,7 @@ function makeSettled(it) {
     h("span", { class: "clip", "data-part": "q" }),
     h("span", { class: "meta", "data-part": "th" }),
     h("button", { class: "btn", type: "button", "data-part": "restore" }, "Restore"),
-    h("span", { class: "meta clip", "data-part": "a" }));
+    h("span", { class: "meta clip md", "data-part": "a" }));
 }
 
 function patchSettled(el, it) {
@@ -2880,8 +2990,9 @@ function patchSettled(el, it) {
     setText(q, a.question);
     setAttr(q, "title", a.question);
     const an = part(el, "a");
-    setText(an, a.answer || "no answer");
-    setAttr(an, "title", a.answer || null);
+    if (a.answer) renderAnswer(an, a.answer, a.answerCut, true);
+    else plainAnswer(an, "no answer");
+    setAttr(an, "title", a.answer ? answerPlain(a.answer, a.answerCut) : null);
     setLink(part(el, "th"), a.link, "thread", "Open thread for the question " + quote(a.question));
     setAttr(r, "aria-label", "Restore the question " + quote(a.question));
     r.onclick = () => act(r, "/api/asks/" + encodeURIComponent(a.id) + "/restore");
