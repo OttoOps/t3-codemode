@@ -3,7 +3,8 @@
 ## Requirements
 
 - Linux with systemd user services, macOS, or Windows (x86_64; Arm64 runs it
-  under emulation).
+  under emulation). Windows release binaries are paused until we have a
+  code-signing certificate, so v0.6.0 is the last release with a Windows archive.
 - A running T3 Code server and its `t3` CLI.
 - `curl` and `tar` for `deploy/install.sh`; Windows PowerShell 5.1 or newer for
   `deploy/install.ps1`.
@@ -64,12 +65,18 @@ deploy/install.sh --from-source
 
 ### Windows
 
+Windows release binaries are paused until we have a code-signing certificate,
+and CI no longer builds or tests on Windows
+([#123](https://github.com/OttoOps/t3-codemode/issues/123)). v0.6.0 is the
+last release with a Windows archive, so install that version by name. Once a
+newer release is out, a plain `install.ps1` or `t3cm update` finds no Windows
+archive to fetch.
+
 In PowerShell:
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/OttoOps/t3-codemode/main/deploy/install.ps1 -OutFile install.ps1 -UseBasicParsing
-powershell -ExecutionPolicy Bypass -File install.ps1                   # latest release
-powershell -ExecutionPolicy Bypass -File install.ps1 -Version v0.4.0   # a given release
+powershell -ExecutionPolicy Bypass -File install.ps1 -Version v0.6.0   # the last Windows release
 ```
 
 The Windows installer does not add `t3cm` to `PATH`, so run it by its full
@@ -189,7 +196,9 @@ On macOS and Windows, `t3cm update` replaces the binary and prints the command
 that restarts the service on it, along with the one that goes back to
 `t3cm.old`. On macOS that is `launchctl kickstart -k`, and on Windows the
 scheduled task's `/End` and `/Run`; both end runs in flight. Rerun the
-installer to pick up a changed launchd agent or task.
+installer to pick up a changed launchd agent or task. While Windows release
+binaries are paused, `t3cm update` on Windows fails once a release newer than
+v0.6.0 is out, because that release has no Windows archive.
 
 Only one `t3cm update` runs at a time, and it changes nothing while a service
 answers with a version other than the binary on disk, for example after an

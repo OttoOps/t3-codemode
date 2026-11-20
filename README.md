@@ -15,8 +15,11 @@ Beyond T3's tools, the sandbox carries:
   wakes and a watcher that nudges stalled threads,
 - a local web board that acts as the root overseer for ticket threads.
 
-Status: prototype. It builds and passes its tests on Linux, macOS and Windows,
-and installs as a per-user service on each.
+Status: prototype. It builds and passes its tests on Linux and macOS, and
+installs as a per-user service on Linux, macOS and Windows. Windows CI and
+Windows release binaries are paused until we have a code-signing certificate,
+so v0.6.0 is the last release with a Windows archive
+([#123](https://github.com/OttoOps/t3-codemode/issues/123)).
 
 Documentation: https://ottoops.com/t3-codemode/
 
@@ -33,8 +36,8 @@ t3cm status       # t3.connected should be true
 The installer asks `Use the T3 workflow? [Y/n]`. On yes, the default, it
 installs the workflow skills below. Update it in place with `t3cm update`,
 which brings the skills along; `t3cm --version` says when a newer release is
-out. On Windows, use `deploy/install.ps1`. Until the first release is published,
-Linux and macOS build from a clone with `deploy/install.sh --from-source`. See
+out. On Windows, use `deploy/install.ps1 -Version v0.6.0`. Linux and macOS can
+also build from a clone with `deploy/install.sh --from-source`. See
 [Getting started](https://ottoops.com/t3-codemode/getting-started.html) for
 every OS, the config, and the `t3cm` commands.
 
