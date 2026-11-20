@@ -200,7 +200,7 @@ Pools are per T3 environment, since instance ids belong to one T3 server.
 | `T3CODE_HOME` | T3's home directory (default `~/.t3`) |
 | `T3CM_TZ` | Time zone for times the board and `wf` show (default `America/Denver`; an unknown zone falls back to UTC) |
 | `T3CM_NO_UPDATE_CHECK` | Any value but `0` or `false` turns the release checks off, like `updateCheck: false`. `CI` does the same. |
-| `T3CM_RELEASES_URL` | Where `t3cm update` and the checks look for releases (default `https://github.com/OttoOps/t3-codemode/releases`); https, or plain http on `127.0.0.1` or `localhost` only. The installers read it too. |
+| `T3CM_RELEASES_URL` | Where `t3cm update` and the checks look for releases (default `https://github.com/OttoOps/t3-codemode/releases`); https, or plain http on `127.0.0.1` or `localhost` only, and with no user name or password in it. The installers read it too. |
 | `RUST_LOG` | Log level |
 
 ## State
