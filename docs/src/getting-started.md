@@ -135,18 +135,23 @@ that entry alone.
 
 ```bash
 claude mcp add --transport http --scope user t3cm http://127.0.0.1:47731/mcp \
-  --header 'X-T3-Thread: ${T3CODE_THREAD_ID}'
+  --header 'X-T3-Thread: ${T3CODE_THREAD_ID}' --header 'X-T3-Config-Dir: ${CLAUDE_CONFIG_DIR:-}'
 ```
 
 In PowerShell, run it on one line:
 
 ```powershell
-claude mcp add --transport http --scope user t3cm http://127.0.0.1:47731/mcp --header 'X-T3-Thread: ${T3CODE_THREAD_ID}'
+claude mcp add --transport http --scope user t3cm http://127.0.0.1:47731/mcp --header 'X-T3-Thread: ${T3CODE_THREAD_ID}' --header 'X-T3-Config-Dir: ${CLAUDE_CONFIG_DIR:-}'
 ```
 
-Keep the header in single quotes in either shell. Claude Code expands `${T3CODE_THREAD_ID}`
-when it connects, so each T3 thread reaches the service as itself. That header
-is how `mem`, `vars` and `wf` know which thread is calling.
+Keep the headers in single quotes in either shell. Claude Code expands them
+when it connects, so each T3 thread reaches the service as itself. The thread
+header is how `mem`, `vars` and `wf` know which thread is calling. The config
+folder header tells the service which Claude config folder the session runs
+from (empty means `~/.claude`), so [slots](#slots) resolve to the skills that
+session has installed and enabled. `t3cm skills update` re-registers an
+existing entry that lacks it (setup step `mcp:config-dir-header`); new sessions
+send it.
 
 ## Check it
 
