@@ -28,19 +28,25 @@ Boss and its page is the waiting list, so this thread only starts the work:
    issues, or reply with changes", and wait.
 2. On approval, one `execute` call launches them all and returns one line
    each: `wf.launchTicket({ issue: url, model, effort })` per issue,
-   `Promise.all`, mapping each result to its label and link (a failure
-   throws and also leaves a card on the board). The board launches on its
-   own provider (`instanceId` in the t3cm config, `claudeAgent` by
-   default) and fills what you leave out from its own `ticketModel` and
-   `ticketEffort`. With `board.pool` set in the t3cm config, the board
-   picks each ticket's instance from that pool, with the pool's model and
-   effort, and a call that passes another model or effort fails. Pass the
-   `model ticket` line's model and effort only when its provider is the
-   board's or unnamed; otherwise pass neither and tell the user the board's
-   ticket model applies. For `pool <name>`, pass neither: `wf.launchTicket`
-   takes no pool, so the board launches from `board.pool`, or on its own
-   instance when that is unset. Tell the user so, and that `board.pool`
-   in the t3cm config is where the board's pool is set.
+   `Promise.allSettled`, mapping each result to its label and link, or to
+   its error (a failure throws and also leaves a card on the board). The
+   board launches on its own provider (`instanceId` in the t3cm config,
+   `claudeAgent` by default) and fills what you leave out from its own
+   `ticketModel` and `ticketEffort`. With `board.pool` set in the t3cm
+   config, the board picks each ticket's instance from that pool, with the
+   pool's model and effort, and a launch that passes another model or
+   effort throws `board.pool <name> runs ...; launch without a model` (or
+   an effort). This thread cannot read `board.pool`, so pass the `model
+   ticket` line's model and effort only when its provider is the board's
+   or unnamed; otherwise pass neither and tell the user the board's ticket
+   model applies. When a launch throws that `board.pool` error, launch
+   that ticket again with neither, and tell the user that the board's pool
+   sets the model and effort in place of the slot's, and that the first
+   try left an error card. For `pool <name>`, pass neither:
+   `wf.launchTicket` takes no pool, so the board launches from
+   `board.pool`, or on its own instance when that is unset. Tell the user
+   so, and that `board.pool` in the t3cm config is where the board's pool
+   is set.
 3. Reply with the ticket links and
    `**ACTION NEEDED:** answer the tickets' decisions on the board, here: http://127.0.0.1:47731/`,
    then end the turn. Do not open links or watch: the board does both.
