@@ -854,3 +854,60 @@ async fn a_ticket_that_starts_tracking_after_a_close_is_never_told_of_it() {
     assert_eq!(events_to(&h, "mcp:ticket2"), 0);
     assert_eq!(events_to(&h, TICKET), 1);
 }
+
+#[tokio::test]
+async fn a_read_error_for_one_pr_leaves_its_approval_alone() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+    assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "waiting");
+    h.github.fail_read(REPO, 7, "Something went wrong while executing your query");
+
+    for m in [2, 4, 6] {
+        h.clock.set(&at(m));
+        let err = h.app.wf.reconcile().await.unwrap_err();
+        assert!(format!("{err:#}").contains("Something went wrong"), "{err:#}");
+    }
+
+    assert!(cards(&h, false).is_empty());
+    let waits = h.app.store.merge_waits().unwrap();
+    assert_eq!(waits.len(), 1);
+    assert_eq!(waits[0].failures, 0);
+}
+
+#[tokio::test]
+async fn a_pr_that_leaves_the_queue_before_its_removal_shows_is_still_reported() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+    check(&h, 0).await;
+    h.github.update_pr(REPO, 7, json!({"isInMergeQueue": true, "mergeQueueEntry": {"position": 1}}));
+    check(&h, 2).await;
+    h.wf(WORKER, "send", json!({"kind": "handoff", "body": "queued"})).await;
+    h.github.update_pr(REPO, 7, json!({"isInMergeQueue": false, "mergeQueueEntry": null}));
+    check(&h, 4).await;
+    h.github.drop_from_queue(REPO, 7, "failed_checks", &at(3));
+
+    check(&h, 14).await;
+
+    let open = cards(&h, false);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert!(open[0]["text"].as_str().unwrap().contains("failed checks"), "{open:?}");
+}
+
+#[tokio::test]
+async fn a_waiting_approval_is_never_sent_to_another_pr_under_the_same_number() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+    assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "waiting");
+    h.github.update_pr(REPO, 7, json!({"id": "PR_other", "mergeStateStatus": "CLEAN"}));
+
+    check(&h, 2).await;
+
+    assert!(h.github.operations().iter().all(|o| !o.ends_with("PullRequest")));
+    assert!(h.app.store.merge_waits().unwrap().is_empty());
+    let open = cards(&h, false);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert!(open[0]["text"].as_str().unwrap().contains("no longer the pull request that was approved"), "{open:?}");
+}

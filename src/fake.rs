@@ -390,6 +390,7 @@ struct GhState {
     prs: BTreeMap<(String, u64), Value>,
     calls: Vec<Value>,
     errors: BTreeMap<String, String>,
+    read_errors: BTreeMap<(String, u64), String>,
     down: bool,
     queue: u64,
     merges: u64,
@@ -461,6 +462,10 @@ impl FakeGitHub {
         self.st().errors.insert(operation.into(), message.into());
     }
 
+    pub fn fail_read(&self, repo: &str, number: u64, message: &str) {
+        self.st().read_errors.insert((repo.into(), number), message.into());
+    }
+
     pub fn set_unknown_reads(&self, n: usize) {
         self.st().unknown_reads = n;
     }
@@ -517,8 +522,11 @@ impl crate::github::GitHub for FakeGitHub {
                         data.insert(alias, Value::Null);
                         continue;
                     }
-                    let pr = st.prs.get(&(repo.clone(), number)).cloned().unwrap_or(Value::Null);
-                    if pr.is_null() {
+                    let mut pr = st.prs.get(&(repo.clone(), number)).cloned().unwrap_or(Value::Null);
+                    if let Some(message) = st.read_errors.get(&(repo.clone(), number)) {
+                        errs.push(json!({"path": [alias, "pullRequest"], "message": message}));
+                        pr = Value::Null;
+                    } else if pr.is_null() {
                         errs.push(
                             json!({"type": "NOT_FOUND", "path": [alias, "pullRequest"], "message": "no pull request"}),
                         );
