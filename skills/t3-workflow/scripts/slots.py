@@ -14,7 +14,8 @@ import subprocess
 
 CONFIG_VERSION = 1
 SLOTS = ("review", "passes", "credentials", "delivery", "models")
-TOP_KEYS = ("version",) + SLOTS
+RECORD_KEYS = ("writtenBy", "steps")
+TOP_KEYS = ("version",) + SLOTS + RECORD_KEYS
 DELIVERY_MODES = ("merge", "tag-deploy")
 MODEL_ROLES = ("ticket", "worker")
 DEFAULT_REVIEW = "sol-loop"
@@ -68,7 +69,7 @@ def repo_root(start=None):
 def load_user_config(path=None):
     path = path or config_path()
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             cfg = json.load(f)
     except FileNotFoundError:
         return {}
@@ -152,6 +153,10 @@ def validate_config(cfg, where="config"):
         problems.append(f"{where}: unknown keys {sorted(extra)}; keys are {', '.join(TOP_KEYS)}")
     if cfg.get("version", CONFIG_VERSION) != CONFIG_VERSION:
         problems.append(f"{where}.version: {cfg['version']!r}, expected {CONFIG_VERSION}")
+    if "writtenBy" in cfg and not isinstance(cfg["writtenBy"], str):
+        problems.append(f"{where}.writtenBy: must be a release string")
+    if "steps" in cfg and not (isinstance(cfg["steps"], list) and all(isinstance(s, str) for s in cfg["steps"])):
+        problems.append(f"{where}.steps: must be a list of step ids")
     return problems + validate_slots(cfg, where)
 
 

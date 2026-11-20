@@ -257,7 +257,7 @@ async fn await_version(port: u16, want: &str) -> Result<Duration> {
     }
 }
 
-fn plain(p: &Path) -> String {
+pub(crate) fn plain(p: &Path) -> String {
     let s = p.display().to_string();
     match (s.strip_prefix(r"\\?\UNC\"), s.strip_prefix(r"\\?\")) {
         (Some(unc), _) => format!(r"\\{unc}"),

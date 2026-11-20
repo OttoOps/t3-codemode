@@ -1,0 +1,457 @@
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use crate::skills::{Bundle, user_home, write_atomic};
+
+pub const CATALOG: &str = "setup-t3-workflow/steps.json";
+pub const RULE: &str = "t3-workflow/rules/report-filed-issues.md";
+pub const RULE_STEP: &str = "rule:filed-issues";
+pub const RULE_FILE: &str = "t3-workflow-filed-issues.md";
+pub const RULE_START: &str = "<!-- t3-workflow:filed-issues:start -->";
+pub const RULE_END: &str = "<!-- t3-workflow:filed-issues:end -->";
+pub const CONFIG_VERSION: u64 = 1;
+const CATALOG_VERSION: u32 = 1;
+const SETUP_SKILL: &str = "setup-t3-workflow";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Auto,
+    Interview,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Step {
+    pub id: String,
+    pub since: String,
+    pub kind: Kind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<String>,
+    #[serde(default)]
+    pub legacy: bool,
+}
+
+#[derive(Deserialize)]
+struct Catalog {
+    version: u32,
+    steps: Vec<Step>,
+}
+
+pub fn catalog(bundle: &Bundle) -> Result<Vec<Step>> {
+    let raw = bundle.raw(CATALOG).with_context(|| format!("release {} carries no {CATALOG}", bundle.release))?;
+    let c: Catalog = serde_json::from_slice(raw).with_context(|| format!("{CATALOG} is not a step list"))?;
+    if c.version != CATALOG_VERSION {
+        bail!("{CATALOG} is version {}, this t3cm reads version {CATALOG_VERSION}", c.version);
+    }
+    for s in &c.steps {
+        match s.kind {
+            Kind::Auto if s.id != RULE_STEP => bail!("{CATALOG}: t3cm does not know how to apply step {}", s.id),
+            Kind::Interview if s.slot.is_none() => bail!("{CATALOG}: interview step {} names no slot", s.id),
+            _ => {}
+        }
+    }
+    Ok(c.steps)
+}
+
+pub struct Env {
+    pub config: PathBuf,
+    pub claude: PathBuf,
+    pub codex: PathBuf,
+}
+
+impl Env {
+    pub fn from_env() -> Result<Env> {
+        let var = |k| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+        let home = user_home().context("no home folder: set HOME (USERPROFILE on Windows)")?;
+        let mut env = Env::under(&home, var("XDG_CONFIG_HOME").as_deref());
+        if let Some(p) = var("T3WF_CONFIG") {
+            env.config = p;
+        }
+        if let Some(p) = var("CLAUDE_CONFIG_DIR") {
+            env.claude = p;
+        }
+        if let Some(p) = var("CODEX_HOME") {
+            env.codex = p;
+        }
+        Ok(env)
+    }
+
+    pub fn under(home: &Path, config_home: Option<&Path>) -> Env {
+        let config = config_home.map(Path::to_path_buf).unwrap_or_else(|| home.join(".config"));
+        Env {
+            config: config.join("t3-workflow").join("config.json"),
+            claude: home.join(".claude"),
+            codex: home.join(".codex"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum RuleState {
+    #[serde(rename = "current")]
+    Current,
+    #[serde(rename = "stale")]
+    Stale,
+    #[serde(rename = "missing")]
+    Missing,
+    #[serde(rename = "no agent")]
+    NoAgent,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RuleTarget {
+    pub agent: String,
+    pub path: PathBuf,
+    pub status: RuleState,
+    #[serde(skip)]
+    new: String,
+}
+
+fn lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
+fn real(path: &Path) -> PathBuf {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return PathBuf::from(crate::upgrade::plain(&p));
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => real(dir).join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+fn read_text(path: &Path) -> Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(lf(&s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+pub fn codex_block(text: &str) -> String {
+    format!("{RULE_START}\n{}\n{RULE_END}\n", text.trim_end())
+}
+
+pub fn spliced(old: &str, block: &str) -> String {
+    if let (Some(start), Some(end)) = (old.find(RULE_START), old.find(RULE_END))
+        && end > start
+    {
+        let rest = old[end + RULE_END.len()..].trim_start_matches('\n');
+        let tail = if rest.is_empty() { String::new() } else { format!("\n{rest}") };
+        return format!("{}{block}{tail}", &old[..start]);
+    }
+    if old.trim().is_empty() { block.to_string() } else { format!("{}\n\n{block}", old.trim_end_matches('\n')) }
+}
+
+pub fn rule_targets(env: &Env, bundle: &Bundle) -> Result<Vec<RuleTarget>> {
+    let raw = bundle.raw(RULE).with_context(|| format!("release {} carries no {RULE}", bundle.release))?;
+    let text = lf(std::str::from_utf8(raw).with_context(|| format!("{RULE} is not UTF-8"))?);
+    let over = env.codex.join("AGENTS.override.md");
+    let codex = if over.is_file() { over } else { env.codex.join("AGENTS.md") };
+    let mut out = Vec::new();
+    for (agent, home, path) in
+        [("claude", &env.claude, env.claude.join("rules").join(RULE_FILE)), ("codex", &env.codex, codex)]
+    {
+        if !home.is_dir() {
+            out.push(RuleTarget { agent: agent.into(), path, status: RuleState::NoAgent, new: String::new() });
+            continue;
+        }
+        let path = real(&path);
+        let old = read_text(&path)?;
+        let (new, ours) = if agent == "claude" {
+            (text.clone(), !old.is_empty())
+        } else {
+            match (old.find(RULE_START), old.find(RULE_END)) {
+                (None, None) => {}
+                (Some(start), Some(end)) if end > start => {}
+                _ => bail!(
+                    "{} has a {RULE_START} or {RULE_END} marker without its pair; fix or remove it, then run the command again",
+                    path.display()
+                ),
+            }
+            (spliced(&old, &codex_block(&text)), old.contains(RULE_START))
+        };
+        let status = if old == new {
+            RuleState::Current
+        } else if ours {
+            RuleState::Stale
+        } else {
+            RuleState::Missing
+        };
+        out.push(RuleTarget { agent: agent.into(), path, status, new });
+    }
+    Ok(out)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutoState {
+    Done,
+    Missing,
+    NotApplicable,
+}
+
+fn rule_state(targets: &[RuleTarget]) -> AutoState {
+    if targets.iter().all(|t| t.status == RuleState::NoAgent) {
+        AutoState::NotApplicable
+    } else if targets.iter().any(|t| matches!(t.status, RuleState::Stale | RuleState::Missing)) {
+        AutoState::Missing
+    } else {
+        AutoState::Done
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConfigState {
+    Absent,
+    Legacy,
+    Recorded,
+    Problem,
+}
+
+enum Config {
+    Absent,
+    Problem(String),
+    Found { cfg: Map<String, Value>, recorded: Option<Vec<String>> },
+}
+
+fn load_config(path: &Path) -> Config {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Config::Absent,
+        Err(e) => return Config::Problem(format!("cannot read it: {e}")),
+    };
+    let cfg = match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(m)) => m,
+        Ok(_) => return Config::Problem("the top level must be a JSON object".into()),
+        Err(e) => return Config::Problem(format!("not JSON: {e}")),
+    };
+    if let Some(v) = cfg.get("version")
+        && v.as_u64() != Some(CONFIG_VERSION)
+    {
+        return Config::Problem(format!("config version {v}, and t3cm records steps only in version {CONFIG_VERSION}"));
+    }
+    if cfg.get("writtenBy").is_some_and(|v| !v.is_string()) {
+        return Config::Problem("writtenBy must be a release string".into());
+    }
+    let recorded = match cfg.get("steps") {
+        None => None,
+        Some(Value::Array(a)) if a.iter().all(Value::is_string) => {
+            Some(a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        }
+        Some(_) => return Config::Problem("steps must be a list of step ids".into()),
+    };
+    Config::Found { cfg, recorded }
+}
+
+fn done_ids(steps: &[Step], recorded: &Option<Vec<String>>) -> Vec<String> {
+    match recorded {
+        Some(r) => r.clone(),
+        None => steps.iter().filter(|s| s.legacy).map(|s| s.id.clone()).collect(),
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Missing {
+    pub id: String,
+    pub kind: Kind,
+    pub since: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot: Option<String>,
+    pub fix: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Steps {
+    pub release: String,
+    pub config: PathBuf,
+    pub config_state: ConfigState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    pub written_by: Option<String>,
+    pub recorded: Vec<String>,
+    pub missing: Vec<Missing>,
+    pub rule: Vec<RuleTarget>,
+}
+
+impl Steps {
+    pub fn needs_update(&self) -> bool {
+        self.missing.iter().any(|m| m.kind == Kind::Auto)
+    }
+
+    pub fn needs_setup(&self) -> impl Iterator<Item = &Missing> {
+        self.missing.iter().filter(|m| m.kind == Kind::Interview)
+    }
+}
+
+pub fn check(env: &Env, bundle: &Bundle) -> Result<Steps> {
+    let steps = catalog(bundle)?;
+    let rule = rule_targets(env, bundle)?;
+    let config = load_config(&env.config);
+    let (state, problem, written_by, recorded) = match &config {
+        Config::Absent => (ConfigState::Absent, None, None, Vec::new()),
+        Config::Problem(p) => (ConfigState::Problem, Some(p.clone()), None, Vec::new()),
+        Config::Found { cfg, recorded } => (
+            if recorded.is_some() { ConfigState::Recorded } else { ConfigState::Legacy },
+            None,
+            cfg.get("writtenBy").and_then(Value::as_str).map(str::to_string),
+            done_ids(&steps, recorded),
+        ),
+    };
+    let mut missing = Vec::new();
+    for s in &steps {
+        let fix = match s.kind {
+            Kind::Auto if rule_state(&rule) == AutoState::Missing => "t3cm skills update".to_string(),
+            Kind::Auto => continue,
+            Kind::Interview if recorded.contains(&s.id) || state == ConfigState::Problem => continue,
+            Kind::Interview if state == ConfigState::Absent => format!("run {SETUP_SKILL}"),
+            Kind::Interview => format!("run {SETUP_SKILL}: new slot {}", s.slot.as_deref().unwrap_or(&s.id)),
+        };
+        missing.push(Missing { id: s.id.clone(), kind: s.kind, since: s.since.clone(), slot: s.slot.clone(), fix });
+    }
+    Ok(Steps {
+        release: bundle.release.clone(),
+        config: env.config.clone(),
+        config_state: state,
+        problem,
+        written_by,
+        recorded,
+        missing,
+        rule,
+    })
+}
+
+pub fn missing_steps(env: &Env, bundle: &Bundle) -> Result<Vec<Missing>> {
+    Ok(check(env, bundle)?.missing)
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Applied {
+    pub wrote: Vec<PathBuf>,
+    pub newly_recorded: Vec<String>,
+    pub steps: Steps,
+}
+
+pub fn apply(env: &Env, bundle: &Bundle) -> Result<Applied> {
+    let steps = catalog(bundle)?;
+    let mut wrote = Vec::new();
+    let mut rule = rule_targets(env, bundle)?;
+    if steps.iter().any(|s| s.id == RULE_STEP) {
+        for t in rule.iter_mut().filter(|t| matches!(t.status, RuleState::Stale | RuleState::Missing)) {
+            write_atomic(&t.path, t.new.as_bytes())?;
+            t.status = RuleState::Current;
+            wrote.push(t.path.clone());
+        }
+    }
+    let mut newly = Vec::new();
+    if let Config::Found { mut cfg, recorded } = load_config(&env.config) {
+        let mut ids = done_ids(&steps, &recorded);
+        for s in steps.iter().filter(|s| s.kind == Kind::Auto) {
+            if rule_state(&rule) == AutoState::Done && !ids.contains(&s.id) {
+                ids.push(s.id.clone());
+                newly.push(s.id.clone());
+            }
+        }
+        if !newly.is_empty() {
+            let known: Vec<String> = steps.iter().map(|s| s.id.clone()).filter(|id| ids.contains(id)).collect();
+            let extra = ids.iter().filter(|id| !known.contains(id)).cloned();
+            let ordered: Vec<Value> = known.iter().cloned().chain(extra).map(Value::String).collect();
+            cfg.insert("writtenBy".into(), Value::String(bundle.release.clone()));
+            cfg.insert("steps".into(), Value::Array(ordered));
+            let mut text = serde_json::to_string_pretty(&Value::Object(cfg))?;
+            text.push('\n');
+            write_atomic(&real(&env.config), text.as_bytes())?;
+        }
+    }
+    Ok(Applied { wrote, newly_recorded: newly, steps: check(env, bundle)? })
+}
+
+fn setup_lines(s: &Steps, out: &mut String) {
+    if let Some(p) = &s.problem {
+        out.push_str(&format!(
+            "warning: {} is ignored ({p}); fix it, then run {SETUP_SKILL}. Setup steps are not recorded until then\n",
+            s.config.display()
+        ));
+    }
+    let slots: Vec<&str> = s.needs_setup().filter_map(|m| m.slot.as_deref()).collect();
+    if slots.is_empty() {
+        return;
+    }
+    if s.config_state == ConfigState::Absent {
+        out.push_str(&format!(
+            "no T3 workflow config at {} yet: run {SETUP_SKILL} to pick the reviewer, passes, delivery and models\n",
+            s.config.display()
+        ));
+    } else {
+        let noun = if slots.len() == 1 { "slot" } else { "slots" };
+        out.push_str(&format!("run {SETUP_SKILL}: new {noun} {}\n", slots.join(", ")));
+    }
+}
+
+pub fn describe_steps(s: &Steps) -> String {
+    let mut out = String::new();
+    if s.needs_update() {
+        for t in s.rule.iter().filter(|t| matches!(t.status, RuleState::Stale | RuleState::Missing)) {
+            let what = if t.status == RuleState::Stale { "out of date" } else { "missing" };
+            out.push_str(&format!(
+                "setup step {RULE_STEP}: the filed-issue rule for {} is {what} at {}\n",
+                t.agent,
+                t.path.display()
+            ));
+        }
+        out.push_str("fix: t3cm skills update\n");
+    }
+    setup_lines(s, &mut out);
+    if out.is_empty() {
+        out.push_str("setup steps: none missing\n");
+    }
+    out
+}
+
+pub fn describe_applied(a: &Applied) -> String {
+    let mut out = String::new();
+    for p in &a.wrote {
+        out.push_str(&format!("wrote the filed-issue rule to {}\n", p.display()));
+    }
+    if !a.newly_recorded.is_empty() {
+        out.push_str(&format!(
+            "recorded setup steps in {}: {}\n",
+            a.steps.config.display(),
+            a.newly_recorded.join(", ")
+        ));
+    }
+    setup_lines(&a.steps, &mut out);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_embedded_catalog_parses_and_t3cm_applies_every_auto_step() {
+        let steps = catalog(&Bundle::embedded()).unwrap();
+        assert!(steps.iter().any(|s| s.id == RULE_STEP && s.kind == Kind::Auto));
+        for slot in ["review", "passes", "credentials", "delivery", "models"] {
+            assert!(steps.iter().any(|s| s.slot.as_deref() == Some(slot) && s.legacy), "{slot}");
+        }
+    }
+
+    #[test]
+    fn spliced_appends_a_block_and_replaces_one_in_place() {
+        let block = codex_block("rule");
+        assert_eq!(spliced("", &block), block);
+        assert_eq!(spliced("# Mine\n\nKeep.\n", &block), format!("# Mine\n\nKeep.\n\n{block}"));
+        let old = format!("# Mine\n\n{RULE_START}\nold\n{RULE_END}\n\n## After\n");
+        assert_eq!(spliced(&old, &block), format!("# Mine\n\n{block}\n## After\n"));
+        let tail = format!("{RULE_START}\nold\n{RULE_END}\n");
+        assert_eq!(spliced(&tail, &block), block);
+    }
+}

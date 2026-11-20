@@ -35,6 +35,9 @@ one. The JSON it prints is the interview's only source of facts:
   `path` and a `status` of `current`, `stale`, `missing` or `no agent`;
   `rule.error` in their place when the rule could not be checked, which you
   show the user.
+- `steps`: the setup steps `recorded` in the config, and those `missing`,
+  each with its `id`, its `kind` (`interview`, naming a `slot`, or `auto`)
+  and, for an interview step, the slot setup has not asked about yet.
 - `platform`, and `config`: its path, whether it exists, its `problems`, and
   `repoProblems` from the repository's `AGENTS.md` block, which the user
   fixes in that file.
@@ -62,7 +65,9 @@ Ask about one slot per question, in this order: review, passes, credentials,
 delivery, model ticket, model worker. Use the session's question tool when
 it has one; otherwise ask in chat. Wait for each answer before the next
 question. When the user asked to change one slot ("change the reviewer"),
-ask about that slot alone.
+ask about that slot alone. When the config exists and `steps.missing` names
+interview steps, a later release added those slots: ask about each of them,
+as well as any slot the user asked to change.
 
 What to offer, suggest and explain for each slot, and the JSON each answer
 records: [interview.md](references/interview.md). Three rules hold for every
@@ -73,7 +78,8 @@ slot:
 - **Slash-only skill** (`invoke: inline`): record it like any other. Tell
   the user the roles read its `SKILL.md` and apply it inline, because the
   Skill tool refuses it.
-- **Keep current**: a slot the user keeps stays out of the write.
+- **Keep current**: a slot the user keeps stays out of the JSON, and goes
+  in `--asked` (step 3).
 
 ## 3. Write
 
@@ -85,6 +91,11 @@ setup write --skills '<same list as step 1>' <<'JSON'
 {"review": "cbrip:sol-loop", "passes": ["unslop", "pr"]}
 JSON
 ```
+
+Pass `--asked <slot>` for each slot you asked about, the kept ones too, such
+as `--asked review,passes,credentials,delivery,models` after a full
+interview, and write `{}` when every slot was kept. The write records those
+slots as done setup steps, so a later release names only the slots it adds.
 
 It merges into the user config at `config.path` (`models` by role), checks
 the result, and prints the new `t3wf slots` lines. `--unset <slot>` (or
@@ -116,8 +127,10 @@ setup rule
 It writes the rule to `rules/t3-workflow-filed-issues.md` in the Claude
 Code config folder and as a marked block in Codex's global `AGENTS.md`
 (`AGENTS.override.md` when that file exists), and leaves the rest of that
-file as it was. An agent with no config folder is skipped. Tell the user in
-one line what it wrote; new sessions load it.
+file as it was. An agent with no config folder is skipped. It records the
+step in the config when the config exists. Tell the user in one line what it
+wrote; new sessions load it. `t3cm skills install` and `t3cm skills update`
+install the same rule the same way.
 
 ## 5. Offer t3cm
 
@@ -136,6 +149,6 @@ and a board in the browser. Act on `t3cm` from step 1:
 - **No `binary`**: offer to install it, once. On yes, follow
   [Installing t3cm](../t3-workflow/codemode.md#installing-t3cm).
 
-Setup is done when the config holds every answer (or the user kept every
-slot), the user has seen the summary, the filed-issue rule is current for
+Setup is done when the config holds every answer and records every slot
+asked about, the user has seen the summary, the filed-issue rule is current for
 each installed agent, and t3cm is running or was offered.

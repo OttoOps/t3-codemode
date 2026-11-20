@@ -13,7 +13,7 @@ use t3_codemode::config::{self, Config};
 use t3_codemode::release::{self, Version};
 use t3_codemode::store::Store;
 use t3_codemode::t3_http::HttpT3;
-use t3_codemode::{bench, platform, server, skills, upgrade, watcher};
+use t3_codemode::{bench, platform, server, skills, steps, upgrade, watcher};
 
 #[derive(Parser)]
 #[command(
@@ -130,7 +130,7 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum SkillsCmd {
-    /// Write the skills to ~/.agents/skills and record them in ~/.config/t3-workflow/installed.json
+    /// Write the skills to ~/.agents/skills, record them in ~/.config/t3-workflow/installed.json, and apply new setup steps
     Install {
         /// Replace skills another tool (npx skills, a copy) installed, and drop them from its lock file
         #[arg(long)]
@@ -141,7 +141,7 @@ enum SkillsCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Bring installed skills to this binary's release, keeping locally edited files
+    /// Bring installed skills to this binary's release, keeping locally edited files, and apply new setup steps
     Update {
         /// Overwrite files edited since t3cm installed them
         #[arg(long)]
@@ -149,7 +149,7 @@ enum SkillsCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Compare the installed skills with this binary's release; exits 1 unless all are current
+    /// Compare the installed skills and setup steps with this binary's release; exits 1 unless all are current
     Status {
         #[arg(long)]
         json: bool,
@@ -158,16 +158,22 @@ enum SkillsCmd {
 
 fn run_skills(cmd: SkillsCmd) -> Result<ExitCode> {
     let paths = skills::Paths::from_env()?;
+    let env = steps::Env::from_env()?;
     let bundle = skills::Bundle::embedded();
     let (opts, json) = match cmd {
         SkillsCmd::Status { json } => {
             let st = skills::status(&paths, &bundle)?;
+            let setup = steps::check(&env, &bundle)?;
+            let ok = st.current && !setup.needs_update();
             if json {
-                println!("{}", serde_json::to_string_pretty(&st)?);
+                let mut v = serde_json::to_value(&st)?;
+                v["current"] = Value::Bool(ok);
+                v["steps"] = serde_json::to_value(&setup)?;
+                println!("{}", serde_json::to_string_pretty(&v)?);
             } else {
-                print!("{}", skills::describe_status(&st));
+                print!("{}{}", skills::describe_status(&st), steps::describe_steps(&setup));
             }
-            return Ok(if st.current { ExitCode::SUCCESS } else { ExitCode::FAILURE });
+            return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE });
         }
         SkillsCmd::Install { take_over, force, json } => {
             (skills::Options { mode: skills::Mode::Install, force, take_over }, json)
@@ -177,10 +183,13 @@ fn run_skills(cmd: SkillsCmd) -> Result<ExitCode> {
         }
     };
     let report = skills::sync(&paths, &bundle, opts)?;
+    let applied = steps::apply(&env, &bundle)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        let mut v = serde_json::to_value(&report)?;
+        v["steps"] = serde_json::to_value(&applied)?;
+        println!("{}", serde_json::to_string_pretty(&v)?);
     } else {
-        print!("{}", skills::describe_report(&report));
+        print!("{}{}", skills::describe_report(&report), steps::describe_applied(&applied));
     }
     Ok(ExitCode::SUCCESS)
 }

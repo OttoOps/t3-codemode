@@ -6,6 +6,8 @@ installed candidates for each slot, the T3 providers and models, and whether
 t3cm runs. `write` merges slot settings from stdin into the user config file,
 refuses a bare name that matches several skills, and prints `t3wf slots`.
 `rule` installs the always-loaded filed-issue rule for Claude Code and Codex.
+`write` and `rule` record the setup steps they cover, from steps.json, in the
+config's `steps`, and the release that wrote it in `writtenBy`.
 """
 import argparse
 import contextlib
@@ -28,6 +30,9 @@ T3CM_PORT = 47731
 RULE_FILE = "t3-workflow-filed-issues.md"
 RULE_START = "<!-- t3-workflow:filed-issues:start -->"
 RULE_END = "<!-- t3-workflow:filed-issues:end -->"
+RULE_STEP = "rule:filed-issues"
+STAMP_KEY = "t3-codemode-release"
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 class Fail(Exception):
@@ -64,6 +69,79 @@ def common(a):
 
 def listed(a):
     return [n.strip().lstrip("/") for n in (a.skills or "").replace(",", " ").split() if n.strip()]
+
+
+# ---------------------------------------------------------------- steps
+
+def catalog():
+    path = os.path.join(HERE, "..", "steps.json")
+    try:
+        with open(path) as f:
+            return json.load(f)["steps"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise Fail(f"setup-t3-workflow has no readable steps.json ({e}); update it")
+
+
+def release():
+    try:
+        with open(os.path.join(HERE, "..", "SKILL.md")) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return None
+        key, _, value = line.strip().partition(":")
+        if key == STAMP_KEY:
+            return value.strip().strip('"\'') or None
+    return None
+
+
+def done_steps(cfg, steps):
+    if isinstance(cfg.get("steps"), list):
+        return list(cfg["steps"])
+    return [s["id"] for s in steps if s.get("legacy")]
+
+
+def record(cfg, done, steps):
+    known = [s["id"] for s in steps if s["id"] in done]
+    cfg["steps"] = known + [i for i in dict.fromkeys(done) if i not in known]
+    if release():
+        cfg["writtenBy"] = release()
+    else:
+        cfg.pop("writtenBy", None)
+    return cfg
+
+
+def rule_done(plan):
+    states = [p["status"] for p in plan]
+    return "current" in states and all(s in ("current", "no agent") for s in states)
+
+
+def steps_status(slots):
+    steps = catalog()
+    path = slots.config_path()
+    out = {"config": path, "writtenBy": None, "recorded": [], "missing": []}
+    try:
+        cfg = slots.load_user_config(path)
+    except slots.ConfigError:
+        return out
+    exists = os.path.exists(path)
+    if exists:
+        out["recorded"] = done_steps(cfg, steps)
+        out["writtenBy"] = cfg.get("writtenBy")
+    try:
+        rule_missing = any(p["status"] in ("missing", "stale") for p in rule_plan())
+    except Fail:
+        rule_missing = True
+    for s in steps:
+        if s["kind"] == "interview" and s["id"] not in out["recorded"]:
+            out["missing"].append({"id": s["id"], "kind": s["kind"], "slot": s.get("slot")})
+        elif s["kind"] == "auto" and rule_missing:
+            out["missing"].append({"id": s["id"], "kind": s["kind"]})
+    return out
 
 
 # ---------------------------------------------------------------- detect
@@ -195,6 +273,7 @@ def cmd_detect(a):
                       "slots": candidates(a, eff),
                       "providers": providers(),
                       "rule": rule_status(),
+                      "steps": steps_status(slots),
                       "t3cm": t3cm()}, indent=1))
 
 
@@ -245,6 +324,10 @@ def rule_plan():
             continue
         path = os.path.realpath(path)
         old = read_or_empty(path)
+        start, end = old.find(RULE_START), old.find(RULE_END)
+        if agent == "codex" and ((start == -1) != (end == -1) or end < start):
+            raise Fail(f"{path} has a {RULE_START} or {RULE_END} marker without its pair; fix or remove it, "
+                       "then run the command again")
         new = text if agent == "claude" else spliced(old, codex_block(text))
         ours = old if agent == "claude" else RULE_START in old
         status = "current" if old == new else "stale" if ours else "missing"
@@ -274,6 +357,25 @@ def save(path, text):
         raise Fail(f"not written: {path}: {e}")
 
 
+def record_rule():
+    slots = load_t3wf().slots
+    path = os.path.realpath(slots.config_path())
+    if not os.path.exists(path):
+        return
+    try:
+        cfg = slots.load_user_config(path)
+    except slots.ConfigError:
+        return
+    if cfg.get("version", slots.CONFIG_VERSION) != slots.CONFIG_VERSION or slots.validate_config(cfg):
+        return
+    steps = catalog()
+    done = done_steps(cfg, steps)
+    if RULE_STEP in done:
+        return
+    save_config(path, record(cfg, done + [RULE_STEP], steps))
+    print(f"recorded {RULE_STEP} in {path}")
+
+
 def cmd_rule(a):
     plan = rule_plan()
     if all(p["status"] == "no agent" for p in plan):
@@ -286,6 +388,7 @@ def cmd_rule(a):
         else:
             save(p["path"], p["new"])
             print(f"{p['agent']}: wrote {p['path']}")
+    record_rule()
 
 
 # ---------------------------------------------------------------- write
@@ -324,6 +427,31 @@ def merge(old, new, unset):
     return {"version": load_t3wf().slots.CONFIG_VERSION, **cfg}
 
 
+def save_config(path, cfg):
+    tmp = None
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".config.", suffix=".json")
+        with os.fdopen(fd, "w") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except OSError as e:
+        if tmp:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+        raise Fail(f"not written: {e}")
+
+
+def asked_slots(a, new, slots):
+    names = [n.strip() for v in a.asked or [] for n in v.split(",") if n.strip()]
+    bad = [n for n in names if n not in slots.SLOTS]
+    if bad:
+        raise Fail(f"--asked {', '.join(bad)}: name a slot ({', '.join(slots.SLOTS)})")
+    unset = [u.partition(".")[0] for u in a.unset or []]
+    return set(names) | {k for k in new if k in slots.SLOTS} | set(unset)
+
+
 def cmd_write(a):
     slots = load_t3wf().slots
     try:
@@ -332,6 +460,9 @@ def cmd_write(a):
         raise Fail(f"stdin is not JSON: {e}")
     if not isinstance(new, dict):
         raise Fail("stdin must be a JSON object of slot settings")
+    kept = [k for k in slots.RECORD_KEYS if k in new]
+    if kept:
+        raise Fail(f"stdin sets {', '.join(kept)}; setup records those itself")
     path = os.path.realpath(slots.config_path())
     try:
         old = {} if a.replace else slots.load_user_config(path)
@@ -362,19 +493,16 @@ def cmd_write(a):
             warnings.append(f"{where}: {ref} is not installed yet; the roles skip it until it is")
     if problems:
         raise Fail("not written:\n" + "\n".join(problems))
-    tmp = None
+    steps = catalog()
+    done = done_steps(old, steps) if os.path.exists(path) and not a.replace else []
+    by_slot = {s.get("slot"): s["id"] for s in steps if s["kind"] == "interview"}
+    done += [by_slot[n] for n in sorted(asked_slots(a, new, slots)) if n in by_slot]
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".config.", suffix=".json")
-        with os.fdopen(fd, "w") as f:
-            json.dump(cfg, f, indent=2)
-            f.write("\n")
-        os.replace(tmp, path)
-    except OSError as e:
-        if tmp:
-            with contextlib.suppress(OSError):
-                os.remove(tmp)
-        raise Fail(f"not written: {e}")
+        if rule_done(rule_plan()):
+            done.append(RULE_STEP)
+    except Fail:
+        pass
+    save_config(path, record(cfg, done, steps))
     print(f"wrote {path}")
     for w in warnings:
         print(f"warn: {w}")
@@ -396,6 +524,8 @@ def main(argv=None):
     w.add_argument("--unset", action="append", metavar="SLOT[.ROLE]",
                    help="drop a slot (or one model role) so its default applies")
     w.add_argument("--replace", action="store_true", help="start from an empty config, not the current file")
+    w.add_argument("--asked", action="append", metavar="SLOT[,SLOT]",
+                   help="a slot the user was asked about, kept ones too, recorded as a done setup step")
     a = p.parse_args(argv)
     try:
         a.fn(a)
