@@ -3455,7 +3455,7 @@ fn layout_scenario(html: &str, st: &Value, storage: &str, body: &str) -> Value {
 
 #[tokio::test]
 async fn panels_move_and_collapse_from_the_keyboard_and_the_layout_is_saved() {
-    let (html, st) = two_gate_page().await;
+    let (html, st) = new_issue_page().await;
     let r = layout_scenario(
         &html,
         &st,
@@ -3595,7 +3595,7 @@ return { wide, narrow, again: where(), tix: q("#p-tix").classList.contains("coll
 
 #[tokio::test]
 async fn a_shortcut_to_a_collapsed_panel_expands_it_and_resizing_is_keyboard_driven() {
-    let (html, st) = two_gate_page().await;
+    let (html, st) = new_issue_page().await;
     let r = layout_scenario(
         &html,
         &st,
@@ -3769,4 +3769,178 @@ return { hint, shut, open, holdOld, holdNew, heldShut, narrowFocus: document.act
                "narrowFocus": true, "mode": "ask", "narrowHint": true}),
         "{r}"
     );
+}
+
+#[tokio::test]
+async fn with_no_new_issues_nothing_renders_above_tickets() {
+    let (html, st) = new_issue_page().await;
+    assert!(html.contains(r#"data-view="open" data-empty="" hidden>"#));
+    let r = new_scenario(
+        &html,
+        &st,
+        r##"
+const none = { ...base, newIssues: [], counts: { ...base.counts, newIssues: 0 } };
+emitState(none);
+const empty = { sec: sec().hidden, route: q("#dismissed-open").hidden };
+emitState(base);
+const shown = { sec: sec().hidden, route: q("#dismissed-open").hidden, view: q("#new-view").hidden };
+emitState(none);
+return { empty, shown, again: sec().hidden };
+"##,
+    );
+    assert_eq!(r["empty"], json!({"sec": true, "route": true}), "{r}");
+    assert_eq!(r["shown"], json!({"sec": false, "route": true, "view": true}), "{r}");
+    assert_eq!(r["again"], true, "{r}");
+}
+
+#[tokio::test]
+async fn only_issues_and_tickets_that_arrive_live_flash_and_the_flash_fades() {
+    let (html, st) = new_issue_page().await;
+    let r = new_scenario(
+        &html,
+        &st,
+        r##"
+const lit = (el) => !!el && el.classList.contains("arrive");
+const tk = (k) => q('#open [data-key="' + k + '"]');
+emitState(base);
+const atLoad = { rows: rows().map((k) => lit(row(k))), ticket: lit(tk(base.tree[0].thread)) };
+const issue = { ...base.newIssues[0], id: "n9", label: "widgets#49", number: 49, url: "https://github.com/Acme/widgets/issues/49" };
+const ticket = { ...base.tree[0], thread: "t-new", label: "widgets#50" };
+emitState({ ...base, newIssues: [issue, ...base.newIssues], tree: [...base.tree, ticket] });
+const arrived = { issue: lit(row("n9")), ticket: lit(tk("t-new")), old: lit(row("n1")) };
+advance(4000);
+const fading = lit(row("n9")) && lit(tk("t-new"));
+advance(200);
+return { atLoad, arrived, fading, faded: lit(row("n9")) || lit(tk("t-new")) };
+"##,
+    );
+    assert_eq!(r["atLoad"], json!({"rows": [false, false], "ticket": false}), "{r}");
+    assert_eq!(r["arrived"], json!({"issue": true, "ticket": true, "old": false}), "{r}");
+    assert_eq!(r["fading"], true, "{r}");
+    assert_eq!(r["faded"], false, "{r}");
+    assert!(html.contains(".nrow.arrive, .tk.arrive { animation: flash 4s ease-in; }"));
+}
+
+#[tokio::test]
+async fn an_issue_held_behind_the_count_flashes_when_revealed() {
+    let (html, st) = new_issue_page().await;
+    let r = new_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+q("#tixcol").dispatch("pointerenter");
+const issue = { ...base.newIssues[0], id: "n9", label: "widgets#49", number: 49 };
+emitState({ ...base, newIssues: [issue, ...base.newIssues] });
+const held = { rows: rows(), slot: q("#new-nis").textContent };
+q("#new-nis").dispatch("click");
+return { held, rows: rows(), lit: row("n9").classList.contains("arrive") };
+"##,
+    );
+    assert_eq!(r["held"], json!({"rows": ["n2", "n1"], "slot": "1 new"}), "{r}");
+    assert_eq!(r["rows"], json!(["n9", "n2", "n1"]), "{r}");
+    assert_eq!(r["lit"], true, "{r}");
+}
+
+#[tokio::test]
+async fn reduced_motion_gets_a_short_static_tint() {
+    let (html, st) = new_issue_page().await;
+    assert!(html.contains("  .nrow.arrive, .tk.arrive { background-color: var(--flash); }\n}"));
+    let prelude = r#"globalThis.matchMedia = (m) => ({ matches: /reduce/.test(m), addEventListener() {} });"#;
+    let body = r##"
+emitState(base);
+const issue = { ...base.newIssues[0], id: "n9", label: "widgets#49", number: 49 };
+emitState({ ...base, newIssues: [issue, ...base.newIssues] });
+const lit = row("n9").classList.contains("arrive");
+advance(1500);
+return { lit, after: row("n9").classList.contains("arrive") };
+"##;
+    let r = run_page_async_with(
+        &html,
+        prelude,
+        &format!("async () => {{\n{PAGE_HELPERS}\n{NEW_HELPERS}\nconst base = {st};\n{body}\n}}"),
+    );
+    assert_eq!(r, json!({"lit": true, "after": false}));
+}
+
+#[tokio::test]
+async fn dismissed_issues_stay_reachable_from_settled_while_none_are_new() {
+    let s = start(H::new()).await;
+    result(&s.h.exec_as(WORKER, "async () => wf.issue({ url: 'Acme/widgets#43', title: 'Fix the grader' })").await);
+    s.h.app.wf.dismiss_new_issue("n1").await.unwrap();
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    let r = new_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+const hidden = { sec: sec().hidden, route: q("#dismissed-open").hidden, n: q("#n-dismissed-s").textContent,
+  name: q("#dismissed-open").getAttribute("aria-label") };
+sec().append(q("#new-view"));
+q("#dismissed-open").dispatch("click");
+const view = { sec: sec().hidden, rows: rows(), head: q("#h-new-t").textContent, route: q("#dismissed-open").hidden,
+  focus: document.activeElement === q("#new-view") };
+q("#new-view").dispatch("click");
+return { hidden, view, back: sec().hidden, refocus: document.activeElement === q("#dismissed-open") };
+"##,
+    );
+    assert_eq!(r["hidden"], json!({"sec": true, "route": false, "n": "1", "name": "Show 1 dismissed issues"}), "{r}");
+    assert_eq!(
+        r["view"],
+        json!({"sec": false, "rows": ["n1"], "head": "Dismissed issues", "route": true, "focus": true}),
+        "{r}"
+    );
+    assert_eq!((&r["back"], &r["refocus"]), (&json!(true), &json!(true)), "{r}");
+}
+
+#[tokio::test]
+async fn clearing_the_filter_over_tickets_brings_issues_back_at_once_without_a_flash() {
+    let (html, st) = new_issue_page().await;
+    let r = new_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+q("#tixcol").dispatch("pointerenter");
+const box = document.getElementById("filter-q");
+box.focus();
+typeKeys("gadgets");
+advance(200);
+const narrowed = rows();
+box.value = "";
+box.dispatch("input");
+advance(200);
+return { narrowed, rows: rows(), slot: q("#new-nis").textContent, lit: rows().map((k) => row(k).classList.contains("arrive")) };
+"##,
+    );
+    assert_eq!(r, json!({"narrowed": ["n2"], "rows": ["n2", "n1"], "slot": "", "lit": [false, false]}));
+}
+
+#[tokio::test]
+async fn the_wide_layout_drops_the_divider_above_tickets_while_new_issues_hides() {
+    let (html, st) = new_issue_page().await;
+    let none = json!({"newIssues": [], "counts": {"newIssues": 0}});
+    let r = layout_scenario(
+        &html,
+        &st,
+        "{}",
+        &format!(
+            r##"
+const none = {{ ...base, ...{none}, counts: {{ ...base.counts, newIssues: 0 }} }};
+heads();
+setWide(true);
+const col = () => main().children.filter((c) => c.classList.contains("lcol"))[1];
+const kids = () => col().children.map((x) => x.id || x.className);
+const shown = kids();
+emitState(none);
+const hidden = {{ kids: kids(), vacant: col().classList.contains("vacant") }};
+emitState(base);
+return {{ shown, hidden, back: kids() }};
+"##
+        ),
+    );
+    assert_eq!(r["shown"], json!(["p-new", "hsplit", "p-tix"]), "{r}");
+    assert_eq!(r["hidden"], json!({"kids": ["p-new", "p-tix"], "vacant": false}), "{r}");
+    assert_eq!(r["back"], json!(["p-new", "hsplit", "p-tix"]), "{r}");
 }

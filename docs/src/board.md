@@ -31,9 +31,9 @@ and the threads running. Only the lists scroll.
   filed and reported with `wf.issue` that have no ticket yet, newest first.
   Each row shows the issue's `repo#n` linked to GitHub, its title, how long ago
   it was filed and a link to the thread that filed it, with Launch and Dismiss.
-  A count beside the heading says how many wait, and the section shrinks to
-  its heading when none do. Show dismissed swaps the list for the dismissed
-  issues, each with Restore. [New issues](#new-issues) covers what each button
+  A count beside the heading says how many wait, and the section is gone
+  while none do. Show dismissed, beside the heading when any are dismissed,
+  swaps the list for the dismissed issues, each with Restore. [New issues](#new-issues) covers what each button
   does.
 - **Tickets,** in Open, Done and Settled tabs, grouped by state. A ticket
   takes the most urgent state of its own thread and its workers, so a ticket
@@ -236,6 +236,17 @@ everything else. While the pointer or focus is in the Tickets column, a new
 entry waits behind an "N new" button in the section's heading, and an entry
 that leaves stays as a placeholder ("widgets#43 launched") until you move
 away, so nothing under your pointer shifts.
+
+While no entry waits, nothing shows above Tickets, not even the heading. When
+dismissed entries exist then, the Settled tab carries a Dismissed issues
+button that opens the section on the dismissed list, and Show new closes it
+again.
+
+A new-issue row or ticket row that arrives on the event stream gets a green
+tint that fades on its own over about four seconds. An entry held behind "N
+new" gets it when you reveal it. Rows already there when the page loads, and
+rows a filter change brings back, don't flash. With reduced motion set, the
+tint holds still for a moment and then goes, with no fade.
 
 ## GitHub reconcile
 
