@@ -13,6 +13,7 @@ description: The T3 workflow for T3 Code, and the router to its skills - the lin
 | one issue, or issues one after another | the `t3-ticket` skill |
 | a launch brief for one PR's worker | the `t3-worker` skill |
 | t3cm, or installing it | [codemode.md, Installing t3cm](codemode.md#installing-t3cm) |
+| a thread filed a GitHub issue | [Filed issues](#filed-issues) |
 | how links, messages and gates work | the rest of this file |
 
 ## The protocol
@@ -112,6 +113,18 @@ To set or change them, run the `setup-t3-workflow` skill.
 How a role acts on each line, including a skill that no longer resolves:
 [slots.md, Reading slots in a role](slots.md#reading-slots-in-a-role).
 Config file, `AGENTS.md` keys and skill search: [slots.md](slots.md).
+
+## Filed issues
+
+Every thread that files a GitHub issue reports it to the t3cm board with
+`wf.issue`, as part of filing it. The rule and its single copy are in
+[rules/report-filed-issues.md](rules/report-filed-issues.md); follow it.
+
+Most issues are filed from threads that run no T3 role skill and load no
+part of this one, so the rule cannot live here alone. `setup-t3-workflow`
+installs it where each agent loads instructions in every session: Claude
+Code's user rules folder, and a marked block in Codex's global `AGENTS.md`.
+Edit the rule file, then run setup again to reinstall it.
 
 ## What each role supplies
 

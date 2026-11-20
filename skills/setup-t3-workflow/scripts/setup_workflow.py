@@ -5,6 +5,7 @@
 installed candidates for each slot, the T3 providers and models, and whether
 t3cm runs. `write` merges slot settings from stdin into the user config file,
 refuses a bare name that matches several skills, and prints `t3wf slots`.
+`rule` installs the always-loaded filed-issue rule for Claude Code and Codex.
 """
 import argparse
 import contextlib
@@ -24,6 +25,9 @@ SUGGESTED = {"review": ["sol-loop"], "passes": ["unslop", "pr"],
 REVIEW_SOURCE = "https://github.com/t3dotgg/tstack"
 EFFORT_OPTIONS = ("effort", "reasoningEffort", "thinking_level")
 T3CM_PORT = 47731
+RULE_FILE = "t3-workflow-filed-issues.md"
+RULE_START = "<!-- t3-workflow:filed-issues:start -->"
+RULE_END = "<!-- t3-workflow:filed-issues:end -->"
 
 
 class Fail(Exception):
@@ -190,7 +194,98 @@ def cmd_detect(a):
                       "summary": slots.report_lines(eff),
                       "slots": candidates(a, eff),
                       "providers": providers(),
+                      "rule": rule_status(),
                       "t3cm": t3cm()}, indent=1))
+
+
+# ---------------------------------------------------------------- rule
+
+def rule_text():
+    path = os.path.join(os.path.dirname(t3wf_script()), "..", "rules", "report-filed-issues.md")
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError as e:
+        raise Fail(f"the t3-workflow skill has no filed-issue rule ({e}); update it")
+
+
+def codex_block(text):
+    return f"{RULE_START}\n{text.rstrip()}\n{RULE_END}\n"
+
+
+def read_or_empty(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+    except (OSError, UnicodeDecodeError) as e:
+        raise Fail(f"cannot read {path}: {e}")
+
+
+def spliced(old, block):
+    start, end = old.find(RULE_START), old.find(RULE_END)
+    if start != -1 and end > start:
+        rest = old[end + len(RULE_END):].lstrip("\n")
+        return old[:start] + block + ("\n" + rest if rest else "")
+    return (old.rstrip("\n") + "\n\n" if old.strip() else "") + block
+
+
+def rule_plan():
+    slots = load_t3wf().slots
+    text = rule_text()
+    codex = slots.codex_dir()
+    override = os.path.join(codex, "AGENTS.override.md")
+    plan = []
+    for agent, home_dir, path in (
+            ("claude", slots.claude_dir(), os.path.join(slots.claude_dir(), "rules", RULE_FILE)),
+            ("codex", codex, override if os.path.isfile(override) else os.path.join(codex, "AGENTS.md"))):
+        if not os.path.isdir(home_dir):
+            plan.append({"agent": agent, "path": path, "status": "no agent", "home": home_dir})
+            continue
+        path = os.path.realpath(path)
+        old = read_or_empty(path)
+        new = text if agent == "claude" else spliced(old, codex_block(text))
+        ours = old if agent == "claude" else RULE_START in old
+        status = "current" if old == new else "stale" if ours else "missing"
+        plan.append({"agent": agent, "path": path, "status": status, "new": new})
+    return plan
+
+
+def rule_status():
+    try:
+        return {p["agent"]: {"status": p["status"], "path": p["path"]} for p in rule_plan()}
+    except Fail as e:
+        return {"error": str(e)}
+
+
+def save(path, text):
+    tmp = None
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".t3wf.", suffix=".md")
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except OSError as e:
+        if tmp:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+        raise Fail(f"not written: {path}: {e}")
+
+
+def cmd_rule(a):
+    plan = rule_plan()
+    if all(p["status"] == "no agent" for p in plan):
+        raise Fail("found neither a Claude Code nor a Codex config folder; install one of them first")
+    for p in plan:
+        if p["status"] == "no agent":
+            print(f"{p['agent']}: skipped, {p['home']} does not exist")
+        elif p["status"] == "current":
+            print(f"{p['agent']}: {p['path']} is current")
+        else:
+            save(p["path"], p["new"])
+            print(f"{p['agent']}: wrote {p['path']}")
 
 
 # ---------------------------------------------------------------- write
@@ -292,7 +387,7 @@ def cmd_write(a):
 def main(argv=None):
     p = argparse.ArgumentParser(prog="setup_workflow.py", description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name, fn in (("detect", cmd_detect), ("write", cmd_write)):
+    for name, fn in (("detect", cmd_detect), ("write", cmd_write), ("rule", cmd_rule)):
         s = sub.add_parser(name)
         s.set_defaults(fn=fn)
         s.add_argument("--repo", help="the repository (default: the current directory's)")
