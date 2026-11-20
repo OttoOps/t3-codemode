@@ -12,7 +12,7 @@ use crate::config::{CLOSING, Config, LinkParams, UP_KINDS};
 use crate::github::GitHub;
 use crate::issues::IssueArgs;
 use crate::merge::MergeArgs;
-use crate::store::{Link, Pending, Store};
+use crate::store::{Bind, Link, Pending, Store};
 use crate::t3::{T3Client, T3Error};
 use crate::usage::UsageSource;
 
@@ -533,10 +533,6 @@ impl Wf {
         let field = |k: &str| thread.and_then(|t| t[k].as_str()).map(String::from);
         let (link_url, project) = (field("link"), field("projectId"));
         let _g = self.lock.lock().await;
-        let current = self.store.link_get(me)?;
-        if auto && let Some(l) = current.as_ref().filter(|l| !l.closed) {
-            return Ok(json!({"parent": l.parent, "label": l.label}));
-        }
         let parent_role = self.store.node_role(&a.parent)?;
         let base =
             parent_role.as_deref().and_then(|r| self.config.link_params(r, &a.role).ok()).unwrap_or(self.config.link);
@@ -547,38 +543,41 @@ impl Wf {
         };
         params.validate().map_err(|e| anyhow!("the brief's link numbers are invalid: {e}"))?;
         let now = self.now();
-        self.store.node_set(me, &a.role, &now)?;
-        if !auto {
-            self.store.pending_remove(&a.parent, &a.label)?;
+        let bound = self.store.link_bind(me, !auto, |current| {
+            if auto && let Some(l) = current.as_ref().filter(|l| !l.closed) {
+                return Bind::Kept(l.clone());
+            }
+            let old = current.filter(|l| l.parent == a.parent);
+            Bind::Saved(Link {
+                child: me.into(),
+                parent: a.parent.clone(),
+                label: a.label.clone(),
+                role: a.role.clone(),
+                parent_role,
+                params,
+                link: link_url.or_else(|| old.as_ref().and_then(|o| o.link.clone())),
+                opened: old.as_ref().map(|o| o.opened.clone()).unwrap_or_else(|| now.clone()),
+                last_up: now.clone(),
+                last_seen: None,
+                last_nudge: None,
+                nudges: 0,
+                escalated: false,
+                reported: old.as_ref().filter(|_| !auto).map(|o| o.reported.clone()).unwrap_or_default(),
+                gate: old.as_ref().filter(|_| !auto).and_then(|o| o.gate.clone()),
+                gate_since: old.as_ref().filter(|_| !auto).and_then(|o| o.gate_since.clone()),
+                closed: false,
+                closed_at: None,
+                closed_how: None,
+                unread: old.as_ref().map(|o| o.unread.clone()).unwrap_or_default(),
+                bad_run: None,
+                settled_at: None,
+                restored_at: None,
+                project: project.or_else(|| old.as_ref().and_then(|o| o.project.clone())),
+            })
+        })?;
+        if let Bind::Kept(l) = bound {
+            return Ok(json!({"parent": l.parent, "label": l.label}));
         }
-        let old = current.filter(|l| l.parent == a.parent);
-        let ln = Link {
-            child: me.into(),
-            parent: a.parent.clone(),
-            label: a.label.clone(),
-            role: a.role.clone(),
-            parent_role,
-            params,
-            link: link_url.or_else(|| old.as_ref().and_then(|o| o.link.clone())),
-            opened: old.as_ref().map(|o| o.opened.clone()).unwrap_or_else(|| now.clone()),
-            last_up: now.clone(),
-            last_seen: None,
-            last_nudge: None,
-            nudges: 0,
-            escalated: false,
-            reported: old.as_ref().filter(|_| !auto).map(|o| o.reported.clone()).unwrap_or_default(),
-            gate: old.as_ref().filter(|_| !auto).and_then(|o| o.gate.clone()),
-            gate_since: old.as_ref().filter(|_| !auto).and_then(|o| o.gate_since.clone()),
-            closed: false,
-            closed_at: None,
-            closed_how: None,
-            unread: old.as_ref().map(|o| o.unread.clone()).unwrap_or_default(),
-            bad_run: None,
-            settled_at: None,
-            restored_at: None,
-            project: project.or_else(|| old.as_ref().and_then(|o| o.project.clone())),
-        };
-        self.store.link_save(&ln)?;
         Ok(json!({
             "parent": a.parent, "label": a.label, "params": params,
             "message": format!("Joined. The watcher nudges this thread after {} idle minutes with no gate open; \

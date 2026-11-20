@@ -105,6 +105,12 @@ impl Link {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum Bind {
+    Kept(Link),
+    Saved(Link),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Pending {
@@ -470,6 +476,37 @@ impl Store {
             )
         })?;
         Ok(())
+    }
+
+    pub fn link_bind(
+        &self,
+        child: &str,
+        clear_pending: bool,
+        build: impl FnOnce(Option<Link>) -> Bind,
+    ) -> Result<Bind> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let raw: Option<String> =
+            tx.query_row("SELECT data FROM links WHERE child = ?1", [child], |r| r.get(0)).optional()?;
+        let current = raw.map(|s| serde_json::from_str(&s)).transpose()?;
+        let bind = build(current);
+        if let Bind::Saved(ln) = &bind {
+            tx.execute(
+                "INSERT INTO links (child, parent, closed, data) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (child) DO UPDATE SET parent = excluded.parent, closed = excluded.closed, data = excluded.data",
+                params![ln.child, ln.parent, ln.closed as i64, serde_json::to_string(ln)?],
+            )?;
+            tx.execute(
+                "INSERT INTO nodes (thread, role, at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (thread) DO UPDATE SET role = excluded.role, at = excluded.at",
+                params![ln.child, ln.role, ln.last_up],
+            )?;
+            if clear_pending {
+                tx.execute("DELETE FROM pending WHERE parent = ?1 AND label = ?2", params![ln.parent, ln.label])?;
+            }
+        }
+        tx.commit()?;
+        Ok(bind)
     }
 
     pub fn pending_put(&self, p: &Pending) -> Result<()> {
