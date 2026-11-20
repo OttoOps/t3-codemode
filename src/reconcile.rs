@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -17,6 +17,7 @@ pub const SINCE: &str = "reconcile_since";
 const BATCH: usize = 100;
 const PAGE_LOAD_GAP_MINS: f64 = 0.5;
 const MAX_FAILURES: u32 = 3;
+const EXIT_WINDOW_MINS: f64 = 30.0;
 const PR_FIELDS: &str = "fragment F on PullRequest { id state isDraft headRefOid mergeStateStatus \
 isMergeQueueEnabled isInMergeQueue mergeQueueEntry { position } mergeCommit { oid } mergedAt closedAt \
 timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) { nodes { ... on RemovedFromMergeQueueEvent { \
@@ -271,10 +272,24 @@ impl Wf {
                 bail!("GitHub reconcile query failed: {}", errors(&resp).unwrap_or_else(|| "no data".into()));
             }
             for (i, t) in chunk.iter().enumerate() {
-                let repo = &resp["data"][format!("p{i}")];
-                let done = match repo["pullRequest"].is_object() {
-                    true => self.fix(t, repo, &mut pass).await,
-                    false => self.missing(t, &resp, &mut pass).await,
+                let alias = format!("p{i}");
+                let repo = &resp["data"][&alias];
+                let errs: Vec<&Value> = resp["errors"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|e| e["path"][0] == alias.as_str())
+                    .collect();
+                let why = errs.iter().filter_map(|e| e["message"].as_str()).collect::<Vec<_>>().join("; ");
+                let done = if repo["pullRequest"].is_object() {
+                    self.fix(t, repo, &mut pass).await
+                } else if errs.iter().any(|e| e["type"] == "NOT_FOUND") {
+                    self.missing(t, &why, &mut pass).await
+                } else {
+                    Err(anyhow!(
+                        "GitHub returned no pull request: {}",
+                        if why.is_empty() { "no error given" } else { &why }
+                    ))
                 };
                 if let Err(e) = done {
                     failed.push(format!("{}: {e:#}", t.label()));
@@ -344,7 +359,8 @@ impl Wf {
             t.approval = Some(w.approval);
         }
         for row in self.store.pr_seen_all()? {
-            let live = row.queued && row.state == "OPEN";
+            let leaving = row.left.as_deref().is_some_and(|l| self.mins(Some(l)).is_some_and(|m| m < EXIT_WINDOW_MINS));
+            let live = (row.queued || leaving) && row.state == "OPEN";
             if !live && !map.contains_key(&(row.repo.clone(), row.pr)) {
                 continue;
             }
@@ -380,6 +396,11 @@ impl Wf {
                 _ => None,
             };
             let prev = self.store.pr_seen_get(&t.repo, t.number)?;
+            let left = match &prev {
+                Some(p) if o.state == "OPEN" && !o.queued && p.queued => Some(self.now()),
+                Some(p) if o.state == "OPEN" && !o.queued => p.left.clone(),
+                _ => None,
+            };
             if prev.as_ref().map(|p| (p.state.as_str(), p.queued)) != Some((o.state.as_str(), o.queued)) {
                 self.changed();
             }
@@ -392,6 +413,7 @@ impl Wf {
                 since: t.since.clone(),
                 tickets: t.tickets.clone(),
                 at: self.now(),
+                left,
             })?;
             advance
         };
@@ -401,12 +423,11 @@ impl Wf {
         }
     }
 
-    async fn missing(&self, t: &Tracked, resp: &Value, pass: &mut Pass) -> Result<()> {
+    async fn missing(&self, t: &Tracked, why: &str, pass: &mut Pass) -> Result<()> {
         let _g = self.lock.lock().await;
         self.store.pr_seen_remove(&t.repo, t.number)?;
         if let Some(w) = self.wait(t)? {
-            let why = errors(resp).unwrap_or_else(|| "GitHub returned no pull request".into());
-            self.failed(t, w, &why, pass)?;
+            self.failed(t, w, why, pass)?;
         }
         Ok(())
     }
@@ -547,7 +568,22 @@ impl Wf {
                 }
                 Ok(None)
             }
-            (WaitStatus::Waiting, false) if !o.draft && MERGEABLE.contains(&o.merge_state.as_str()) => Ok(Some(w)),
+            (WaitStatus::Waiting, false) if !o.draft && MERGEABLE.contains(&o.merge_state.as_str()) => {
+                if w.pull_request_id.is_empty() || w.pull_request_id == o.id {
+                    return Ok(Some(w));
+                }
+                let ask = Ask {
+                    what: format!("{} is no longer the pull request that was approved", t.label()),
+                    reply: "reply \"merge\" to approve it again, or \"hold\" to leave it",
+                    context: format!(
+                        "The approval was for GitHub node {}. That number now resolves to {}.",
+                        w.pull_request_id, o.id
+                    ),
+                };
+                self.raise(t, w.thread.as_deref(), "report", &ask, &o.head, None, pass)?;
+                self.store.merge_wait_retire(&w)?;
+                Ok(None)
+            }
             (WaitStatus::Sent, true) if w.failures > 0 => {
                 w.failures = 0;
                 w.last_error = None;

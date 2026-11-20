@@ -178,6 +178,8 @@ pub struct PrSeen {
     pub since: String,
     pub tickets: Vec<(String, String)>,
     pub at: String,
+    #[serde(default)]
+    pub left: Option<String>,
 }
 
 pub struct Wake<'a> {

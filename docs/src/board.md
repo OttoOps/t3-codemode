@@ -222,7 +222,8 @@ and its ticket. It tracks:
   exactly one,
 - each pull request `wf.merge` saved as waiting to be queued, or sent to
   GitHub,
-- each pull request it last saw in a merge queue, until it leaves.
+- each pull request it last saw in a merge queue, until 30 minutes after it
+  leaves, so a removal that GitHub records late still gets its report.
 
 It reads them with `gh` as the user the service runs as, in one GraphQL query
 for every 100 pull requests it tracks, and makes no GitHub call when it tracks
@@ -258,13 +259,18 @@ When GitHub refuses the enqueue or the merge, or cannot find the pull request,
 the approval stays for the next check. After 3 failures in a row the board
 opens a `report` card with GitHub's last message and drops the approval. A pull
 request sent to the queue that leaves it with no removal GitHub recorded gets
-the same 3 checks. Every fix goes on the activity feed from `github`.
+the same 3 checks. The board never sends an approval whose number GitHub now
+resolves to another pull request, such as after a repository rename. It drops
+that approval and opens a `report` card. Every fix goes on the activity feed
+from `github`.
 
 The tree shows a pull request in the merge queue as `queued`, next to `open`,
 `merged` and `closed`. When `gh` cannot reach GitHub, the check logs a warning,
 changes nothing, and runs again at the next interval. When one pull request
 cannot be fixed, for example because the waiting list is full, the check still
 fixes the others, and that pull request keeps its approval for the next check.
+A read error for one pull request, other than GitHub's `NOT_FOUND`, changes
+nothing for it either.
 
 ## Settling
 
