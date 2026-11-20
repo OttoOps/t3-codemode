@@ -13,7 +13,7 @@ use t3_codemode::config::{self, Config};
 use t3_codemode::release::{self, Version};
 use t3_codemode::store::Store;
 use t3_codemode::t3_http::HttpT3;
-use t3_codemode::{bench, platform, server, skills, steps, upgrade, watcher};
+use t3_codemode::{bench, claude_link, platform, server, skills, steps, upgrade, watcher};
 
 #[derive(Parser)]
 #[command(
@@ -130,7 +130,7 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum SkillsCmd {
-    /// Write the skills to ~/.agents/skills, record them in ~/.config/t3-workflow/installed.json, and apply new setup steps
+    /// Write the skills to ~/.agents/skills, link them into Claude Code's skills folder, record them in ~/.config/t3-workflow/installed.json, and apply new setup steps
     Install {
         /// Replace skills another tool (npx skills, a copy) installed, and drop them from its lock file
         #[arg(long)]
@@ -165,13 +165,23 @@ fn run_skills(cmd: SkillsCmd) -> Result<ExitCode> {
             let st = skills::status(&paths, &bundle)?;
             let setup = steps::check(&env, &bundle)?;
             let ok = t3_codemode::drift::current(&st, &setup);
+            let links = match st.installed {
+                Some(_) => claude_link::check(&env.claude, &paths.dir, &bundle.skills()),
+                None => Vec::new(),
+            };
             if json {
                 let mut v = serde_json::to_value(&st)?;
                 v["current"] = Value::Bool(ok);
                 v["steps"] = serde_json::to_value(&setup)?;
+                v["claudeLinks"] = serde_json::to_value(&links)?;
                 println!("{}", serde_json::to_string_pretty(&v)?);
             } else {
-                print!("{}{}", skills::describe_status(&st), steps::describe_steps(&setup));
+                print!(
+                    "{}{}{}",
+                    skills::describe_status(&st),
+                    steps::describe_steps(&setup),
+                    claude_link::describe_check(&links)
+                );
             }
             return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE });
         }
@@ -184,12 +194,19 @@ fn run_skills(cmd: SkillsCmd) -> Result<ExitCode> {
     };
     let report = skills::sync(&paths, &bundle, opts)?;
     let applied = steps::apply(&env, &bundle)?;
+    let linked = claude_link::link(&env.claude, &paths.dir, &bundle.skills());
     if json {
         let mut v = serde_json::to_value(&report)?;
         v["steps"] = serde_json::to_value(&applied)?;
+        v["claudeLinks"] = serde_json::to_value(&linked)?;
         println!("{}", serde_json::to_string_pretty(&v)?);
     } else {
-        print!("{}{}", skills::describe_report(&report), steps::describe_applied(&applied));
+        print!(
+            "{}{}{}",
+            skills::describe_report(&report),
+            steps::describe_applied(&applied),
+            claude_link::describe(&linked)
+        );
     }
     Ok(ExitCode::SUCCESS)
 }
