@@ -18,6 +18,7 @@ pub mod reconcile;
 pub mod release;
 pub mod sandbox;
 pub mod server;
+pub mod skills;
 pub mod store;
 pub mod t3;
 pub mod t3_http;
