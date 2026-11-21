@@ -100,7 +100,7 @@ async fn priority_fills_the_first_member_until_it_is_out() {
     let r = launch(&h, 4).await;
     assert_eq!(r["instanceId"], "claude-b");
     let reason = r["reason"].as_str().unwrap();
-    assert!(reason.starts_with("priority"), "{reason}");
+    assert!(reason.starts_with(&format!("claudeAgent {OPUS}, effort high; priority")), "{reason}");
     assert!(reason.contains(&format!("claude-a limited until {}", local_clock("2026-11-17T21:00:00Z"))), "{reason}");
 }
 
@@ -190,7 +190,10 @@ async fn a_reserved_member_is_a_last_resort_while_no_usage_source_exists() {
     let r = launch(&h, 5).await;
     assert_eq!(r["instanceId"], "claude-a");
     let reason = r["reason"].as_str().unwrap();
-    assert!(reason.starts_with("last resort: claude-a holds a 30% reserve"), "{reason}");
+    assert!(
+        reason.starts_with(&format!("claudeAgent {OPUS}, effort high; last resort: claude-a holds a 30% reserve")),
+        "{reason}"
+    );
     assert!(reason.contains("claude-b limited until"), "{reason}");
 }
 
@@ -215,7 +218,11 @@ async fn wf_pick_returns_a_model_selection_and_records_the_pick() {
     assert_eq!(r["model"], OPUS);
     assert_eq!(r["options"], json!([{"id": "effort", "value": "high"}]));
     assert_eq!(r["modelSelection"], json!({"instanceId": r["instanceId"], "model": OPUS, "options": r["options"]}));
-    assert!(r["reason"].as_str().unwrap().starts_with("weighted: weight 1 of 2"), "{r}");
+    assert_eq!((&r["driver"], &r["effort"]), (&json!("claudeAgent"), &json!("high")));
+    assert!(
+        r["reason"].as_str().unwrap().starts_with(&format!("claudeAgent {OPUS}, effort high; weighted: weight 1 of 2")),
+        "{r}"
+    );
     let launched = h
         .exec(
             "async () => { const p = await wf.pick({ pool: 'opus' });
@@ -342,7 +349,11 @@ async fn no_pool_set_launches_exactly_as_before() {
 async fn a_member_of_another_driver_or_unknown_instance_is_rejected() {
     let h = pooled("weighted", json!([{"instanceId": "claude-a"}, {"instanceId": "codex"}]));
     let out = h.exec("async () => wf.launchTicket({ issue: 'acme/widgets#1' })").await;
-    assert!(err_text(&out).contains("pool opus: member codex is a codex instance, not claudeAgent"), "{}", out.text);
+    assert!(
+        err_text(&out).contains("pool opus: member codex is a codex instance, not claudeAgent; set \"mixed\": true"),
+        "{}",
+        out.text
+    );
     assert!(h.fake.launched().is_empty());
     assert!(h.app.wf.check_pools().await.is_err());
     let h = pooled("weighted", json!([{"instanceId": "claude-a"}, {"instanceId": "claude-z"}]));
@@ -580,13 +591,21 @@ async fn a_usage_source_with_nothing_left_limits_the_member() {
 
 fn headroom_choice(usage: &[(&str, f64)], credits: &BTreeMap<String, i64>) -> (String, String, BTreeMap<String, i64>) {
     let pool = PoolConfig {
-        driver: "claudeAgent".into(),
-        model: OPUS.into(),
+        mixed: false,
+        driver: Some("claudeAgent".into()),
+        model: Some(OPUS.into()),
         effort: None,
         strategy: "headroom".into(),
         members: ["claude-a", "claude-b", "claude-c"]
             .iter()
-            .map(|id| PoolMember { instance_id: id.to_string(), weight: 1, reserve: 0.0, cost: 1.0 })
+            .map(|id| PoolMember {
+                instance_id: id.to_string(),
+                weight: 1,
+                reserve: 0.0,
+                cost: 1.0,
+                model: None,
+                effort: None,
+            })
             .collect(),
     };
     let providers: Vec<Value> =
@@ -612,13 +631,14 @@ fn headroom_choice(usage: &[(&str, f64)], credits: &BTreeMap<String, i64>) -> (S
 fn headroom_picks_the_most_room_and_breaks_ties_by_weight() {
     let none = BTreeMap::new();
     let (id, reason, _) = headroom_choice(&[("claude-a", 40.0), ("claude-b", 62.0), ("claude-c", 10.0)], &none);
-    assert_eq!((id.as_str(), reason.as_str()), ("claude-b", "headroom: most left, 62%"));
+    let ran = format!("claudeAgent {OPUS}, effort default; ");
+    assert_eq!((id.as_str(), reason.as_str()), ("claude-b", format!("{ran}headroom: most left, 62%").as_str()));
     let tie = [("claude-a", 70.0), ("claude-b", 70.0), ("claude-c", 10.0)];
     let (first, _, credits) = headroom_choice(&tie, &none);
     let (second, _, _) = headroom_choice(&tie, &credits);
     assert_eq!([first.as_str(), second.as_str()], ["claude-a", "claude-b"]);
     let (_, reason, _) = headroom_choice(&[], &none);
-    assert_eq!(reason, "headroom: no member reports usage, so weighted: weight 1 of 3");
+    assert_eq!(reason, format!("{ran}headroom: no member reports usage, so weighted: weight 1 of 3"));
 }
 
 #[test]
@@ -631,6 +651,9 @@ fn limit_hold_minutes_must_be_positive() {
     assert_eq!(Config::default().limit_hold_minutes, 60);
 }
 
+const HIGH: &str = "claudeAgent claude-opus-5-5, effort high; ";
+const DEFAULT: &str = "claudeAgent claude-opus-5-5, effort default; ";
+
 fn costed(costs: &[(&str, f64)]) -> Value {
     costs.iter().map(|(id, cost)| json!({"instanceId": id, "cost": cost})).collect()
 }
@@ -640,13 +663,16 @@ async fn cheapest_sends_every_launch_to_the_cheapest_ready_member() {
     let h = pooled("cheapest", costed(&[("claude-a", 2.0), ("claude-b", 0.0)]));
     assert_eq!(launches(&h, 1, 4).await, ["claude-b"; 4]);
     let r = pick(&h).await;
-    assert_eq!(r["reason"], "cheapest: cost 0, weighted: weight 1 of 1");
+    assert_eq!(r["reason"], format!("{HIGH}cheapest: cost 0, weighted: weight 1 of 1"));
     limit(&h, "claude-b", "2026-11-17T21:00:00Z");
     let r = launch(&h, 5).await;
     assert_eq!(r["instanceId"], "claude-a");
     let reason = r["reason"].as_str().unwrap();
     let until = local_clock("2026-11-17T21:00:00Z");
-    assert_eq!(reason, format!("cheapest: cost 2, weighted: weight 1 of 1; skipped claude-b limited until {until}"));
+    assert_eq!(
+        reason,
+        format!("{HIGH}cheapest: cost 2, weighted: weight 1 of 1; skipped claude-b limited until {until}")
+    );
     h.clock.set("2026-11-17T21:00:01Z");
     assert_eq!(pick(&h).await["instanceId"], "claude-b");
 }
@@ -667,7 +693,7 @@ async fn cheapest_spreads_by_weight_among_members_of_the_same_cost() {
     assert_eq!((tally(&picks, "claude-a"), tally(&picks, "claude-b")), (2, 6), "{picks:?}");
     let r = pick(&h).await;
     let reason = r["reason"].as_str().unwrap();
-    assert!(reason.starts_with("cheapest: cost 0.5, weighted: weight "), "{reason}");
+    assert!(reason.starts_with(&format!("{HIGH}cheapest: cost 0.5, weighted: weight ")), "{reason}");
     assert!(reason.ends_with(" of 4; skipped claude-d does not list model claude-opus-5-5"), "{reason}");
 }
 
@@ -679,7 +705,9 @@ async fn a_cheap_member_held_at_its_reserve_never_wins_over_a_ready_one() {
     let r = pick(&h).await;
     assert_eq!(
         r["reason"],
-        "cheapest: cost 1, weighted: weight 1 of 1; skipped claude-a held at its 30% reserve until every other member is out"
+        format!(
+            "{HIGH}cheapest: cost 1, weighted: weight 1 of 1; skipped claude-a held at its 30% reserve until every other member is out"
+        )
     );
     let u = usage(&h);
     u.set("claude-a", 20.0, None);
@@ -703,7 +731,9 @@ async fn a_cheap_member_with_a_reserve_is_still_the_last_resort() {
     assert_eq!(r["instanceId"], "claude-a");
     let reason = r["reason"].as_str().unwrap();
     assert!(
-        reason.starts_with("last resort: claude-a holds a 30% reserve and every other member is out; cheapest: cost 0"),
+        reason.starts_with(&format!(
+            "{HIGH}last resort: claude-a holds a 30% reserve and every other member is out; cheapest: cost 0"
+        )),
         "{reason}"
     );
 }
@@ -757,14 +787,22 @@ fn cheapest_choice(
 ) -> (String, String, BTreeMap<String, i64>) {
     let ids = ["claude-a", "claude-b", "claude-c"];
     let pool = PoolConfig {
-        driver: "claudeAgent".into(),
-        model: OPUS.into(),
+        mixed: false,
+        driver: Some("claudeAgent".into()),
+        model: Some(OPUS.into()),
         effort: None,
         strategy: "cheapest".into(),
         members: ids
             .iter()
             .zip(costs)
-            .map(|(id, cost)| PoolMember { instance_id: id.to_string(), weight: 1, reserve: 0.0, cost: *cost })
+            .map(|(id, cost)| PoolMember {
+                instance_id: id.to_string(),
+                weight: 1,
+                reserve: 0.0,
+                cost: *cost,
+                model: None,
+                effort: None,
+            })
             .collect(),
     };
     let providers: Vec<Value> = ids.map(|id| provider(id, "claudeAgent", &[OPUS])).into();
@@ -794,7 +832,7 @@ fn cheapest_takes_the_lowest_cost_group_and_moves_up_only_when_it_is_out() {
     let none = BTreeMap::new();
     let costs = [0.0, 0.0, 3.0];
     let (first, reason, credits) = cheapest_choice(&costs, &[], &none);
-    assert_eq!((first.as_str(), reason.as_str()), ("claude-a", "cheapest: cost 0, weighted: weight 1 of 2"));
+    assert_eq!((first.as_str(), reason), ("claude-a", format!("{DEFAULT}cheapest: cost 0, weighted: weight 1 of 2")));
     let (second, _, credits) = cheapest_choice(&costs, &[], &credits);
     assert_eq!(second, "claude-b");
     let (one_out, _, _) = cheapest_choice(&costs, &["claude-a"], &credits);
@@ -805,9 +843,211 @@ fn cheapest_takes_the_lowest_cost_group_and_moves_up_only_when_it_is_out() {
     assert_eq!(
         reason,
         format!(
-            "cheapest: cost 3, weighted: weight 1 of 1; skipped claude-a limited until {until}, claude-b limited until {until}"
+            "{DEFAULT}cheapest: cost 3, weighted: weight 1 of 1; skipped claude-a limited until {until}, claude-b limited until {until}"
         )
     );
     let (id, _, _) = cheapest_choice(&[2.0, 1.5, 1.0], &[], &none);
     assert_eq!(id, "claude-c");
+}
+
+const ASTRA: &str = "gpt-6-astra";
+
+fn codex(id: &str) -> Value {
+    let mut p = provider(id, "codex", &[ASTRA]);
+    p["models"][0]["options"] = json!([{"id": "reasoningEffort", "values": ["low", "medium", "xhigh"]}]);
+    p
+}
+
+fn mixed(members: Value, board_pool: bool) -> H {
+    let mut c = json!({"pools": {"frontier": {"mixed": true, "members": members}}});
+    if board_pool {
+        c["board"] = json!({"pool": "frontier"});
+    }
+    let h = H::build(Vec::new(), Config::from_value(c).unwrap());
+    h.fake.set_providers(vec![
+        provider("claude-a", "claudeAgent", &[OPUS, "claude-haiku-5-5"]),
+        codex("codex-a"),
+        codex("codex-b"),
+    ]);
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    h
+}
+
+fn claude_and_codex() -> Value {
+    json!([{"instanceId": "claude-a", "model": OPUS, "effort": "high"},
+           {"instanceId": "codex-a", "model": ASTRA, "effort": "xhigh"}])
+}
+
+async fn pick_frontier(h: &H) -> Value {
+    result(&h.exec("async () => wf.pick({ pool: 'frontier' })").await)
+}
+
+#[tokio::test]
+async fn a_mixed_pool_picks_each_member_with_its_own_model_and_effort() {
+    let h = mixed(claude_and_codex(), false);
+    let mut picks = BTreeMap::new();
+    for _ in 0..2 {
+        let r = pick_frontier(&h).await;
+        picks.insert(r["instanceId"].as_str().unwrap().to_string(), r);
+    }
+    let claude = &picks["claude-a"];
+    assert_eq!(
+        (&claude["driver"], &claude["model"], &claude["effort"]),
+        (&json!("claudeAgent"), &json!(OPUS), &json!("high"))
+    );
+    assert_eq!(
+        claude["modelSelection"],
+        json!({"instanceId": "claude-a", "model": OPUS, "options": [{"id": "effort", "value": "high"}]})
+    );
+    assert!(
+        claude["reason"].as_str().unwrap().starts_with(&format!("claudeAgent {OPUS}, effort high; weighted")),
+        "{claude}"
+    );
+    let codex = &picks["codex-a"];
+    assert_eq!(
+        (&codex["driver"], &codex["model"], &codex["effort"]),
+        (&json!("codex"), &json!(ASTRA), &json!("xhigh"))
+    );
+    assert_eq!(
+        codex["modelSelection"],
+        json!({"instanceId": "codex-a", "model": ASTRA, "options": [{"id": "reasoningEffort", "value": "xhigh"}]})
+    );
+    assert!(
+        codex["reason"].as_str().unwrap().starts_with(&format!("codex {ASTRA}, effort xhigh; weighted")),
+        "{codex}"
+    );
+}
+
+#[tokio::test]
+async fn a_mixed_member_is_checked_against_its_own_model_and_effort() {
+    let h = mixed(
+        json!([{"instanceId": "claude-a", "model": ASTRA},
+               {"instanceId": "codex-a", "model": ASTRA, "effort": "high"},
+               {"instanceId": "codex-b", "model": ASTRA}]),
+        false,
+    );
+    let r = pick_frontier(&h).await;
+    assert_eq!(r["instanceId"], "codex-b");
+    assert_eq!((&r["effort"], &r["options"]), (&Value::Null, &json!([])));
+    assert_eq!(r["modelSelection"], json!({"instanceId": "codex-b", "model": ASTRA}));
+    assert!(r["reason"].as_str().unwrap().starts_with(&format!("codex {ASTRA}, effort default; ")), "{r}");
+    assert_eq!(
+        r["skipped"],
+        json!([{"instanceId": "claude-a", "reason": format!("does not list model {ASTRA}")},
+               {"instanceId": "codex-a", "reason": format!("does not offer effort high for {ASTRA}")}])
+    );
+}
+
+#[tokio::test]
+async fn wf_pools_shows_each_members_driver_model_and_effort() {
+    let h = mixed(claude_and_codex(), false);
+    let pools = result(&h.exec("async () => wf.pools()").await);
+    let p = &pools[0];
+    assert_eq!((&p["pool"], &p["mixed"], &p["error"]), (&json!("frontier"), &json!(true), &Value::Null));
+    assert_eq!((&p["driver"], &p["model"], &p["effort"]), (&Value::Null, &Value::Null, &Value::Null));
+    let seen: Vec<(Value, Value, Value, Value)> = p["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| (m["driver"].clone(), m["model"].clone(), m["effort"].clone(), m["state"].clone()))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (json!("claudeAgent"), json!(OPUS), json!("high"), json!("ready")),
+            (json!("codex"), json!(ASTRA), json!("xhigh"), json!("ready")),
+        ]
+    );
+    let same = pooled("weighted", two(1, 1));
+    let pools = result(&same.exec("async () => wf.pools()").await);
+    let m = &pools[0]["members"][1];
+    assert_eq!(pools[0]["mixed"], false);
+    assert_eq!((&m["driver"], &m["model"], &m["effort"]), (&json!("claudeAgent"), &json!(OPUS), &json!("high")));
+}
+
+#[tokio::test]
+async fn a_mixed_board_pool_launches_on_the_members_model_and_refuses_one_named() {
+    let h = mixed(claude_and_codex(), true);
+    let r = launch(&h, 1).await;
+    let id = r["instanceId"].as_str().unwrap();
+    let model = if id == "claude-a" { OPUS } else { ASTRA };
+    assert_eq!(h.fake.launched()[0]["modelSelection"]["model"], model);
+    let out = h.exec(&format!("async () => wf.launchTicket({{ issue: 'acme/widgets#2', model: '{OPUS}' }})")).await;
+    assert!(err_text(&out).contains("board.pool frontier is a mixed pool"), "{}", out.text);
+    let out = h.exec("async () => wf.launchTicket({ issue: 'acme/widgets#3', effort: 'high' })").await;
+    assert!(err_text(&out).contains("unset board.pool to launch effort high"), "{}", out.text);
+    assert_eq!(h.fake.launched().len(), 1);
+}
+
+#[test]
+fn config_load_keeps_mixed_and_single_driver_pools_apart() {
+    let bad = |pool: Value| format!("{:#}", Config::from_value(json!({"pools": {"p": pool}})).unwrap_err());
+    let single = json!({"driver": "claudeAgent", "model": OPUS,
+                        "members": [{"instanceId": "claude-a", "model": "claude-haiku-5-5"}]});
+    assert!(bad(single).contains("pool p: member claude-a: only a mixed pool's members set their own model"));
+    let single =
+        json!({"driver": "claudeAgent", "model": OPUS, "members": [{"instanceId": "claude-a", "effort": "low"}]});
+    assert!(bad(single).contains("only a mixed pool's members set their own effort"));
+    let e = bad(json!({"model": OPUS, "members": [{"instanceId": "claude-a"}]}));
+    assert!(e.contains("pool p: driver is missing; set it, or set \"mixed\": true"), "{e}");
+    for key in ["driver", "model", "effort"] {
+        let mut p = json!({"mixed": true, "members": [{"instanceId": "claude-a", "model": OPUS}]});
+        p[key] = json!("x");
+        assert!(bad(p).contains(&format!("pool p: a mixed pool has no pool-level {key}")));
+    }
+    let e = bad(json!({"mixed": true, "members": [{"instanceId": "claude-a", "effort": "high"}]}));
+    assert!(e.contains("pool p: member claude-a: a mixed pool's member needs a model"), "{e}");
+    let ok = Config::from_value(json!({"pools": {"p": {"mixed": true, "members": claude_and_codex()}}})).unwrap();
+    let p = &ok.pools["p"];
+    assert_eq!((p.model_of(&p.members[1]), p.effort_of(&p.members[1])), (ASTRA, Some("xhigh")));
+}
+
+#[tokio::test]
+async fn a_single_driver_pool_still_rejects_another_driver_beside_a_mixed_one() {
+    let c = json!({"pools": {
+        "frontier": {"mixed": true, "members": claude_and_codex()},
+        "opus": {"driver": "claudeAgent", "model": OPUS, "members": [{"instanceId": "claude-a"}, {"instanceId": "codex-a"}]}
+    }});
+    let h = H::build(Vec::new(), Config::from_value(c).unwrap());
+    h.fake.set_providers(vec![provider("claude-a", "claudeAgent", &[OPUS]), codex("codex-a")]);
+    let out = h.exec("async () => wf.pick({ pool: 'opus' })").await;
+    assert!(err_text(&out).contains("pool opus: member codex-a is a codex instance, not claudeAgent"), "{}", out.text);
+    assert_eq!(pick_frontier(&h).await["pool"], "frontier");
+    let e = format!("{:#}", h.app.wf.check_pools().await.unwrap_err());
+    assert!(e.contains("pool opus: member codex-a"), "{e}");
+}
+
+#[tokio::test]
+async fn a_mixed_pool_finds_a_member_model_beyond_t3s_short_list() {
+    let h = mixed(json!([{"instanceId": "claude-a", "model": "claude-haiku-5-5"}]), false);
+    h.fake.set_short_list(1);
+    let r = pick_frontier(&h).await;
+    assert_eq!((&r["instanceId"], &r["model"]), (&json!("claude-a"), &json!("claude-haiku-5-5")));
+    let pools = result(&h.exec("async () => wf.pools()").await);
+    assert_eq!(pools[0]["members"][0]["state"], "ready");
+}
+
+#[tokio::test]
+async fn a_mixed_cheapest_pool_sends_launches_to_the_cheapest_member_on_its_own_model() {
+    let c = json!({"pools": {"cheap": {"mixed": true, "strategy": "cheapest", "members": [
+        {"instanceId": "claude-a", "model": "claude-haiku-5-5", "cost": 2},
+        {"instanceId": "codex-a", "model": ASTRA, "effort": "low", "cost": 0.5}
+    ]}}});
+    let h = H::build(Vec::new(), Config::from_value(c).unwrap());
+    h.fake.set_providers(vec![provider("claude-a", "claudeAgent", &[OPUS, "claude-haiku-5-5"]), codex("codex-a")]);
+    let pick = || async { result(&h.exec("async () => wf.pick({ pool: 'cheap' })").await) };
+    let r = pick().await;
+    assert_eq!(
+        r["modelSelection"],
+        json!({"instanceId": "codex-a", "model": ASTRA, "options": [{"id": "reasoningEffort", "value": "low"}]})
+    );
+    assert_eq!(r["reason"], format!("codex {ASTRA}, effort low; cheapest: cost 0.5, weighted: weight 1 of 1"));
+    limit(&h, "codex-a", "2026-11-17T21:00:00Z");
+    let r = pick().await;
+    assert_eq!(r["modelSelection"], json!({"instanceId": "claude-a", "model": "claude-haiku-5-5"}));
+    assert!(
+        r["reason"].as_str().unwrap().starts_with("claudeAgent claude-haiku-5-5, effort default; cheapest: cost 2"),
+        "{r}"
+    );
 }
