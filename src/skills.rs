@@ -469,6 +469,18 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("replacing {}", path.display()))
 }
 
+fn has_symlink_parent(root: &Path, rel: &str) -> bool {
+    let mut cur = root.to_path_buf();
+    let parts: Vec<&str> = rel.split('/').collect();
+    for part in parts.iter().take(parts.len().saturating_sub(1)) {
+        cur.push(part);
+        if std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()) {
+            return true;
+        }
+    }
+    false
+}
+
 fn remove_with_empty_parents(dir: &Path, rel: &str) -> Result<()> {
     let path = on_disk(dir, rel);
     match std::fs::remove_file(&path) {
@@ -537,7 +549,17 @@ pub fn sync(paths: &Paths, bundle: &Bundle, opts: Options) -> Result<Report> {
             }
             if opts.take_over {
                 for rel in RETIRED_FILES {
-                    if !expected.contains_key(*rel) && on_disk(&paths.dir, rel).exists() {
+                    if expected.contains_key(*rel) {
+                        continue;
+                    }
+                    let path = on_disk(&paths.dir, rel);
+                    if has_symlink_parent(&paths.dir, rel) {
+                        if path.exists() || std::fs::symlink_metadata(&path).is_ok() {
+                            report.kept.push((*rel).to_string());
+                        }
+                        continue;
+                    }
+                    if path.exists() || std::fs::symlink_metadata(&path).is_ok() {
                         remove_with_empty_parents(&paths.dir, rel)?;
                         report.removed.push((*rel).to_string());
                     }
