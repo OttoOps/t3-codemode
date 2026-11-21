@@ -44,7 +44,24 @@ pub struct PoolConfig {
     pub effort: Option<String>,
     #[serde(default = "weighted")]
     pub strategy: String,
+    #[serde(default, skip_serializing_if = "MoveOnLimit::is_ask")]
+    pub move_on_limit: MoveOnLimit,
     pub members: Vec<PoolMember>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MoveOnLimit {
+    #[default]
+    Ask,
+    Auto,
+    Never,
+}
+
+impl MoveOnLimit {
+    fn is_ask(&self) -> bool {
+        *self == Self::Ask
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -907,6 +924,7 @@ impl Wf {
                 "model": pool.model,
                 "effort": pool.effort,
                 "strategy": pool.strategy,
+                "moveOnLimit": pool.move_on_limit,
                 "error": error,
                 "warnings": warnings,
                 "members": members,
