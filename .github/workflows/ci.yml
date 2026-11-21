@@ -58,10 +58,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Install mold
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y mold
+          mold --version
+          echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
+      - name: Verify mold linked the binary
+        if: runner.os == 'Linux'
+        run: |
+          readelf -p .comment target/debug/t3cm
+          readelf -p .comment target/debug/t3cm | grep -q 'mold '
       - if: matrix.os == 'ubuntu-latest'
         run: python3 -m unittest discover -s tests/skills -v
 
