@@ -146,6 +146,7 @@ it is [mixed](#mixed-pools).
 | `driver` | required | The driver every member must be, as `orchestrator_capabilities` reports it in `driverKind`. A mixed pool has none. |
 | `model`, `effort` | required, unset | Model and effort for every launch from the pool, so a thread gets the same model whichever account runs it. A mixed pool has none. |
 | `strategy` | `weighted` | `weighted` spreads launches by weight. `priority` fills members in order and moves to the next only when one is out. `cheapest` sends launches to the lowest-cost members that can run, by weight among them. `headroom` needs a usage source, so config load rejects it for now. |
+| `moveOnLimit` | `ask` | What happens when a thread the pool launched stops on a usage limit: `ask` puts a move card on the board, `auto` moves the thread to a ready member without one, and `never` leaves the thread where it is. See [Moving a limited thread](#moving-a-limited-thread). |
 | `members[].instanceId` | required | A T3 provider instance |
 | `members[].weight` | `1` | The member's share of `weighted` launches. With weights 3 and 1, three of every four launches go to the first member. |
 | `members[].reserve` | `0` | A share of the account's usage window, 0-100, held for work that names the instance directly |
@@ -304,20 +305,35 @@ Pools are per T3 environment, since instance ids belong to one T3 server.
 
 #### Moving a limited thread
 
-When a thread that a pool launched stops on a usage limit, the watcher pass
-puts one card on the board: reply `move` to move the thread to a ready member
-of its pool, or `wait` to leave it until the reset. In a mixed pool, a move
-considers only the members of the thread's own driver. A move forks the thread
-with its context and worktree, switches the fork to the new member, moves the
-thread's workflow links to the fork, resumes the fork, and settles the old
-thread. The pick history and the feed record the move. The links, the pick,
+When a thread that a pool launched stops on a usage limit, the pool's
+`moveOnLimit` sets what the watcher pass does:
+
+- `ask`, the default, puts one card on the board: reply `move` to move the
+  thread to a ready member of its pool, or `wait` to leave it until the reset.
+- `auto` moves the thread at once, with no card, and logs the move to the
+  feed. When the move fails, for example because no other member is ready,
+  the pass puts up the `ask` card instead. The card says the automatic move
+  failed, and its full message gives the reason. When the move goes through
+  but the fork cannot be resumed or the old thread settled, the pass puts a
+  report card on the fork that says what to finish by hand.
+- `never` leaves the thread where it is. The member is still marked limited,
+  so new picks skip it until the reset.
+
+Config load rejects any other value. `wf.pools()` shows each pool's
+`moveOnLimit`.
+
+In a mixed pool, a move considers only the members of the thread's own
+driver. A move forks the thread with its context and worktree, switches the
+fork to the new member, moves the thread's workflow links to the fork, resumes
+the fork, and settles the old thread. The pick history and the feed record the move. The links, the pick,
 the feed entry and the answer are saved together, so if saving them fails,
 nothing moves and the card stays open. Answering `move` again then reuses the
-same fork.
+same fork. A failed automatic move keeps its fork the same way, and answering
+`move` on its card reuses it.
 
-The card goes only to a thread with a recorded pick: a ticket the board
-launched, or a launch reported with [`wf.picked`](globals.md#wf). A thread
-launched straight on an instance never gets one, and neither does a board
+Only a thread with a recorded pick is moved or gets a card: a ticket the
+board launched, or a launch reported with [`wf.picked`](globals.md#wf). A
+thread launched straight on an instance never is, and neither is a board
 question. A thread that runs again before the answer
 loses its card, and a move refuses a thread that is running.
 
