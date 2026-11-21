@@ -6,7 +6,7 @@
 
 ## Validation
 
-<!-- List the commands you ran and their results (cargo fmt --check, cargo clippy --all-targets -- -D warnings, cargo test --release --locked). Say whether you also ran the service against a live T3 Code server. For docs, describe the checks you made. -->
+<!-- List the commands you ran and their results (cargo fmt --check, cargo clippy --all-targets -- -D warnings, cargo test --locked). Say whether you also ran the service against a live T3 Code server. For docs, describe the checks you made. -->
 
 ## Compatibility
 

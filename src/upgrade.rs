@@ -76,7 +76,7 @@ pub fn cargo_build(exe: &Path) -> bool {
     let mut up = exe.ancestors().skip(1);
     let profile = up.next().and_then(|p| p.file_name()).and_then(|n| n.to_str());
     let in_target = exe.ancestors().any(|a| a.file_name().is_some_and(|n| n == "target"));
-    matches!(profile, Some("release" | "debug")) && in_target
+    matches!(profile, Some("release" | "debug" | "dist")) && in_target
 }
 
 struct Scratch(PathBuf);
@@ -693,8 +693,11 @@ mod tests {
     #[test]
     fn cargo_builds_are_recognised() {
         assert!(cargo_build(Path::new("/src/t3cm/target/release/t3cm")));
+        assert!(cargo_build(Path::new("/src/t3cm/target/dist/t3cm")));
         assert!(cargo_build(Path::new("/src/t3cm/target/x86_64-unknown-linux-musl/debug/t3cm")));
+        assert!(cargo_build(Path::new("/src/t3cm/target/x86_64-unknown-linux-musl/dist/t3cm")));
         assert!(!cargo_build(Path::new("/home/u/.local/bin/t3cm")));
         assert!(!cargo_build(Path::new("/opt/release/t3cm")));
+        assert!(!cargo_build(Path::new("/opt/dist/t3cm")));
     }
 }
