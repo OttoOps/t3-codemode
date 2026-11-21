@@ -11,6 +11,7 @@ use crate::wf::Wf;
 pub const CONFIG_DIR_HEADER: &str = "x-t3-config-dir";
 pub const CLAUDE_DIR_HEADER: &str = "x-t3-claude-config-dir";
 pub const CODEX_HOME_HEADER: &str = "x-t3-codex-home";
+pub const GEMINI_HOME_HEADER: &str = "x-t3-gemini-home";
 const CODEX: &str = "codex";
 const CLAUDE: &str = "claudeAgent";
 const REREGISTER: &str = "run `t3cm skills update`, which re-registers Claude Code's t3cm server with the \
@@ -21,6 +22,7 @@ pub struct Reported {
     pub own: Option<String>,
     pub claude: Option<String>,
     pub codex: Option<String>,
+    pub gemini: Option<String>,
 }
 
 fn header_value(raw: Option<&str>) -> Option<String> {
@@ -38,19 +40,23 @@ impl Reported {
             own: header_value(get(CONFIG_DIR_HEADER)),
             claude: header_value(get(CLAUDE_DIR_HEADER)),
             codex: header_value(get(CODEX_HOME_HEADER)),
+            gemini: header_value(get(GEMINI_HOME_HEADER)),
         }
     }
 
     pub fn from_env() -> Reported {
         let var = |k| Some(std::env::var_os(k).map(|v| v.to_string_lossy().into_owned()).unwrap_or_default());
-        Reported { own: None, claude: var("CLAUDE_CONFIG_DIR"), codex: var("CODEX_HOME") }
+        Reported { own: None, claude: var("CLAUDE_CONFIG_DIR"), codex: var("CODEX_HOME"), gemini: var("GEMINI_HOME") }
     }
 
     pub fn headers(&self) -> Vec<(&'static str, String)> {
         let mut out = Vec::new();
-        for (name, v) in
-            [(CONFIG_DIR_HEADER, &self.own), (CLAUDE_DIR_HEADER, &self.claude), (CODEX_HOME_HEADER, &self.codex)]
-        {
+        for (name, v) in [
+            (CONFIG_DIR_HEADER, &self.own),
+            (CLAUDE_DIR_HEADER, &self.claude),
+            (CODEX_HOME_HEADER, &self.codex),
+            (GEMINI_HOME_HEADER, &self.gemini),
+        ] {
             if let Some(v) = v {
                 out.push((name, v.clone()));
             }
@@ -106,6 +112,7 @@ impl Ctx {
             "driver": self.driver,
             "claudeDir": self.folders.claude.to_string_lossy(),
             "codexHome": self.folders.codex.to_string_lossy(),
+            "geminiHome": self.folders.gemini.to_string_lossy(),
             "folderFrom": self.folder_source,
             "config": self.folders.config.to_string_lossy(),
         })
@@ -237,6 +244,9 @@ impl Wf {
         } else {
             folders.claude = own;
             folders.codex = other;
+        }
+        if let Some(v) = rep.gemini.as_ref().filter(|_| reports_apply) {
+            folders.gemini = reported_path(&home, v, folders.gemini.clone());
         }
         let (root, key) = match repo {
             Some(r) => {
