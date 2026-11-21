@@ -183,6 +183,14 @@ pub fn service(health: Option<&Value>, unreachable: Option<&str>) -> Findings {
     f
 }
 
+fn intercepts_board_route(mount: &str) -> bool {
+    let trimmed = mount.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed == "/api" || trimmed.starts_with("/api/") || trimmed == "/pair" || trimmed.starts_with("/pair/")
+}
+
 pub fn remote_board(
     cfg: Option<&Config>,
     local_port: u16,
@@ -338,6 +346,18 @@ pub fn remote_board(
                                     origin.canonical()
                                 )),
                             }
+                            for r in routes {
+                                if intercepts_board_route(&r.mount)
+                                    && !r.proxy.as_deref().is_some_and(|p| proxy_matches_local_port(p, local_port))
+                                {
+                                    f.problems.push(format!(
+                                        "remote: Tailscale Serve mount {:?} on {} intercepts board routes; \
+                                         remove it or proxy it to http://127.0.0.1:{local_port}",
+                                        r.mount,
+                                        origin.canonical()
+                                    ));
+                                }
+                            }
                         }
                     }
                     if serve.is_funnel_enabled(&origin.host, origin.port) {
@@ -357,12 +377,20 @@ pub fn remote_board(
                                 r.port
                             ));
                         } else if !r.is_raw_tcp && r.host_port.as_deref() != Some(wanted_key.as_str()) {
-                            f.warnings.push(format!(
-                                "remote: Tailscale Serve also exposes 127.0.0.1:{local_port} at {}, \
-                                 which does not match board.remote.origin ({})",
-                                r.host_port.as_deref().unwrap_or("unknown"),
-                                origin.canonical()
-                            ));
+                            let hp = r.host_port.as_deref().unwrap_or("unknown");
+                            if serve.funnel.iter().any(|k| k == hp) {
+                                f.problems.push(format!(
+                                    "remote: Tailscale Funnel is enabled for {hp} (targeting 127.0.0.1:{local_port}), \
+                                     exposing the board to the public internet; disable Funnel on port {}",
+                                    r.port
+                                ));
+                            } else {
+                                f.warnings.push(format!(
+                                    "remote: Tailscale Serve also exposes 127.0.0.1:{local_port} at {hp}, \
+                                     which does not match board.remote.origin ({})",
+                                    origin.canonical()
+                                ));
+                            }
                         }
                     }
                 }
@@ -377,6 +405,14 @@ pub fn remote_board(
                         f.problems.push(format!(
                             "remote: Tailscale Serve raw TCP port {} forwards to 127.0.0.1:{local_port}, \
                              which bypasses remote auth",
+                            r.port
+                        ));
+                    } else if let Some(hp) = r.host_port.as_deref()
+                        && serve.funnel.iter().any(|k| k == hp)
+                    {
+                        f.problems.push(format!(
+                            "remote: Tailscale Funnel is enabled for {hp} (targeting 127.0.0.1:{local_port}), \
+                             exposing the board to the public internet; disable Funnel on port {}",
                             r.port
                         ));
                     }

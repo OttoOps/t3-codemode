@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
@@ -14,6 +15,7 @@ use crate::platform;
 pub const DEFAULT_HTTPS_PORT: u16 = 47732;
 pub const ENV_BIN: &str = "T3CM_TAILSCALE_BIN";
 const MACOS_APP_BIN: &str = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+const CLI_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TailscaleStatus {
@@ -200,6 +202,61 @@ pub struct TailscaleCli {
     bin: Option<PathBuf>,
 }
 
+fn run_command_with_timeout(bin: &Path, args: &[&str], timeout: Duration) -> Result<Output> {
+    let mut child = Command::new(bin)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running `{} {}`", bin.display(), args.join(" ")))?;
+
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = out_pipe.as_mut() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = err_pipe.as_mut() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = out_reader.join();
+                    let _ = err_reader.join();
+                    bail!("`tailscale {}` timed out after {}s", args.join(" "), timeout.as_secs().max(1));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_reader.join();
+                let _ = err_reader.join();
+                return Err(e).with_context(|| format!("waiting for `{} {}`", bin.display(), args.join(" ")));
+            }
+        }
+    };
+
+    let stdout = out_reader.join().unwrap_or_default();
+    let stderr = err_reader.join().unwrap_or_default();
+    Ok(Output { status, stdout, stderr })
+}
+
 impl TailscaleCli {
     pub fn from_env() -> Self {
         Self { bin: find_binary() }
@@ -217,11 +274,7 @@ impl TailscaleCli {
 
     fn run(&self, args: &[&str]) -> Result<String> {
         let bin = self.require_bin()?;
-        let out = Command::new(bin)
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .with_context(|| format!("running `{} {}`", bin.display(), args.join(" ")))?;
+        let out = run_command_with_timeout(bin, args, CLI_TIMEOUT)?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -439,13 +492,7 @@ fn parse_host_port_key(raw: &str) -> Option<(String, u16)> {
     Some((normalize_dns_name(&host), port.unwrap_or(443)))
 }
 
-pub fn parse_serve_status_json(raw: &str) -> Result<ServeStatus> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(ServeStatus::default());
-    }
-    let v: Value = serde_json::from_str(trimmed).context("parsing `tailscale serve status --json` output")?;
-    let mut status = ServeStatus::default();
+fn merge_serve_config(v: &Value, status: &mut ServeStatus) {
     if let Some(tcp) = v.get("TCP").and_then(Value::as_object) {
         for (port_str, entry) in tcp {
             let Ok(port) = port_str.trim().parse::<u16>() else {
@@ -459,7 +506,12 @@ pub fn parse_serve_status_json(raw: &str) -> Result<ServeStatus> {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(String::from);
-            status.tcp.insert(port, ServeTcp { https, http, tcp_forward });
+            let slot = status.tcp.entry(port).or_default();
+            slot.https |= https;
+            slot.http |= http;
+            if let Some(fwd) = tcp_forward {
+                slot.tcp_forward = Some(fwd);
+            }
         }
     }
     if let Some(web) = v.get("Web").and_then(Value::as_object) {
@@ -468,7 +520,7 @@ pub fn parse_serve_status_json(raw: &str) -> Result<ServeStatus> {
                 Some((h, p)) => format!("{h}:{p}"),
                 None => host_port.trim().to_ascii_lowercase(),
             };
-            let mut routes = Vec::new();
+            let slot = status.web.entry(normalized).or_default();
             if let Some(handlers) = entry.get("Handlers").and_then(Value::as_object) {
                 for (mount, h) in handlers {
                     let proxy = h
@@ -484,10 +536,12 @@ pub fn parse_serve_status_json(raw: &str) -> Result<ServeStatus> {
                         .filter(|s| !s.is_empty())
                         .map(String::from);
                     let text = h.get("Text").and_then(Value::as_str).map(String::from);
-                    routes.push(ServeRoute { mount: mount.clone(), proxy, path, text });
+                    let route = ServeRoute { mount: mount.clone(), proxy, path, text };
+                    if !slot.contains(&route) {
+                        slot.push(route);
+                    }
                 }
             }
-            status.web.insert(normalized, routes);
         }
     }
     if let Some(funnel) = v.get("AllowFunnel").and_then(Value::as_object) {
@@ -497,8 +551,25 @@ pub fn parse_serve_status_json(raw: &str) -> Result<ServeStatus> {
                     Some((h, p)) => format!("{h}:{p}"),
                     None => host_port.trim().to_ascii_lowercase(),
                 };
-                status.funnel.push(normalized);
+                if !status.funnel.contains(&normalized) {
+                    status.funnel.push(normalized);
+                }
             }
+        }
+    }
+}
+
+pub fn parse_serve_status_json(raw: &str) -> Result<ServeStatus> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(ServeStatus::default());
+    }
+    let v: Value = serde_json::from_str(trimmed).context("parsing `tailscale serve status --json` output")?;
+    let mut status = ServeStatus::default();
+    merge_serve_config(&v, &mut status);
+    if let Some(foreground) = v.get("Foreground").and_then(Value::as_object) {
+        for entry in foreground.values() {
+            merge_serve_config(entry, &mut status);
         }
     }
     Ok(status)
@@ -945,5 +1016,21 @@ mod tests {
         assert_eq!(targeting.len(), 2);
         assert!(targeting.iter().any(|r| r.is_raw_tcp && r.port == 9000));
         assert!(targeting.iter().any(|r| !r.is_raw_tcp && r.port == 47732));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_with_timeout_kills_stalled_subprocess() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("slow-tailscale");
+        std::fs::write(&script, "#!/bin/sh\nexec sleep 5\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let start = Instant::now();
+        let err = run_command_with_timeout(&script, &["status", "--json"], Duration::from_millis(150)).unwrap_err();
+        assert!(format!("{err:#}").contains("timed out"), "{err:#}");
+        assert!(start.elapsed() < Duration::from_secs(3), "took too long: {:?}", start.elapsed());
     }
 }
