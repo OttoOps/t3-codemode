@@ -2104,8 +2104,7 @@ function flushQuery() {
 }
 
 const CTX_KEY = "t3board.context";
-const CTX_GRACE = 5000;
-const contexts = { list: [], active: "", applied: null, form: null, forms: 0, armed: false, busy: false, fresh: new Map(), picks: 0, sent: null };
+const contexts = { list: [], active: "", applied: null, form: null, forms: 0, armed: false, busy: false, local: new Map(), picks: 0, saving: false };
 try { contexts.active = localStorage.getItem(CTX_KEY) || ""; } catch (_) {}
 
 function normSpec(spec) {
@@ -2148,14 +2147,21 @@ function sortContexts(list) {
   return list.slice().sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || (a.id < b.id ? -1 : 1));
 }
 
-function syncContexts(s) {
-  let list = Array.isArray(s.contexts) ? s.contexts : [];
-  for (const [id, f] of contexts.fresh) {
-    if (list.some((c) => c.id === id) || (connected && Date.now() > f.until)) contexts.fresh.delete(id);
-    else list = [...list, f.c];
+const revOf = (x) => x && typeof x.rev === "number" ? x.rev : 0;
+
+function mergeContexts(s) {
+  let list = s && Array.isArray(s.contexts) ? s.contexts : [];
+  for (const [id, w] of contexts.local) {
+    if (revOf(s) >= w.rev) { contexts.local.delete(id); continue; }
+    list = list.filter((c) => c.id !== id);
+    if (w.c) list = [...list, w.c];
   }
   contexts.list = sortContexts(list);
-  if (!contexts.active) return null;
+}
+
+function syncContexts(s) {
+  mergeContexts(s);
+  if (!contexts.active || contexts.saving) return null;
   const c = activeContext();
   if (!c) {
     rememberContext("");
@@ -2165,23 +2171,24 @@ function syncContexts(s) {
   }
   const key = specKey(c.spec);
   if (key === contexts.applied) return null;
-  const sent = contexts.sent;
   contexts.applied = key;
-  if (sent && sent.id === c.id && sent.key === key) return null;
   return { spec: c.spec };
 }
 
-function keepContext(c, fresh) {
-  contexts.list = sortContexts([...contexts.list.filter((x) => x.id !== c.id), c]);
-  if (fresh) contexts.fresh.set(c.id, { c, until: Date.now() + CTX_GRACE });
-  else if (contexts.fresh.has(c.id)) contexts.fresh.get(c.id).c = c;
-  if (!fresh && state && Array.isArray(state.contexts)) state.contexts = state.contexts.map((x) => x.id === c.id ? c : x);
+function keepContext(id, c, rev) {
+  const w = contexts.local.get(id);
+  if (revOf(state) < rev && !(w && w.rev >= rev)) contexts.local.set(id, { c, rev });
+  mergeContexts(state);
 }
 
-function dropContext(id) {
-  contexts.list = contexts.list.filter((x) => x.id !== id);
-  contexts.fresh.delete(id);
-  if (state && Array.isArray(state.contexts)) state.contexts = state.contexts.filter((x) => x.id !== id);
+async function saving(work) {
+  contexts.busy = true;
+  contexts.saving = true;
+  try { return await work(); } finally {
+    contexts.busy = false;
+    contexts.saving = false;
+    if (state) render(state);
+  }
 }
 
 function clearSettledFind() {
@@ -2325,7 +2332,9 @@ function newContextId() {
 }
 
 async function putContext(id, name, spec) {
-  return (await send("PUT", "/api/contexts/" + encodeURIComponent(id), { name, spec })).context;
+  const r = await send("PUT", "/api/contexts/" + encodeURIComponent(id), { name, spec });
+  keepContext(r.context.id, r.context, revOf(r));
+  return r.context;
 }
 
 async function saveCtxForm() {
@@ -2336,13 +2345,11 @@ async function saveCtxForm() {
   const c = activeContext();
   if (mode === "rename" && !c) return;
   if (mode === "new") flushQuery();
-  contexts.busy = true;
   const picks = contexts.picks;
   const forms = contexts.forms;
   const sameForm = () => contexts.form === mode && contexts.forms === forms;
-  try {
+  await saving(async () => { try {
     const saved = mode === "rename" ? await putContext(c.id, name) : await putContext(newContextId(), name, filterSpec());
-    keepContext(saved, mode === "new");
     if (mode === "new" && picks === contexts.picks) {
       rememberContext(saved.id);
       contexts.applied = specKey(saved.spec);
@@ -2353,7 +2360,7 @@ async function saveCtxForm() {
   } catch (err) {
     if (sameForm()) ctxError(err.message);
     else announce(err.message, true);
-  } finally { contexts.busy = false; }
+  } });
 }
 
 async function updateCtx() {
@@ -2362,21 +2369,14 @@ async function updateCtx() {
   const picks = contexts.picks;
   flushQuery();
   if (picks !== contexts.picks) return;
-  const spec = filterSpec();
-  contexts.busy = true;
-  contexts.sent = { id: c.id, key: specKey(spec) };
-  try {
-    const saved = await putContext(c.id, undefined, spec);
+  await saving(async () => { try {
+    const saved = await putContext(c.id, undefined, filterSpec());
     if (picks === contexts.picks) contexts.applied = specKey(saved.spec);
-    keepContext(saved, false);
     paintCtx();
     announce("Saved the filter to " + saved.name + ".");
   } catch (err) {
     ctxError(err.message);
-  } finally {
-    contexts.busy = false;
-    contexts.sent = null;
-  }
+  } });
 }
 
 async function deleteCtx() {
@@ -2389,8 +2389,13 @@ async function deleteCtx() {
   }
   contexts.busy = true;
   try {
-    try { await send("DELETE", "/api/contexts/" + encodeURIComponent(c.id)); } catch (err) { if (err.status !== 404) throw err; }
-    dropContext(c.id);
+    let rev;
+    try { rev = revOf(await send("DELETE", "/api/contexts/" + encodeURIComponent(c.id))); } catch (err) {
+      if (err.status !== 404) throw err;
+      contexts.local.delete(c.id);
+      rev = revOf(state) + 1;
+    }
+    keepContext(c.id, null, rev);
     if (contexts.active === c.id) {
       useContext("", true);
       announce("Deleted context " + c.name + ". Showing All.");

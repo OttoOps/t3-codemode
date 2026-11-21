@@ -199,13 +199,14 @@ impl Wf {
         self.store.contexts_all()
     }
 
-    pub fn put_context(&self, id: &str, body: ContextBody) -> Result<(bool, BoardContext), ContextError> {
+    pub fn put_context(&self, id: &str, body: ContextBody) -> Result<(bool, BoardContext, u64), ContextError> {
         check_id(id)?;
         if body.name.is_none() && body.spec.is_none() {
             return Err(invalid("give a name, a spec or both"));
         }
         let name = body.name.as_deref().map(check_name).transpose()?;
         let spec = body.spec.map(check_spec).transpose()?;
+        let _in_order = self.context_writes.lock().unwrap_or_else(|e| e.into_inner());
         let out = match self.store.context_put(id, name.as_deref(), spec.as_ref(), &self.now(), MAX_CONTEXTS)? {
             ContextPut::Created(c) => (true, c),
             ContextPut::Updated(c) => (false, c),
@@ -215,16 +216,15 @@ impl Wf {
                 return Err(ContextError::Missing(format!("no context {id:?}; give a name and a spec to create one")));
             }
         };
-        self.changed();
-        Ok(out)
+        Ok((out.0, out.1, self.changed()))
     }
 
-    pub fn delete_context(&self, id: &str) -> Result<(), ContextError> {
+    pub fn delete_context(&self, id: &str) -> Result<u64, ContextError> {
         check_id(id)?;
+        let _in_order = self.context_writes.lock().unwrap_or_else(|e| e.into_inner());
         if !self.store.context_delete(id)? {
             return Err(ContextError::Missing(format!("no context {id:?}")));
         }
-        self.changed();
-        Ok(())
+        Ok(self.changed())
     }
 }

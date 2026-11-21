@@ -2540,7 +2540,8 @@ async fn contexts_are_created_renamed_edited_and_deleted_and_survive_a_restart()
     assert_eq!(context_names(&s.get("/api/state").await), [json!("AI research"), json!("Widget work")]);
     let csrf = s.csrf();
     let (code, gone) = s.context(Method::DELETE, "c1", json!({}), Some(&csrf)).await;
-    assert_eq!((code, gone), (200, json!({"deleted": "c1"})));
+    assert_eq!((code, &gone["deleted"]), (200, &json!("c1")), "{gone}");
+    assert!(gone["rev"].is_u64(), "{gone}");
     let (code, again) = s.context(Method::DELETE, "c1", json!({}), Some(&csrf)).await;
     assert_eq!((code, &again["error"]), (404, &json!("no context \"c1\"")));
 
@@ -2655,6 +2656,32 @@ async fn a_saved_context_reaches_every_open_board() {
     assert_eq!(st["contexts"][0]["spec"]["projects"], json!(["p-widgets"]), "{st}");
 }
 
+#[tokio::test]
+async fn every_state_carries_a_revision_that_each_context_write_reaches() {
+    let s = start(H::new()).await;
+    let mut r = s.http.get(format!("{}/api/events", s.base)).send().await.unwrap();
+    let mut buf = Vec::new();
+    let first = next_state(&mut r, &mut buf).await["rev"].as_u64().unwrap();
+    let body = json!({"name": "Widgets", "spec": {"projects": ["p-widgets"]}});
+    let (_, made) = s.context(reqwest::Method::PUT, "c1", body, Some(&s.csrf())).await;
+    let wrote = made["rev"].as_u64().unwrap();
+    assert!(wrote > first, "{made}");
+    let pushed = next_state(&mut r, &mut buf).await;
+    assert!(pushed["rev"].as_u64().unwrap() >= wrote, "{pushed}");
+    assert_eq!(context_names(&pushed), [json!("Widgets")], "{pushed}");
+    let (_, gone) = s.context(reqwest::Method::DELETE, "c1", json!({}), Some(&s.csrf())).await;
+    let deleted = gone["rev"].as_u64().unwrap();
+    assert!(deleted > wrote, "{gone}");
+    let st = s.get("/api/state").await;
+    assert!(st["rev"].as_u64().unwrap() >= deleted, "{st}");
+    assert_eq!(st["contexts"], json!([]), "{st}");
+    drop(r);
+    s.h.clock.advance_minutes(1);
+    let s = s.restart().await;
+    let after = s.get("/api/state").await["rev"].as_u64().unwrap();
+    assert!(after > deleted, "a restarted service keeps counting up: {after} after {deleted}");
+}
+
 const SAVED_CONTEXTS: &str = r##"[
   { id: "c1", name: "Widgets", spec: { projects: ["p-widgets"], statuses: [], kinds: [] }, createdAt: "2026-11-17T12:00:00Z", updatedAt: "2026-11-17T12:00:00Z" },
   { id: "c2", name: "Gadget gates", spec: { projects: ["p-gadgets"], statuses: [], kinds: ["gate"], q: "gadget" }, createdAt: "2026-11-17T12:00:00Z", updatedAt: "2026-11-17T12:00:00Z" },
@@ -2669,6 +2696,8 @@ const choose = (id) => { openCtxMenu(); ctxPop().querySelector('[data-ctx="' + i
 const ctxAct = (a) => ctxPop().querySelector('[data-act="' + a + '"]');
 const stored = () => localStorage.getItem("t3board.context");
 const flush = async () => { for (let i = 0; i < 20; i++) await null; };
+let rev = s0.rev;
+const later = () => ++rev;
 "##;
 
 fn context_scenario(html: &str, st: &Value, storage: Value, body: &str) -> Value {
@@ -2814,7 +2843,7 @@ const echo = (status) => async (url, opts) => {
   const b = JSON.parse(opts.body);
   if (b.spec) lastSpec = b.spec;
   if (b.name) lastName = b.name;
-  return { ok: true, status, json: async () => ({ context: { id: decodeURIComponent(url.split("/").pop()), name: lastName, spec: lastSpec, createdAt: "x", updatedAt: "x" } }) };
+  return { ok: true, status, json: async () => ({ context: { id: decodeURIComponent(url.split("/").pop()), name: lastName, spec: lastSpec, createdAt: "x", updatedAt: "x" }, rev: later() }) };
 };
 const writes = () => fetches.filter((f) => f.method !== "GET").map((f) => [f.method, f.url, f.body ? JSON.parse(f.body) : null]);
 openCtxMenu();
@@ -2860,7 +2889,7 @@ ctxPop().dispatch("keydown", { key: "Escape", stopPropagation() {} });
 const formClosed = { form: ctxPop().querySelector('[data-part="cform"]').hidden, open: !ctxPop().hidden };
 ctxAct("delete").dispatch("click");
 const armed = { text: ctxAct("delete").textContent, writes: writes().length };
-reply = async () => ({ ok: true, status: 200, json: async () => ({ deleted: id }) });
+reply = async () => ({ ok: true, status: 200, json: async () => ({ deleted: id, rev: later() }) });
 ctxAct("delete").dispatch("click");
 await flush();
 const deleted = { btn: ctxBtn().textContent, stored: stored(), cards: ids(), q: facet("projects").querySelector('[data-part="fbtn"]').textContent };
@@ -2916,7 +2945,7 @@ async fn a_context_saved_before_the_repo_resolves_still_matches_after_it_arrives
 const early = (x) => x.thread === T || x.ticket === T ? { ...x, repo: null } : x;
 const s2 = { ...s0, tree: s0.tree.map(early), cards: s0.cards.map(early), feed: s0.feed.map(early), contexts: [] };
 emitState(s2);
-fetchReply = async (url, opts) => ({ ok: true, status: 201, json: async () => ({ context: { id: decodeURIComponent(url.split("/").pop()), ...JSON.parse(opts.body), createdAt: "x", updatedAt: "x" } }) });
+fetchReply = async (url, opts) => ({ ok: true, status: 201, json: async () => ({ context: { id: decodeURIComponent(url.split("/").pop()), ...JSON.parse(opts.body), createdAt: "x", updatedAt: "x" }, rev: later() }) });
 facet("projects").querySelector('[data-part="fbtn"]').dispatch("click");
 const opts = [...facet("projects").querySelectorAll(".fopt")].map((o) => [o.dataset.val, o.textContent]);
 pick("projects", "p-widgets");
@@ -3043,7 +3072,7 @@ const answer = () => {
   const b = JSON.parse(f.body);
   const id = f.url.split("/").pop();
   const name = b.name || ctxs.find((c) => c.id === id).name;
-  waiting.shift()({ ok: true, status: b.name ? 201 : 200, json: async () => ({ context: { id, name, spec: b.spec, createdAt: "x", updatedAt: "x" } }) });
+  waiting.shift()({ ok: true, status: b.name ? 201 : 200, json: async () => ({ context: { id, name, spec: b.spec, createdAt: "x", updatedAt: "x" }, rev: later() }) });
 };
 pick("projects", "p-widgets");
 openCtxMenu();
@@ -3114,6 +3143,185 @@ return { early, cards: ids(), btn: ctxBtn().textContent, stored: stored() };
     assert_eq!(r["early"], json!({"stored": "c1", "btn": "Context: All"}), "{r}");
     assert_eq!(r["cards"], json!(["a1"]), "{r}");
     assert_eq!((&r["btn"], &r["stored"]), (&json!("Context: Widgets"), &json!("c1")), "{r}");
+}
+
+const CONTEXT_WRITES: &str = r##"
+const waiting = [];
+fetchReply = () => new Promise((resolve) => waiting.push(resolve));
+const lastPut = () => fetches.filter((f) => f.method === "PUT").pop();
+const reply = (at, status) => {
+  const f = lastPut();
+  const b = JSON.parse(f.body);
+  const id = decodeURIComponent(f.url.split("/").pop());
+  const was = ctxs.find((c) => c.id === id);
+  const context = { id, name: b.name || was.name, spec: b.spec || was.spec, createdAt: "x", updatedAt: "x" };
+  waiting.shift()(status >= 400
+    ? { ok: false, status, json: async () => ({ error: "a context named \"" + b.name + "\" exists" }) }
+    : { ok: true, status: status || 200, json: async () => ({ context, rev: at }) });
+};
+const fbtn = (k) => facet(k).querySelector('[data-part="fbtn"]').textContent;
+const shows = () => ({ btn: ctxBtn().textContent, statuses: fbtn("statuses"), kinds: fbtn("kinds") });
+const newCtx = (n) => {
+  openCtxMenu();
+  ctxAct("new").dispatch("click");
+  const name = ctxPop().querySelector('[data-part="cname"]');
+  name.value = n;
+  name.dispatch("keydown", { key: "Enter" });
+};
+const gateOnly = { projects: ["p-widgets"], statuses: [], kinds: ["gate"] };
+"##;
+
+fn context_writes(html: &str, st: &Value, storage: Value, body: &str) -> Value {
+    context_scenario(html, st, storage, &format!("{CONTEXT_WRITES}\n{body}"))
+}
+
+fn shown(btn: &str, statuses: &str, kinds: &str) -> Value {
+    json!({"btn": btn, "statuses": statuses, "kinds": kinds})
+}
+
+#[tokio::test]
+async fn a_new_context_outlives_failing_snapshots_until_a_newer_one_lands() {
+    let (html, st) = two_gate_page().await;
+    let r = context_writes(
+        &html,
+        &st,
+        json!({}),
+        r##"
+emitState(s1);
+pick("projects", "p-widgets");
+newCtx("Mine");
+reply(later(), 201);
+await flush();
+const id = stored();
+const saved = Date.now();
+Date.now = () => saved + 6000;
+advance(6000);
+pick("statuses", "waiting");
+emitState(s1);
+openCtxMenu();
+const held = { ...shows(), stored: stored() === id, menu: ctxOpts().map((o) => o[1]) };
+const mine = contexts.list.find((c) => c.id === id);
+emitState({ ...s1, rev, contexts: [...ctxs, mine] });
+const confirmed = { ...shows(), stored: stored() === id };
+emitState({ ...s1, rev: later(), contexts: ctxs });
+return { held, confirmed, gone: { btn: ctxBtn().textContent, stored: stored() } };
+"##,
+    );
+    let mut held = shown("Context: Mine (edited)", "Status: needs you", "Card kind");
+    held["stored"] = json!(true);
+    held["menu"] = json!(["All", "Gadget gates", "Mine", "Widgets"]);
+    assert_eq!(r["held"], held, "{r}");
+    assert_eq!(
+        (&r["confirmed"]["btn"], &r["confirmed"]["stored"]),
+        (&json!("Context: Mine (edited)"), &json!(true)),
+        "{r}"
+    );
+    assert_eq!(r["gone"], json!({"btn": "Context: All", "stored": null}), "{r}");
+}
+
+#[tokio::test]
+async fn another_browsers_edit_during_a_save_shows_once_the_save_finishes() {
+    let (html, st) = two_gate_page().await;
+    let r = context_writes(
+        &html,
+        &st,
+        json!({"t3board.context": "c1"}),
+        r##"
+emitState(s1);
+pick("statuses", "waiting");
+openCtxMenu();
+ctxAct("update").dispatch("click");
+const mine = later();
+emitState({ ...s1, rev: later(), contexts: [{ ...ctxs[0], spec: gateOnly }, ctxs[1]] });
+const during = shows();
+reply(mine);
+await flush();
+const newer = shows();
+
+pick("statuses", "running");
+openCtxMenu();
+ctxAct("update").dispatch("click");
+const sent = JSON.parse(lastPut().body).spec;
+emitState({ ...s1, rev: later(), contexts: [{ ...ctxs[0], spec: gateOnly }, ctxs[1]] });
+reply(later());
+await flush();
+const ours = shows();
+emitState({ ...s1, rev, contexts: [{ ...ctxs[0], spec: sent }, ctxs[1]] });
+const echoed = shows();
+
+pick("statuses", "waiting");
+openCtxMenu();
+ctxAct("update").dispatch("click");
+const stale = later();
+emitState({ ...s1, rev: later(), contexts: [ctxs[1]] });
+reply(stale);
+await flush();
+openCtxMenu();
+return { during, newer, ours, echoed, deleted: { btn: ctxBtn().textContent, stored: stored(), menu: ctxOpts().map((o) => o[0]) } };
+"##,
+    );
+    assert_eq!(r["during"], shown("Context: Widgets (edited)", "Status: needs you", "Card kind"), "{r}");
+    assert_eq!(r["newer"], shown("Context: Widgets", "Status", "Card kind: gate"), "{r}");
+    assert_eq!(r["ours"], shown("Context: Widgets", "Status: running", "Card kind: gate"), "{r}");
+    assert_eq!(r["echoed"], r["ours"], "{r}");
+    assert_eq!(r["deleted"], json!({"btn": "Context: All", "stored": null, "menu": ["", "c2"]}), "{r}");
+}
+
+#[tokio::test]
+async fn an_edit_to_the_original_context_during_a_create_shows_once_it_finishes() {
+    let (html, st) = two_gate_page().await;
+    let r = context_writes(
+        &html,
+        &st,
+        json!({"t3board.context": "c1"}),
+        r##"
+emitState(s1);
+pick("statuses", "waiting");
+newCtx("Waiting widgets");
+emitState({ ...s1, rev: later(), contexts: [{ ...ctxs[0], spec: gateOnly }, ctxs[1]] });
+const during = shows();
+reply(later(), 201);
+await flush();
+openCtxMenu();
+const made = { ...shows(), c1: ctxPop().querySelector('[data-ctx="c1"]').getAttribute("title") };
+
+choose("c1");
+pick("statuses", "running");
+newCtx("Widgets");
+emitState({ ...s1, rev: later(), contexts: [{ ...ctxs[0], spec: { ...gateOnly, statuses: ["done"] } }, ctxs[1]] });
+reply(later(), 409);
+await flush();
+return { during, made, failed: shows() };
+"##,
+    );
+    assert_eq!(r["during"], shown("Context: Widgets (edited)", "Status: needs you", "Card kind"), "{r}");
+    let mut made = shown("Context: Waiting widgets", "Status: needs you", "Card kind");
+    made["c1"] = json!("Project: acme/widgets; Card kind: gate");
+    assert_eq!(r["made"], made, "{r}");
+    assert_eq!(r["failed"], shown("Context: Widgets", "Status: done", "Card kind: gate"), "{r}");
+}
+
+#[tokio::test]
+async fn an_update_stops_when_saving_the_search_box_changes_the_selection() {
+    let (html, st) = two_gate_page().await;
+    let r = context_writes(
+        &html,
+        &st,
+        json!({"t3board.context": "c1"}),
+        r##"
+emitState(s1);
+pick("statuses", "waiting");
+const box = $$("filter-q");
+box.value = "grader";
+box.dispatch("input");
+state = { ...state, contexts: [ctxs[1]] };
+openCtxMenu();
+ctxAct("update").dispatch("click");
+await flush();
+return { puts: fetches.filter((f) => f.method === "PUT").length, btn: ctxBtn().textContent, stored: stored(), q: box.value };
+"##,
+    );
+    assert_eq!(r, json!({"puts": 0, "btn": "Context: All", "stored": null, "q": ""}), "{r}");
 }
 
 #[tokio::test]
