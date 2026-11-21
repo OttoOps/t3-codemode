@@ -586,7 +586,7 @@ fn headroom_choice(usage: &[(&str, f64)], credits: &BTreeMap<String, i64>) -> (S
         strategy: "headroom".into(),
         members: ["claude-a", "claude-b", "claude-c"]
             .iter()
-            .map(|id| PoolMember { instance_id: id.to_string(), weight: 1, reserve: 0.0 })
+            .map(|id| PoolMember { instance_id: id.to_string(), weight: 1, reserve: 0.0, cost: 1.0 })
             .collect(),
     };
     let providers: Vec<Value> =
@@ -629,4 +629,185 @@ fn limit_hold_minutes_must_be_positive() {
     }
     assert_eq!(Config::from_value(json!({"limitHoldMinutes": 10080})).unwrap().limit_hold_minutes, 10080);
     assert_eq!(Config::default().limit_hold_minutes, 60);
+}
+
+fn costed(costs: &[(&str, f64)]) -> Value {
+    costs.iter().map(|(id, cost)| json!({"instanceId": id, "cost": cost})).collect()
+}
+
+#[tokio::test]
+async fn cheapest_sends_every_launch_to_the_cheapest_ready_member() {
+    let h = pooled("cheapest", costed(&[("claude-a", 2.0), ("claude-b", 0.0)]));
+    assert_eq!(launches(&h, 1, 4).await, ["claude-b"; 4]);
+    let r = pick(&h).await;
+    assert_eq!(r["reason"], "cheapest: cost 0, weighted: weight 1 of 1");
+    limit(&h, "claude-b", "2026-11-17T21:00:00Z");
+    let r = launch(&h, 5).await;
+    assert_eq!(r["instanceId"], "claude-a");
+    let reason = r["reason"].as_str().unwrap();
+    let until = local_clock("2026-11-17T21:00:00Z");
+    assert_eq!(reason, format!("cheapest: cost 2, weighted: weight 1 of 1; skipped claude-b limited until {until}"));
+    h.clock.set("2026-11-17T21:00:01Z");
+    assert_eq!(pick(&h).await["instanceId"], "claude-b");
+}
+
+#[tokio::test]
+async fn cheapest_spreads_by_weight_among_members_of_the_same_cost() {
+    let h = pooled(
+        "cheapest",
+        json!([{"instanceId": "claude-a", "cost": 0.5}, {"instanceId": "claude-b", "cost": 0.5, "weight": 3},
+               {"instanceId": "claude-d", "cost": 0.25, "weight": 9}]),
+    );
+    h.fake.set_providers(vec![
+        provider("claude-a", "claudeAgent", &[OPUS]),
+        provider("claude-b", "claudeAgent", &[OPUS]),
+        provider("claude-d", "claudeAgent", &["claude-haiku-5-5"]),
+    ]);
+    let picks = launches(&h, 1, 8).await;
+    assert_eq!((tally(&picks, "claude-a"), tally(&picks, "claude-b")), (2, 6), "{picks:?}");
+    let r = pick(&h).await;
+    let reason = r["reason"].as_str().unwrap();
+    assert!(reason.starts_with("cheapest: cost 0.5, weighted: weight "), "{reason}");
+    assert!(reason.ends_with(" of 4; skipped claude-d does not list model claude-opus-5-5"), "{reason}");
+}
+
+#[tokio::test]
+async fn a_cheap_member_held_at_its_reserve_never_wins_over_a_ready_one() {
+    let h =
+        pooled("cheapest", json!([{"instanceId": "claude-a", "cost": 0, "reserve": 30}, {"instanceId": "claude-b"}]));
+    assert_eq!(launches(&h, 1, 3).await, ["claude-b"; 3]);
+    let r = pick(&h).await;
+    assert_eq!(
+        r["reason"],
+        "cheapest: cost 1, weighted: weight 1 of 1; skipped claude-a held at its 30% reserve until every other member is out"
+    );
+    let u = usage(&h);
+    u.set("claude-a", 20.0, None);
+    let r = pick(&h).await;
+    assert_eq!(r["instanceId"], "claude-b");
+    assert_eq!(r["skipped"], json!([{"instanceId": "claude-a", "reason": "held at its 30% reserve with 20% left"}]));
+    u.set("claude-a", 50.0, None);
+    assert_eq!(pick(&h).await["instanceId"], "claude-a");
+    u.set("claude-a", 20.0, None);
+    limit(&h, "claude-b", "2026-11-17T21:00:00Z");
+    let out = h.exec("async () => wf.pick({ pool: 'opus' })").await;
+    assert!(err_text(&out).contains("claude-a held at its 30% reserve with 20% left"), "{}", out.text);
+}
+
+#[tokio::test]
+async fn a_cheap_member_with_a_reserve_is_still_the_last_resort() {
+    let h =
+        pooled("cheapest", json!([{"instanceId": "claude-a", "cost": 0, "reserve": 30}, {"instanceId": "claude-b"}]));
+    limit(&h, "claude-b", "2026-11-17T21:00:00Z");
+    let r = pick(&h).await;
+    assert_eq!(r["instanceId"], "claude-a");
+    let reason = r["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with("last resort: claude-a holds a 30% reserve and every other member is out; cheapest: cost 0"),
+        "{reason}"
+    );
+}
+
+#[tokio::test]
+async fn weighted_and_priority_ignore_cost() {
+    let members = costed(&[("claude-a", 5.0), ("claude-b", 0.0)]);
+    let h = pooled("weighted", members.clone());
+    let picks = launches(&h, 1, 4).await;
+    assert_eq!((tally(&picks, "claude-a"), tally(&picks, "claude-b")), (2, 2), "{picks:?}");
+    let h = pooled("priority", members);
+    assert_eq!(launches(&h, 1, 2).await, ["claude-a"; 2]);
+}
+
+#[tokio::test]
+async fn wf_pools_shows_each_members_cost() {
+    let h = pooled("cheapest", json!([{"instanceId": "claude-a", "cost": 0}, {"instanceId": "claude-b"}]));
+    let pools = result(&h.exec("async () => wf.pools()").await);
+    assert_eq!(pools[0]["strategy"], "cheapest");
+    let costs: Vec<f64> = pools[0]["members"].as_array().unwrap().iter().map(|m| m["cost"].as_f64().unwrap()).collect();
+    assert_eq!(costs, [0.0, 1.0]);
+}
+
+#[test]
+fn config_load_rejects_a_bad_cost_by_member() {
+    let pool =
+        |members: Value| json!({"pools": {"opus": {"driver": "claudeAgent", "model": OPUS, "members": members}}});
+    let e = Config::from_value(pool(json!([{"instanceId": "claude-a", "cost": -0.5}]))).unwrap_err();
+    assert!(
+        format!("{e:#}").contains("pool opus: member claude-a: cost must be a finite number of 0 or more, got -0.5"),
+        "{e:#}"
+    );
+    let e = Config::from_value(pool(json!([{"instanceId": "claude-a", "cost": "free"}]))).unwrap_err();
+    assert!(format!("{e:#}").starts_with("pool opus: invalid type"), "{e:#}");
+    let mut p = Config::from_value(pool(json!([{"instanceId": "claude-a"}]))).unwrap().pools["opus"].clone();
+    assert_eq!(p.members[0].cost, 1.0);
+    for bad in [f64::INFINITY, f64::NAN] {
+        p.members[0].cost = bad;
+        assert!(format!("{:#}", p.validate().unwrap_err()).contains("member claude-a: cost must be a finite number"));
+    }
+    let e = Config::from_value(json!({"pools": {"opus": {"driver": "claudeAgent", "model": OPUS, "strategy": "cheap",
+                                                          "members": [{"instanceId": "claude-a"}]}}}))
+    .unwrap_err();
+    assert!(format!("{e:#}").contains("unknown strategy \"cheap\"; use one of weighted, priority, cheapest"), "{e:#}");
+}
+
+fn cheapest_choice(
+    costs: &[f64],
+    limited: &[&str],
+    credits: &BTreeMap<String, i64>,
+) -> (String, String, BTreeMap<String, i64>) {
+    let ids = ["claude-a", "claude-b", "claude-c"];
+    let pool = PoolConfig {
+        driver: "claudeAgent".into(),
+        model: OPUS.into(),
+        effort: None,
+        strategy: "cheapest".into(),
+        members: ids
+            .iter()
+            .zip(costs)
+            .map(|(id, cost)| PoolMember { instance_id: id.to_string(), weight: 1, reserve: 0.0, cost: *cost })
+            .collect(),
+    };
+    let providers: Vec<Value> = ids.map(|id| provider(id, "claudeAgent", &[OPUS])).into();
+    let caps = json!({ "providers": providers });
+    let limits: BTreeMap<String, Limit> = limited
+        .iter()
+        .map(|id| {
+            (id.to_string(), Limit { until: "2026-11-17T21:00:00Z".into(), reason: None, at: T0.into(), thread: None })
+        })
+        .collect();
+    let c = choose(&Inputs {
+        name: "opus",
+        pool: &pool,
+        caps: &caps,
+        running: &BTreeMap::new(),
+        limits: &limits,
+        usage: &BTreeMap::new(),
+        credits,
+        now: "2026-11-17T12:00:00Z".parse().unwrap(),
+    })
+    .unwrap();
+    (c.instance_id, c.reason, c.credits)
+}
+
+#[test]
+fn cheapest_takes_the_lowest_cost_group_and_moves_up_only_when_it_is_out() {
+    let none = BTreeMap::new();
+    let costs = [0.0, 0.0, 3.0];
+    let (first, reason, credits) = cheapest_choice(&costs, &[], &none);
+    assert_eq!((first.as_str(), reason.as_str()), ("claude-a", "cheapest: cost 0, weighted: weight 1 of 2"));
+    let (second, _, credits) = cheapest_choice(&costs, &[], &credits);
+    assert_eq!(second, "claude-b");
+    let (one_out, _, _) = cheapest_choice(&costs, &["claude-a"], &credits);
+    assert_eq!(one_out, "claude-b");
+    let (id, reason, _) = cheapest_choice(&costs, &["claude-a", "claude-b"], &credits);
+    let until = local_clock("2026-11-17T21:00:00Z");
+    assert_eq!(id, "claude-c");
+    assert_eq!(
+        reason,
+        format!(
+            "cheapest: cost 3, weighted: weight 1 of 1; skipped claude-a limited until {until}, claude-b limited until {until}"
+        )
+    );
+    let (id, _, _) = cheapest_choice(&[2.0, 1.5, 1.0], &[], &none);
+    assert_eq!(id, "claude-c");
 }

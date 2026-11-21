@@ -114,15 +114,28 @@ until it hits its usage limit.
 |---|---|---|
 | `driver` | required | The driver every member must be, as `orchestrator_capabilities` reports it in `driverKind` |
 | `model`, `effort` | required, unset | Model and effort for every launch from the pool, so a thread gets the same model whichever account runs it |
-| `strategy` | `weighted` | `weighted` spreads launches by weight. `priority` fills members in order and moves to the next only when one is out. `headroom` needs a usage source, so config load rejects it for now. |
+| `strategy` | `weighted` | `weighted` spreads launches by weight. `priority` fills members in order and moves to the next only when one is out. `cheapest` sends launches to the lowest-cost members that can run, by weight among them. `headroom` needs a usage source, so config load rejects it for now. |
 | `members[].instanceId` | required | A T3 provider instance |
 | `members[].weight` | `1` | The member's share of `weighted` launches. With weights 3 and 1, three of every four launches go to the first member. |
 | `members[].reserve` | `0` | A share of the account's usage window, 0-100, held for work that names the instance directly |
+| `members[].cost` | `1` | What a launch on the member costs, a number of 0 or more. Only its order against the other members counts, and only `cheapest` reads it. |
 
 `weighted` is a smooth weighted round robin. Each member's running credit is
 in `store.db`, so a run of launches from the same state picks the same
 members, and a restart carries on where it stopped. When two members are
 level, the one with fewer running threads wins, then the one listed first.
+
+`cheapest` looks at the members a pick has not skipped, takes those with the
+lowest `cost`, and spreads launches across them by the same weighted round
+robin. It moves to the next cost only when every cheaper member is out. Give a
+flat-rate subscription account cost 0 and metered accounts their relative
+prices. The pool then fills the subscription until limit marking takes it out,
+and the metered accounts take over after that, cheapest first. Cost never overrides a reserve
+or a limit. The pick reason names the cost, as in
+`cheapest: cost 0, weighted: weight 1 of 2`. Costs come from config only, since
+t3cm cannot see provider pricing;
+[ADR 0004](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0004-cost-for-pool-picks.md)
+records the choice.
 
 A pick skips a member that T3 reports as disabled or constrained, a member
 that does not list the pool's model or does not offer its effort, and a member
@@ -134,7 +147,7 @@ directly ignores the reserve. When every member is out, the pick fails, nothing
 launches, and a board launch leaves an error card that names the pool.
 
 At load, a pool must have at least one member, no member twice, weights of 1
-or more and reserves from 0 to 100, and `board.pool` must name a configured
+or more, reserves from 0 to 100 and costs of 0 or more, and `board.pool` must name a configured
 pool. A bad pool fails config load with a message that names it. Only T3 knows
 whether each member is an instance of the pool's `driver`. Every pick checks
 that against T3's live `orchestrator_capabilities`, and a pick from a pool with
