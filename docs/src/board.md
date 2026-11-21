@@ -64,7 +64,7 @@ and the threads running. Only the lists scroll.
   makes each one a ticket thread. A question in Ask starts a short-lived Haiku
   thread that reads the board, writes its answer under Ask, and then gets
   archived. With `board.pool` set, the thread runs on a pool member with the
-  pool's model.
+  pool's model, or in a mixed pool the member's own.
 
 Times show as ages (`36m`, `1h 32m`); hover one for the local time.
 

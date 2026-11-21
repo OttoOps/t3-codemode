@@ -87,10 +87,11 @@ All under `board`:
 
 ### Pools
 
-`pools` names groups of T3 provider instances of one driver, such as two
-Claude accounts, each one its own T3 provider instance. A launch from a pool
-picks one member, so work spreads across the accounts instead of filling one
-until it hits its usage limit.
+`pools` names groups of T3 provider instances, such as two Claude accounts,
+each one its own T3 provider instance. A launch from a pool picks one member,
+so work spreads across the accounts instead of filling one until it hits its
+usage limit. A pool holds instances of one driver and runs one model, unless
+it is [mixed](#mixed-pools).
 
 ```json
 {
@@ -112,13 +113,15 @@ until it hits its usage limit.
 
 | Key | Default | Does |
 |---|---|---|
-| `driver` | required | The driver every member must be, as `orchestrator_capabilities` reports it in `driverKind` |
-| `model`, `effort` | required, unset | Model and effort for every launch from the pool, so a thread gets the same model whichever account runs it |
+| `mixed` | `false` | `true` lets members be instances of any driver, each with its own model and effort. See [Mixed pools](#mixed-pools). |
+| `driver` | required | The driver every member must be, as `orchestrator_capabilities` reports it in `driverKind`. A mixed pool has none. |
+| `model`, `effort` | required, unset | Model and effort for every launch from the pool, so a thread gets the same model whichever account runs it. A mixed pool has none. |
 | `strategy` | `weighted` | `weighted` spreads launches by weight. `priority` fills members in order and moves to the next only when one is out. `cheapest` sends launches to the lowest-cost members that can run, by weight among them. `headroom` needs a usage source, so config load rejects it for now. |
 | `members[].instanceId` | required | A T3 provider instance |
 | `members[].weight` | `1` | The member's share of `weighted` launches. With weights 3 and 1, three of every four launches go to the first member. |
 | `members[].reserve` | `0` | A share of the account's usage window, 0-100, held for work that names the instance directly |
 | `members[].cost` | `1` | What a launch on the member costs, a number of 0 or more. Only its order against the other members counts, and only `cheapest` reads it. |
+| `members[].model`, `members[].effort` | required, unset | Only in a mixed pool: the model and effort for launches on this member |
 
 `weighted` is a smooth weighted round robin. Each member's running credit is
 in `store.db`, so a run of launches from the same state picks the same
@@ -138,7 +141,7 @@ t3cm cannot see provider pricing;
 records the choice.
 
 A pick skips a member that T3 reports as disabled or constrained, a member
-that does not list the pool's model or does not offer its effort, and a member
+that does not list its model or does not offer its effort, and a member
 marked limited until its reset time, as [Limits](#limits) describes. A member
 with a `reserve` is a last resort. t3cm has no usage source yet, so it cannot
 see how close an account is to its reserve, and the pool picks that member only
@@ -148,11 +151,56 @@ launches, and a board launch leaves an error card that names the pool.
 
 At load, a pool must have at least one member, no member twice, weights of 1
 or more, reserves from 0 to 100 and costs of 0 or more, and `board.pool` must name a configured
-pool. A bad pool fails config load with a message that names it. Only T3 knows
+pool. A pool that is not mixed must not set `model` or `effort` on a member.
+A bad pool fails config load with a message that names it. Only T3 knows
 whether each member is an instance of the pool's `driver`. Every pick checks
 that against T3's live `orchestrator_capabilities`, and a pick from a pool with
 an unknown instance or a member of another driver fails and names the pool and
 the member. When T3 answers at start, the service also logs a bad pool then.
+
+The pick's reason starts with the driver, model and effort it chose, such as
+`claudeAgent claude-opus-5-5, effort high; weighted: weight 1 of 4`, and
+`wf.pick` returns them as `driver`, `model` and `effort`.
+
+#### Mixed pools
+
+A pool with `"mixed": true` takes members of any driver, and each member names
+its own model and, when it wants one, its effort. Use one for work where it
+matters less which vendor runs a launch than that the launches spread out,
+such as a research swarm on cheap models. A capability tier is a mixed pool
+named for its class:
+
+```json
+{
+  "pools": {
+    "frontier": {
+      "mixed": true,
+      "members": [
+        { "instanceId": "claude-a", "model": "claude-opus-5-5", "effort": "high" },
+        { "instanceId": "codex-a", "model": "gpt-6-astra", "effort": "xhigh" }
+      ]
+    },
+    "cheap": {
+      "mixed": true,
+      "strategy": "priority",
+      "members": [
+        { "instanceId": "claude-a", "model": "claude-haiku-5-5" },
+        { "instanceId": "codex-a", "model": "gpt-6-astra-mini", "effort": "low" }
+      ]
+    }
+  }
+}
+```
+
+A mixed pool has no pool-level `driver`, `model` or `effort`, and config load
+rejects one that sets them. Every member needs a `model`. t3cm does not group
+models into tiers on its own, so a new model joins a tier when you add it to
+the pool. The same instance can be a member of several pools, each with its
+own model. Weights and credits are per pool, and a usage limit benches the
+instance in every pool it belongs to. With a mixed `board.pool`, a
+`wf.launchTicket` call that names a model or effort fails, since the member
+picked sets both. [ADR 0005](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0005-tiers-are-mixed-pools.md)
+records why tiers work this way.
 
 #### Limits
 
@@ -182,9 +230,9 @@ mark's reset time and the thread that set it. [ADR 0001](https://github.com/Otto
 records why t3cm reads limits this way.
 
 `board.pool` covers `wf.launchTicket`, the launch box and the ask box. With it
-set, launches use the pool's model and effort, a `wf.launchTicket` call that
-asks for another model or effort fails, and the ask box runs the pool's model
-in place of `askModel`. Skills pick from a pool with [`wf.pick`](globals.md#wf).
+set, launches use the pool's model and effort (in a mixed pool, the picked
+member's), a `wf.launchTicket` call that asks for another model or effort
+fails, and the ask box runs that model in place of `askModel`. Skills pick from a pool with [`wf.pick`](globals.md#wf).
 The workflow skills do that for each launch when their `model worker` or
 `model ticket` slot names a pool, as `"worker": {"pool": "opus"}`; see
 [A pool on a model line](https://github.com/OttoOps/t3-codemode/blob/main/skills/t3-workflow/slots.md#a-pool-on-a-model-line).
