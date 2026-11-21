@@ -1,11 +1,9 @@
 #![cfg(unix)]
 
-mod common;
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use common::H;
+use crate::common::{self, H};
 use serde_json::{Value, json};
 use t3_codemode::app::ExecuteRequest;
 use t3_codemode::config::Config;

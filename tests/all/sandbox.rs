@@ -1,8 +1,6 @@
-mod common;
-
 use std::time::Instant;
 
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::config::Config;
 use t3_codemode::js::normalize_code;

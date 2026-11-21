@@ -1,8 +1,6 @@
-mod common;
-
 use std::path::{Path, PathBuf};
 
-use common::{H, ok_json};
+use crate::common::{self, H, ok_json};
 use serde_json::{Value, json};
 use t3_codemode::app::{ExecuteRequest, ToolOutput};
 use t3_codemode::fake::{project, provider, thread};

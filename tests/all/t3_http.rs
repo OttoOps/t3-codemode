@@ -88,6 +88,37 @@ async fn mcp(State(s): State<S>, headers: HeaderMap, Json(body): Json<Value>) ->
 
 #[tokio::test]
 async fn oauth_session_calls_reauth_and_revoke() {
+    if std::env::var_os("T3CM_T3_HTTP_CHILD").is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Store::open(&home.path().join("state")).unwrap();
+        let label = t3_codemode::t3_http::instance_label(store.path());
+        drop(store);
+        let log = home.path().join("t3.log");
+        let bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_t3cm-fake-mcp"));
+        let list = json!([
+            {"sessionId": "old", "client": {"label": "t3-codemode"}, "issuedAt": "2026-11-01T00:00:00.000Z"},
+            {"sessionId": "mine-old", "client": {"label": label}, "issuedAt": "2026-11-10T00:00:00.000Z"},
+            {"sessionId": "sibling", "client": {"label": "t3-codemode@deadbeef"}, "issuedAt": "2026-11-17T00:00:00.000Z"},
+            {"sessionId": "new", "client": {"label": label}, "issuedAt": "2026-11-17T00:00:00.000Z"},
+            {"sessionId": "other", "client": {"label": "T3 Code Desktop"}, "issuedAt": "2026-11-16T00:00:00.000Z"}
+        ]);
+        let out = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "t3_http::oauth_session_calls_reauth_and_revoke", "--nocapture"])
+            .env("T3CM_T3_HTTP_CHILD", "1")
+            .env("FAKE_T3_LOG", &log)
+            .env("FAKE_T3_SESSIONS", list.to_string())
+            .env("T3CODE_HOME", home.path())
+            .env("T3CM_T3_BIN", &bin)
+            .env_remove("T3CM_T3_ORIGIN")
+            .output()
+            .await
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}{stderr}");
+        return;
+    }
+
     let state: S = Arc::new(Mutex::new(Fake::default()));
     let app = Router::new()
         .route("/oauth/mcp/register", post(register))
@@ -99,31 +130,16 @@ async fn oauth_session_calls_reauth_and_revoke() {
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let home = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(home.path().join("userdata")).unwrap();
+    let home = std::path::PathBuf::from(std::env::var_os("T3CODE_HOME").unwrap());
+    let log = std::path::PathBuf::from(std::env::var_os("FAKE_T3_LOG").unwrap());
+    std::fs::create_dir_all(home.join("userdata")).unwrap();
     std::fs::write(
-        home.path().join("userdata/server-runtime.json"),
+        home.join("userdata/server-runtime.json"),
         json!({"origin": format!("http://127.0.0.1:{port}"), "pid": 999999999u64}).to_string(),
     )
     .unwrap();
-    let log = home.path().join("t3.log");
-    let bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_t3cm-fake-mcp"));
-    let store = Arc::new(Store::open(&home.path().join("state")).unwrap());
+    let store = Arc::new(Store::open(&home.join("state")).unwrap());
     let label = t3_codemode::t3_http::instance_label(store.path());
-    let list = json!([
-        {"sessionId": "old", "client": {"label": "t3-codemode"}, "issuedAt": "2026-11-01T00:00:00.000Z"},
-        {"sessionId": "mine-old", "client": {"label": label}, "issuedAt": "2026-11-10T00:00:00.000Z"},
-        {"sessionId": "sibling", "client": {"label": "t3-codemode@deadbeef"}, "issuedAt": "2026-11-17T00:00:00.000Z"},
-        {"sessionId": "new", "client": {"label": label}, "issuedAt": "2026-11-17T00:00:00.000Z"},
-        {"sessionId": "other", "client": {"label": "T3 Code Desktop"}, "issuedAt": "2026-11-16T00:00:00.000Z"}
-    ]);
-    unsafe {
-        std::env::set_var("FAKE_T3_LOG", &log);
-        std::env::set_var("FAKE_T3_SESSIONS", list.to_string());
-        std::env::set_var("T3CODE_HOME", home.path());
-        std::env::set_var("T3CM_T3_BIN", &bin);
-        std::env::remove_var("T3CM_T3_ORIGIN");
-    }
 
     let t3 = HttpT3::new(store.clone(), Arc::new(SystemClock));
     let r = t3.call("t3_thread_read", json!({"threadId": "x"})).await.unwrap();

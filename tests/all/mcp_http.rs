@@ -1,9 +1,7 @@
-mod common;
-
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::server;
 
