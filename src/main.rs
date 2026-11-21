@@ -238,6 +238,9 @@ enum SetupCmd {
         /// A slot the user was asked about, kept ones too, recorded as a done setup step
         #[arg(long, value_name = "SLOT[,SLOT]")]
         asked: Vec<String>,
+        /// Write to the repository's .t3-workflow.json instead of the user config file
+        #[arg(long)]
+        repo_config: bool,
         /// Skip querying T3 capabilities through the running service
         #[arg(long)]
         no_t3: bool,
@@ -773,7 +776,7 @@ async fn run_setup(cmd: SetupCmd) -> Result<ExitCode> {
             })?;
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
-        SetupCmd::Write { repo, skills, unset, replace, asked, no_t3, port, state, thread } => {
+        SetupCmd::Write { repo, skills, unset, replace, asked, repo_config, no_t3, port, state, thread } => {
             let root = repo_root(repo.as_deref())?;
             let listed = setup::parse_listed(skills.as_deref());
             let mut stdin_buf = String::new();
@@ -783,7 +786,7 @@ async fn run_setup(cmd: SetupCmd) -> Result<ExitCode> {
                 &env,
                 &bundle,
                 &stdin_buf,
-                &setup::WriteOpts { repo: root.clone(), listed: listed.clone(), unset, replace, asked },
+                &setup::WriteOpts { repo: root.clone(), listed: listed.clone(), unset, replace, asked, repo_config },
             )?;
             println!("wrote {}", res.path.display());
             for w in &res.warnings {

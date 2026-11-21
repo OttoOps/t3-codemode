@@ -233,10 +233,15 @@ fn configured_names(eff: &Value) -> BTreeMap<&'static str, Vec<String>> {
             names.get_mut("credentials").unwrap().push(r.to_string());
         }
     }
-    if eff["delivery"]["skill"].is_object()
-        && let Some(r) = eff["delivery"]["skill"]["ref"].as_str()
-    {
-        names.get_mut("delivery").unwrap().push(r.to_string());
+    for step in eff["delivery"]["steps"].as_array().into_iter().flatten() {
+        if step["skill"].is_object()
+            && let Some(r) = step["skill"]["ref"].as_str()
+        {
+            let list = names.get_mut("delivery").unwrap();
+            if !list.iter().any(|existing| existing == r) {
+                list.push(r.to_string());
+            }
+        }
     }
     names
 }
@@ -422,6 +427,8 @@ pub fn detect_json(i: &DetectInputs) -> Result<Value> {
         "config": {
             "path": i.folders.config.to_string_lossy(),
             "exists": resolved.config.is_some(),
+            "repoPath": i.root.join(slots::REPO_CONFIG_FILE).to_string_lossy(),
+            "repoExists": resolved.repo_config.is_some(),
             "problems": resolved.config_problems,
             "repoProblems": resolved.repo_problems,
         },
@@ -449,14 +456,22 @@ fn skill_refs(cfg: &Map<String, Value>) -> Vec<(String, String)> {
             refs.push((format!("credentials[{i}]"), s.to_string()));
         }
     }
-    if let Some(s) = cfg
-        .get("delivery")
-        .and_then(Value::as_object)
-        .and_then(|d| d.get("skill"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    {
-        refs.push(("delivery".into(), s.to_string()));
+    if let Some(d) = cfg.get("delivery").and_then(Value::as_object) {
+        if let Some(steps) = d.get("steps").and_then(Value::as_array) {
+            for (i, step) in steps.iter().enumerate() {
+                if let Some(s) =
+                    step.as_object().and_then(|o| o.get("skill")).and_then(Value::as_str).filter(|s| !s.is_empty())
+                {
+                    let at = match step.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+                        Some(id) => format!("delivery.{id}"),
+                        None => format!("delivery.steps[{i}]"),
+                    };
+                    refs.push((at, s.to_string()));
+                }
+            }
+        } else if let Some(s) = d.get("skill").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+            refs.push(("delivery".into(), s.to_string()));
+        }
     }
     refs
 }
@@ -538,6 +553,7 @@ pub struct WriteOpts {
     pub unset: Vec<String>,
     pub replace: bool,
     pub asked: Vec<String>,
+    pub repo_config: bool,
 }
 
 pub struct WriteResult {
@@ -552,6 +568,9 @@ pub fn write_config(
     stdin_json: &str,
     opts: &WriteOpts,
 ) -> Result<WriteResult> {
+    if opts.repo_config && !opts.asked.is_empty() {
+        bail!("--asked only applies to the user config, not --repo-config");
+    }
     let new_val: Value = serde_json::from_str(stdin_json).map_err(|e| anyhow::anyhow!("stdin is not JSON: {e}"))?;
     let Some(new) = new_val.as_object() else {
         bail!("stdin must be a JSON object of slot settings");
@@ -560,7 +579,11 @@ pub fn write_config(
     if !kept.is_empty() {
         bail!("stdin sets {}; setup records those itself", kept.join(", "));
     }
-    let path = steps::real(&folders.config);
+    let path = if opts.repo_config {
+        steps::real(&opts.repo.join(slots::REPO_CONFIG_FILE))
+    } else {
+        steps::real(&folders.config)
+    };
     let old = if opts.replace {
         Map::new()
     } else {
@@ -576,7 +599,8 @@ pub fn write_config(
         );
     }
     let mut cfg = merge_config(&old, new, &opts.unset)?;
-    let mut problems = slots::validate_config(&cfg, "new config");
+    let label = if opts.repo_config { slots::REPO_CONFIG_FILE } else { "new config" };
+    let mut problems = slots::validate_config(&cfg, label);
     if new.contains_key("delivery")
         && let Some(d) = cfg.get("delivery").and_then(Value::as_object)
         && d.get("mode").and_then(Value::as_str) == Some("tag-deploy")
@@ -628,27 +652,30 @@ pub fn write_config(
     if !problems.is_empty() {
         bail!("not written:\n{}", problems.join("\n"));
     }
-    let catalog = steps::catalog(bundle)?;
-    let mut done = if path.exists() && !opts.replace { done_steps(&old, &catalog) } else { Vec::new() };
-    let asked = asked_slots(&opts.asked, new, &opts.unset)?;
-    let mut asked_sorted: Vec<String> = asked.into_iter().collect();
-    asked_sorted.sort();
-    for slot in asked_sorted {
-        if let Some(s) = catalog.iter().find(|s| s.kind == Kind::Interview && s.slot.as_deref() == Some(slot.as_str()))
-        {
-            done.push(s.id.clone());
+    if !opts.repo_config {
+        let catalog = steps::catalog(bundle)?;
+        let mut done = if path.exists() && !opts.replace { done_steps(&old, &catalog) } else { Vec::new() };
+        let asked = asked_slots(&opts.asked, new, &opts.unset)?;
+        let mut asked_sorted: Vec<String> = asked.into_iter().collect();
+        asked_sorted.sort();
+        for slot in asked_sorted {
+            if let Some(s) =
+                catalog.iter().find(|s| s.kind == Kind::Interview && s.slot.as_deref() == Some(slot.as_str()))
+            {
+                done.push(s.id.clone());
+            }
         }
-    }
-    if let Ok(targets) = steps::rule_targets(env, bundle)
-        && rule_done(&targets)
-    {
-        done.push(RULE_STEP.into());
-    }
-    cfg.insert("steps".into(), Value::Array(ordered_steps(&done, &catalog)));
-    if !bundle.release.is_empty() {
-        cfg.insert("writtenBy".into(), Value::String(bundle.release.clone()));
-    } else {
-        cfg.remove("writtenBy");
+        if let Ok(targets) = steps::rule_targets(env, bundle)
+            && rule_done(&targets)
+        {
+            done.push(RULE_STEP.into());
+        }
+        cfg.insert("steps".into(), Value::Array(ordered_steps(&done, &catalog)));
+        if !bundle.release.is_empty() {
+            cfg.insert("writtenBy".into(), Value::String(bundle.release.clone()));
+        } else {
+            cfg.remove("writtenBy");
+        }
     }
     save_config(&path, &cfg)?;
     Ok(WriteResult { path, warnings })

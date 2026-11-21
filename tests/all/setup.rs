@@ -1095,7 +1095,14 @@ fn steps_stamped_bundle_records_its_release() {
         &env,
         &custom,
         "{}",
-        &WriteOpts { repo: s.repo.clone(), listed: vec![], unset: vec![], replace: false, asked: vec![] },
+        &WriteOpts {
+            repo: s.repo.clone(),
+            listed: vec![],
+            unset: vec![],
+            replace: false,
+            asked: vec![],
+            repo_config: false,
+        },
     )
     .unwrap();
     assert_eq!(s.raw_saved()["writtenBy"], "9.8.7");
@@ -1142,4 +1149,96 @@ fn steps_malformed_claude_headers_does_not_abort_steps_status() {
     )
     .unwrap();
     assert!(!s.missing_steps().contains(&"mcp:config-dir-header".to_string()));
+}
+
+// ---------------------------------------------------------------- Composable delivery & .t3-workflow.json
+
+#[test]
+fn setup_detect_and_write_handle_delivery_steps_and_repo_config() {
+    let s = SetupEnv::new();
+    s.skill(&s.claude.join("skills"), "deploy", false);
+    s.skill(&s.claude.join("skills"), "lms-publish", false);
+
+    let lms_delivery = json!({
+        "delivery": {
+            "steps": [
+                {"id": "merge",   "kind": "builtin", "gate": "always", "scope": "pr"},
+                {"id": "deploy",  "skill": "deploy", "gate": "chain",  "scope": "ticket", "watch": true},
+                {"id": "publish", "skill": "lms-publish", "gate": "always", "scope": "post-handoff", "paths": ["training/**"]}
+            ],
+            "closeAfter": "ticket"
+        }
+    });
+
+    // Reject --asked with --repo-config
+    let out = s.write_err(&lms_delivery, &["--no-t3", "--repo-config", "--asked", "delivery"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--asked only applies to the user config"));
+
+    // Write lms delivery steps to repo .t3-workflow.json
+    let out = s.write_ok(&lms_delivery, &["--no-t3", "--repo-config"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let repo_cfg = s.repo.join(".t3-workflow.json");
+    assert!(repo_cfg.exists());
+    assert!(!s.config.exists(), "writing --repo-config must not touch user config");
+    assert!(stdout.contains(&format!("wrote {}", realpath(&repo_cfg).display())), "{stdout}");
+    assert!(stdout.contains("publish via lms-publish"), "{stdout}");
+    assert!(stdout.contains("[.t3-workflow.json]"), "{stdout}");
+
+    let saved_repo: Value = serde_json::from_str(&std::fs::read_to_string(&repo_cfg).unwrap()).unwrap();
+    assert_eq!(saved_repo["version"], 1);
+    assert_eq!(saved_repo["delivery"], lms_delivery["delivery"]);
+    assert!(saved_repo.get("steps").is_none(), "repo config must not record per-machine setup steps");
+    assert!(saved_repo.get("writtenBy").is_none());
+
+    // detect reads .t3-workflow.json and searches every configured delivery step skill
+    let detected = s.detect(&["--no-t3"]);
+    assert_eq!(detected["config"]["repoExists"], true);
+    assert_eq!(detected["config"]["repoProblems"], json!([]));
+    assert_eq!(detected["slots"]["delivery"]["configured"], json!(["deploy", "lms-publish"]));
+    assert!(detected["slots"]["delivery"]["found"].get("deploy").is_some());
+    assert!(detected["slots"]["delivery"]["found"].get("lms-publish").is_some());
+
+    // Write composable delivery steps to user config as well
+    let user_steps = json!({
+        "delivery": {
+            "steps": [
+                {"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"},
+                {"id": "verify", "skill": "not-installed-yet", "gate": "never", "scope": "pr"}
+            ],
+            "closeAfter": "pr"
+        }
+    });
+    let out = s.write_ok(&user_steps, &["--no-t3"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("warn: delivery.verify: not-installed-yet is not installed yet"), "{stdout}");
+    assert_eq!(s.saved()["delivery"], user_steps["delivery"]);
+
+    // Reject ambiguous bare skill in a newly written delivery step
+    let (p1, _) = s.plugin_skill("one", "ship-it");
+    let (p2, _) = s.plugin_skill("two", "ship-it");
+    s.install_plugins(&[("one", &p1), ("two", &p2)]);
+    let bad_ambig = json!({
+        "delivery": {
+            "steps": [
+                {"id": "merge", "kind": "builtin", "gate": "always"},
+                {"id": "deploy", "skill": "ship-it", "gate": "chain"}
+            ]
+        }
+    });
+    let out = s.write_err(&bad_ambig, &["--no-t3"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("delivery.deploy: ship-it matches"), "{stderr}");
+    assert!(stderr.contains("record one full name"), "{stderr}");
+
+    // Reject invalid delivery.steps shape on write
+    let bad_shape = json!({
+        "delivery": {
+            "steps": [
+                {"id": "deploy", "skill": "deploy", "gate": "always"},
+                {"id": "merge", "kind": "builtin", "gate": "always"}
+            ]
+        }
+    });
+    let out = s.write_err(&bad_shape, &["--no-t3", "--repo-config"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("builtin merge step must be first"));
 }

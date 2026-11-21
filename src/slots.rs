@@ -9,9 +9,16 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 pub const CONFIG_VERSION: u64 = 1;
+pub const REPO_CONFIG_FILE: &str = ".t3-workflow.json";
 pub const SLOTS: &[&str] = &["review", "passes", "credentials", "delivery", "models"];
 const TOP_KEYS: &[&str] = &["version", "review", "passes", "credentials", "delivery", "models", "writtenBy", "steps"];
 pub const DELIVERY_MODES: &[&str] = &["merge", "tag-deploy"];
+pub const DELIVERY_KINDS: &[&str] = &["builtin", "skill", "manual"];
+pub const DELIVERY_GATES: &[&str] = &["always", "chain", "never"];
+pub const DELIVERY_SCOPES: &[&str] = &["pr", "ticket", "post-handoff"];
+pub const DELIVERY_CLOSE_AFTER: &[&str] = &["pr", "ticket", "all"];
+pub const DEFAULT_CLOSE_AFTER: &str = "ticket";
+const DELIVERY_STEP_KEYS: &[&str] = &["id", "kind", "skill", "prompt", "gate", "scope", "paths", "watch"];
 pub const MODEL_ROLES: &[&str] = &["ticket", "worker"];
 const DEFAULT_REVIEW: &str = "sol-loop";
 const DEFAULT_PROVIDER: &str = "claudeAgent";
@@ -645,6 +652,357 @@ fn nonempty_str(v: &Value) -> bool {
     v.as_str().is_some_and(|s| !s.is_empty())
 }
 
+fn step_id_ok(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else { return false };
+    first.is_ascii_alphanumeric() && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+fn scope_rank(scope: &str) -> Option<usize> {
+    DELIVERY_SCOPES.iter().position(|s| *s == scope)
+}
+
+fn normalize_rel_path(path: &str) -> String {
+    let replaced = path.replace('\\', "/");
+    let mut s = replaced.as_str();
+    loop {
+        if let Some(rest) = s.strip_prefix("./") {
+            s = rest;
+        } else if let Some(rest) = s.strip_prefix('/') {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    s.to_string()
+}
+
+const MAX_GLOB_BRACE_DEPTH: usize = 16;
+
+fn push_glob_segment(
+    chars: &[char],
+    idx: &mut usize,
+    depth: usize,
+    out: &mut String,
+) -> std::result::Result<(), String> {
+    let in_brace = depth > 0;
+    while *idx < chars.len() {
+        let c = chars[*idx];
+        if in_brace && (c == ',' || c == '}') {
+            return Ok(());
+        }
+        match c {
+            '\\' => {
+                *idx += 1;
+                let Some(&next) = chars.get(*idx) else {
+                    return Err("trailing backslash".into());
+                };
+                out.push_str(&fancy_regex::escape(&next.to_string()));
+                *idx += 1;
+            }
+            '*' => {
+                if chars.get(*idx + 1) == Some(&'*') {
+                    let start = *idx;
+                    while chars.get(*idx) == Some(&'*') {
+                        *idx += 1;
+                    }
+                    let at_start = start == 0
+                        || chars.get(start.wrapping_sub(1)) == Some(&'/')
+                        || (in_brace && matches!(chars.get(start.wrapping_sub(1)), Some('{' | ',')));
+                    if chars.get(*idx) == Some(&'/') && at_start {
+                        *idx += 1;
+                        out.push_str("(?:[^/]+/)*");
+                    } else {
+                        out.push_str(".*");
+                    }
+                } else {
+                    *idx += 1;
+                    out.push_str("[^/]*");
+                }
+            }
+            '?' => {
+                *idx += 1;
+                out.push_str("[^/]");
+            }
+            '[' => {
+                *idx += 1;
+                let mut negated = false;
+                if matches!(chars.get(*idx), Some('!' | '^')) {
+                    negated = true;
+                    *idx += 1;
+                }
+                let mut content = String::new();
+                if chars.get(*idx) == Some(&']') {
+                    content.push_str(r"\]");
+                    *idx += 1;
+                }
+                let mut closed = false;
+                while *idx < chars.len() {
+                    let ch = chars[*idx];
+                    *idx += 1;
+                    if ch == ']' {
+                        closed = true;
+                        break;
+                    }
+                    if ch == '\\' {
+                        let Some(&esc) = chars.get(*idx) else {
+                            return Err("unclosed character class '['".into());
+                        };
+                        *idx += 1;
+                        content.push('\\');
+                        content.push(esc);
+                    } else {
+                        content.push(ch);
+                    }
+                }
+                if !closed {
+                    return Err("unclosed character class '['".into());
+                }
+                if content.is_empty() {
+                    return Err("empty character class '[]'".into());
+                }
+                if negated {
+                    out.push_str("[^/");
+                    out.push_str(&content);
+                    out.push(']');
+                } else {
+                    out.push_str("(?:(?!/)[");
+                    out.push_str(&content);
+                    out.push_str("])");
+                }
+            }
+            '{' => {
+                if depth >= MAX_GLOB_BRACE_DEPTH {
+                    return Err(format!("brace nesting exceeds maximum depth ({MAX_GLOB_BRACE_DEPTH})"));
+                }
+                *idx += 1;
+                let mut alts = Vec::new();
+                loop {
+                    let mut branch = String::new();
+                    push_glob_segment(chars, idx, depth + 1, &mut branch)?;
+                    alts.push(branch);
+                    match chars.get(*idx) {
+                        Some(',') => *idx += 1,
+                        Some('}') => {
+                            *idx += 1;
+                            break;
+                        }
+                        _ => return Err("unclosed brace group '{'".into()),
+                    }
+                }
+                if alts.iter().all(String::is_empty) {
+                    return Err("empty brace group '{}'".into());
+                }
+                out.push_str("(?:");
+                out.push_str(&alts.join("|"));
+                out.push(')');
+            }
+            '}' => return Err("unmatched '}'".into()),
+            other => {
+                *idx += 1;
+                out.push_str(&fancy_regex::escape(&other.to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn compile_glob(pattern: &str) -> std::result::Result<Regex, String> {
+    let mut trimmed = pattern.trim();
+    loop {
+        if let Some(rest) = trimmed.strip_prefix("./") {
+            trimmed = rest;
+        } else if let Some(rest) = trimmed.strip_prefix('/') {
+            trimmed = rest;
+        } else {
+            break;
+        }
+    }
+    if trimmed.is_empty() {
+        return Err("glob pattern must not be empty".into());
+    }
+    let effective = if trimmed.ends_with('/') { format!("{trimmed}**") } else { trimmed.to_string() };
+    let chars: Vec<char> = effective.chars().collect();
+    let mut idx = 0;
+    let mut regex_src = String::from("^");
+    push_glob_segment(&chars, &mut idx, 0, &mut regex_src)?;
+    regex_src.push('$');
+    Regex::new(&regex_src).map_err(|e| e.to_string())
+}
+
+pub fn validate_glob(pattern: &str) -> std::result::Result<(), String> {
+    compile_glob(pattern).map(|_| ())
+}
+
+pub fn glob_matches(pattern: &str, file: &str) -> std::result::Result<bool, String> {
+    let re = compile_glob(pattern)?;
+    let normalized = normalize_rel_path(file);
+    re.is_match(&normalized).map_err(|e| e.to_string())
+}
+
+fn validate_delivery_steps(steps_val: &Value, at: &str, problems: &mut Vec<Option<String>>) {
+    let Some(steps) = steps_val.as_array() else {
+        problems.push(Some(format!("{at}.delivery.steps: must be a list of step objects")));
+        return;
+    };
+    if steps.is_empty() {
+        problems.push(Some(format!("{at}.delivery.steps: must contain at least one step")));
+        return;
+    }
+    let mut seen_ids = HashSet::new();
+    let mut saw_builtin_merge = false;
+    let mut saw_always_gate = false;
+    let mut max_scope_rank = 0usize;
+    for (i, step_val) in steps.iter().enumerate() {
+        let w = format!("{at}.delivery.steps[{i}]");
+        let Some(step) = step_val.as_object() else {
+            problems.push(Some(format!("{w}: must be an object")));
+            continue;
+        };
+        let mut extra: Vec<String> =
+            step.keys().filter(|k| !DELIVERY_STEP_KEYS.contains(&k.as_str())).cloned().collect();
+        if !extra.is_empty() {
+            extra.sort();
+            problems.push(Some(format!("{w}: unknown keys {}", py_list(&extra))));
+        }
+        let id = match step.get("id") {
+            Some(Value::String(s)) if step_id_ok(s) => {
+                if !seen_ids.insert(s.clone()) {
+                    problems.push(Some(format!("{w}.id: duplicate step id {}", py_str(s))));
+                }
+                Some(s.as_str())
+            }
+            Some(v) => {
+                problems.push(Some(format!(
+                    "{w}.id: {} must be a non-empty identifier (letters, digits, `-`, `_`, `.`)",
+                    py_repr(v)
+                )));
+                None
+            }
+            None => {
+                problems.push(Some(format!("{w}.id: required")));
+                None
+            }
+        };
+        let kind = match step.get("kind") {
+            None => None,
+            Some(Value::String(k)) if DELIVERY_KINDS.contains(&k.as_str()) => Some(k.as_str()),
+            Some(v) => {
+                problems.push(Some(format!("{w}.kind: {} is not one of {}", py_repr(v), DELIVERY_KINDS.join(", "))));
+                Some("<invalid>")
+            }
+        };
+        match kind {
+            Some("builtin") => {
+                if id.is_some_and(|s| s != "merge") {
+                    problems.push(Some(format!("{w}: kind 'builtin' is only supported for id 'merge'")));
+                }
+                if saw_builtin_merge {
+                    if id != Some("merge") {
+                        problems.push(Some(format!("{w}: builtin merge step may appear at most once")));
+                    }
+                } else if i != 0 {
+                    problems.push(Some(format!("{w}: builtin merge step must be first")));
+                }
+                saw_builtin_merge = true;
+                if step.contains_key("skill") {
+                    problems.push(Some(format!("{w}: builtin merge step cannot set skill")));
+                }
+                if step.contains_key("prompt") {
+                    problems.push(Some(format!("{w}: builtin merge step cannot set prompt")));
+                }
+            }
+            Some("manual") => {
+                if id == Some("merge") {
+                    problems.push(Some(format!("{w}: id 'merge' is reserved for kind 'builtin'")));
+                }
+                if step.contains_key("skill") {
+                    problems.push(Some(format!("{w}: manual step cannot set skill")));
+                }
+                if step.get("prompt").is_none_or(|v| v.as_str().is_none_or(|s| s.trim().is_empty())) {
+                    problems.push(Some(format!("{w}.prompt: manual step requires a non-empty prompt string")));
+                }
+            }
+            Some("skill") | None => {
+                if id == Some("merge") {
+                    problems.push(Some(format!("{w}: id 'merge' is reserved for kind 'builtin'")));
+                }
+                if step.contains_key("prompt") {
+                    problems.push(Some(format!("{w}: skill step cannot set prompt")));
+                }
+                match step.get("skill") {
+                    Some(s) => problems.push(skill_ref_problem(&format!("{w}.skill"), s)),
+                    None if kind == Some("skill") => {
+                        problems.push(Some(format!("{w}.skill: kind 'skill' requires a skill name")));
+                    }
+                    None => {
+                        problems.push(Some(format!("{w}: must set kind ('builtin' or 'manual') or skill")));
+                    }
+                }
+            }
+            Some(_) => {}
+        }
+        match step.get("gate") {
+            Some(Value::String(g)) if DELIVERY_GATES.contains(&g.as_str()) => {
+                if g == "always" {
+                    saw_always_gate = true;
+                } else if g == "chain" && !saw_always_gate {
+                    problems.push(Some(format!("{w}.gate: 'chain' requires a preceding step with gate 'always'")));
+                }
+            }
+            Some(v) => {
+                problems.push(Some(format!("{w}.gate: {} is not one of {}", py_repr(v), DELIVERY_GATES.join(", "))))
+            }
+            None => problems.push(Some(format!("{w}.gate: required (one of {})", DELIVERY_GATES.join(", ")))),
+        }
+        let scope = match step.get("scope") {
+            None => Some("pr"),
+            Some(Value::String(s)) if DELIVERY_SCOPES.contains(&s.as_str()) => Some(s.as_str()),
+            Some(v) => {
+                problems.push(Some(format!("{w}.scope: {} is not one of {}", py_repr(v), DELIVERY_SCOPES.join(", "))));
+                None
+            }
+        };
+        if let Some(scope) = scope {
+            if kind == Some("builtin") && scope != "pr" {
+                problems.push(Some(format!("{w}.scope: builtin merge step must have scope 'pr'")));
+            }
+            if let Some(rank) = scope_rank(scope) {
+                if rank < max_scope_rank {
+                    problems.push(Some(format!("{w}.scope: {scope:?} cannot follow a broader scope")));
+                } else {
+                    max_scope_rank = rank;
+                }
+            }
+        }
+        if let Some(paths_val) = step.get("paths") {
+            match paths_val.as_array() {
+                None => problems.push(Some(format!("{w}.paths: must be a list of glob patterns"))),
+                Some(a) if a.is_empty() => {
+                    problems.push(Some(format!("{w}.paths: must be a non-empty list of glob patterns")))
+                }
+                Some(a) => {
+                    for (j, p) in a.iter().enumerate() {
+                        match p.as_str() {
+                            Some(s) => {
+                                if let Err(e) = validate_glob(s) {
+                                    problems.push(Some(format!("{w}.paths[{j}]: invalid glob {}: {e}", py_str(s))));
+                                }
+                            }
+                            None => problems.push(Some(format!("{w}.paths[{j}]: {} must be a string", py_repr(p)))),
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(watch_val) = step.get("watch")
+            && !watch_val.is_boolean()
+        {
+            problems.push(Some(format!("{w}.watch: must be a boolean")));
+        }
+    }
+}
+
 pub fn validate_slots(cfg: &Map<String, Value>, at: &str) -> Vec<String> {
     let mut problems: Vec<Option<String>> = Vec::new();
     if let Some(r) = cfg.get("review").filter(|r| !r.is_null()) {
@@ -688,14 +1046,22 @@ pub fn validate_slots(cfg: &Map<String, Value>, at: &str) -> Vec<String> {
     }
     if let Some(d) = cfg.get("delivery") {
         match d.as_object() {
-            None => {
-                problems.push(Some(format!("{at}.delivery: must be an object with mode (and skill for tag-deploy)")))
-            }
+            None => problems.push(Some(format!(
+                "{at}.delivery: must be an object with steps (and optional closeAfter) or mode (and skill for tag-deploy)"
+            ))),
             Some(d) => {
-                let mut extra: Vec<String> = d.keys().filter(|k| *k != "mode" && *k != "skill").cloned().collect();
+                let allowed = ["mode", "skill", "steps", "closeAfter"];
+                let mut extra: Vec<String> = d.keys().filter(|k| !allowed.contains(&k.as_str())).cloned().collect();
                 if !extra.is_empty() {
                     extra.sort();
                     problems.push(Some(format!("{at}.delivery: unknown keys {}", py_list(&extra))));
+                }
+                let has_legacy = d.contains_key("mode") || d.contains_key("skill");
+                let has_new = d.contains_key("steps") || d.contains_key("closeAfter");
+                if has_legacy && has_new {
+                    problems.push(Some(format!(
+                        "{at}.delivery: cannot mix steps/closeAfter with legacy mode/skill"
+                    )));
                 }
                 if let Some(m) = d.get("mode")
                     && !m.as_str().is_some_and(|m| DELIVERY_MODES.contains(&m))
@@ -708,6 +1074,18 @@ pub fn validate_slots(cfg: &Map<String, Value>, at: &str) -> Vec<String> {
                 }
                 if let Some(s) = d.get("skill") {
                     problems.push(skill_ref_problem(&format!("{at}.delivery.skill"), s));
+                }
+                if let Some(ca) = d.get("closeAfter")
+                    && !ca.as_str().is_some_and(|c| DELIVERY_CLOSE_AFTER.contains(&c))
+                {
+                    problems.push(Some(format!(
+                        "{at}.delivery.closeAfter: {} is not one of {}",
+                        py_repr(ca),
+                        DELIVERY_CLOSE_AFTER.join(", ")
+                    )));
+                }
+                if let Some(steps) = d.get("steps") {
+                    validate_delivery_steps(steps, at, &mut problems);
                 }
             }
         }
@@ -1366,6 +1744,8 @@ pub struct ModelSlot {
 pub struct Resolved {
     pub repo: String,
     pub config: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_config: Option<String>,
     pub review: Value,
     pub passes: Value,
     pub credentials: Value,
@@ -1391,7 +1771,52 @@ struct Eff {
     review_set: bool,
 }
 
-fn merged(user: &Map<String, Value>, block: &Map<String, Value>) -> Eff {
+fn merge_delivery_layer(prev: &Map<String, Value>, next_layer: &Map<String, Value>) -> Option<Map<String, Value>> {
+    if next_layer.is_empty() {
+        return None;
+    }
+    if next_layer.contains_key("steps") {
+        return Some(next_layer.clone());
+    }
+    if let Some(mode_val) = next_layer.get("mode") {
+        let mut next = Map::new();
+        let mode = mode_val.as_str().unwrap_or_default();
+        next.insert("mode".into(), mode_val.clone());
+        if let Some(skill) = next_layer.get("skill") {
+            next.insert("skill".into(), skill.clone());
+        } else if mode == "tag-deploy"
+            && !prev.contains_key("steps")
+            && let Some(prev_skill) = prev.get("skill")
+        {
+            next.insert("skill".into(), prev_skill.clone());
+        }
+        return Some(next);
+    }
+    if let Some(skill) = next_layer.get("skill") {
+        if prev.contains_key("steps") {
+            let mut next = prev.clone();
+            if let Some(steps) = next.get_mut("steps").and_then(Value::as_array_mut) {
+                for st in steps {
+                    if st.get("id").and_then(Value::as_str) == Some("deploy") && st.get("skill").is_some() {
+                        st["skill"] = skill.clone();
+                    }
+                }
+            }
+            return Some(next);
+        }
+        let mut next = prev.clone();
+        next.insert("skill".into(), skill.clone());
+        return Some(next);
+    }
+    if let Some(close_after) = next_layer.get("closeAfter") {
+        let mut next = prev.clone();
+        next.insert("closeAfter".into(), close_after.clone());
+        return Some(next);
+    }
+    None
+}
+
+fn merged(user: &Map<String, Value>, block: &Map<String, Value>, repo_json: &Map<String, Value>) -> Eff {
     let mut eff = Eff {
         review: (Value::Null, "default".into()),
         passes: (Vec::new(), "default".into()),
@@ -1400,7 +1825,7 @@ fn merged(user: &Map<String, Value>, block: &Map<String, Value>) -> Eff {
         models: MODEL_ROLES.iter().map(|r| (r.to_string(), (None, "default".to_string()))).collect(),
         review_set: false,
     };
-    for (src, cfg) in [("user", user), ("AGENTS.md", block)] {
+    for (src, cfg) in [("user", user), ("AGENTS.md", block), (REPO_CONFIG_FILE, repo_json)] {
         if let Some(r) = cfg.get("review") {
             eff.review = (r.clone(), src.into());
             eff.review_set = true;
@@ -1421,9 +1846,9 @@ fn merged(user: &Map<String, Value>, block: &Map<String, Value>) -> Eff {
                 .collect();
             eff.credentials = (pairs, src.into());
         }
-        if let Some(d) = cfg.get("delivery").and_then(Value::as_object) {
-            let mut next = eff.delivery.0.clone();
-            next.extend(d.clone());
+        if let Some(d) = cfg.get("delivery").and_then(Value::as_object)
+            && let Some(next) = merge_delivery_layer(&eff.delivery.0, d)
+        {
             eff.delivery = (next, src.into());
         }
         if let Some(m) = cfg.get("models").and_then(Value::as_object) {
@@ -1464,6 +1889,169 @@ fn inline_paths(v: &mut Value) {
     }
 }
 
+fn builtin_merge_step() -> Value {
+    json!({"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"})
+}
+
+fn is_default_merge_step(step: &Value) -> bool {
+    step.get("id").and_then(Value::as_str) == Some("merge")
+        && step.get("kind").and_then(Value::as_str) == Some("builtin")
+        && step.get("gate").and_then(Value::as_str) == Some("always")
+        && step.get("scope").and_then(Value::as_str) == Some("pr")
+        && step.get("paths").is_none()
+        && step.get("watch").and_then(Value::as_bool) != Some(true)
+}
+
+fn apply_legacy_delivery_compat(delivery: &mut Value) {
+    if delivery.get("problem").is_some() {
+        return;
+    }
+    let close_after = delivery["closeAfter"].as_str().unwrap_or(DEFAULT_CLOSE_AFTER).to_string();
+    let steps = delivery["steps"].as_array().cloned();
+    let Some(o) = delivery.as_object_mut() else { return };
+    o.remove("mode");
+    o.remove("skill");
+    if close_after != DEFAULT_CLOSE_AFTER {
+        return;
+    }
+    let Some(steps) = steps else { return };
+    if steps.len() == 1 && is_default_merge_step(&steps[0]) {
+        o.insert("mode".into(), json!("merge"));
+    } else if steps.len() == 2
+        && is_default_merge_step(&steps[0])
+        && steps[1].get("id").and_then(Value::as_str) == Some("deploy")
+        && steps[1].get("kind").and_then(Value::as_str) == Some("skill")
+        && steps[1].get("gate").and_then(Value::as_str) == Some("chain")
+        && steps[1].get("scope").and_then(Value::as_str) == Some("pr")
+        && steps[1].get("watch").and_then(Value::as_bool) == Some(true)
+        && steps[1].get("paths").is_none()
+    {
+        o.insert("mode".into(), json!("tag-deploy"));
+        o.insert("skill".into(), steps[1]["skill"].clone());
+    }
+}
+
+fn resolve_step(raw: &Map<String, Value>, resolver: &Resolver) -> Value {
+    let id = raw.get("id").and_then(Value::as_str).unwrap_or_default();
+    let kind = raw
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| if raw.contains_key("skill") { "skill" } else { "builtin" });
+    let gate = raw.get("gate").and_then(Value::as_str).unwrap_or("always");
+    let scope = raw.get("scope").and_then(Value::as_str).unwrap_or("pr");
+    let mut step = Map::new();
+    step.insert("id".into(), json!(id));
+    step.insert("kind".into(), json!(kind));
+    if kind == "skill" {
+        let skill_ref = raw.get("skill").and_then(Value::as_str).unwrap_or_default();
+        step.insert("skill".into(), resolver.resolve(skill_ref));
+    } else if kind == "manual"
+        && let Some(prompt) = raw.get("prompt").and_then(Value::as_str)
+    {
+        step.insert("prompt".into(), json!(prompt));
+    }
+    step.insert("gate".into(), json!(gate));
+    step.insert("scope".into(), json!(scope));
+    if let Some(paths) = raw.get("paths").and_then(Value::as_array) {
+        step.insert("paths".into(), Value::Array(paths.clone()));
+    }
+    if raw.get("watch").and_then(Value::as_bool) == Some(true) {
+        step.insert("watch".into(), json!(true));
+    }
+    Value::Object(step)
+}
+
+fn resolve_delivery(d: &Map<String, Value>, source: &str, resolver: &Resolver) -> Value {
+    let close_after = d
+        .get("closeAfter")
+        .and_then(Value::as_str)
+        .filter(|c| DELIVERY_CLOSE_AFTER.contains(c))
+        .unwrap_or(DEFAULT_CLOSE_AFTER);
+    if let Some(raw_steps) = d.get("steps").and_then(Value::as_array) {
+        let steps: Vec<Value> =
+            raw_steps.iter().filter_map(Value::as_object).map(|st| resolve_step(st, resolver)).collect();
+        let mut delivery = json!({
+            "slot": "delivery",
+            "source": source,
+            "steps": steps,
+            "closeAfter": close_after,
+        });
+        apply_legacy_delivery_compat(&mut delivery);
+        return delivery;
+    }
+    let mode = d.get("mode").and_then(Value::as_str).unwrap_or("merge");
+    if mode == "tag-deploy" {
+        match d.get("skill").filter(|s| truthy(s)).and_then(Value::as_str) {
+            Some(skill_ref) => {
+                let resolved_skill = resolver.resolve(skill_ref);
+                let steps = vec![
+                    builtin_merge_step(),
+                    json!({
+                        "id": "deploy",
+                        "kind": "skill",
+                        "skill": resolved_skill,
+                        "gate": "chain",
+                        "scope": "pr",
+                        "watch": true,
+                    }),
+                ];
+                let mut delivery = json!({
+                    "slot": "delivery",
+                    "source": source,
+                    "steps": steps,
+                    "closeAfter": close_after,
+                });
+                apply_legacy_delivery_compat(&mut delivery);
+                delivery
+            }
+            None => json!({
+                "slot": "delivery",
+                "source": source,
+                "steps": [builtin_merge_step()],
+                "closeAfter": close_after,
+                "mode": "tag-deploy",
+                "skill": Value::Null,
+                "problem": "tag-deploy names no deploy skill",
+            }),
+        }
+    } else {
+        let mut delivery = json!({
+            "slot": "delivery",
+            "source": source,
+            "steps": [builtin_merge_step()],
+            "closeAfter": close_after,
+        });
+        apply_legacy_delivery_compat(&mut delivery);
+        delivery
+    }
+}
+
+pub fn filter_delivery_steps(delivery: &mut Value, files: &[String]) {
+    let Some(steps) = delivery.get("steps").and_then(Value::as_array).cloned() else { return };
+    let mut kept = Vec::new();
+    let mut skipped = Vec::new();
+    for step in steps {
+        let Some(paths) = step.get("paths").and_then(Value::as_array) else {
+            kept.push(step);
+            continue;
+        };
+        let globs: Vec<&str> = paths.iter().filter_map(Value::as_str).collect();
+        let matched = files.iter().any(|f| globs.iter().any(|g| glob_matches(g, f).unwrap_or(false)));
+        if matched {
+            kept.push(step);
+        } else {
+            skipped.push(json!({
+                "id": step["id"],
+                "reason": "no files matched paths",
+                "paths": globs,
+            }));
+        }
+    }
+    delivery["steps"] = Value::Array(kept);
+    delivery["skipped"] = Value::Array(skipped);
+    apply_legacy_delivery_compat(delivery);
+}
+
 impl Resolved {
     pub fn build(i: &Inputs) -> Resolved {
         Snapshot::capture_with(i.folders, i.root, i.listed, Some(i.enabled)).build()
@@ -1493,12 +2081,35 @@ impl Resolved {
         if !config_problems.is_empty() {
             user = Map::new();
         }
-        let (block, repo_problems) = match &s.agents_md_raw {
+        let (block, mut repo_problems) = match &s.agents_md_raw {
             Ok(Some(raw)) => parse_agent_workflow(&String::from_utf8_lossy(raw)),
             Ok(None) => (Map::new(), Vec::new()),
             Err(e) => (Map::new(), vec![e.clone()]),
         };
-        let eff = merged(&user, &block);
+        let repo_config_path = s.root.join(REPO_CONFIG_FILE);
+        let mut repo_json_problems = Vec::new();
+        let mut repo_json = match &s.repo_config_raw {
+            Ok(Some(raw)) => match parse_user_config(&repo_config_path, raw) {
+                Ok(c) => c,
+                Err(e) => {
+                    repo_json_problems.push(e);
+                    Map::new()
+                }
+            },
+            Ok(None) => Map::new(),
+            Err(e) => {
+                repo_json_problems.push(e.clone());
+                Map::new()
+            }
+        };
+        if !repo_json.is_empty() {
+            repo_json_problems.extend(validate_config(&repo_json, REPO_CONFIG_FILE));
+        }
+        if !repo_json_problems.is_empty() {
+            repo_json = Map::new();
+        }
+        repo_problems.extend(repo_json_problems);
+        let eff = merged(&user, &block, &repo_json);
         let resolver = Resolver::from_disk(s.skills.clone(), &s.listed);
         let review = if !eff.review_set {
             let hit = resolver.resolve(DEFAULT_REVIEW);
@@ -1519,23 +2130,14 @@ impl Resolved {
         let renewals: Vec<Value> =
             eff.credentials.0.iter().map(|(m, s)| json!({"match": m, "skill": resolver.resolve(s)})).collect();
         let credentials = json!({"slot": "credentials", "source": eff.credentials.1, "renewals": renewals});
-        let d = &eff.delivery.0;
-        let mode = d.get("mode").cloned().unwrap_or_else(|| json!("merge"));
-        let mut delivery = json!({"slot": "delivery", "source": eff.delivery.1, "mode": mode});
-        match d.get("skill").filter(|s| truthy(s)) {
-            Some(s) => delivery["skill"] = resolver.resolve(s.as_str().unwrap_or_default()),
-            None if mode == "tag-deploy" => {
-                delivery["skill"] = Value::Null;
-                delivery["problem"] = json!("tag-deploy names no deploy skill");
-            }
-            None => {}
-        }
+        let delivery = resolve_delivery(&eff.delivery.0, &eff.delivery.1, &resolver);
         let mut models: Vec<ModelSlot> =
             eff.models.into_iter().map(|(role, (spec, source))| ModelSlot { role, spec, source }).collect();
         models.sort_by_key(|m| MODEL_ROLES.iter().position(|r| *r == m.role));
         Resolved {
             repo: text(&s.root),
             config: s.config_exists.then(|| text(config_file)),
+            repo_config: s.repo_config_exists.then(|| text(&repo_config_path)),
             review,
             passes,
             credentials,
@@ -1581,7 +2183,7 @@ impl Resolved {
     }
 
     pub fn all(&self, caps: &Caps) -> Value {
-        json!({
+        let mut out = json!({
             "repo": self.repo,
             "config": self.config,
             "review": self.review,
@@ -1589,7 +2191,11 @@ impl Resolved {
             "credentials": self.credentials,
             "delivery": self.delivery,
             "models": self.models_json(caps),
-        })
+        });
+        if let Some(rc) = &self.repo_config {
+            out["repoConfig"] = json!(rc);
+        }
+        out
     }
 }
 
@@ -1853,6 +2459,56 @@ fn model_text(m: &Value) -> String {
     t
 }
 
+fn step_text(step: &Value) -> String {
+    let id = step["id"].as_str().unwrap_or("?");
+    let kind = step["kind"].as_str().unwrap_or("skill");
+    let gate = step["gate"].as_str().unwrap_or("always");
+    let scope = step["scope"].as_str().unwrap_or("pr");
+    let watch = step["watch"].as_bool().unwrap_or(false);
+    let paths = strings(&step["paths"]);
+    let mut head = match kind {
+        "builtin" => id.to_string(),
+        "manual" => format!("{id} (manual)"),
+        _ => format!("{id} via {}", skill_text(&step["skill"])),
+    };
+    let mut meta = Vec::new();
+    if !(kind == "builtin" && gate == "always" && scope == "pr" && !watch && paths.is_empty()) {
+        meta.push(format!("{gate}/{scope}"));
+        if watch {
+            meta.push("watch".into());
+        }
+        if !paths.is_empty() {
+            meta.push(format!("paths: {}", paths.join(", ")));
+        }
+    }
+    if !meta.is_empty() {
+        head.push_str(&format!(" ({})", meta.join(", ")));
+    }
+    head
+}
+
+pub fn delivery_line(d: &Value) -> String {
+    let src = d["source"].as_str().unwrap_or_default();
+    if let Some(p) = d["problem"].as_str() {
+        let mode = d["mode"].as_str().unwrap_or("tag-deploy");
+        return format!("delivery: {mode} via ? - PROBLEM: {p} [{src}]");
+    }
+    let steps = d["steps"].as_array();
+    let mut text = match steps {
+        Some(list) if !list.is_empty() => list.iter().map(step_text).collect::<Vec<_>>().join(" -> "),
+        _ => "none".into(),
+    };
+    let close_after = d["closeAfter"].as_str().unwrap_or(DEFAULT_CLOSE_AFTER);
+    if close_after != DEFAULT_CLOSE_AFTER {
+        text.push_str(&format!("; closeAfter {close_after}"));
+    }
+    let skipped: Vec<&str> = d["skipped"].as_array().into_iter().flatten().filter_map(|s| s["id"].as_str()).collect();
+    if !skipped.is_empty() {
+        text.push_str(&format!("; skipped: {}", skipped.join(", ")));
+    }
+    format!("delivery: {text} [{src}]")
+}
+
 pub fn slot_line(eff: &Value, slot: &str) -> Vec<String> {
     let src = |v: &Value| v["source"].as_str().unwrap_or_default().to_string();
     match slot {
@@ -1878,18 +2534,7 @@ pub fn slot_line(eff: &Value, slot: &str) -> Vec<String> {
             let text = if list.is_empty() { "none".into() } else { list.join("; ") };
             vec![format!("credentials: {text} [{}]", src(c))]
         }
-        "delivery" => {
-            let d = &eff["delivery"];
-            let mode = d["mode"].as_str().map(String::from).unwrap_or_else(|| d["mode"].to_string());
-            let mut text = mode.clone();
-            if truthy(&d["skill"]) {
-                text.push_str(if mode == "tag-deploy" { " via " } else { "; deploy skill " });
-                text.push_str(&skill_text(&d["skill"]));
-            } else if let Some(p) = d["problem"].as_str() {
-                text.push_str(&format!(" via ? - PROBLEM: {p}"));
-            }
-            vec![format!("delivery: {text} [{}]", src(d))]
-        }
+        "delivery" => vec![delivery_line(&eff["delivery"])],
         "models" => eff["models"]
             .as_object()
             .into_iter()
@@ -1902,7 +2547,11 @@ pub fn slot_line(eff: &Value, slot: &str) -> Vec<String> {
 
 pub fn report_lines(eff: &Value) -> Vec<String> {
     let config = eff["config"].as_str().unwrap_or("none (defaults)");
-    let mut lines = vec![format!("repo: {}; config: {config}", eff["repo"].as_str().unwrap_or_default())];
+    let mut header = format!("repo: {}; config: {config}", eff["repo"].as_str().unwrap_or_default());
+    if let Some(rc) = eff["repoConfig"].as_str() {
+        header.push_str(&format!("; repo config: {rc}"));
+    }
+    let mut lines = vec![header];
     for slot in SLOTS {
         lines.extend(slot_line(eff, slot));
     }
@@ -1920,7 +2569,17 @@ pub fn configured_skills(eff: &Value) -> Vec<(String, Value)> {
     for x in eff["credentials"]["renewals"].as_array().into_iter().flatten() {
         out.push((format!("credentials /{}/", x["match"].as_str().unwrap_or_default()), x["skill"].clone()));
     }
-    if truthy(&eff["delivery"]["skill"]) {
+    if let Some(steps) = eff["delivery"]["steps"].as_array() {
+        for (i, step) in steps.iter().enumerate() {
+            if step["skill"].is_object() {
+                let label = match step["id"].as_str().filter(|id| !id.is_empty()) {
+                    Some(id) => format!("delivery.{id}"),
+                    None => format!("delivery.steps[{i}]"),
+                };
+                out.push((label, step["skill"].clone()));
+            }
+        }
+    } else if truthy(&eff["delivery"]["skill"]) {
         out.push(("delivery".to_string(), eff["delivery"]["skill"].clone()));
     }
     out
@@ -2062,6 +2721,8 @@ pub struct Snapshot {
     config_exists: bool,
     config_raw: std::result::Result<Option<Vec<u8>>, String>,
     agents_md_raw: std::result::Result<Option<Vec<u8>>, String>,
+    repo_config_exists: bool,
+    repo_config_raw: std::result::Result<Option<Vec<u8>>, String>,
     skills: Vec<Skill>,
 }
 
@@ -2078,6 +2739,7 @@ impl Snapshot {
     ) -> Snapshot {
         let mut h = Sha256::new();
         h.update(env!("CARGO_PKG_VERSION").as_bytes());
+        h.update(b"|slots-schema:2\n");
         for s in listed {
             h.update(s.as_bytes());
             h.update(b",");
@@ -2089,6 +2751,11 @@ impl Snapshot {
         let agents_path = root.join("AGENTS.md");
         let agents_md_raw = read_optional(&agents_path);
         stamp_bytes(&mut h, &agents_path, &agents_md_raw);
+
+        let repo_config_path = root.join(REPO_CONFIG_FILE);
+        let repo_config_raw = read_optional(&repo_config_path);
+        let repo_config_exists = !matches!(repo_config_raw, Ok(None));
+        stamp_bytes(&mut h, &repo_config_path, &repo_config_raw);
 
         let installed_path = folders.claude.join("plugins").join("installed_plugins.json");
         let installed_raw = read_optional(&installed_path);
@@ -2166,6 +2833,8 @@ impl Snapshot {
             config_exists,
             config_raw,
             agents_md_raw,
+            repo_config_exists,
+            repo_config_raw,
             skills,
         }
     }
@@ -2324,5 +2993,155 @@ mod tests {
             return;
         }
         assert_eq!(realpath(&git_root(&repo.join("sub"))), realpath(&repo));
+    }
+
+    #[test]
+    fn glob_matching_and_validation_cover_repo_patterns() {
+        assert!(glob_matches("training/**", "training/course-1/lesson.md").unwrap());
+        assert!(glob_matches("training/**", "./training/README.md").unwrap());
+        assert!(glob_matches("training/**", r"training\sub\file.md").unwrap());
+        assert!(!glob_matches("training/**", "training-extra/file.md").unwrap());
+        assert!(!glob_matches("training/**", "src/app.ts").unwrap());
+        assert!(glob_matches("training/", "training/a/b.md").unwrap());
+
+        assert!(glob_matches("**/Dockerfile", "Dockerfile").unwrap());
+        assert!(glob_matches("**/Dockerfile", "deploy/docker/Dockerfile").unwrap());
+        assert!(glob_matches("a/**/b.rs", "a/b.rs").unwrap());
+        assert!(glob_matches("a/**/b.rs", "a/x/y/b.rs").unwrap());
+        assert!(!glob_matches("a/**/b.rs", "a/x/c.rs").unwrap());
+
+        assert!(glob_matches("docs/*.md", "docs/guide.md").unwrap());
+        assert!(!glob_matches("docs/*.md", "docs/sub/guide.md").unwrap());
+        assert!(glob_matches("src/**/*.{ts,tsx}", "src/index.ts").unwrap());
+        assert!(glob_matches("src/**/*.{ts,tsx}", "src/ui/App.tsx").unwrap());
+        assert!(!glob_matches("src/**/*.{ts,tsx}", "src/ui/App.js").unwrap());
+        assert!(glob_matches("notes/v?.md", "notes/v2.md").unwrap());
+        assert!(!glob_matches("notes/v?.md", "notes/v10.md").unwrap());
+        assert!(glob_matches("data/[a-z].json", "data/k.json").unwrap());
+        assert!(!glob_matches("data/[a-z].json", "data/1.json").unwrap());
+        assert!(glob_matches("data/[!0-9].json", "data/k.json").unwrap());
+        assert!(!glob_matches("data/[!0-9].json", "data/1.json").unwrap());
+        assert!(!glob_matches("data/[!0-9].json", "data//.json").unwrap());
+
+        for bad in ["", "   ", "/", "a/[unclosed", "a/[]", "a/{x,y", "a/x}", "a/{}", r"a\"] {
+            assert!(validate_glob(bad).is_err(), "expected invalid glob: {bad:?}");
+        }
+        let deep = format!("{}a{}", "{".repeat(MAX_GLOB_BRACE_DEPTH + 1), "}".repeat(MAX_GLOB_BRACE_DEPTH + 1));
+        assert!(validate_glob(&deep).unwrap_err().contains("maximum depth"));
+    }
+
+    #[test]
+    fn validate_slots_checks_every_delivery_steps_invariant() {
+        let check = |delivery: Value| -> Vec<String> {
+            let mut cfg = Map::new();
+            cfg.insert("delivery".into(), delivery);
+            validate_slots(&cfg, ".t3-workflow.json")
+        };
+
+        // Valid lms-shaped 3-stage config
+        assert!(
+            check(json!({
+                "steps": [
+                    {"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"},
+                    {"id": "deploy", "skill": "deploy", "gate": "chain", "scope": "ticket", "watch": true},
+                    {"id": "publish", "skill": "lms-publish", "gate": "always", "scope": "post-handoff", "paths": ["training/**"]}
+                ],
+                "closeAfter": "ticket"
+            }))
+            .is_empty()
+        );
+
+        // Valid manual + never gate + non-merge start
+        assert!(
+            check(json!({
+                "steps": [
+                    {"id": "verify", "skill": "verify", "gate": "never", "scope": "pr"},
+                    {"id": "announce", "kind": "manual", "prompt": "Post release notes", "gate": "always", "scope": "post-handoff"}
+                ],
+                "closeAfter": "all"
+            }))
+            .is_empty()
+        );
+
+        // Empty steps
+        assert!(check(json!({"steps": []})).iter().any(|p| p.contains("at least one step")));
+        // Mixing legacy and steps
+        assert!(
+            check(json!({"mode": "merge", "steps": [{"id": "merge", "kind": "builtin", "gate": "always"}]}))
+                .iter()
+                .any(|p| p.contains("cannot mix"))
+        );
+        // Merge not first
+        assert!(
+            check(json!({"steps": [
+                {"id": "deploy", "skill": "deploy", "gate": "always"},
+                {"id": "merge", "kind": "builtin", "gate": "always"}
+            ]}))
+            .iter()
+            .any(|p| p.contains("must be first"))
+        );
+        // Duplicate id (including duplicate merge)
+        assert!(
+            check(json!({"steps": [
+                {"id": "merge", "kind": "builtin", "gate": "always"},
+                {"id": "merge", "kind": "builtin", "gate": "always"}
+            ]}))
+            .iter()
+            .any(|p| p.contains("duplicate step id"))
+        );
+        // Builtin with non-merge id
+        assert!(
+            check(json!({"steps": [{"id": "deploy", "kind": "builtin", "gate": "always"}]}))
+                .iter()
+                .any(|p| p.contains("only supported for id 'merge'"))
+        );
+        // Builtin merge with non-pr scope
+        assert!(
+            check(json!({"steps": [{"id": "merge", "kind": "builtin", "gate": "always", "scope": "ticket"}]}))
+                .iter()
+                .any(|p| p.contains("must have scope 'pr'"))
+        );
+        // Chain without preceding always
+        assert!(
+            check(json!({"steps": [{"id": "deploy", "skill": "deploy", "gate": "chain"}]}))
+                .iter()
+                .any(|p| p.contains("'chain' requires a preceding step with gate 'always'"))
+        );
+        // Decreasing scope order
+        assert!(
+            check(json!({"steps": [
+                {"id": "deploy", "skill": "deploy", "gate": "always", "scope": "ticket"},
+                {"id": "verify", "skill": "verify", "gate": "never", "scope": "pr"}
+            ]}))
+            .iter()
+            .any(|p| p.contains("cannot follow a broader scope"))
+        );
+        // Manual missing prompt
+        assert!(
+            check(json!({"steps": [{"id": "announce", "kind": "manual", "gate": "always"}]}))
+                .iter()
+                .any(|p| p.contains("requires a non-empty prompt"))
+        );
+        // Bad glob in paths
+        assert!(
+            check(json!({"steps": [{"id": "publish", "skill": "pub", "gate": "always", "paths": ["training/[bad"]}]}))
+                .iter()
+                .any(|p| p.contains("invalid glob"))
+        );
+        // Bad closeAfter
+        assert!(
+            check(json!({
+                "steps": [{"id": "merge", "kind": "builtin", "gate": "always"}],
+                "closeAfter": "never"
+            }))
+            .iter()
+            .any(|p| p.contains("closeAfter"))
+        );
+        // Non-boolean watch
+        assert!(
+            check(json!({"steps": [{"id": "deploy", "skill": "deploy", "gate": "always", "watch": "yes"}]}))
+                .iter()
+                .any(|p| p.contains("watch: must be a boolean"))
+        );
     }
 }
