@@ -478,6 +478,14 @@ impl Srv {
         req.send().await.unwrap()
     }
 
+    async fn put(&self, path: &str, body: Value, csrf: Option<&str>) -> reqwest::Response {
+        let mut req = self.http.put(format!("{}{path}", self.base)).json(&body);
+        if let Some(c) = csrf {
+            req = req.header("X-T3CM-CSRF", c);
+        }
+        req.send().await.unwrap()
+    }
+
     fn csrf(&self) -> String {
         self.h.app.csrf.clone()
     }
@@ -4729,4 +4737,744 @@ async fn board_launch_fails_with_error_card_on_invalid_slot_choices_never_fallin
     assert!(h2.fake.launched().is_empty());
     assert_eq!(cards(&h2).len(), 1);
     assert_eq!(cards(&h2)[0]["kind"], "error");
+}
+
+#[tokio::test]
+async fn board_models_route_shows_effective_models_sources_providers_pools_and_repo_overrides() {
+    use t3_codemode::fake::{disabled_provider, provider};
+
+    let cfg = Config::from_value(json!({
+        "pools": {
+            "opus": {
+                "driver": "claudeAgent",
+                "model": "claude-opus-5-5",
+                "effort": "high",
+                "members": [{"instanceId": "claudeAgent"}, {"instanceId": "claude-2"}]
+            }
+        }
+    }))
+    .unwrap();
+    let s = start(H::build(Vec::new(), cfg)).await;
+    let widgets = s.h.dir.path().join("widgets");
+    let lms = s.h.dir.path().join("lms");
+    std::fs::create_dir_all(&widgets).unwrap();
+    std::fs::create_dir_all(&lms).unwrap();
+    std::fs::write(lms.join("AGENTS.md"), "## Agent workflow\n\n- Ticket model: claude-opus-5-5, medium effort\n")
+        .unwrap();
+    s.h.fake
+        .set_projects(vec![project("p-widgets", &widgets.to_string_lossy()), project("p-lms", &lms.to_string_lossy())]);
+    s.h.remotes.set(&widgets.to_string_lossy(), "git@github.com:acme/widgets.git");
+    s.h.remotes.set(&lms.to_string_lossy(), "git@github.com:acme/lms.git");
+    let mut haiku_only = provider("claudeAgent", "claudeAgent", &["claude-opus-5-5", "claude-haiku-5-5"]);
+    haiku_only["models"][1]["options"] = json!([]);
+    s.h.fake.set_providers(vec![
+        haiku_only,
+        provider("claude-2", "claudeAgent", &["claude-opus-5-5"]),
+        disabled_provider("claude-off", "claudeAgent"),
+        codex_provider("codex", &["gpt-6.2-sol"]),
+    ]);
+
+    let body = s.get("/api/models").await;
+    assert_eq!(body["ticket"]["mode"], "model");
+    assert_eq!(body["ticket"]["source"], "default");
+    assert_eq!(body["ticket"]["model"], "claude-opus-5-5");
+    assert_eq!(body["ticket"]["effort"], "high");
+    assert_eq!(body["ticket"]["error"], Value::Null);
+    assert_eq!(body["ask"]["mode"], "model");
+    assert_eq!(body["ask"]["source"], "default");
+    assert_eq!(body["ask"]["model"], "claude-haiku-5-5");
+    assert_eq!(body["ask"]["error"], Value::Null);
+
+    let provider_ids: Vec<&str> =
+        body["providers"].as_array().unwrap().iter().filter_map(|p| p["id"].as_str()).collect();
+    assert_eq!(provider_ids, vec!["claudeAgent", "claude-2", "codex"]);
+    let haiku =
+        body["providers"][0]["models"].as_array().unwrap().iter().find(|m| m["id"] == "claude-haiku-5-5").unwrap();
+    assert_eq!(haiku["efforts"], json!([]));
+    assert_eq!(body["pools"].as_array().unwrap().len(), 1);
+    assert_eq!(body["pools"][0]["name"], "opus");
+
+    let overrides = body["repoOverrides"].as_array().unwrap();
+    assert_eq!(overrides.len(), 1, "{body}");
+    assert_eq!(overrides[0]["projectId"], "p-lms");
+    assert_eq!(overrides[0]["repo"], "acme/lms");
+    assert_eq!(overrides[0]["source"], "AGENTS.md");
+    assert_eq!(overrides[0]["model"], "claude-opus-5-5");
+    assert_eq!(overrides[0]["effort"], "medium");
+    assert_eq!(overrides[0]["error"], Value::Null);
+}
+
+#[tokio::test]
+async fn board_ticket_model_picker_persists_both_modes_and_launches_follow_without_restart() {
+    use t3_codemode::fake::{disabled_provider, provider};
+
+    let cfg = Config::from_value(json!({
+        "pools": {
+            "opus": {
+                "driver": "claudeAgent",
+                "model": "claude-opus-5-5",
+                "effort": "high",
+                "strategy": "weighted",
+                "members": [
+                    {"instanceId": "claudeAgent", "weight": 1},
+                    {"instanceId": "claude-2", "weight": 1}
+                ]
+            }
+        }
+    }))
+    .unwrap();
+    let s = start(H::build(Vec::new(), cfg)).await;
+    let widgets = s.h.dir.path().join("widgets");
+    let lms = s.h.dir.path().join("lms");
+    std::fs::create_dir_all(&widgets).unwrap();
+    std::fs::create_dir_all(&lms).unwrap();
+    std::fs::write(lms.join("AGENTS.md"), "## Agent workflow\n\n- Ticket model: claude-opus-5-5, low effort\n")
+        .unwrap();
+    s.h.fake
+        .set_projects(vec![project("p-widgets", &widgets.to_string_lossy()), project("p-lms", &lms.to_string_lossy())]);
+    s.h.remotes.set(&widgets.to_string_lossy(), "git@github.com:acme/widgets.git");
+    s.h.remotes.set(&lms.to_string_lossy(), "git@github.com:acme/lms.git");
+    let mut claude_a = provider("claudeAgent", "claudeAgent", &["claude-opus-5-5", "claude-haiku-5-5"]);
+    claude_a["models"][1]["options"] = json!([]);
+    s.h.fake.set_providers(vec![
+        claude_a,
+        provider("claude-2", "claudeAgent", &["claude-opus-5-5"]),
+        disabled_provider("claude-off", "claudeAgent"),
+        codex_provider("codex", &["gpt-6.2-sol"]),
+    ]);
+
+    // Pre-existing workflow user config keys must be preserved when the board updates models.ticket.
+    write_workflow_config(
+        &s.h,
+        json!({
+            "version": 1,
+            "review": "cbrip:sol-loop",
+            "passes": ["unslop", "pr"],
+            "models": {"worker": {"provider": "claude-2", "model": "claude-opus-5-5", "effort": "high"}},
+            "steps": ["slot:review", "slot:models"]
+        }),
+    );
+
+    // CSRF required on PUT.
+    let r = s
+        .put(
+            "/api/models/ticket",
+            json!({"mode": "model", "provider": "codex", "model": "gpt-6.2-sol", "effort": "xhigh"}),
+            Some("wrong"),
+        )
+        .await;
+    assert_eq!(r.status(), 403);
+
+    // Invalid choices are rejected with 400 and do not clobber config.
+    for bad in [
+        json!({"mode": "t3-default"}),
+        json!({"mode": "model", "provider": "claude-off", "model": "claude-opus-5-5", "effort": "high"}),
+        json!({"mode": "model", "provider": "claudeAgent", "model": "claude-haiku-5-5", "effort": "high"}),
+        json!({"mode": "pool", "pool": "ghost"}),
+        json!({"mode": "pool", "pool": "opus", "model": "claude-opus-5-5"}),
+    ] {
+        let r = s.put("/api/models/ticket", bad.clone(), Some(&s.csrf())).await;
+        assert_eq!(r.status(), 400, "expected 400 for {bad}");
+    }
+
+    // 1. Switch to Specific model mode through the board route.
+    let r = s
+        .put(
+            "/api/models/ticket",
+            json!({"mode": "model", "provider": "codex", "model": "gpt-6.2-sol", "effort": "xhigh"}),
+            Some(&s.csrf()),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let models: Value = r.json().await.unwrap();
+    assert_eq!(models["ticket"]["mode"], "model");
+    assert_eq!(models["ticket"]["source"], "user");
+    assert_eq!(models["ticket"]["instanceId"], "codex");
+    assert_eq!(models["ticket"]["model"], "gpt-6.2-sol");
+    assert_eq!(models["ticket"]["effort"], "xhigh");
+    assert_eq!(models["modelsRev"], 1);
+
+    // Persisted to workflow user config while preserving unrelated slots and worker model.
+    let wf_path = s.h.dir.path().join("home/.config/t3-workflow/config.json");
+    let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(&wf_path).unwrap()).unwrap();
+    assert_eq!(on_disk["review"], "cbrip:sol-loop");
+    assert_eq!(on_disk["passes"], json!(["unslop", "pr"]));
+    assert_eq!(on_disk["models"]["worker"]["provider"], "claude-2");
+    assert_eq!(on_disk["models"]["ticket"], json!({"provider": "codex", "model": "gpt-6.2-sol", "effort": "xhigh"}));
+
+    // Next board launch follows the new setting without a restart.
+    let launch_res: Value =
+        s.post("/api/launch", json!({"issues": ["acme/widgets#1"]}), Some(&s.csrf()), None).await.json().await.unwrap();
+    let r1 = &launch_res["results"][0];
+    assert_eq!(r1["ok"], true, "{r1}");
+    assert_eq!(r1["instanceId"], "codex");
+    assert_eq!(r1["model"], "gpt-6.2-sol");
+    assert_eq!(r1["effort"], "xhigh");
+    assert_eq!(r1["modelSource"], "user");
+
+    // Repo override still takes precedence over user config on launch.
+    let lms_res: Value =
+        s.post("/api/launch", json!({"issues": ["acme/lms#2"]}), Some(&s.csrf()), None).await.json().await.unwrap();
+    let r2 = &lms_res["results"][0];
+    assert_eq!(r2["ok"], true, "{r2}");
+    assert_eq!(r2["model"], "claude-opus-5-5");
+    assert_eq!(r2["effort"], "low");
+    assert_eq!(r2["modelSource"], "AGENTS.md");
+
+    // 2. Switch to Pool mode through the board route; next launch uses the pool without restart.
+    let r = s.put("/api/models/ticket", json!({"mode": "pool", "pool": "opus"}), Some(&s.csrf())).await;
+    assert_eq!(r.status(), 200);
+    let models: Value = r.json().await.unwrap();
+    assert_eq!(models["ticket"]["mode"], "pool");
+    assert_eq!(models["ticket"]["pool"], "opus");
+    assert_eq!(models["ticket"]["source"], "user");
+    assert_eq!(models["modelsRev"], 2);
+
+    let on_disk: Value = serde_json::from_str(&std::fs::read_to_string(&wf_path).unwrap()).unwrap();
+    assert_eq!(on_disk["models"]["ticket"], json!({"pool": "opus"}));
+
+    let pool_res: Value =
+        s.post("/api/launch", json!({"issues": ["acme/widgets#3"]}), Some(&s.csrf()), None).await.json().await.unwrap();
+    let r3 = &pool_res["results"][0];
+    assert_eq!(r3["ok"], true, "{r3}");
+    assert_eq!(r3["pool"], "opus");
+    assert_eq!(r3["model"], "claude-opus-5-5");
+    assert_eq!(r3["effort"], "high");
+    assert_eq!(r3["modelSource"], "user");
+
+    // Explicit model arg still works even if models.ticket only holds effort (advisory note from PR 1).
+    write_workflow_config(&s.h, json!({"version": 1, "models": {"ticket": {"effort": "high"}}}));
+    let out = s.h.exec("async () => wf.launchTicket({ issue: 'acme/widgets#4', model: 'gpt-6.2-sol' })").await;
+    let r4 = result(&out);
+    assert_eq!(r4["instanceId"], "codex");
+    assert_eq!(r4["model"], "gpt-6.2-sol");
+    assert_eq!(r4["modelSource"], "argument");
+}
+
+#[tokio::test]
+async fn board_ask_model_picker_persists_both_modes_and_ignores_legacy_board_instance_and_pool() {
+    use t3_codemode::fake::{disabled_provider, provider};
+
+    let raw_cfg = json!({
+        "deny": ["t3_project_delete"],
+        "pools": {
+            "opus": {
+                "driver": "claudeAgent",
+                "model": "claude-opus-5-5",
+                "effort": "high",
+                "members": [{"instanceId": "claude-2"}]
+            },
+            "cheap": {
+                "driver": "claudeAgent",
+                "model": "claude-haiku-5-5",
+                "members": [{"instanceId": "claudeAgent"}, {"instanceId": "claude-2"}]
+            }
+        },
+        "board": {
+            "instanceId": "claude-2",
+            "pool": "opus",
+            "settleAfterHours": 48
+        }
+    });
+    let cfg = Config::from_value(raw_cfg.clone()).unwrap();
+    let s = start(H::build(Vec::new(), cfg)).await;
+    let cfg_path = s.h.dir.path().join("t3cm-config.json");
+    std::fs::write(&cfg_path, serde_json::to_string_pretty(&raw_cfg).unwrap()).unwrap();
+
+    let mut claude_a = provider("claudeAgent", "claudeAgent", &["claude-opus-5-5", "claude-haiku-5-5"]);
+    claude_a["models"][1]["options"] = json!([]);
+    let mut claude_2 = provider("claude-2", "claudeAgent", &["claude-opus-5-5", "claude-haiku-5-5"]);
+    claude_2["models"][1]["options"] = json!([]);
+    s.h.fake.set_providers(vec![
+        claude_a,
+        claude_2,
+        disabled_provider("claude-off", "claudeAgent"),
+        codex_provider("codex", &["gpt-6-mini"]),
+    ]);
+
+    // Legacy board.instanceId and board.pool do NOT drive the ask box anymore.
+    let models = s.get("/api/models").await;
+    assert_eq!(models["ask"]["mode"], "model");
+    assert_eq!(models["ask"]["source"], "default");
+    assert_eq!(models["ask"]["instanceId"], "claudeAgent");
+    assert_eq!(models["ask"]["model"], "claude-haiku-5-5");
+    assert_eq!(models["ask"]["pool"], Value::Null);
+
+    let r = s.post("/api/ask", json!({"question": "Default ask?"}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 200);
+    let a1: Value = r.json().await.unwrap();
+    assert_eq!(a1["instanceId"], "claudeAgent");
+    assert_eq!(a1["model"], "claude-haiku-5-5");
+    assert_eq!(a1["modelSource"], "default");
+    assert!(a1.get("pool").is_none(), "{a1}");
+
+    // Reject invalid ask settings without changing config or runtime state.
+    for bad in [
+        json!({"mode": "t3-default"}),
+        json!({"mode": "model", "provider": "claude-off", "model": "claude-haiku-5-5"}),
+        json!({"mode": "model", "provider": "claudeAgent", "model": "claude-haiku-5-5", "effort": "high"}),
+        json!({"mode": "pool", "pool": "missing"}),
+    ] {
+        let r = s.put("/api/models/ask", bad.clone(), Some(&s.csrf())).await;
+        assert_eq!(r.status(), 400, "expected 400 for {bad}");
+    }
+
+    // 1. Switch ask box to Specific model mode on codex.
+    let r = s
+        .put(
+            "/api/models/ask",
+            json!({"mode": "model", "provider": "codex", "model": "gpt-6-mini", "effort": "low"}),
+            Some(&s.csrf()),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let models: Value = r.json().await.unwrap();
+    assert_eq!(models["ask"]["mode"], "model");
+    assert_eq!(models["ask"]["source"], "board");
+    assert_eq!(models["ask"]["instanceId"], "codex");
+    assert_eq!(models["ask"]["model"], "gpt-6-mini");
+    assert_eq!(models["ask"]["effort"], "low");
+
+    // Persisted cleanly in t3cm-config.json (preserving other keys) and valid for Config::load.
+    let reloaded = Config::load(&cfg_path).unwrap();
+    assert_eq!(reloaded.deny, vec!["t3_project_delete"]);
+    assert_eq!(reloaded.board.settle_after_hours, 48);
+    assert_eq!(reloaded.board.ask_instance_id.as_deref(), Some("codex"));
+    assert_eq!(reloaded.board.ask_model, "gpt-6-mini");
+    assert_eq!(reloaded.board.ask_effort.as_deref(), Some("low"));
+    assert_eq!(reloaded.board.ask_pool, None);
+
+    // Next /api/ask uses the new setting with no restart.
+    let a2: Value =
+        s.post("/api/ask", json!({"question": "Codex ask?"}), Some(&s.csrf()), None).await.json().await.unwrap();
+    assert_eq!(a2["instanceId"], "codex");
+    assert_eq!(a2["model"], "gpt-6-mini");
+    assert_eq!(a2["effort"], "low");
+    assert_eq!(a2["modelSource"], "board");
+    assert_eq!(
+        s.h.fake.launched()[1]["modelSelection"],
+        json!({"instanceId": "codex", "model": "gpt-6-mini", "options": [{"id": "reasoningEffort", "value": "low"}]})
+    );
+
+    // 2. Switch ask box to Pool mode.
+    let r = s.put("/api/models/ask", json!({"mode": "pool", "pool": "cheap"}), Some(&s.csrf())).await;
+    assert_eq!(r.status(), 200);
+    let models: Value = r.json().await.unwrap();
+    assert_eq!(models["ask"]["mode"], "pool");
+    assert_eq!(models["ask"]["pool"], "cheap");
+    assert_eq!(models["ask"]["source"], "board");
+
+    let reloaded = Config::load(&cfg_path).unwrap();
+    assert_eq!(reloaded.board.ask_pool.as_deref(), Some("cheap"));
+    assert_eq!(reloaded.board.ask_instance_id, None);
+
+    let a3: Value =
+        s.post("/api/ask", json!({"question": "Pooled ask?"}), Some(&s.csrf()), None).await.json().await.unwrap();
+    assert_eq!(a3["pool"], "cheap");
+    assert_eq!(a3["model"], "claude-haiku-5-5");
+    assert_eq!(a3["modelSource"], "board");
+    assert!(a3["reason"].is_string(), "{a3}");
+
+    // If the configured ask instance later disappears, ask fails with an error card and never falls back.
+    s.put(
+        "/api/models/ask",
+        json!({"mode": "model", "provider": "claude-2", "model": "claude-haiku-5-5"}),
+        Some(&s.csrf()),
+    )
+    .await;
+    s.h.fake.set_providers(vec![
+        provider("claudeAgent", "claudeAgent", &["claude-haiku-5-5"]),
+        disabled_provider("claude-2", "claudeAgent"),
+    ]);
+    let r = s.post("/api/ask", json!({"question": "Should fail?"}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 400);
+    assert_eq!(s.h.fake.launched().len(), 3, "no fallback launch");
+    assert_eq!(cards(&s.h).len(), 1);
+    assert_eq!(cards(&s.h)[0]["kind"], "error");
+}
+
+#[tokio::test]
+async fn board_page_shows_launch_model_repo_overrides_and_saves_picker_modes() {
+    let (html, st) = two_gate_page().await;
+    let initial = json!({
+        "ticket": {"mode": "model", "source": "user", "provider": "claude-2", "instanceId": "claude-2", "model": "claude-opus-5-5", "effort": "high", "pool": null, "error": null},
+        "ask": {"mode": "model", "source": "default", "provider": "claudeAgent", "instanceId": "claudeAgent", "model": "claude-haiku-5-5", "effort": null, "pool": null, "error": null},
+        "providers": [
+            {"id": "claudeAgent", "driver": "claudeAgent", "name": "Claude Prime", "models": [
+                {"id": "claude-opus-5-5", "efforts": ["low", "medium", "high"], "defaultEffort": "medium"},
+                {"id": "claude-haiku-5-5", "efforts": [], "defaultEffort": null}
+            ]},
+            {"id": "claude-2", "driver": "claudeAgent", "name": "Claude 2", "models": [
+                {"id": "claude-opus-5-5", "efforts": ["low", "medium", "high"], "defaultEffort": "medium"}
+            ]}
+        ],
+        "pools": [
+            {"name": "opus", "mixed": false, "driver": "claudeAgent", "model": "claude-opus-5-5", "effort": "high", "strategy": "weighted", "members": [{"instanceId": "claudeAgent", "model": "claude-opus-5-5", "effort": "high"}]}
+        ],
+        "repoOverrides": [
+            {"projectId": "p-lms", "title": "lms", "repo": "acme/lms", "mode": "model", "source": "AGENTS.md", "provider": "claude-2", "instanceId": "claude-2", "model": "claude-opus-5-5", "effort": "medium", "pool": null, "error": null}
+        ],
+        "capabilitiesError": null,
+        "projectsError": null,
+        "modelsRev": 0
+    });
+    let after_ticket = json!({
+        "ticket": {"mode": "pool", "source": "user", "provider": null, "instanceId": null, "model": "claude-opus-5-5", "effort": "high", "pool": "opus", "mixed": false, "error": null},
+        "ask": initial["ask"],
+        "providers": initial["providers"],
+        "pools": initial["pools"],
+        "repoOverrides": initial["repoOverrides"],
+        "capabilitiesError": null,
+        "projectsError": null,
+        "modelsRev": 1
+    });
+    let after_ask = json!({
+        "ticket": after_ticket["ticket"],
+        "ask": {"mode": "pool", "source": "board", "provider": null, "instanceId": null, "model": "claude-opus-5-5", "effort": "high", "pool": "opus", "mixed": false, "error": null},
+        "providers": initial["providers"],
+        "pools": initial["pools"],
+        "repoOverrides": initial["repoOverrides"],
+        "capabilitiesError": null,
+        "projectsError": null,
+        "modelsRev": 2
+    });
+    let r = run_page_async(
+        &html,
+        &format!(
+            "async () => {{\n{PAGE_HELPERS}\nconst base = {st};\nconst initial = {initial};\nconst afterTicket = {after_ticket};\nconst afterAsk = {after_ask};\n{}\n}}",
+            r##"
+const tick = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); };
+let curModels = initial;
+fetchReply = (url, opts) => {
+  const m = (opts && opts.method) || "GET";
+  if (url === "/api/models" && m === "GET") return Promise.resolve({ ok: true, json: async () => curModels });
+  if (url === "/api/models/ticket" && m === "PUT") { curModels = afterTicket; return Promise.resolve({ ok: true, json: async () => afterTicket }); }
+  if (url === "/api/models/ask" && m === "PUT") { curModels = afterAsk; return Promise.resolve({ ok: true, json: async () => afterAsk }); }
+  return Promise.resolve({ ok: true, json: async () => ({}) });
+};
+emitState(base);
+await refreshModels(true);
+const beforeLaunch = document.getElementById("launch-model-text").textContent;
+const beforeAsk = document.getElementById("ask-model-text").textContent;
+const beforeBtn = document.getElementById("models-btn-text").textContent;
+
+// Typing an issue from an overridden repo previews that repo's override before launch.
+const issues = document.getElementById("issues");
+issues.value = "https://github.com/acme/lms/issues/42";
+issues.dispatch("input");
+const withOverride = document.getElementById("launch-model-text").textContent;
+issues.value = "";
+issues.dispatch("input");
+
+// Open picker dialog, check repo overrides list and save ticket pool mode + ask pool mode.
+document.getElementById("models-btn").dispatch("click");
+await tick();
+const ovrList = document.getElementById("md-repo-list").textContent;
+document.getElementById("tm-mode-pool").dispatch("click");
+document.getElementById("tm-save").dispatch("click");
+await tick();
+const afterTicketLine = document.getElementById("launch-model-text").textContent;
+const afterTicketBtn = document.getElementById("models-btn-text").textContent;
+
+document.getElementById("am-mode-pool").dispatch("click");
+document.getElementById("am-save").dispatch("click");
+await tick();
+const afterAskLine = document.getElementById("ask-model-text").textContent;
+const puts = fetches.filter((f) => f.method === "PUT").map((f) => [f.url, JSON.parse(f.body)]);
+return { beforeLaunch, beforeAsk, beforeBtn, withOverride, ovrList, afterTicketLine, afterTicketBtn, afterAskLine, puts };
+"##
+        ),
+    );
+    assert!(r["beforeLaunch"].as_str().unwrap().contains("claude-2 · claude-opus-5-5 · high (user config)"), "{r}");
+    assert!(r["beforeLaunch"].as_str().unwrap().contains("lms overrides via AGENTS.md"), "{r}");
+    assert!(r["beforeAsk"].as_str().unwrap().contains("claudeAgent · claude-haiku-5-5 (default)"), "{r}");
+    assert_eq!(r["beforeBtn"], "claude-opus-5-5 · high");
+    assert!(
+        r["withOverride"]
+            .as_str()
+            .unwrap()
+            .contains("lms: claude-2 · claude-opus-5-5 · medium (AGENTS.md overrides user config)"),
+        "{r}"
+    );
+    assert!(
+        r["ovrList"].as_str().unwrap().contains("lms (acme/lms): AGENTS.md sets claude-2 · claude-opus-5-5 · medium"),
+        "{r}"
+    );
+    assert!(r["afterTicketLine"].as_str().unwrap().contains("pool opus (claude-opus-5-5 · high) (user config)"), "{r}");
+    assert_eq!(r["afterTicketBtn"], "Pool: opus");
+    assert!(r["afterAskLine"].as_str().unwrap().contains("pool opus (claude-opus-5-5 · high) (board setting)"), "{r}");
+    assert_eq!(
+        r["puts"],
+        json!([
+            ["/api/models/ticket", {"mode": "pool", "pool": "opus"}],
+            ["/api/models/ask", {"mode": "pool", "pool": "opus"}]
+        ])
+    );
+}
+
+#[tokio::test]
+async fn board_models_picker_preserves_catalog_only_models_exact_instance_and_validates_pools() {
+    use t3_codemode::fake::{disabled_provider, provider};
+
+    let raw_cfg = json!({
+        "pools": {
+            "opus": {
+                "driver": "claudeAgent",
+                "model": "claude-opus-5-5",
+                "effort": "high",
+                "members": [{"instanceId": "claudeAgent"}, {"instanceId": "claude-2"}]
+            },
+            "stale": {
+                "driver": "claudeAgent",
+                "model": "claude-opus-5-5",
+                "effort": "high",
+                "members": [{"instanceId": "claude-gone"}]
+            },
+            "wrong-driver": {
+                "driver": "claudeAgent",
+                "model": "claude-opus-5-5",
+                "effort": "high",
+                "members": [{"instanceId": "codex"}]
+            }
+        }
+    });
+    let cfg = Config::from_value(raw_cfg.clone()).unwrap();
+    let s = start(H::build(Vec::new(), cfg)).await;
+    let cfg_path = s.h.dir.path().join("t3cm-config.json");
+    std::fs::write(&cfg_path, serde_json::to_string_pretty(&raw_cfg).unwrap()).unwrap();
+    let repo = s.h.dir.path().join("widgets");
+    std::fs::create_dir_all(&repo).unwrap();
+    s.h.fake.set_projects(vec![project("p-widgets", &repo.to_string_lossy())]);
+    s.h.remotes.set(&repo.to_string_lossy(), "git@github.com:acme/widgets.git");
+    s.h.fake.set_providers(vec![
+        provider("claudeAgent", "claudeAgent", &["claude-opus-5-5", "claude-haiku-5-5"]),
+        provider("claude-2", "claudeAgent", &["claude-opus-5-5", "claude-catalog-only"]),
+        codex_provider("codex", &["gpt-6.2-sol"]),
+    ]);
+    s.h.fake.set_short_list(1);
+
+    // 1. Catalog-only saved model stays selectable in GET /api/models providers with its effort options.
+    write_workflow_config(
+        &s.h,
+        json!({"version": 1, "models": {"ticket": {"provider": "claude-2", "model": "claude-catalog-only", "effort": "high"}}}),
+    );
+    let body = s.get("/api/models").await;
+    assert_eq!(body["ticket"]["instanceId"], "claude-2");
+    assert_eq!(body["ticket"]["model"], "claude-catalog-only");
+    assert_eq!(body["ticket"]["effort"], "high");
+    assert_eq!(body["ticket"]["error"], Value::Null);
+    let claude2 = body["providers"].as_array().unwrap().iter().find(|p| p["id"] == "claude-2").unwrap();
+    let cat = claude2["models"].as_array().unwrap().iter().find(|m| m["id"] == "claude-catalog-only").unwrap();
+    assert!(cat["efforts"].as_array().unwrap().iter().any(|e| e == "medium"), "{cat}");
+
+    // User can keep the catalog-only model and change only effort.
+    let r = s
+        .put(
+            "/api/models/ticket",
+            json!({"mode": "model", "provider": "claude-2", "model": "claude-catalog-only", "effort": "medium"}),
+            Some(&s.csrf()),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let updated: Value = r.json().await.unwrap();
+    assert_eq!(updated["ticket"]["model"], "claude-catalog-only");
+    assert_eq!(updated["ticket"]["effort"], "medium");
+
+    // 2. Pools with missing members or wrong driver are rejected before replacing a working choice.
+    for bad_pool in ["stale", "wrong-driver"] {
+        let rt = s.put("/api/models/ticket", json!({"mode": "pool", "pool": bad_pool}), Some(&s.csrf())).await;
+        assert_eq!(rt.status(), 400, "ticket should reject {bad_pool}");
+        let ra = s.put("/api/models/ask", json!({"mode": "pool", "pool": bad_pool}), Some(&s.csrf())).await;
+        assert_eq!(ra.status(), 400, "ask should reject {bad_pool}");
+    }
+    let after_bad = s.get("/api/models").await;
+    assert_eq!(after_bad["ticket"]["model"], "claude-catalog-only");
+
+    // Temporary usage limits do not block saving an otherwise valid pool.
+    s.h.exec("async () => wf.limit({ instance: 'claudeAgent', until: '2026-04-16T02:00:00Z' })").await;
+    s.h.exec("async () => wf.limit({ instance: 'claude-2', until: '2026-04-16T02:00:00Z' })").await;
+    let r = s.put("/api/models/ticket", json!({"mode": "pool", "pool": "opus"}), Some(&s.csrf())).await;
+    assert_eq!(r.status(), 200);
+
+    // 3. Removing a pool from disk prevents PUT /api/models/ask from writing an invalid config.
+    std::fs::write(&cfg_path, serde_json::to_string_pretty(&json!({"pools": {}})).unwrap()).unwrap();
+    let r = s.put("/api/models/ask", json!({"mode": "pool", "pool": "opus"}), Some(&s.csrf())).await;
+    assert_eq!(r.status(), 400);
+    let err: Value = r.json().await.unwrap();
+    assert!(err["error"].as_str().unwrap().contains("no longer defined"), "{err}");
+    assert!(Config::load(&cfg_path).is_ok(), "disk config must remain valid");
+    let still_default = s.get("/api/models").await;
+    assert_eq!(still_default["ask"]["mode"], "model");
+
+    // 4. Saved ticket instance never falls back silently to a sibling instance with the same driverKind.
+    s.h.fake.set_short_list(10);
+    let r = s
+        .put(
+            "/api/models/ticket",
+            json!({"mode": "model", "provider": "claudeAgent", "model": "claude-opus-5-5", "effort": "high"}),
+            Some(&s.csrf()),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    s.h.fake.set_providers(vec![
+        disabled_provider("claudeAgent", "claudeAgent"),
+        provider("claude-2", "claudeAgent", &["claude-opus-5-5"]),
+    ]);
+    let view = s.get("/api/models").await;
+    assert!(view["ticket"]["error"].as_str().unwrap().contains("claudeAgent"), "{view}");
+    assert_eq!(view["ticket"]["instanceId"], Value::Null);
+    let launch: Value = s
+        .post("/api/launch", json!({"issues": ["acme/widgets#42"]}), Some(&s.csrf()), None)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(launch["results"][0]["ok"], false, "{launch}");
+    assert!(launch["results"][0]["error"].as_str().unwrap().contains("claudeAgent"), "{launch}");
+    assert!(s.h.fake.launched().is_empty(), "must not fall back to claude-2");
+}
+
+#[tokio::test]
+async fn board_page_rejects_stale_model_snapshots_and_retries_failed_refreshes() {
+    let (html, st) = two_gate_page().await;
+    let rev1 = json!({
+        "ticket": {"mode": "model", "source": "user", "provider": "claudeAgent", "instanceId": "claudeAgent", "model": "claude-opus-5-5", "effort": "high", "pool": null, "error": null},
+        "ask": {"mode": "model", "source": "default", "provider": "claudeAgent", "instanceId": "claudeAgent", "model": "claude-haiku-5-5", "effort": null, "pool": null, "error": null},
+        "providers": [{"id": "claudeAgent", "driver": "claudeAgent", "name": "Claude", "models": [{"id": "claude-opus-5-5", "efforts": ["high"], "defaultEffort": "high"}]}],
+        "pools": [{"name": "opus", "mixed": false, "driver": "claudeAgent", "model": "claude-opus-5-5", "effort": "high", "strategy": "weighted", "members": [{"instanceId": "claudeAgent", "model": "claude-opus-5-5", "effort": "high"}]}],
+        "repoOverrides": [],
+        "capabilitiesError": null,
+        "projectsError": null,
+        "modelsRev": 1,
+        "modelsSession": "sess-a"
+    });
+    let rev2 = json!({
+        "ticket": {"mode": "pool", "source": "user", "provider": null, "instanceId": null, "model": "claude-opus-5-5", "effort": "high", "pool": "opus", "mixed": false, "error": null},
+        "ask": rev1["ask"],
+        "providers": rev1["providers"],
+        "pools": rev1["pools"],
+        "repoOverrides": [],
+        "capabilitiesError": null,
+        "projectsError": null,
+        "modelsRev": 2,
+        "modelsSession": "sess-a"
+    });
+    let rev3 = json!({
+        "ticket": {"mode": "model", "source": "user", "provider": "claudeAgent", "instanceId": "claudeAgent", "model": "claude-opus-5-5", "effort": "high", "pool": null, "error": null},
+        "ask": rev1["ask"],
+        "providers": rev1["providers"],
+        "pools": rev1["pools"],
+        "repoOverrides": [],
+        "capabilitiesError": null,
+        "projectsError": null,
+        "modelsRev": 3,
+        "modelsSession": "sess-a"
+    });
+    let rev0_new = json!({
+        "ticket": rev2["ticket"],
+        "ask": rev1["ask"],
+        "providers": rev1["providers"],
+        "pools": rev1["pools"],
+        "repoOverrides": [],
+        "capabilitiesError": null,
+        "projectsError": null,
+        "modelsRev": 0,
+        "modelsSession": "sess-b"
+    });
+    let r = run_page_async(
+        &html,
+        &format!(
+            "async () => {{\n{PAGE_HELPERS}\nconst base = {st};\nconst rev1 = {rev1};\nconst rev2 = {rev2};\nconst rev3 = {rev3};\nconst rev0New = {rev0_new};\n{}\n}}",
+            r##"
+const tick = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); };
+const stateWith = (rev, sess) => {
+  const copy = JSON.parse(JSON.stringify(base));
+  copy.service.modelsRev = rev;
+  copy.service.modelsSession = sess;
+  return copy;
+};
+let resolveLateGet = null;
+let mode = "init";
+let getCount = 0;
+fetchReply = (url, opts) => {
+  const m = (opts && opts.method) || "GET";
+  if (url === "/api/models" && m === "GET") {
+    getCount++;
+    if (mode === "init") return Promise.resolve({ ok: true, json: async () => rev1 });
+    if (mode === "late") return new Promise((res) => { resolveLateGet = () => res({ ok: true, json: async () => rev1 }); });
+    if (mode === "fail") return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: "boom" }) });
+    if (mode === "rev3") return Promise.resolve({ ok: true, json: async () => rev3 });
+    if (mode === "newSession") return Promise.resolve({ ok: true, json: async () => rev0New });
+  }
+  if (url === "/api/models/ticket" && m === "PUT") {
+    return Promise.resolve({ ok: true, json: async () => rev2 });
+  }
+  return Promise.resolve({ ok: true, json: async () => ({}) });
+};
+emitState(stateWith(1, "sess-a"));
+await refreshModels(true);
+
+// 1. Start a GET (resolving to rev1), save via PUT (resolving to rev2), then finish the late GET.
+mode = "late";
+const lateP = refreshModels(false);
+document.getElementById("tm-mode-pool").dispatch("click");
+document.getElementById("tm-save").dispatch("click");
+await tick();
+resolveLateGet();
+await lateP;
+await tick();
+const afterLateBtn = document.getElementById("models-btn-text").textContent;
+const afterLateRev = modelsState.appliedRev;
+
+// 2. Revision moves to 3, GET fails -> error is surfaced and rev stays at 2.
+mode = "fail";
+emitState(stateWith(3, "sess-a"));
+await tick();
+const errBanner = document.getElementById("models-cap-err").textContent;
+const errLine = document.getElementById("launch-model-text").textContent;
+const revDuringFail = modelsState.appliedRev;
+
+// 3. Next state event with same revision 3 retries and succeeds -> error clears and rev3 renders.
+mode = "rev3";
+emitState(stateWith(3, "sess-a"));
+await tick();
+const afterRetryBtn = document.getElementById("models-btn-text").textContent;
+const afterRetryErr = document.getElementById("models-cap-err").textContent;
+const afterRetryRev = modelsState.appliedRev;
+
+// 4. Repeated failures stay bounded at MAX_MODEL_RETRIES.
+mode = "fail";
+const beforeBound = getCount;
+for (let i = 0; i < 6; i++) {
+  emitState(stateWith(4, "sess-a"));
+  await tick();
+}
+const boundedAttempts = getCount - beforeBound;
+
+// 5. New service session resets modelsRev to 0 and is accepted.
+mode = "newSession";
+emitState(stateWith(0, "sess-b"));
+await tick();
+const afterRestartBtn = document.getElementById("models-btn-text").textContent;
+const afterRestartRev = modelsState.appliedRev;
+
+return {
+  afterLateBtn, afterLateRev, errBanner, errLine, revDuringFail,
+  afterRetryBtn, afterRetryErr, afterRetryRev, boundedAttempts,
+  afterRestartBtn, afterRestartRev
+};
+"##
+        ),
+    );
+    assert_eq!(r["afterLateBtn"], "Pool: opus", "{r}");
+    assert_eq!(r["afterLateRev"], 2, "{r}");
+    assert!(r["errBanner"].as_str().unwrap().contains("Could not refresh models"), "{r}");
+    assert!(r["errLine"].as_str().unwrap().contains("Could not refresh models"), "{r}");
+    assert_eq!(r["revDuringFail"], 2, "{r}");
+    assert_eq!(r["afterRetryBtn"], "claude-opus-5-5 · high", "{r}");
+    assert_eq!(r["afterRetryErr"], "", "{r}");
+    assert_eq!(r["afterRetryRev"], 3, "{r}");
+    assert_eq!(r["boundedAttempts"], 4, "1 initial + 3 bounded retries: {r}");
+    assert_eq!(r["afterRestartBtn"], "Pool: opus", "{r}");
+    assert_eq!(r["afterRestartRev"], 0, "{r}");
 }

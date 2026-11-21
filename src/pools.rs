@@ -12,7 +12,7 @@ use crate::usage::{Usage, UsageSource};
 use crate::wf::{ACTIVE, Wf};
 
 pub const STRATEGIES: &[&str] = &["weighted", "priority", "cheapest"];
-const EFFORT_IDS: &[&str] = &["effort", "reasoningEffort", "thinking_level"];
+const EFFORT_IDS: &[&str] = &["effort", "reasoningEffort", "thinking_level", "thought_level"];
 const THREAD_PAGE: u64 = 200;
 const LIMIT_TITLE: &str = "Usage limit reached";
 const LOOKBACK_MINUTES: f64 = 24.0 * 60.0;

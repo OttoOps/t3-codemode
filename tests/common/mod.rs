@@ -68,6 +68,7 @@ impl H {
         );
         app.wf.set_skills_home(Home::under(&dir.path().join("home")));
         app.wf.set_slot_folders(t3_codemode::slots::Folders::under(&dir.path().join("home"), None));
+        app.wf.set_config_path(dir.path().join("t3cm-config.json"));
         H { dir, fake, clock, app, remotes, github, desktop, config }
     }
 
@@ -88,6 +89,7 @@ impl H {
         );
         self.app.wf.set_skills_home(Home::under(&self.dir.path().join("home")));
         self.app.wf.set_slot_folders(t3_codemode::slots::Folders::under(&self.dir.path().join("home"), None));
+        self.app.wf.set_config_path(self.dir.path().join("t3cm-config.json"));
     }
 
     pub fn peer(&self) -> Arc<App> {
@@ -101,6 +103,8 @@ impl H {
             self.desktop.clone(),
         );
         app.wf.set_skills_home(Home::under(&self.dir.path().join("home")));
+        app.wf.set_slot_folders(t3_codemode::slots::Folders::under(&self.dir.path().join("home"), None));
+        app.wf.set_config_path(self.dir.path().join("t3cm-config.json"));
         app
     }
 

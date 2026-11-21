@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow, bail};
@@ -241,6 +243,11 @@ pub struct Wf {
     pub(crate) skills: crate::drift::Cache,
     pub(crate) slot_folders: Mutex<Option<crate::slots::Folders>>,
     pub(crate) drivers: Mutex<HashMap<String, String>>,
+    pub(crate) ask_config: Mutex<crate::board::AskConfig>,
+    pub(crate) config_path: Mutex<Option<PathBuf>>,
+    pub(crate) config_lock: tokio::sync::Mutex<()>,
+    pub(crate) models_rev: AtomicU64,
+    pub(crate) models_session: String,
 }
 
 const MAX_PR_PAGES: usize = 20;
@@ -270,6 +277,7 @@ impl Wf {
         if store.meta_get(crate::reconcile::SINCE).ok().flatten().is_none() {
             let _ = store.meta_set(crate::reconcile::SINCE, &iso(clock.now()));
         }
+        let ask_config = crate::board::AskConfig::from_board(&config.board);
         Wf {
             store,
             t3,
@@ -290,7 +298,20 @@ impl Wf {
             skills: crate::drift::Cache::default(),
             slot_folders: Mutex::new(None),
             drivers: Mutex::new(HashMap::new()),
+            ask_config: Mutex::new(ask_config),
+            config_path: Mutex::new(None),
+            config_lock: tokio::sync::Mutex::new(()),
+            models_rev: AtomicU64::new(0),
+            models_session: crate::board::random_id(),
         }
+    }
+
+    pub fn set_config_path(&self, path: PathBuf) {
+        *self.config_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+    }
+
+    pub(crate) fn config_path(&self) -> PathBuf {
+        self.config_path.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(crate::config::default_path)
     }
 
     pub(crate) fn now(&self) -> String {

@@ -73,9 +73,11 @@ All under `board`:
 | Key | Default | Does |
 |---|---|---|
 | `ticketModel`, `ticketEffort` | `claude-opus-5-5`, `high` | Legacy fallback for ticket launches when `models.ticket` is unset in repo and user workflow configs. Move these into `models.ticket`; `t3cm doctor` warns when they are set. |
-| `askModel`, `askEffort` | `claude-haiku-5-5`, unset | Model and effort for the ask box's scratch threads |
-| `instanceId` | `claudeAgent` | Legacy fallback T3 provider instance for ticket launches when `models.ticket` is unset, and the default instance for the ask box. `t3cm doctor` warns when it is set and notes that it still applies to the ask box. |
-| `pool` | unset | Legacy fallback pool from `pools` for ticket launches when `models.ticket` is unset, and the pool for the ask box. Set ticket pools in `models.ticket` and keep `board.pool` if the ask box uses it; `t3cm doctor` warns when it is set. See [Pools](#pools). |
+| `askInstanceId` | unset | Provider instance for the ask box when `askPool` is unset. When unset, defaults to an enabled `claudeAgent` instance for the default ask model. |
+| `askModel`, `askEffort` | `claude-haiku-5-5`, unset | Model and effort for the ask box's scratch threads when `askPool` is unset. |
+| `askPool` | unset | Pool from `pools` for the ask box. Takes precedence over `askInstanceId`, `askModel` and `askEffort`, running the picked member's model. See [Pools](#pools). |
+| `instanceId` | `claudeAgent` | Legacy fallback T3 provider instance for ticket launches when `models.ticket` is unset. No longer applies to the ask box; use `models.ticket` for tickets and `board.askInstanceId` for the ask box. `t3cm doctor` warns when it is set. |
+| `pool` | unset | Legacy fallback pool from `pools` for ticket launches when `models.ticket` is unset. No longer applies to the ask box; use `models.ticket` for tickets and `board.askPool` for the ask box. `t3cm doctor` warns when it is set. See [Pools](#pools). |
 | `runtimeMode` | `full-access` | Runtime mode for launches. The service has no thread to inherit a mode from. |
 | `askPollSecs` | `4` | How often an open ask is checked for its answer |
 | `askTimeoutMinutes` | `15` | How long an ask may run |
@@ -150,8 +152,8 @@ directly ignores the reserve. When every member is out, the pick fails, nothing
 launches, and a board launch leaves an error card that names the pool.
 
 At load, a pool must have at least one member, no member twice, weights of 1
-or more, reserves from 0 to 100 and costs of 0 or more, and `board.pool` must name a configured
-pool. A pool that is not mixed must not set `model` or `effort` on a member.
+or more, reserves from 0 to 100 and costs of 0 or more, and `board.pool` and
+`board.askPool` must name configured pools. A pool that is not mixed must not set `model` or `effort` on a member.
 A bad pool fails config load with a message that names it. Only T3 knows
 whether each member is a real instance and, in a pool that is not mixed,
 whether it is an instance of the pool's `driver`. Every pick checks that
@@ -263,8 +265,10 @@ the `models.ticket` slot first, checking repo `.t3-workflow.json` and
 legacy `board.pool` only when `models.ticket` is unset. `model` or `effort`
 passed to `wf.launchTicket` takes precedence over the slot and legacy board
 keys; passing `effort` alone over a mixed pool fails because members run
-different models. `board.pool` still covers the ask box, running the picked
-member's model in place of `askModel`. Skills pick from a pool with
+different models. `board.askPool` covers the ask box, running the picked
+member's model in place of `askInstanceId`, `askModel` and `askEffort`. Changes
+to ticket or ask model modes made from the board UI persist to their config
+files and take effect without a restart. Skills pick from a pool with
 [`wf.pick`](globals.md#wf).
 The workflow skills do that for each launch when their `model worker` or
 `model ticket` slot names a pool, as `"worker": {"pool": "opus"}`; see

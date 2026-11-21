@@ -1,4 +1,5 @@
 use std::process::Stdio;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -332,6 +333,55 @@ pub struct LaunchArgs {
     pub title: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskConfig {
+    pub pool: Option<String>,
+    pub instance_id: Option<String>,
+    pub model: String,
+    pub effort: Option<String>,
+    pub explicit: bool,
+}
+
+impl AskConfig {
+    pub fn from_board(b: &crate::config::BoardConfig) -> Self {
+        Self {
+            pool: b.ask_pool.clone(),
+            instance_id: b.ask_instance_id.clone(),
+            model: b.ask_model.clone(),
+            effort: b.ask_effort.clone(),
+            explicit: b.ask_configured,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelSettingBody {
+    pub mode: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub pool: Option<String>,
+}
+
+enum ValidatedModelSetting {
+    Model { provider: String, model: String, effort: Option<String> },
+    Pool { pool: String },
+}
+
+struct SpecificModel<'a> {
+    provider: Option<&'a str>,
+    model: &'a str,
+    effort: Option<&'a str>,
+    exact_instance: bool,
+    hint: Option<&'a str>,
+    source: &'a str,
 }
 
 enum BaseSpec {
@@ -941,9 +991,30 @@ impl Wf {
         Ok(None)
     }
 
-    async fn ask_pool_pick(&self) -> Result<Option<Picked>> {
-        let Some(name) = &self.config.board.pool else { return Ok(None) };
-        Ok(Some(self.pick(name).await?))
+    async fn resolve_ask_model(&self) -> Result<ResolvedLaunch> {
+        let ask = self.ask_config.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(pool) = ask.pool {
+            let p = self.pick(&pool).await?;
+            return Ok(ResolvedLaunch {
+                selection: p.model_selection.clone(),
+                instance_id: p.instance_id.clone(),
+                model: p.model.clone(),
+                effort: p.effort.clone(),
+                source: "board".into(),
+                picked: Some(p),
+            });
+        }
+        let exact_instance = ask.instance_id.is_some();
+        let provider = if exact_instance {
+            ask.instance_id
+        } else if ask.explicit {
+            None
+        } else {
+            Some(slots::DEFAULT_PROVIDER.into())
+        };
+        let hint = if !exact_instance && ask.explicit { Some(slots::DEFAULT_PROVIDER.into()) } else { None };
+        let source = if ask.explicit { "board" } else { "default" };
+        self.resolve_specific_model(provider, ask.model, ask.effort, exact_instance, hint, source.into()).await
     }
 
     async fn resolve_specific_model(
@@ -1017,24 +1088,27 @@ impl Wf {
                         .ok_or_else(|| anyhow!("models.ticket ({}) names an empty pool", slot.source))?;
                     BaseSpec::Pool { pool: pool.to_string(), source: slot.source.clone() }
                 }
-                Some(s) => {
-                    let model = s
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .filter(|m| !m.trim().is_empty())
-                        .ok_or_else(|| anyhow!("models.ticket ({}) names no model", slot.source))?;
-                    let provider =
-                        s.get("provider").and_then(Value::as_str).filter(|p| !p.trim().is_empty()).map(String::from);
-                    let effort =
-                        s.get("effort").and_then(Value::as_str).filter(|e| !e.trim().is_empty()).map(String::from);
-                    BaseSpec::Model {
-                        provider,
-                        model: model.to_string(),
-                        effort,
-                        source: slot.source.clone(),
-                        exact_instance: false,
+                Some(s) => match s.get("model").and_then(Value::as_str).filter(|m| !m.trim().is_empty()) {
+                    Some(model) => {
+                        let provider = s
+                            .get("provider")
+                            .and_then(Value::as_str)
+                            .filter(|p| !p.trim().is_empty())
+                            .map(String::from);
+                        let effort =
+                            s.get("effort").and_then(Value::as_str).filter(|e| !e.trim().is_empty()).map(String::from);
+                        BaseSpec::Model {
+                            exact_instance: provider.is_some(),
+                            provider,
+                            model: model.to_string(),
+                            effort,
+                            source: slot.source.clone(),
+                        }
                     }
-                }
+                    None if model_arg.is_some() => BaseSpec::Default,
+                    None => bail!("models.ticket ({}) names no model", slot.source),
+                },
+                None if model_arg.is_some() => BaseSpec::Default,
                 None => bail!("models.ticket ({}) names no model or pool", slot.source),
             },
             _ => {
@@ -1214,14 +1288,6 @@ impl Wf {
         }
     }
 
-    fn model_selection(&self, model: &str, effort: Option<&str>) -> Value {
-        let mut m = json!({"instanceId": self.config.board.instance_id, "model": model});
-        if let Some(e) = effort {
-            m["options"] = json!([{"id": "effort", "value": e}]);
-        }
-        m
-    }
-
     fn launch_failed(&self, label: &str, text: &str) -> Result<Value> {
         let card = self.card_add(NewCard {
             kind: "error",
@@ -1371,22 +1437,18 @@ impl Wf {
             bail!("the question is over {MAX_TEXT} chars");
         }
         let b = &self.config.board;
-        let picked = match self.ask_pool_pick().await {
-            Ok(p) => p,
+        let resolved = match self.resolve_ask_model().await {
+            Ok(r) => r,
             Err(e) => {
                 let text = format!("Cannot ask the board question: {e:#}");
                 let card = self.launch_failed("ask", &text)?;
                 bail!("{text} (recorded as board card {})", card["card"]);
             }
         };
-        let selection = match &picked {
-            Some(p) => p.model_selection.clone(),
-            None => self.model_selection(&b.ask_model, b.ask_effort.as_deref()),
-        };
         let mut input = json!({
             "scratch": true,
             "title": format!("Board question: {}", truncate_chars(&q.split_whitespace().collect::<Vec<_>>().join(" "), 50)),
-            "modelSelection": selection,
+            "modelSelection": resolved.selection,
             "message": ask_brief(q),
             "clientRequestId": format!("t3cm-ask-{}", random_id()),
         });
@@ -1399,7 +1461,12 @@ impl Wf {
                           "answer": null, "at": self.now(), "answeredAt": null, "archived": false});
         let seq = self.store.ask_insert(thread, &data)?;
         let mut out = ask_view(seq, &data);
-        if let Some(p) = &picked {
+        out["instanceId"] = json!(resolved.instance_id);
+        out["model"] = json!(resolved.model);
+        out["effort"] = json!(resolved.effort);
+        out["modelSource"] = json!(resolved.source);
+        if let Some(p) = &resolved.picked {
+            out["pool"] = json!(p.pool);
             self.note_pool_launch(&mut out, p, "Board question", thread);
         }
         self.changed();
@@ -1808,7 +1875,716 @@ impl Wf {
             "openLinks": self.config.board.open_links,
             "update": self.update_view(),
             "skills": self.skills_view(),
+            "modelsRev": self.models_rev.load(Ordering::Acquire),
+            "modelsSession": self.models_session,
         })
+    }
+
+    async fn validate_model_setting(&self, body: ModelSettingBody) -> Result<ValidatedModelSetting> {
+        let mode = body.mode.trim();
+        let provider = nonempty(body.provider);
+        let model = nonempty(body.model);
+        let effort = nonempty(body.effort);
+        let pool = nonempty(body.pool);
+        match mode {
+            "model" => {
+                if pool.is_some() {
+                    bail!("mode \"model\" does not accept pool");
+                }
+                let provider = provider.ok_or_else(|| anyhow!("provider instance is required for mode \"model\""))?;
+                let model = model.ok_or_else(|| anyhow!("model is required for mode \"model\""))?;
+                self.resolve_specific_model(
+                    Some(provider.clone()),
+                    model.clone(),
+                    effort.clone(),
+                    true,
+                    None,
+                    "user".into(),
+                )
+                .await?;
+                Ok(ValidatedModelSetting::Model { provider, model, effort })
+            }
+            "pool" => {
+                if provider.is_some() || model.is_some() || effort.is_some() {
+                    bail!("mode \"pool\" does not accept provider, model or effort");
+                }
+                let pool = pool.ok_or_else(|| anyhow!("pool is required for mode \"pool\""))?;
+                let cfg = self.pool(&pool)?;
+                let caps = self
+                    .t3
+                    .call("orchestrator_capabilities", json!({}))
+                    .await
+                    .map_err(|e| anyhow!("T3 capabilities unreachable: {}", self.t3.redact(e.to_string())))?;
+                crate::pools::check_members(&pool, cfg, &caps)?;
+                Ok(ValidatedModelSetting::Pool { pool })
+            }
+            other => bail!("unknown mode {other:?}; use \"model\" or \"pool\""),
+        }
+    }
+
+    fn scoped_caps(caps: &Value, provider: Option<&str>, exact_instance: bool) -> Value {
+        let Some(id) = exact_instance.then_some(provider).flatten() else {
+            return caps.clone();
+        };
+        let providers: Vec<Value> = caps["providers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| p["providerInstanceId"].as_str() == Some(id))
+            .cloned()
+            .collect();
+        json!({"providers": providers})
+    }
+
+    async fn inspect_specific_model(
+        &self,
+        caps_base: Option<&mut Value>,
+        caps_err: Option<&str>,
+        m: SpecificModel<'_>,
+    ) -> Value {
+        let mut spec = serde_json::Map::new();
+        spec.insert("model".into(), json!(m.model));
+        if let Some(p) = m.provider {
+            spec.insert("provider".into(), json!(p));
+        }
+        if let Some(e) = m.effort {
+            spec.insert("effort".into(), json!(e));
+        }
+        let Some(base) = caps_base else {
+            return json!({
+                "mode": "model",
+                "source": m.source,
+                "provider": m.provider,
+                "instanceId": m.provider,
+                "model": m.model,
+                "effort": m.effort,
+                "pool": Value::Null,
+                "error": caps_err.map(|e| format!("T3 capabilities unreachable: {e}")),
+            });
+        };
+        let mut scoped = Self::scoped_caps(base, m.provider, m.exact_instance);
+        if slots::model_needs_search(&spec, &scoped) {
+            match self.t3.call("orchestrator_capabilities", json!({"search": m.model})).await {
+                Ok(extra) => {
+                    slots::merge_caps(base, &extra);
+                    scoped = Self::scoped_caps(base, m.provider, m.exact_instance);
+                }
+                Err(e) => {
+                    return json!({
+                        "mode": "model",
+                        "source": m.source,
+                        "provider": m.provider,
+                        "instanceId": Value::Null,
+                        "model": m.model,
+                        "effort": m.effort,
+                        "pool": Value::Null,
+                        "error": format!("T3 capabilities unreachable: {}", self.t3.redact(e.to_string())),
+                    });
+                }
+            }
+        }
+        if let Some(problem) = slots::check_model(&spec, &scoped) {
+            return json!({
+                "mode": "model",
+                "source": m.source,
+                "provider": m.provider,
+                "instanceId": Value::Null,
+                "model": m.model,
+                "effort": m.effort,
+                "pool": Value::Null,
+                "error": problem,
+            });
+        }
+        let selection = crate::wf_slots::model_selection(&json!({"spec": spec}), m.hint, &Caps::Got(scoped));
+        let instance_id = selection["instanceId"].as_str().map(String::from);
+        let effort_out = effort_from_selection(&selection).or_else(|| m.effort.map(String::from));
+        let error = instance_id.is_none().then(|| format!("T3 offers no enabled provider with model {}", m.model));
+        json!({
+            "mode": "model",
+            "source": m.source,
+            "provider": m.provider,
+            "instanceId": instance_id,
+            "model": m.model,
+            "effort": effort_out,
+            "pool": Value::Null,
+            "error": error,
+        })
+    }
+
+    fn inspect_pool(&self, caps_base: Option<&Value>, pool_name: &str, source: &str) -> Value {
+        match self.pool(pool_name) {
+            Err(e) => json!({
+                "mode": "pool",
+                "source": source,
+                "provider": Value::Null,
+                "instanceId": Value::Null,
+                "model": Value::Null,
+                "effort": Value::Null,
+                "pool": pool_name,
+                "mixed": false,
+                "error": format!("{e:#}"),
+            }),
+            Ok(cfg) => {
+                let error = caps_base
+                    .and_then(|c| crate::pools::check_members(pool_name, cfg, c).err())
+                    .map(|e| format!("{e:#}"));
+                json!({
+                    "mode": "pool",
+                    "source": source,
+                    "provider": Value::Null,
+                    "instanceId": Value::Null,
+                    "model": cfg.model,
+                    "effort": cfg.effort,
+                    "pool": pool_name,
+                    "mixed": cfg.mixed,
+                    "error": error,
+                })
+            }
+        }
+    }
+
+    async fn inspect_default_ticket(&self, caps_base: Option<&mut Value>, caps_err: Option<&str>) -> Value {
+        let Some(base) = caps_base else {
+            return json!({
+                "mode": "model",
+                "source": "default",
+                "provider": slots::DEFAULT_PROVIDER,
+                "instanceId": slots::DEFAULT_PROVIDER,
+                "model": slots::DEFAULT_MODEL,
+                "effort": slots::DEFAULT_EFFORT,
+                "pool": Value::Null,
+                "error": caps_err.map(|e| format!("T3 capabilities unreachable: {e}")),
+            });
+        };
+        if slots::default_model_needs_search(base) {
+            match self.t3.call("orchestrator_capabilities", json!({"search": slots::DEFAULT_MODEL})).await {
+                Ok(extra) => slots::merge_caps(base, &extra),
+                Err(e) => {
+                    return json!({
+                        "mode": "model",
+                        "source": "default",
+                        "provider": slots::DEFAULT_PROVIDER,
+                        "instanceId": Value::Null,
+                        "model": slots::DEFAULT_MODEL,
+                        "effort": slots::DEFAULT_EFFORT,
+                        "pool": Value::Null,
+                        "error": format!("T3 capabilities unreachable: {}", self.t3.redact(e.to_string())),
+                    });
+                }
+            }
+        }
+        if slots::model_offers(base, slots::DEFAULT_MODEL, Some(slots::DEFAULT_PROVIDER)).is_empty() {
+            return json!({
+                "mode": "model",
+                "source": "default",
+                "provider": slots::DEFAULT_PROVIDER,
+                "instanceId": Value::Null,
+                "model": slots::DEFAULT_MODEL,
+                "effort": slots::DEFAULT_EFFORT,
+                "pool": Value::Null,
+                "error": format!(
+                    "no ticket model is configured and T3 offers no enabled Claude provider with {}; set models.ticket on the board or with setup-t3-workflow",
+                    slots::DEFAULT_MODEL
+                ),
+            });
+        }
+        if let Some(problem) = slots::check_default_model(base) {
+            return json!({
+                "mode": "model",
+                "source": "default",
+                "provider": slots::DEFAULT_PROVIDER,
+                "instanceId": Value::Null,
+                "model": slots::DEFAULT_MODEL,
+                "effort": slots::DEFAULT_EFFORT,
+                "pool": Value::Null,
+                "error": problem,
+            });
+        }
+        let spec = slots::default_model_spec();
+        let selection = crate::wf_slots::model_selection(&json!({"spec": spec}), None, &Caps::Got(base.clone()));
+        let instance_id = selection["instanceId"].as_str().map(String::from);
+        let effort_out = effort_from_selection(&selection).or_else(|| Some(slots::DEFAULT_EFFORT.into()));
+        let error =
+            instance_id.is_none().then(|| format!("T3 offers no enabled provider with model {}", slots::DEFAULT_MODEL));
+        json!({
+            "mode": "model",
+            "source": "default",
+            "provider": slots::DEFAULT_PROVIDER,
+            "instanceId": instance_id,
+            "model": slots::DEFAULT_MODEL,
+            "effort": effort_out,
+            "pool": Value::Null,
+            "error": error,
+        })
+    }
+
+    async fn inspect_base_spec(&self, base: BaseSpec, caps_base: Option<&mut Value>, caps_err: Option<&str>) -> Value {
+        match base {
+            BaseSpec::Pool { pool, source } => self.inspect_pool(caps_base.as_deref(), &pool, &source),
+            BaseSpec::Model { provider, model, effort, source, exact_instance } => {
+                let hint = if !exact_instance && source == "board" {
+                    Some(self.config.board.instance_id.as_str())
+                } else {
+                    None
+                };
+                self.inspect_specific_model(
+                    caps_base,
+                    caps_err,
+                    SpecificModel {
+                        provider: provider.as_deref(),
+                        model: &model,
+                        effort: effort.as_deref(),
+                        exact_instance,
+                        hint,
+                        source: &source,
+                    },
+                )
+                .await
+            }
+            BaseSpec::Default => self.inspect_default_ticket(caps_base, caps_err).await,
+        }
+    }
+
+    fn base_spec_from_slot(slot: &slots::ModelSlot) -> std::result::Result<BaseSpec, String> {
+        match &slot.spec {
+            Some(s) if s.contains_key("pool") => {
+                let pool = s
+                    .get("pool")
+                    .and_then(Value::as_str)
+                    .filter(|p| !p.trim().is_empty())
+                    .ok_or_else(|| format!("models.ticket ({}) names an empty pool", slot.source))?;
+                Ok(BaseSpec::Pool { pool: pool.to_string(), source: slot.source.clone() })
+            }
+            Some(s) => {
+                let model = s
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|m| !m.trim().is_empty())
+                    .ok_or_else(|| format!("models.ticket ({}) names no model", slot.source))?;
+                let provider =
+                    s.get("provider").and_then(Value::as_str).filter(|p| !p.trim().is_empty()).map(String::from);
+                let effort = s.get("effort").and_then(Value::as_str).filter(|e| !e.trim().is_empty()).map(String::from);
+                Ok(BaseSpec::Model {
+                    exact_instance: provider.is_some(),
+                    provider,
+                    model: model.to_string(),
+                    effort,
+                    source: slot.source.clone(),
+                })
+            }
+            None => Err(format!("models.ticket ({}) names no model or pool", slot.source)),
+        }
+    }
+
+    fn legacy_ticket_base(&self) -> BaseSpec {
+        let b = &self.config.board;
+        if let Some(pool) = &b.pool {
+            BaseSpec::Pool { pool: pool.clone(), source: "board".into() }
+        } else if b.has_legacy_ticket_keys() {
+            let exact_instance = b.has_legacy_ticket_key("instanceId");
+            let provider = if exact_instance || !b.has_legacy_ticket_key("ticketModel") {
+                Some(b.instance_id.clone())
+            } else {
+                None
+            };
+            let effort = if b.has_legacy_ticket_key("ticketEffort") || b.ticket_model == slots::DEFAULT_MODEL {
+                b.ticket_effort.clone()
+            } else {
+                None
+            };
+            BaseSpec::Model { provider, model: b.ticket_model.clone(), effort, source: "board".into(), exact_instance }
+        } else {
+            BaseSpec::Default
+        }
+    }
+
+    fn providers_from_caps(caps: Option<&Value>) -> Vec<Value> {
+        let Some(caps) = caps else { return Vec::new() };
+        caps["providers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| !slots::provider_disabled(p))
+            .filter_map(|p| {
+                let id = p["providerInstanceId"].as_str()?;
+                let driver = p["driverKind"].as_str().unwrap_or_default();
+                let name = p["displayName"].as_str().filter(|s| !s.is_empty()).unwrap_or(id);
+                let models: Vec<Value> = p["models"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|m| {
+                        let mid = m["id"].as_str()?;
+                        let (efforts, default_effort) = slots::effort_option(m).unwrap_or_else(|| (Vec::new(), None));
+                        Some(json!({"id": mid, "efforts": efforts, "defaultEffort": default_effort}))
+                    })
+                    .collect();
+                Some(json!({"id": id, "driver": driver, "name": name, "models": models}))
+            })
+            .collect()
+    }
+
+    pub async fn models_view(&self) -> Result<Value> {
+        let (mut caps_base, caps_err) = match self.t3.call("orchestrator_capabilities", json!({})).await {
+            Ok(v) => (Some(v), None),
+            Err(e) => (None, Some(self.t3.redact(e.to_string()))),
+        };
+        let pools: Vec<Value> = self
+            .config
+            .pools
+            .iter()
+            .map(|(name, cfg)| {
+                let members: Vec<Value> = cfg
+                    .members
+                    .iter()
+                    .map(|m| {
+                        json!({
+                            "instanceId": m.instance_id,
+                            "model": cfg.model_of(m),
+                            "effort": cfg.effort_of(m),
+                        })
+                    })
+                    .collect();
+                json!({
+                    "name": name,
+                    "mixed": cfg.mixed,
+                    "driver": cfg.driver,
+                    "model": cfg.model,
+                    "effort": cfg.effort,
+                    "strategy": cfg.strategy,
+                    "members": members,
+                })
+            })
+            .collect();
+        let (projects_list, projects_err) = match self.projects().await {
+            Ok(ps) => (Some(ps), None),
+            Err(e) => (None, Some(self.t3.redact(e.to_string()))),
+        };
+
+        let mut attempt = 0usize;
+        loop {
+            let (rev, folders, user_resolved, ask_cfg) = {
+                let _g = self.config_lock.lock().await;
+                let rev = self.models_rev.load(Ordering::Acquire);
+                let folders = self.base_folders()?;
+                let user_resolved = self.resolve_project_slots(None).await?;
+                let ask_cfg = self.ask_config.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                (rev, folders, user_resolved, ask_cfg)
+            };
+
+            let mut ticket = if !user_resolved.config_problems.is_empty() {
+                json!({
+                    "mode": "model",
+                    "source": "user",
+                    "provider": Value::Null,
+                    "instanceId": Value::Null,
+                    "model": Value::Null,
+                    "effort": Value::Null,
+                    "pool": Value::Null,
+                    "error": format!("workflow config problem: {}", user_resolved.config_problems.join("; ")),
+                })
+            } else {
+                let base = match user_resolved.models.iter().find(|m| m.role == "ticket") {
+                    Some(slot) if slot.source != "default" => match Self::base_spec_from_slot(slot) {
+                        Ok(b) => Ok(b),
+                        Err(e) => Err((slot.source.clone(), e)),
+                    },
+                    _ => Ok(self.legacy_ticket_base()),
+                };
+                match base {
+                    Ok(b) => self.inspect_base_spec(b, caps_base.as_mut(), caps_err.as_deref()).await,
+                    Err((src, err)) => json!({
+                        "mode": "model",
+                        "source": src,
+                        "provider": Value::Null,
+                        "instanceId": Value::Null,
+                        "model": Value::Null,
+                        "effort": Value::Null,
+                        "pool": Value::Null,
+                        "error": err,
+                    }),
+                }
+            };
+            ticket["userConfigPath"] = json!(folders.config.to_string_lossy());
+
+            let mut repo_overrides = Vec::new();
+            if let Some(projects) = &projects_list {
+                for p in projects {
+                    let Some(root) = p["workspaceRoot"].as_str().filter(|s| !s.is_empty()) else { continue };
+                    let pid = p["id"].as_str().unwrap_or_default().to_string();
+                    let title = p["title"].as_str().filter(|s| !s.is_empty()).unwrap_or(&pid).to_string();
+                    let Ok(resolved) = self.resolve_project_slots(Some(root)).await else { continue };
+                    let repo_json_problems: Vec<&str> = resolved
+                        .repo_problems
+                        .iter()
+                        .filter(|msg| msg.contains(REPO_CONFIG_FILE))
+                        .map(String::as_str)
+                        .collect();
+                    let model_repo_problems: Vec<&str> = resolved
+                        .repo_problems
+                        .iter()
+                        .filter(|msg| {
+                            msg.contains("models.ticket")
+                                || msg.contains(".models:")
+                                || msg.contains("AGENTS.md models:")
+                        })
+                        .map(String::as_str)
+                        .collect();
+                    let ticket_slot = resolved.models.iter().find(|m| m.role == "ticket");
+                    let is_repo_override =
+                        ticket_slot.is_some_and(|s| matches!(s.source.as_str(), "AGENTS.md" | REPO_CONFIG_FILE));
+                    if !is_repo_override && repo_json_problems.is_empty() && model_repo_problems.is_empty() {
+                        continue;
+                    }
+                    let repo = match identity_repo(p) {
+                        Some(r) => Some(r),
+                        None => match self.known_project(&pid).and_then(|k| k["repo"].as_str().map(String::from)) {
+                            Some(r) => Some(r),
+                            None => {
+                                let r = self.origin_repo(p).await;
+                                if r.is_some() {
+                                    self.remember_project(&pid, &p["title"], r.clone());
+                                }
+                                r
+                            }
+                        },
+                    };
+                    let mut entry = if !repo_json_problems.is_empty() {
+                        json!({
+                            "mode": "model",
+                            "source": REPO_CONFIG_FILE,
+                            "provider": Value::Null,
+                            "instanceId": Value::Null,
+                            "model": Value::Null,
+                            "effort": Value::Null,
+                            "pool": Value::Null,
+                            "error": format!("repo workflow config problem: {}", repo_json_problems.join("; ")),
+                        })
+                    } else if !model_repo_problems.is_empty() {
+                        json!({
+                            "mode": "model",
+                            "source": "AGENTS.md",
+                            "provider": Value::Null,
+                            "instanceId": Value::Null,
+                            "model": Value::Null,
+                            "effort": Value::Null,
+                            "pool": Value::Null,
+                            "error": model_repo_problems.join("; "),
+                        })
+                    } else if let Some(slot) = ticket_slot {
+                        match Self::base_spec_from_slot(slot) {
+                            Ok(b) => self.inspect_base_spec(b, caps_base.as_mut(), caps_err.as_deref()).await,
+                            Err(err) => json!({
+                                "mode": "model",
+                                "source": slot.source,
+                                "provider": Value::Null,
+                                "instanceId": Value::Null,
+                                "model": Value::Null,
+                                "effort": Value::Null,
+                                "pool": Value::Null,
+                                "error": err,
+                            }),
+                        }
+                    } else {
+                        continue;
+                    };
+                    entry["projectId"] = json!(pid);
+                    entry["title"] = json!(title);
+                    entry["repo"] = json!(repo);
+                    repo_overrides.push(entry);
+                }
+            }
+            repo_overrides.sort_by(|a, b| {
+                let ka = (
+                    a["title"].as_str().unwrap_or_default().to_lowercase(),
+                    a["projectId"].as_str().unwrap_or_default().to_string(),
+                );
+                let kb = (
+                    b["title"].as_str().unwrap_or_default().to_lowercase(),
+                    b["projectId"].as_str().unwrap_or_default().to_string(),
+                );
+                ka.cmp(&kb)
+            });
+
+            let ask = if let Some(pool) = &ask_cfg.pool {
+                self.inspect_pool(caps_base.as_ref(), pool, "board")
+            } else {
+                let source = if ask_cfg.explicit { "board" } else { "default" };
+                let exact = ask_cfg.instance_id.is_some();
+                let provider = if exact {
+                    ask_cfg.instance_id.as_deref()
+                } else if ask_cfg.explicit {
+                    None
+                } else {
+                    Some(slots::DEFAULT_PROVIDER)
+                };
+                let hint = if !exact && ask_cfg.explicit { Some(slots::DEFAULT_PROVIDER) } else { None };
+                self.inspect_specific_model(
+                    caps_base.as_mut(),
+                    caps_err.as_deref(),
+                    SpecificModel {
+                        provider,
+                        model: &ask_cfg.model,
+                        effort: ask_cfg.effort.as_deref(),
+                        exact_instance: exact,
+                        hint,
+                        source,
+                    },
+                )
+                .await
+            };
+
+            if self.models_rev.load(Ordering::Acquire) != rev && attempt < 2 {
+                attempt += 1;
+                continue;
+            }
+
+            let providers = Self::providers_from_caps(caps_base.as_ref());
+            return Ok(json!({
+                "ticket": ticket,
+                "ask": ask,
+                "providers": providers,
+                "pools": pools,
+                "repoOverrides": repo_overrides,
+                "capabilitiesError": caps_err,
+                "projectsError": projects_err,
+                "modelsRev": rev,
+                "modelsSession": self.models_session,
+            }));
+        }
+    }
+
+    pub async fn set_ticket_model(&self, body: ModelSettingBody) -> Result<Value> {
+        let validated = self.validate_model_setting(body).await?;
+        let spec = match validated {
+            ValidatedModelSetting::Model { provider, model, effort } => {
+                let mut m = serde_json::Map::new();
+                m.insert("provider".into(), json!(provider));
+                m.insert("model".into(), json!(model));
+                if let Some(e) = effort {
+                    m.insert("effort".into(), json!(e));
+                }
+                Value::Object(m)
+            }
+            ValidatedModelSetting::Pool { pool } => json!({"pool": pool}),
+        };
+        {
+            let _g = self.config_lock.lock().await;
+            let folders = self.base_folders()?;
+            let path = crate::steps::real(&folders.config);
+            let old = slots::load_user_config(&path).map_err(|e| anyhow!("{e}"))?;
+            if let Some(v) = old.get("version")
+                && v.as_u64() != Some(slots::CONFIG_VERSION)
+            {
+                bail!(
+                    "{} is config version {}; expected version {}",
+                    path.display(),
+                    slots::py_repr(v),
+                    slots::CONFIG_VERSION
+                );
+            }
+            let mut merged = old;
+            let models_obj = match merged.get("models") {
+                None => serde_json::Map::new(),
+                Some(Value::Object(o)) => o.clone(),
+                Some(_) => bail!("{}: models must be a JSON object", path.display()),
+            };
+            let mut models_obj = models_obj;
+            models_obj.insert("ticket".into(), spec);
+            merged.insert("models".into(), Value::Object(models_obj));
+            merged.remove("version");
+            let mut cfg = serde_json::Map::new();
+            cfg.insert("version".into(), json!(slots::CONFIG_VERSION));
+            for (k, v) in merged {
+                cfg.insert(k, v);
+            }
+            let problems = slots::validate_config(&cfg, "config.json");
+            if !problems.is_empty() {
+                bail!("workflow config invalid: {}", problems.join("; "));
+            }
+            let mut text = serde_json::to_string_pretty(&Value::Object(cfg))?;
+            text.push('\n');
+            crate::skills::write_atomic(&path, text.as_bytes())?;
+            self.models_rev.fetch_add(1, Ordering::AcqRel);
+        }
+        self.refresh_skills();
+        self.changed();
+        self.models_view().await
+    }
+
+    pub async fn set_ask_model(&self, body: ModelSettingBody) -> Result<Value> {
+        let validated = self.validate_model_setting(body).await?;
+        let chosen_pool = match &validated {
+            ValidatedModelSetting::Pool { pool } => Some(pool.clone()),
+            ValidatedModelSetting::Model { .. } => None,
+        };
+        {
+            let _g = self.config_lock.lock().await;
+            let path = crate::steps::real(&self.config_path());
+            let mut root = match std::fs::read_to_string(&path) {
+                Ok(s) => match serde_json::from_str::<Value>(&s) {
+                    Ok(Value::Object(o)) => o,
+                    Ok(_) => bail!("{}: top level must be a JSON object", path.display()),
+                    Err(e) => bail!("{} is not valid JSON: {e}", path.display()),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+                Err(e) => bail!("reading {}: {e}", path.display()),
+            };
+            let mut board = match root.get("board") {
+                None => serde_json::Map::new(),
+                Some(Value::Object(o)) => o.clone(),
+                Some(_) => bail!("{}: board must be a JSON object", path.display()),
+            };
+            let next_ask = match validated {
+                ValidatedModelSetting::Model { provider, model, effort } => {
+                    board.insert("askInstanceId".into(), json!(provider));
+                    board.insert("askModel".into(), json!(model));
+                    match &effort {
+                        Some(e) => {
+                            board.insert("askEffort".into(), json!(e));
+                        }
+                        None => {
+                            board.remove("askEffort");
+                        }
+                    }
+                    board.remove("askPool");
+                    AskConfig { pool: None, instance_id: Some(provider), model, effort, explicit: true }
+                }
+                ValidatedModelSetting::Pool { pool } => {
+                    board.insert("askPool".into(), json!(pool));
+                    board.remove("askInstanceId");
+                    board.remove("askModel");
+                    board.remove("askEffort");
+                    AskConfig {
+                        pool: Some(pool),
+                        instance_id: None,
+                        model: self.config.board.ask_model.clone(),
+                        effort: None,
+                        explicit: true,
+                    }
+                }
+            };
+            root.insert("board".into(), Value::Object(board));
+            let merged = Value::Object(root);
+            if let Err(e) = crate::config::Config::from_value(merged.clone()) {
+                if let Some(pool) = chosen_pool.as_deref()
+                    && merged.get("pools").and_then(Value::as_object).is_none_or(|p| !p.contains_key(pool))
+                {
+                    bail!(
+                        "pool {pool:?} is no longer defined in {}; restart t3cm to reload the configuration",
+                        path.display()
+                    );
+                }
+                bail!("{} would be invalid after update: {e:#}", path.display());
+            }
+            let mut text = serde_json::to_string_pretty(&merged)?;
+            text.push('\n');
+            crate::skills::write_atomic(&path, text.as_bytes())?;
+            *self.ask_config.lock().unwrap_or_else(|e| e.into_inner()) = next_ask;
+            self.models_rev.fetch_add(1, Ordering::AcqRel);
+        }
+        self.changed();
+        self.models_view().await
     }
 
     pub async fn board_view(&self, root: &str, all: bool) -> Result<Value> {

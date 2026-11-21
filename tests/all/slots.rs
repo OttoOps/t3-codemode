@@ -609,6 +609,17 @@ async fn model_checks_search_catalog_validate_codex_effort_and_default_effort() 
         "{}",
         m["worker"]
     );
+
+    // Specific model with an effort also fails when the model exposes options: [].
+    s.config(json!({"models": {"worker": {"provider": "claudeAgent", "model": "claude-opus-5-5", "effort": "high"}}}));
+    let m = s.call("async () => wf.slot(\"models\")", own(&claude)).await;
+    assert!(
+        m["worker"]["problem"]
+            .as_str()
+            .is_some_and(|p| p.contains("effort high is not offered") && p.contains("no effort options")),
+        "{}",
+        m["worker"]
+    );
 }
 
 #[tokio::test]
@@ -1140,12 +1151,21 @@ fn doctor_warns_when_legacy_board_ticket_keys_are_set() {
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     let warnings: Vec<&str> = v["warnings"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
     let legacy = warnings.iter().find(|w| w.contains("legacy ticket launch")).expect("legacy board warning");
-    for key in ["board.instanceId", "board.ticketModel", "board.ticketEffort", "board.pool", "models.ticket"] {
+    for key in [
+        "board.instanceId",
+        "board.ticketModel",
+        "board.ticketEffort",
+        "board.pool",
+        "models.ticket",
+        "board.askInstanceId",
+        "board.askPool",
+    ] {
         assert!(legacy.contains(key), "missing {key} in {legacy}");
     }
-    assert!(legacy.contains("ask box"), "expected ask-box caveat for instanceId/pool: {legacy}");
+    assert!(legacy.contains("no longer apply to the ask box"), "expected ask-box migration note: {legacy}");
+    assert!(!legacy.contains("still configure"), "stale caveat in {legacy}");
 
-    // When only ticketModel/ticketEffort are set, doctor advises moving them without the ask-box caveat.
+    // When only ticketModel/ticketEffort are set, doctor advises moving them without mentioning ask box keys.
     std::fs::write(&cfg_path, json!({"board": {"ticketModel": "claude-opus-5-5"}}).to_string()).unwrap();
     let out = t3cm(home.path())
         .env("T3CM_CONFIG", &cfg_path)
