@@ -24,7 +24,11 @@ fn config(strategy: &str, members: Value, board_pool: bool) -> Config {
 }
 
 fn pooled(strategy: &str, members: Value) -> H {
-    let h = H::build(Vec::new(), config(strategy, members, true));
+    pooled_on(config(strategy, members, true))
+}
+
+fn pooled_on(c: Config) -> H {
+    let h = H::build(Vec::new(), c);
     h.fake.set_providers(vec![
         provider("claude-a", "claudeAgent", &[OPUS, "claude-haiku-5-5"]),
         provider("claude-b", "claudeAgent", &[OPUS]),
@@ -607,6 +611,7 @@ fn headroom_choice(usage: &[(&str, f64)], credits: &BTreeMap<String, i64>) -> (S
         model: Some(OPUS.into()),
         effort: None,
         strategy: "headroom".into(),
+        move_on_limit: Default::default(),
         members: ["claude-a", "claude-b", "claude-c"]
             .iter()
             .map(|id| PoolMember {
@@ -803,6 +808,7 @@ fn cheapest_choice(
         model: Some(OPUS.into()),
         effort: None,
         strategy: "cheapest".into(),
+        move_on_limit: Default::default(),
         members: ids
             .iter()
             .zip(costs)
@@ -1417,4 +1423,143 @@ async fn a_ticket_limited_before_it_joins_moves_its_launch_row_and_a_board_quest
     let fork = moved["thread"].as_str().unwrap();
     let rows = h.app.store.pending_all().unwrap();
     assert_eq!(rows.iter().filter_map(|p| p.thread.as_deref()).collect::<Vec<_>>(), [fork], "{rows:?}");
+}
+
+fn moving(policy: &str) -> H {
+    pooled_on(moving_config(policy).unwrap())
+}
+
+fn moving_config(policy: &str) -> anyhow::Result<Config> {
+    Config::from_value(json!({"pools": {"opus": {"driver": "claudeAgent", "model": OPUS, "effort": "high",
+                                                 "moveOnLimit": policy, "members": two(1, 1)}},
+                              "board": {"pool": "opus", "askPool": "opus"}}))
+}
+
+fn transfers(h: &H) -> usize {
+    h.fake.calls().iter().filter(|c| *c == "t3_thread_transfer").count()
+}
+
+#[tokio::test]
+async fn move_on_limit_auto_moves_a_limited_pool_ticket_without_a_card() {
+    let h = moving("auto");
+    let ticket = launch(&h, 51).await;
+    let (old, first) = (ticket["thread"].as_str().unwrap().to_string(), ticket["instanceId"].as_str().unwrap());
+    let other = if first == "claude-a" { "claude-b" } else { "claude-a" };
+    h.wf(&old, "join", json!({"parent": BOARD, "label": "widgets#51", "role": "ticket"})).await;
+    limit_stop_on(&h, &old);
+
+    let actions = mark(&h).await;
+    assert!(move_cards(&h).is_empty(), "{actions:?}");
+    assert!(actions.iter().any(|a| a == &format!("moved widgets#51 off {first} to fork:1 on {other}")), "{actions:?}");
+    assert_eq!(h.fake.thread("fork:1").unwrap()["providerInstanceId"], other);
+    let ln = h.app.store.link_get("fork:1").unwrap().expect("the ticket link moved to the fork");
+    assert_eq!((ln.label.as_str(), ln.parent.as_str()), ("widgets#51", BOARD));
+    assert!(h.app.store.link_get(&old).unwrap().is_none());
+    let pick = h.app.store.pick_by_thread("fork:1").unwrap().unwrap();
+    assert_eq!(pick.moved_from.as_deref(), Some(old.as_str()));
+    assert!(h.app.wf.feed(20).unwrap().iter().any(|f| f["head"].as_str().unwrap().starts_with("moved ")));
+    assert!(h.sent().iter().any(|s| s["threadId"] == "fork:1"));
+    assert!(h.fake.organized().iter().any(|o| o["threadId"] == old.as_str() && o["action"] == "settle"));
+    assert!(h.app.wf.cards_with(true).unwrap().iter().all(|c| c.offer.is_none()));
+
+    mark(&h).await;
+    assert_eq!(transfers(&h), 1);
+    assert!(move_cards(&h).is_empty());
+}
+
+#[tokio::test]
+async fn move_on_limit_auto_offers_the_card_when_the_move_fails() {
+    let h = moving("auto");
+    let ticket = launch(&h, 52).await;
+    let (old, first) = (ticket["thread"].as_str().unwrap().to_string(), ticket["instanceId"].as_str().unwrap());
+    let other = if first == "claude-a" { "claude-b" } else { "claude-a" };
+    limit(&h, other, "2099-01-01T00:00:00Z");
+    limit_stop_on(&h, &old);
+
+    let actions = mark(&h).await;
+    let cards = move_cards(&h);
+    assert_eq!(cards.len(), 1, "{actions:?}");
+    assert!(
+        actions.iter().any(|a| a
+            == &format!(
+                "could not move {} off {first} automatically, so offered it as {}",
+                cards[0].label.as_deref().unwrap(),
+                cards[0].id
+            )),
+        "{actions:?}"
+    );
+    assert!(cards[0].text.contains(&format!("on {first} until")), "{}", cards[0].text);
+    assert!(cards[0].text.contains("and moving it automatically failed: reply \"move\""), "{}", cards[0].text);
+    let handle = cards[0].handle.clone().expect("the failure is kept with the card");
+    let full = result(&h.exec(&format!("async () => (await wf.show('{handle}')).body")).await);
+    let full = full.as_str().unwrap();
+    assert!(full.contains("Pool opus has moveOnLimit \"auto\", but the move failed:"), "{full}");
+    assert!(full.contains(other), "{full}");
+    assert!(h.fake.configured().is_empty());
+
+    mark(&h).await;
+    assert_eq!(move_cards(&h).len(), 1);
+    assert!(h.fake.configured().is_empty());
+}
+
+#[tokio::test]
+async fn move_on_limit_never_opens_no_card_and_moves_nothing() {
+    let h = moving("never");
+    let ticket = launch(&h, 53).await;
+    let (old, first) = (ticket["thread"].as_str().unwrap().to_string(), ticket["instanceId"].as_str().unwrap());
+    limit_stop_on(&h, &old);
+    let actions = mark(&h).await;
+    assert!(actions.iter().any(|a| a.starts_with(&format!("limited {first} until"))), "{actions:?}");
+    assert!(h.app.wf.cards_with(true).unwrap().iter().all(|c| c.offer.is_none()), "{actions:?}");
+    assert_eq!(transfers(&h), 0);
+    assert!(h.fake.configured().is_empty());
+    assert_eq!(h.app.store.pick_by_thread(&old).unwrap().unwrap().instance_id, first);
+}
+
+#[tokio::test]
+async fn move_on_limit_ask_keeps_the_card() {
+    let h = moving("ask");
+    let old = launch(&h, 54).await["thread"].as_str().unwrap().to_string();
+    limit_stop_on(&h, &old);
+    mark(&h).await;
+    let cards = move_cards(&h);
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].options, ["move", "wait"]);
+    assert!(!cards[0].text.contains("automatically"), "{}", cards[0].text);
+    assert_eq!(transfers(&h), 0);
+    assert_eq!(moving_config("ask").unwrap().pools, config("weighted", two(1, 1), true).pools);
+}
+
+#[tokio::test]
+async fn move_on_limit_is_shown_by_wf_pools() {
+    let h = moving("auto");
+    assert_eq!(result(&h.exec("async () => wf.pools()").await)[0]["moveOnLimit"], "auto");
+    assert_eq!(result(&pooled("weighted", two(1, 1)).exec("async () => wf.pools()").await)[0]["moveOnLimit"], "ask");
+}
+
+#[test]
+fn an_unknown_move_on_limit_fails_config_load() {
+    let e = format!("{:#}", moving_config("sometimes").unwrap_err());
+    assert!(e.contains("pool opus"), "{e}");
+    assert!(e.contains("unknown variant `sometimes`, expected one of `ask`, `auto`, `never`"), "{e}");
+}
+
+#[tokio::test]
+async fn move_on_limit_auto_reports_a_fork_it_could_not_resume() {
+    let h = moving("auto");
+    let old = launch(&h, 55).await["thread"].as_str().unwrap().to_string();
+    limit_stop_on(&h, &old);
+    h.fake.set_send_fails(true);
+    let actions = mark(&h).await;
+    assert!(move_cards(&h).is_empty(), "{actions:?}");
+    let cards: Vec<_> =
+        h.app.wf.cards().unwrap().into_iter().filter(|c| c.ticket.as_deref() == Some("fork:1")).collect();
+    assert_eq!(cards.len(), 1, "{actions:?}");
+    assert!(cards[0].text.contains("moved off claude-"), "{}", cards[0].text);
+    assert!(cards[0].text.contains("to fork:1 on claude-"), "{}", cards[0].text);
+    assert_eq!(cards[0].link.as_deref(), Some("https://t3/fork:1"));
+    let handle = cards[0].handle.clone().unwrap();
+    let full = result(&h.exec(&format!("async () => (await wf.show('{handle}')).body")).await);
+    assert!(full.as_str().unwrap().contains("resuming the fork failed, so send it a message by hand"), "{full}");
+    assert!(actions.iter().any(|a| a.ends_with(&format!("so reported it as {}", cards[0].id))), "{actions:?}");
 }

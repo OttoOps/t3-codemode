@@ -332,8 +332,7 @@ pub struct Rebind<'a> {
     pub new: &'a str,
     pub link: Option<&'a str>,
     pub board: &'a str,
-    pub card: i64,
-    pub resolution: &'a str,
+    pub card: Option<(i64, &'a str)>,
     pub pick: i64,
     pub summary: &'a str,
     pub at: &'a str,
@@ -988,12 +987,14 @@ impl Store {
             }
             tx.execute("UPDATE pr_seen SET data = ?2 WHERE rowid = ?1", params![row, serde_json::to_string(&p)?])?;
         }
-        let resolved = tx.execute(
-            "UPDATE waiting SET resolved_at = ?3, note = ?4 WHERE owner = ?1 AND seq = ?2 AND resolved_at IS NULL",
-            params![board, m.card, at, m.resolution],
-        )?;
-        if resolved == 0 {
-            anyhow::bail!("its card was already answered");
+        if let Some((card, resolution)) = m.card {
+            let resolved = tx.execute(
+                "UPDATE waiting SET resolved_at = ?3, note = ?4 WHERE owner = ?1 AND seq = ?2 AND resolved_at IS NULL",
+                params![board, card, at, resolution],
+            )?;
+            if resolved == 0 {
+                anyhow::bail!("its card was already answered");
+            }
         }
         let handle = Self::msg_insert(&tx, board, board, "note", m.summary, at)?;
         let pick: Option<String> =

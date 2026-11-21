@@ -4,8 +4,9 @@ use serde_json::{Value, json};
 
 use crate::board::{BOARD, Card, NewCard};
 use crate::clock::local_clock;
+use crate::pools::MoveOnLimit;
 use crate::store::Rebind;
-use crate::wf::Wf;
+use crate::wf::{WATCHER, Wf};
 
 pub const MOVE: &str = "move";
 pub const WAIT: &str = "wait";
@@ -70,11 +71,11 @@ impl Wf {
         if self.store.ask_thread(thread)? {
             return Ok(None);
         }
-        if !self.config.pools.contains_key(&pick.pool) {
+        let Some(policy) = self.config.pools.get(&pick.pool).map(|p| p.move_on_limit) else { return Ok(None) };
+        if policy == MoveOnLimit::Never {
             return Ok(None);
         }
         let key = offered_key(thread, run);
-        let _g = self.lock.lock().await;
         if self.store.meta_get(&key)?.is_some() {
             return Ok(None);
         }
@@ -82,30 +83,87 @@ impl Wf {
         let title = t["title"].as_str().filter(|s| !s.is_empty()).unwrap_or(thread).to_string();
         let label = link.as_ref().map_or(title.clone(), |l| l.label.clone());
         let url = t["link"].as_str().map(String::from).or_else(|| link.as_ref().and_then(|l| l.link.clone()));
+        let offer =
+            Offer { thread: thread.into(), run: run.into(), pool: pick.pool, instance_id: instance.into(), title };
+        let mut failed = None;
+        if policy == MoveOnLimit::Auto {
+            match self.move_thread(None, &offer).await {
+                Ok(out) => {
+                    let new = out["thread"].as_str().unwrap_or_default();
+                    if let Err(e) = self.store.meta_set(&key, new) {
+                        tracing::warn!("moved {label} to {new}, but recording the move failed: {e:#}");
+                    }
+                    self.changed();
+                    let to = out["instanceId"].as_str().unwrap_or_default();
+                    let mut action = format!("moved {label} off {instance} to {new} on {to}");
+                    let warnings: Vec<&str> =
+                        out["warnings"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    if !warnings.is_empty() {
+                        let fork = out["link"].as_str();
+                        let here = fork.map(|u| format!(", here: {u}")).unwrap_or_default();
+                        let body = format!(
+                            "**ACTION NEEDED:** check {label}, which moved off {instance} to {new} on {to} \
+                             without finishing{here}\n\n{}",
+                            warnings.join("\n")
+                        );
+                        let _g = self.lock.lock().await;
+                        let handle = self.store.msg_new(WATCHER, BOARD, "report", &body, &self.now())?;
+                        let id = self.card_add(NewCard {
+                            kind: "report",
+                            label: Some(&label),
+                            ticket: Some(new),
+                            link: fork,
+                            body: &body,
+                            handle: Some(&handle),
+                            options: None,
+                            pr: None,
+                            approval: None,
+                            offer: None,
+                        })?;
+                        action.push_str(&format!("; {}, so reported it as {id}", warnings.join("; ")));
+                    }
+                    return Ok(Some(action));
+                }
+                Err(e) => failed = Some(self.t3.redact(format!("{e:#}"))),
+            }
+        }
+        let _g = self.lock.lock().await;
+        if self.store.meta_get(&key)?.is_some() {
+            return Ok(None);
+        }
         let reset =
             self.store.limits()?.get(instance).map(|l| format!(" until {}", local_clock(&l.until))).unwrap_or_default();
         let here = url.as_deref().map(|u| format!(", here: {u}")).unwrap_or_default();
-        let body = format!(
-            "**ACTION NEEDED:** {label} stopped on a usage limit on {instance}{reset}: reply \"{MOVE}\" to move it \
-             to a ready member of pool {}, or \"{WAIT}\" to leave it until the reset{here}",
-            pick.pool
+        let failed_note = if failed.is_some() { " and moving it automatically failed" } else { "" };
+        let mut body = format!(
+            "**ACTION NEEDED:** {label} stopped on a usage limit on {instance}{reset}{failed_note}: reply \"{MOVE}\" \
+             to move it to a ready member of pool {}, or \"{WAIT}\" to leave it until the reset{here}",
+            offer.pool
         );
-        let offer =
-            Offer { thread: thread.into(), run: run.into(), pool: pick.pool, instance_id: instance.into(), title };
+        let handle = match &failed {
+            Some(e) => {
+                body.push_str(&format!("\n\nPool {} has moveOnLimit \"auto\", but the move failed: {e}", offer.pool));
+                Some(self.store.msg_new(WATCHER, BOARD, "report", &body, &self.now())?)
+            }
+            None => None,
+        };
         let id = self.card_add(NewCard {
             kind: "report",
             label: Some(&label),
             ticket: Some(thread),
             link: url.as_deref(),
             body: &body,
-            handle: None,
+            handle: handle.as_deref(),
             options: Some(vec![MOVE.into(), WAIT.into()]),
             pr: None,
             approval: None,
             offer: Some(&offer),
         })?;
         self.store.meta_set(&key, &id)?;
-        Ok(Some(format!("offered to move {label} off {instance} as {id}")))
+        Ok(Some(match failed {
+            Some(_) => format!("could not move {label} off {instance} automatically, so offered it as {id}"),
+            None => format!("offered to move {label} off {instance} as {id}"),
+        }))
     }
 
     pub(crate) async fn answer_offer(&self, card: &Card, offer: &Offer, text: &str) -> Result<Value> {
@@ -115,7 +173,7 @@ impl Wf {
                 self.changed();
                 return Ok(json!({"card": card.id, "moved": false}));
             }
-            MOVE => self.move_thread(card.seq, offer).await?,
+            MOVE => self.move_thread(Some(card.seq), offer).await?,
             _ => bail!("card {} takes \"{MOVE}\" or \"{WAIT}\"", card.id),
         };
         self.changed();
@@ -124,7 +182,7 @@ impl Wf {
         Ok(out)
     }
 
-    async fn move_thread(&self, card: i64, o: &Offer) -> Result<Value> {
+    async fn move_thread(&self, card: Option<i64>, o: &Offer) -> Result<Value> {
         let old = &o.thread;
         let th = self.t3.call("t3_thread_read", json!({"threadId": old, "limit": 1, "maxCharsPerItem": 1})).await?;
         let th = &th["thread"];
@@ -173,6 +231,7 @@ impl Wf {
         }
         let link = f["link"].as_str().map(String::from);
         let summary = format!("moved {} from {} to {new} {}", o.title, o.instance_id, picked.summary());
+        let resolution = format!("answered: move; {summary}");
         let rebound = self
             .store
             .rebind(&Rebind {
@@ -180,8 +239,7 @@ impl Wf {
                 new: &new,
                 link: link.as_deref(),
                 board: BOARD,
-                card,
-                resolution: &format!("answered: move; {summary}"),
+                card: card.map(|c| (c, resolution.as_str())),
                 pick: picked.seq,
                 summary: &summary,
                 at: &self.now(),
