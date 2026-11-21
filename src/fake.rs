@@ -24,6 +24,7 @@ struct State {
     projects_fail: bool,
     read_fails: bool,
     pr_page: usize,
+    short_list: usize,
     organize_fails: bool,
     delay: Duration,
 }
@@ -216,6 +217,10 @@ impl FakeT3 {
         self.st().providers = providers;
     }
 
+    pub fn set_short_list(&self, models: usize) {
+        self.st().short_list = models;
+    }
+
     pub fn launched(&self) -> Vec<Value> {
         self.st().launched.clone()
     }
@@ -312,6 +317,11 @@ impl FakeT3 {
                     .iter()
                     .map(|p| {
                         let mut p = p.clone();
+                        if search.is_none() && st.short_list > 0 {
+                            let models: Vec<Value> =
+                                p["models"].as_array().into_iter().flatten().take(st.short_list).cloned().collect();
+                            p["models"] = json!(models);
+                        }
                         if let Some(q) = search {
                             let models: Vec<Value> = p["models"]
                                 .as_array()

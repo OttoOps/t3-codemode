@@ -880,8 +880,16 @@ impl Wf {
     async fn pool_pick(&self, model: Option<&str>, effort: Option<&str>) -> Result<Option<Picked>> {
         let Some(name) = &self.config.board.pool else { return Ok(None) };
         let pool = self.pool(name)?;
-        if let Some(m) = model.filter(|m| *m != pool.model) {
-            bail!("board.pool {name} runs {}; launch without a model, or unset board.pool to launch {m}", pool.model);
+        if pool.mixed
+            && let Some(what) = model.map(|m| format!("model {m}")).or(effort.map(|e| format!("effort {e}")))
+        {
+            bail!(
+                "board.pool {name} is a mixed pool, where each member runs its own model and effort; launch without a model or effort, or unset board.pool to launch {what}"
+            );
+        }
+        let pooled = pool.model.as_deref().unwrap_or_default();
+        if let Some(m) = model.filter(|m| *m != pooled) {
+            bail!("board.pool {name} runs {pooled}; launch without a model, or unset board.pool to launch {m}");
         }
         if let Some(e) = effort.filter(|e| Some(*e) != pool.effort.as_deref()) {
             bail!(

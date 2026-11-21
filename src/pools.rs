@@ -34,9 +34,13 @@ fn unit_cost() -> f64 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PoolConfig {
-    pub driver: String,
-    pub model: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mixed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     #[serde(default = "weighted")]
     pub strategy: String,
@@ -53,15 +57,38 @@ pub struct PoolMember {
     pub reserve: f64,
     #[serde(default = "unit_cost")]
     pub cost: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
+fn blank(v: &Option<String>) -> bool {
+    v.as_deref().is_some_and(|s| s.trim().is_empty())
 }
 
 impl PoolConfig {
     pub fn validate(&self) -> Result<()> {
-        if self.driver.trim().is_empty() {
-            bail!("driver is empty");
-        }
-        if self.model.trim().is_empty() {
-            bail!("model is empty");
+        if self.mixed {
+            for (key, set) in [("driver", &self.driver), ("model", &self.model), ("effort", &self.effort)] {
+                if set.is_some() {
+                    bail!("a mixed pool has no pool-level {key}; set model and effort on each member");
+                }
+            }
+        } else {
+            match self.driver.as_deref() {
+                None => bail!("driver is missing; set it, or set \"mixed\": true for members of several drivers"),
+                Some(d) if d.trim().is_empty() => bail!("driver is empty"),
+                Some(_) => {}
+            }
+            match self.model.as_deref() {
+                None => bail!("model is missing"),
+                Some(m) if m.trim().is_empty() => bail!("model is empty"),
+                Some(_) => {}
+            }
+            if blank(&self.effort) {
+                bail!("effort is empty");
+            }
         }
         match self.strategy.as_str() {
             s if STRATEGIES.contains(&s) => {}
@@ -92,8 +119,35 @@ impl PoolConfig {
             if !m.cost.is_finite() || m.cost < 0.0 {
                 bail!("member {}: cost must be a finite number of 0 or more, got {}", m.instance_id, m.cost);
             }
+            if !self.mixed {
+                for (key, set) in [("model", &m.model), ("effort", &m.effort)] {
+                    if set.is_some() {
+                        bail!(
+                            "member {}: only a mixed pool's members set their own {key}; set it on the pool, or set \"mixed\": true",
+                            m.instance_id
+                        );
+                    }
+                }
+            } else {
+                match m.model.as_deref() {
+                    None => bail!("member {}: a mixed pool's member needs a model", m.instance_id),
+                    Some(s) if s.trim().is_empty() => bail!("member {}: model is empty", m.instance_id),
+                    Some(_) => {}
+                }
+                if blank(&m.effort) {
+                    bail!("member {}: effort is empty", m.instance_id);
+                }
+            }
         }
         Ok(())
+    }
+
+    pub fn model_of<'a>(&'a self, m: &'a PoolMember) -> &'a str {
+        m.model.as_deref().or(self.model.as_deref()).unwrap_or_default()
+    }
+
+    pub fn effort_of<'a>(&'a self, m: &'a PoolMember) -> Option<&'a str> {
+        m.effort.as_deref().or(self.effort.as_deref())
     }
 }
 
@@ -122,8 +176,11 @@ pub fn check_members(name: &str, pool: &PoolConfig, caps: &Value) -> Result<()> 
             );
         };
         let driver = p["driverKind"].as_str().unwrap_or_default();
-        if driver != pool.driver {
-            bail!("pool {name}: member {} is a {driver} instance, not {}", m.instance_id, pool.driver);
+        if let Some(want) = pool.driver.as_deref().filter(|w| *w != driver) {
+            bail!(
+                "pool {name}: member {} is a {driver} instance, not {want}; set \"mixed\": true to mix drivers",
+                m.instance_id
+            );
         }
     }
     Ok(())
@@ -152,17 +209,19 @@ impl State {
         }
     }
 
-    fn why(&self, pool: &PoolConfig) -> Option<String> {
+    fn why(&self, pool: &PoolConfig, m: &PoolMember) -> Option<String> {
         match self {
             State::Ready => None,
             State::Limited(until) => Some(format!("limited until {}", local_clock(until))),
             State::NoUsage => Some("has no usage left".into()),
             State::Disabled => Some("disabled".into()),
             State::Constrained(c) => Some(format!("constrained: {c}")),
-            State::MissingModel => Some(format!("does not list model {}", pool.model)),
-            State::MissingEffort => {
-                Some(format!("does not offer effort {} for {}", pool.effort.as_deref().unwrap_or_default(), pool.model))
-            }
+            State::MissingModel => Some(format!("does not list model {}", pool.model_of(m))),
+            State::MissingEffort => Some(format!(
+                "does not offer effort {} for {}",
+                pool.effort_of(m).unwrap_or_default(),
+                pool.model_of(m)
+            )),
         }
     }
 }
@@ -175,7 +234,7 @@ fn active_limit<'a>(limits: &'a BTreeMap<String, Limit>, id: &str, now: Timestam
     limits.get(id).filter(|l| parse_ts(&l.until).is_some_and(|u| u > now))
 }
 
-fn member_state(pool: &PoolConfig, p: &Value, limit: Option<&Limit>, usage: Option<&Usage>) -> State {
+fn member_state(pool: &PoolConfig, m: &PoolMember, p: &Value, limit: Option<&Limit>, usage: Option<&Usage>) -> State {
     let constraints: Vec<&str> = p["constraints"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     if constraints.iter().any(|c| c.to_ascii_lowercase().contains("disabled")) {
         return State::Disabled;
@@ -183,10 +242,11 @@ fn member_state(pool: &PoolConfig, p: &Value, limit: Option<&Limit>, usage: Opti
     if !constraints.is_empty() {
         return State::Constrained(constraints.join("; "));
     }
-    if !p["models"].as_array().is_some_and(|ms| ms.iter().any(|m| m["id"] == pool.model.as_str())) {
+    let model = pool.model_of(m);
+    if !p["models"].as_array().is_some_and(|ms| ms.iter().any(|m| m["id"] == model)) {
         return State::MissingModel;
     }
-    if pool.effort.is_some() && effort_options(pool, p).is_none() {
+    if effort_options(model, pool.effort_of(m), p).is_none() {
         return State::MissingEffort;
     }
     if let Some(l) = limit {
@@ -198,14 +258,14 @@ fn member_state(pool: &PoolConfig, p: &Value, limit: Option<&Limit>, usage: Opti
     }
 }
 
-fn effort_options(pool: &PoolConfig, p: &Value) -> Option<Value> {
-    let Some(effort) = &pool.effort else { return Some(json!([])) };
+fn effort_options(model: &str, effort: Option<&str>, p: &Value) -> Option<Value> {
+    let Some(effort) = effort else { return Some(json!([])) };
     let options = p["models"]
         .as_array()
-        .and_then(|ms| ms.iter().find(|m| m["id"] == pool.model.as_str()))
+        .and_then(|ms| ms.iter().find(|m| m["id"] == model))
         .and_then(|m| m["options"].as_array())?;
     let option = EFFORT_IDS.iter().find_map(|id| options.iter().find(|o| o["id"] == *id))?;
-    let offered = option["values"].as_array().is_some_and(|vs| vs.iter().any(|v| v == effort.as_str()));
+    let offered = option["values"].as_array().is_some_and(|vs| vs.iter().any(|v| v == effort));
     offered.then(|| json!([{"id": option["id"], "value": effort}]))
 }
 
@@ -223,6 +283,9 @@ pub struct Skipped {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Choice {
     pub instance_id: String,
+    pub driver: String,
+    pub model: String,
+    pub effort: Option<String>,
     pub options: Value,
     pub reason: String,
     pub skipped: Vec<Skipped>,
@@ -282,8 +345,8 @@ pub fn choose(inp: &Inputs) -> Result<Choice> {
     for (i, m) in pool.members.iter().enumerate() {
         let p = provider(caps, &m.instance_id).expect("checked members");
         let left = usage.get(&m.instance_id);
-        let state = member_state(pool, p, active_limit(limits, &m.instance_id, now), left);
-        if let Some(why) = state.why(pool) {
+        let state = member_state(pool, m, p, active_limit(limits, &m.instance_id, now), left);
+        if let Some(why) = state.why(pool, m) {
             skipped.push(Skipped { instance_id: m.instance_id.clone(), reason: why });
             continue;
         }
@@ -349,10 +412,16 @@ pub fn choose(inp: &Inputs) -> Result<Choice> {
         base
     };
     let p = provider(caps, &m.instance_id).expect("checked members");
+    let driver = p["driverKind"].as_str().unwrap_or_default().to_string();
+    let (model, effort) = (pool.model_of(m), pool.effort_of(m));
+    let ran = format!("{driver} {model}, effort {}", effort.unwrap_or("default"));
     Ok(Choice {
         instance_id: m.instance_id.clone(),
-        options: effort_options(pool, p).expect("a ready member offers the effort"),
-        reason: with_skips(base, &skipped),
+        driver,
+        model: model.to_string(),
+        effort: effort.map(String::from),
+        options: effort_options(model, effort, p).expect("a ready member offers the effort"),
+        reason: with_skips(format!("{ran}; {base}"), &skipped),
         skipped,
         credits,
     })
@@ -363,7 +432,9 @@ pub fn choose(inp: &Inputs) -> Result<Choice> {
 pub struct Picked {
     pub pool: String,
     pub instance_id: String,
+    pub driver: String,
     pub model: String,
+    pub effort: Option<String>,
     pub options: Value,
     pub reason: String,
     pub skipped: Vec<Skipped>,
@@ -432,6 +503,31 @@ impl Wf {
         Ok(self.t3.call("orchestrator_capabilities", input).await?)
     }
 
+    async fn pool_capabilities(&self, pool: &PoolConfig) -> Result<Value> {
+        let models: BTreeSet<&str> = pool.members.iter().map(|m| pool.model_of(m)).collect();
+        let mut merged: Option<Value> = None;
+        for model in models {
+            let caps = self.capabilities(Some(model)).await?;
+            let Some(all) = merged.as_mut() else {
+                merged = Some(caps);
+                continue;
+            };
+            for p in providers(&caps) {
+                let Some(id) = p["providerInstanceId"].as_str() else { continue };
+                let Some(have) = all["providers"]
+                    .as_array_mut()
+                    .and_then(|ps| ps.iter_mut().find(|q| q["providerInstanceId"] == id))
+                else {
+                    continue;
+                };
+                if let Some(ms) = have["models"].as_array_mut() {
+                    ms.extend(p["models"].as_array().into_iter().flatten().cloned());
+                }
+            }
+        }
+        merged.ok_or_else(|| anyhow!("pool has no members"))
+    }
+
     async fn threads_with(&self, statuses: &[&str]) -> Result<Vec<Value>> {
         let mut out = Vec::new();
         let mut cursor: Option<u64> = None;
@@ -484,7 +580,7 @@ impl Wf {
 
     pub async fn pick(&self, name: &str) -> Result<Picked> {
         let pool = self.pool(name)?;
-        let caps = self.capabilities(Some(&pool.model)).await?;
+        let caps = self.pool_capabilities(pool).await?;
         check_members(name, pool, &caps)?;
         let running = match pool.strategy.as_str() {
             "priority" => BTreeMap::new(),
@@ -512,7 +608,7 @@ impl Wf {
         let seq = self.store.pick_add(&PickRecord {
             pool: name.into(),
             instance_id: c.instance_id.clone(),
-            model: pool.model.clone(),
+            model: c.model.clone(),
             strategy: pool.strategy.clone(),
             reason: c.reason.clone(),
             skipped: serde_json::to_value(&c.skipped)?,
@@ -522,9 +618,11 @@ impl Wf {
         })?;
         Ok(Picked {
             pool: name.into(),
-            model_selection: model_selection(&c.instance_id, &pool.model, &c.options),
+            model_selection: model_selection(&c.instance_id, &c.model, &c.options),
             instance_id: c.instance_id,
-            model: pool.model.clone(),
+            driver: c.driver,
+            model: c.model,
+            effort: c.effort,
             options: c.options,
             reason: c.reason,
             skipped: c.skipped,
@@ -656,7 +754,7 @@ impl Wf {
         let mut out = Vec::new();
         for (name, pool) in &self.config.pools {
             let caps = match &running {
-                Ok(_) => self.capabilities(Some(&pool.model)).await,
+                Ok(_) => self.pool_capabilities(pool).await,
                 Err(e) => Err(anyhow!("{e:#}")),
             };
             let now = self.clock.now();
@@ -674,18 +772,22 @@ impl Wf {
                     let left = usage.get(&m.instance_id);
                     let p = caps.as_ref().ok().and_then(|c| provider(c, &m.instance_id));
                     let state = match (p, limit) {
-                        (Some(p), _) if error.is_none() => Some(member_state(pool, p, limit, left)),
+                        (Some(p), _) if error.is_none() => Some(member_state(pool, m, p, limit, left)),
                         (_, Some(l)) => Some(State::Limited(l.until.clone())),
                         _ => None,
                     };
                     let (picks, last) = stats.get(&m.instance_id).cloned().unwrap_or((0, None));
+                    let driver = p.and_then(|p| p["driverKind"].as_str()).or(pool.driver.as_deref());
                     json!({
                         "instanceId": m.instance_id,
+                        "driver": driver,
+                        "model": pool.model_of(m),
+                        "effort": pool.effort_of(m),
                         "weight": m.weight,
                         "reserve": m.reserve,
                         "cost": m.cost,
                         "state": state.as_ref().map_or("unknown", State::name),
-                        "reason": state.as_ref().and_then(|s| s.why(pool)),
+                        "reason": state.as_ref().and_then(|s| s.why(pool, m)),
                         "limitedUntil": limit.map(|l| l.until.clone()),
                         "limitedUntilLocal": limit.map(|l| local_clock(&l.until)),
                         "limitReason": limit.and_then(|l| l.reason.clone()),
@@ -699,6 +801,7 @@ impl Wf {
                 .collect();
             out.push(json!({
                 "pool": name,
+                "mixed": pool.mixed,
                 "driver": pool.driver,
                 "model": pool.model,
                 "effort": pool.effort,
