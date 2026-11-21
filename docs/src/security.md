@@ -48,6 +48,7 @@ for the split trust boundary and reverse-proxy trust assumptions.
   read and write route is refused with 403.
 - With `board.remote` enabled (`mode` and an `https://` `origin`), a remote
   board request must satisfy all of the following on both read routes (`/`,
+  `/manifest.webmanifest`, `/icon.svg`, `/icon-192.png`, `/icon-512.png`,
   `/api/state`, `/api/events`, `/api/msg/*`, `/api/contexts`,
   `/api/new-issues`) and mutating routes:
   - `X-Forwarded-Proto`, when present, must be `https`.
@@ -78,6 +79,16 @@ for the split trust boundary and reverse-proxy trust assumptions.
       `"off"` or `"pairing"`.
   - Every mutating method (`POST`, `PUT`, `DELETE`) on authenticated board
     routes still requires the per-process `X-T3CM-CSRF` header.
+  - `POST /api/open` is strictly loopback-only and refuses every remote request
+    with 403 even when authenticated, so remote clients cannot trigger desktop
+    app launches on the host.
+  - Unauthenticated remote `GET /` requests that send `Accept: text/html`
+    receive a 401/403 HTML sign-in or access-denied screen with no CSRF token,
+    no board data, and no scripts; API and non-HTML requests receive JSON.
+  - The board's Content-Security-Policy keeps `default-src 'none'` with zero
+    external requests (`manifest-src 'self'`, `img-src 'self' data:`), and the
+    page fetches `/manifest.webmanifest` with `crossorigin="use-credentials"` so
+    authenticated remote browsers stay behind the same guard.
 - **Reverse-proxy trust assumption.** Because `t3cm` listens on `127.0.0.1`,
   any forwarder that sends a loopback `Host` with no forwarding headers looks
   identical on the wire to a direct loopback client. Any proxy fronting the

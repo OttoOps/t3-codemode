@@ -26,17 +26,321 @@ use crate::server::{RequestKind, SingleHeader, classify_request, is_own_loopback
 pub const CSRF_HEADER: &str = "x-t3cm-csrf";
 const PAGE: &str = include_str!("board.html");
 const PAIR_PAGE: &str = include_str!("pair.html");
+const ICON_SVG: &str = include_str!("icon.svg");
+const ICON_192_PNG: &[u8] = include_bytes!("icon-192.png");
+const ICON_512_PNG: &[u8] = include_bytes!("icon-512.png");
+const MANIFEST_JSON: &str = concat!(
+    r##"{"name":"t3 board","short_name":"t3 board","description":"T3 Code workflow board","##,
+    r##""start_url":"/","scope":"/","display":"standalone","##,
+    r##""background_color":"#0f1113","theme_color":"#181b1f","##,
+    r##""icons":["##,
+    r##"{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"},"##,
+    r##"{"src":"/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},"##,
+    r##"{"src":"/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"}"##,
+    r##"]}"##,
+);
 const MAX_LAUNCH: usize = 20;
 const KEEPALIVE: Duration = Duration::from_secs(25);
 const SETTLE: Duration = Duration::from_millis(150);
 const SESSION_CHECK: Duration = Duration::from_secs(1);
 const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; \
-img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+img-src 'self' data:; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const STATIC_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
+const AUTH_PAGE_CSP: &str =
+    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 #[derive(Clone, Debug)]
 struct AuthSession {
     seq: Option<i64>,
     tailscale_login: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthErrorKind {
+    RemoteDisabled,
+    OriginMismatch,
+    PairingRequired,
+    SessionInvalid,
+    TailscaleMissing,
+    TailscaleDenied,
+    TailscaleUnavailable,
+    Internal,
+}
+
+#[derive(Clone, Debug)]
+struct AuthError {
+    status: StatusCode,
+    message: &'static str,
+    kind: AuthErrorKind,
+    login: Option<String>,
+}
+
+impl AuthError {
+    fn plain(status: StatusCode, message: &'static str, kind: AuthErrorKind) -> Self {
+        Self { status, message, kind, login: None }
+    }
+
+    fn tailscale_denied(login: &str) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: "Tailscale user is not allowed to access this board",
+            kind: AuthErrorKind::TailscaleDenied,
+            login: Some(login.to_string()),
+        }
+    }
+
+    fn supports_html_screen(&self) -> bool {
+        matches!(
+            self.kind,
+            AuthErrorKind::PairingRequired
+                | AuthErrorKind::SessionInvalid
+                | AuthErrorKind::TailscaleMissing
+                | AuthErrorKind::TailscaleDenied
+                | AuthErrorKind::TailscaleUnavailable
+        )
+    }
+
+    fn into_json_response(self) -> Response {
+        let auth = match self.kind {
+            AuthErrorKind::PairingRequired => Some(json!({
+                "kind": "pairing",
+                "reason": "missing",
+                "pairingUrl": "/pair",
+            })),
+            AuthErrorKind::SessionInvalid => Some(json!({
+                "kind": "pairing",
+                "reason": "expired",
+                "pairingUrl": "/pair",
+            })),
+            AuthErrorKind::TailscaleMissing => Some(json!({"kind": "tailscale_missing"})),
+            AuthErrorKind::TailscaleDenied => Some(json!({
+                "kind": "tailscale_denied",
+                "login": self.login,
+            })),
+            AuthErrorKind::TailscaleUnavailable => Some(json!({"kind": "tailscale_unavailable"})),
+            AuthErrorKind::RemoteDisabled => Some(json!({"kind": "remote_disabled"})),
+            AuthErrorKind::OriginMismatch | AuthErrorKind::Internal => None,
+        };
+        let body = match auth {
+            Some(a) => json!({"error": self.message, "auth": a}),
+            None => json!({"error": self.message}),
+        };
+        json_ok(self.status, body)
+    }
+
+    fn into_html_response(self) -> Response {
+        let (title, lead, hint, cmd, show_pair) = match self.kind {
+            AuthErrorKind::PairingRequired => (
+                "Sign in to t3 board",
+                "This browser needs a remote pairing session to open the board.".to_string(),
+                "Run on the host, then scan the QR code or open the pairing link:",
+                "t3cm board pair",
+                true,
+            ),
+            AuthErrorKind::SessionInvalid => (
+                "Session expired or revoked",
+                "This browser's remote session is no longer valid. Pair this device again to continue.".to_string(),
+                "Run on the host, then scan the QR code or open the pairing link:",
+                "t3cm board pair",
+                true,
+            ),
+            AuthErrorKind::TailscaleDenied => {
+                let lead = match self.login.as_deref() {
+                    Some(login) => format!(
+                        "Signed in via Tailscale as <code>{}</code>, which is not allowed to access this board.",
+                        escape_html(login)
+                    ),
+                    None => "Your Tailscale account is not allowed to access this board.".to_string(),
+                };
+                (
+                    "Access denied",
+                    lead,
+                    "Switch Tailscale accounts on this device, or allow this login on the host:",
+                    "t3cm board expose --tailscale --allow-user <login>",
+                    false,
+                )
+            }
+            AuthErrorKind::TailscaleUnavailable => (
+                "Tailscale sign-in required",
+                "The host could not verify its Tailscale login to authorize this request.".to_string(),
+                "Check Tailscale status and remote board health on the host:",
+                "t3cm doctor",
+                false,
+            ),
+            AuthErrorKind::TailscaleMissing
+            | AuthErrorKind::RemoteDisabled
+            | AuthErrorKind::OriginMismatch
+            | AuthErrorKind::Internal => (
+                "Tailscale sign-in required",
+                "This request did not carry a Tailscale user identity header.".to_string(),
+                "Open the board through its Tailscale Serve HTTPS URL, or check the host:",
+                "t3cm doctor",
+                false,
+            ),
+        };
+        let pair_btn = if show_pair { r#"<a class="btn go" href="/pair">Open pairing page</a>"# } else { "" };
+        let retry_cls = if show_pair { "btn" } else { "btn go" };
+        let html = format!(
+            r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>{title} - t3 board</title>
+<style>
+  :root {{
+    --canvas: #f3f3ef;
+    --panel: #ffffff;
+    --panel-2: #f7f7f4;
+    --line: #83878d;
+    --field: #7d8187;
+    --ink: #1b1d20;
+    --ink-2: #565b62;
+    --go: #2f5bd3;
+    --go-ink: #ffffff;
+    --go-hover: #2549b0;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{
+      --canvas: #0f1113;
+      --panel: #181b1f;
+      --panel-2: #1d2125;
+      --line: #6e747c;
+      --field: #7d848c;
+      --ink: #eceef0;
+      --ink-2: #a9aeb5;
+      --go: #4268dc;
+      --go-ink: #ffffff;
+      --go-hover: #3a5fd0;
+    }}
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0;
+    min-height: 100vh;
+    min-height: 100dvh;
+    display: grid;
+    place-items: center;
+    padding: 24px 16px max(24px, env(safe-area-inset-bottom, 0px));
+    background: var(--canvas);
+    color: var(--ink);
+    font: 400 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }}
+  main {{
+    width: 100%;
+    max-width: 460px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 24px;
+    display: grid;
+    gap: 12px;
+  }}
+  h1 {{ margin: 0; font-size: 19px; line-height: 24px; font-weight: 600; }}
+  p {{ margin: 0; color: var(--ink-2); font-size: 14px; line-height: 20px; }}
+  code {{
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink);
+  }}
+  .cmd {{
+    display: block;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel-2);
+    overflow-wrap: anywhere;
+    user-select: all;
+  }}
+  .acts {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }}
+  .btn {{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    padding: 0 14px;
+    border-radius: 6px;
+    border: 1px solid var(--field);
+    background: transparent;
+    color: var(--ink);
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 500;
+  }}
+  .btn:hover {{ background: var(--panel-2); }}
+  .btn.go {{ background: var(--go); border-color: var(--go); color: var(--go-ink); font-weight: 600; }}
+  .btn.go:hover {{ background: var(--go-hover); border-color: var(--go-hover); }}
+  @media (max-width: 600px) {{
+    .acts {{ flex-direction: column; }}
+    .btn {{ min-height: 44px; width: 100%; }}
+  }}
+</style>
+</head>
+<body>
+<main>
+  <h1>{title}</h1>
+  <p>{lead}</p>
+  <p>{hint}</p>
+  <code class="cmd">{cmd}</code>
+  <div class="acts">{pair_btn}<a class="{retry_cls}" href="/">Try again</a></div>
+</main>
+</body>
+</html>"#,
+            title = escape_html(title),
+            lead = lead,
+            hint = escape_html(hint),
+            cmd = escape_html(cmd),
+            pair_btn = pair_btn,
+            retry_cls = retry_cls,
+        );
+        (
+            self.status,
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-store"),
+                (header::CONTENT_SECURITY_POLICY, AUTH_PAGE_CSP),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                (header::REFERRER_POLICY, "no-referrer"),
+            ],
+            html,
+        )
+            .into_response()
+    }
+}
+
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn accepts_html(headers: &HeaderMap) -> bool {
+    headers.get_all(header::ACCEPT).iter().filter_map(|v| v.to_str().ok()).any(|v| {
+        v.split(',').any(|part| {
+            let mut segs = part.split(';');
+            let media = segs.next().map(str::trim).unwrap_or("");
+            if !media.eq_ignore_ascii_case("text/html") {
+                return false;
+            }
+            !segs.any(|p| {
+                let p = p.trim();
+                p.strip_prefix("q=")
+                    .or_else(|| p.strip_prefix("Q="))
+                    .is_some_and(|q| q.trim().parse::<f32>().ok().is_some_and(|val| val == 0.0))
+            })
+        })
+    })
 }
 
 #[derive(Clone)]
@@ -79,26 +383,34 @@ impl Web {
         None
     }
 
-    fn check_remote_host_and_origin(
-        &self,
-        headers: &HeaderMap,
-        origin: &RemoteOrigin,
-    ) -> Result<(), (StatusCode, &'static str)> {
+    fn check_remote_host_and_origin(&self, headers: &HeaderMap, origin: &RemoteOrigin) -> Result<(), AuthError> {
         match single_header(headers, "x-forwarded-proto") {
             SingleHeader::Missing => {}
             SingleHeader::Present(proto) if proto.eq_ignore_ascii_case("https") => {}
             SingleHeader::Present(_) | SingleHeader::Invalid => {
-                return Err((StatusCode::FORBIDDEN, "remote board requests must arrive over https"));
+                return Err(AuthError::plain(
+                    StatusCode::FORBIDDEN,
+                    "remote board requests must arrive over https",
+                    AuthErrorKind::OriginMismatch,
+                ));
             }
         }
         let SingleHeader::Present(host) = single_header(headers, header::HOST.as_str()) else {
-            return Err((StatusCode::FORBIDDEN, "remote request Host does not match board.remote.origin"));
+            return Err(AuthError::plain(
+                StatusCode::FORBIDDEN,
+                "remote request Host does not match board.remote.origin",
+                AuthErrorKind::OriginMismatch,
+            ));
         };
         let xfh = match single_header(headers, "x-forwarded-host") {
             SingleHeader::Missing => None,
             SingleHeader::Present(v) => Some(v),
             SingleHeader::Invalid => {
-                return Err((StatusCode::FORBIDDEN, "remote request Host does not match board.remote.origin"));
+                return Err(AuthError::plain(
+                    StatusCode::FORBIDDEN,
+                    "remote request Host does not match board.remote.origin",
+                    AuthErrorKind::OriginMismatch,
+                ));
             }
         };
         let host_ok = match xfh {
@@ -109,13 +421,21 @@ impl Web {
             None => origin.matches_host(host),
         };
         if !host_ok {
-            return Err((StatusCode::FORBIDDEN, "remote request Host does not match board.remote.origin"));
+            return Err(AuthError::plain(
+                StatusCode::FORBIDDEN,
+                "remote request Host does not match board.remote.origin",
+                AuthErrorKind::OriginMismatch,
+            ));
         }
         match single_header(headers, header::ORIGIN.as_str()) {
             SingleHeader::Missing => {}
             SingleHeader::Present(req_origin) if origin.matches_origin(req_origin) => {}
             SingleHeader::Present(_) | SingleHeader::Invalid => {
-                return Err((StatusCode::FORBIDDEN, "cross-origin requests are refused"));
+                return Err(AuthError::plain(
+                    StatusCode::FORBIDDEN,
+                    "cross-origin requests are refused",
+                    AuthErrorKind::OriginMismatch,
+                ));
             }
         }
         Ok(())
@@ -125,33 +445,45 @@ impl Web {
         self.remote.as_ref().is_some_and(|(cfg, _)| cfg.pairing_enabled())
     }
 
-    fn authenticate_pairing_cookie(&self, headers: &HeaderMap) -> Result<AuthSession, (StatusCode, &'static str)> {
+    fn authenticate_pairing_cookie(&self, headers: &HeaderMap) -> Result<AuthSession, AuthError> {
         let raw = match pairing::extract_session_cookie(headers) {
             CookieExtract::Present(v) => v,
             CookieExtract::Missing => {
-                return Err((StatusCode::UNAUTHORIZED, "remote board authentication is required"));
+                return Err(AuthError::plain(
+                    StatusCode::UNAUTHORIZED,
+                    "remote board authentication is required",
+                    AuthErrorKind::PairingRequired,
+                ));
             }
             CookieExtract::Invalid => {
-                return Err((StatusCode::UNAUTHORIZED, "remote board session is invalid or expired"));
+                return Err(AuthError::plain(
+                    StatusCode::UNAUTHORIZED,
+                    "remote board session is invalid or expired",
+                    AuthErrorKind::SessionInvalid,
+                ));
             }
         };
         let hash = pairing::hash_token(raw);
         let now = iso(self.app.clock.now());
         match self.app.store.board_session_verify(&hash, &now) {
             Ok(Some(session)) => Ok(AuthSession { seq: Some(session.seq), tailscale_login: None }),
-            Ok(None) => Err((StatusCode::UNAUTHORIZED, "remote board session is invalid or expired")),
+            Ok(None) => Err(AuthError::plain(
+                StatusCode::UNAUTHORIZED,
+                "remote board session is invalid or expired",
+                AuthErrorKind::SessionInvalid,
+            )),
             Err(e) => {
                 tracing::warn!("board session lookup failed: {e:#}");
-                Err((StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed"))
+                Err(AuthError::plain(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "session lookup failed",
+                    AuthErrorKind::Internal,
+                ))
             }
         }
     }
 
-    async fn authenticate_tailscale(
-        &self,
-        cfg: &BoardRemoteConfig,
-        headers: &HeaderMap,
-    ) -> Result<String, (StatusCode, &'static str)> {
+    async fn authenticate_tailscale(&self, cfg: &BoardRemoteConfig, headers: &HeaderMap) -> Result<String, AuthError> {
         let login = match single_header(headers, "tailscale-user-login") {
             SingleHeader::Present(v)
                 if !v.is_empty()
@@ -161,27 +493,39 @@ impl Web {
                 v
             }
             SingleHeader::Missing | SingleHeader::Present(_) | SingleHeader::Invalid => {
-                return Err((StatusCode::UNAUTHORIZED, "remote board authentication is required"));
+                return Err(AuthError::plain(
+                    StatusCode::UNAUTHORIZED,
+                    "remote board authentication is required",
+                    AuthErrorKind::TailscaleMissing,
+                ));
             }
         };
         if !cfg.allow_users.is_empty() {
             if cfg.allow_users.iter().any(|u| u.eq_ignore_ascii_case(login)) {
                 return Ok(login.to_string());
             }
-            return Err((StatusCode::FORBIDDEN, "Tailscale user is not allowed to access this board"));
+            return Err(AuthError::tailscale_denied(login));
         }
         match self.app.tailscale_host_login_async().await {
             Ok(Some(host_login)) => {
                 if host_login.eq_ignore_ascii_case(login) {
                     Ok(login.to_string())
                 } else {
-                    Err((StatusCode::FORBIDDEN, "Tailscale user is not allowed to access this board"))
+                    Err(AuthError::tailscale_denied(login))
                 }
             }
-            Ok(None) => Err((StatusCode::UNAUTHORIZED, "Tailscale host login is unavailable")),
+            Ok(None) => Err(AuthError::plain(
+                StatusCode::UNAUTHORIZED,
+                "Tailscale host login is unavailable",
+                AuthErrorKind::TailscaleUnavailable,
+            )),
             Err(e) => {
                 tracing::warn!("tailscale status lookup failed: {e}");
-                Err((StatusCode::UNAUTHORIZED, "Tailscale host login is unavailable"))
+                Err(AuthError::plain(
+                    StatusCode::UNAUTHORIZED,
+                    "Tailscale host login is unavailable",
+                    AuthErrorKind::TailscaleUnavailable,
+                ))
             }
         }
     }
@@ -211,7 +555,7 @@ impl Web {
         &self,
         cfg: &BoardRemoteConfig,
         headers: &HeaderMap,
-    ) -> Result<Option<AuthSession>, (StatusCode, &'static str)> {
+    ) -> Result<Option<AuthSession>, AuthError> {
         match cfg.mode {
             RemoteMode::Pairing => self.authenticate_pairing_cookie(headers).map(Some),
             RemoteMode::Tailscale => {
@@ -219,13 +563,21 @@ impl Web {
                 let seq = if cfg.require_pairing { self.authenticate_pairing_cookie(headers)?.seq } else { None };
                 Ok(Some(AuthSession { seq, tailscale_login: Some(login) }))
             }
-            RemoteMode::Off => Err((StatusCode::FORBIDDEN, "remote board access is disabled")),
+            RemoteMode::Off => Err(AuthError::plain(
+                StatusCode::FORBIDDEN,
+                "remote board access is disabled",
+                AuthErrorKind::RemoteDisabled,
+            )),
         }
     }
 
-    async fn check_remote(&self, headers: &HeaderMap) -> Result<Option<AuthSession>, (StatusCode, &'static str)> {
+    async fn check_remote(&self, headers: &HeaderMap) -> Result<Option<AuthSession>, AuthError> {
         let Some((cfg, origin)) = &self.remote else {
-            return Err((StatusCode::FORBIDDEN, "remote board access is disabled"));
+            return Err(AuthError::plain(
+                StatusCode::FORBIDDEN,
+                "remote board access is disabled",
+                AuthErrorKind::RemoteDisabled,
+            ));
         };
         self.check_remote_host_and_origin(headers, origin)?;
         self.authenticate_remote(cfg, headers).await
@@ -248,9 +600,11 @@ async fn board_guard(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    let is_root_html = req.method() == Method::GET && req.uri().path() == "/" && accepts_html(req.headers());
     let headers = req.headers();
     let mutating = is_mutating(req.method());
-    let session = match classify_request(headers, web.port) {
+    let kind = classify_request(headers, web.port);
+    let session = match kind {
         RequestKind::Local => {
             if let Some(r) = web.check_local_origin(headers) {
                 return r;
@@ -259,12 +613,18 @@ async fn board_guard(
         }
         RequestKind::Remote => match web.check_remote(headers).await {
             Ok(session) => session,
-            Err((status, msg)) => return error(status, msg),
+            Err(err) => {
+                if is_root_html && err.supports_html_screen() {
+                    return err.into_html_response();
+                }
+                return err.into_json_response();
+            }
         },
     };
     if mutating && let Some(r) = web.check_csrf(headers) {
         return r;
     }
+    req.extensions_mut().insert(kind);
     if let Some(session) = session {
         req.extensions_mut().insert(session);
     }
@@ -272,6 +632,7 @@ async fn board_guard(
 }
 
 async fn pair_guard(State(web): State<Web>, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let is_pair_html = req.method() == Method::GET && req.uri().path() == "/pair" && accepts_html(req.headers());
     let headers = req.headers();
     match classify_request(headers, web.port) {
         RequestKind::Local => {
@@ -288,18 +649,26 @@ async fn pair_guard(State(web): State<Web>, req: axum::extract::Request, next: a
         }
         RequestKind::Remote => {
             let Some((cfg, origin)) = &web.remote else {
-                return error(StatusCode::FORBIDDEN, "remote board access is disabled");
+                return AuthError::plain(
+                    StatusCode::FORBIDDEN,
+                    "remote board access is disabled",
+                    AuthErrorKind::RemoteDisabled,
+                )
+                .into_json_response();
             };
-            if let Err((status, msg)) = web.check_remote_host_and_origin(headers, origin) {
-                return error(status, msg);
+            if let Err(err) = web.check_remote_host_and_origin(headers, origin) {
+                return err.into_json_response();
             }
             if !web.pairing_enabled() {
                 return error(StatusCode::FORBIDDEN, "remote pairing is not enabled");
             }
             if cfg.mode == RemoteMode::Tailscale
-                && let Err((status, msg)) = web.authenticate_tailscale(cfg, headers).await
+                && let Err(err) = web.authenticate_tailscale(cfg, headers).await
             {
-                return error(status, msg);
+                if is_pair_html && err.supports_html_screen() {
+                    return err.into_html_response();
+                }
+                return err.into_json_response();
             }
         }
     }
@@ -632,7 +1001,70 @@ struct OpenBody {
     link: String,
 }
 
-async fn open_link(State(web): State<Web>, raw: Bytes) -> Response {
+async fn manifest() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/manifest+json; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::CONTENT_SECURITY_POLICY, STATIC_CSP),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        MANIFEST_JSON,
+    )
+        .into_response()
+}
+
+async fn icon_svg() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::CONTENT_SECURITY_POLICY, STATIC_CSP),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        ICON_SVG,
+    )
+        .into_response()
+}
+
+async fn icon_192() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::CONTENT_SECURITY_POLICY, STATIC_CSP),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        ICON_192_PNG,
+    )
+        .into_response()
+}
+
+async fn icon_512() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::CONTENT_SECURITY_POLICY, STATIC_CSP),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        ICON_512_PNG,
+    )
+        .into_response()
+}
+
+async fn open_link(State(web): State<Web>, Extension(kind): Extension<RequestKind>, raw: Bytes) -> Response {
+    if kind == RequestKind::Remote {
+        return error(StatusCode::FORBIDDEN, "opening desktop links is only allowed from loopback");
+    }
     let b: OpenBody = match body(&raw) {
         Ok(b) => b,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
@@ -749,6 +1181,10 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
     let web = Web { app, port, remote };
     let board = Router::new()
         .route("/", get(page))
+        .route("/manifest.webmanifest", get(manifest))
+        .route("/icon.svg", get(icon_svg))
+        .route("/icon-192.png", get(icon_192))
+        .route("/icon-512.png", get(icon_512))
         .route("/api/state", get(state))
         .route("/api/events", get(events))
         .route("/api/msg/{handle}", get(message))
