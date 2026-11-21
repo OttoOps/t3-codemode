@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::slots::{self, Caps, Enabled, Folders, Inputs, Resolved};
+use crate::slots::{self, Caps, Folders, Resolved};
 use crate::store::InstanceFolder;
 use crate::wf::Wf;
 
@@ -267,30 +267,48 @@ impl Wf {
         let store = self.store.clone();
         let at = self.now();
         tokio::task::spawn_blocking(move || -> Result<Resolved> {
-            let enabled = Enabled::load(&folders.claude, &root);
-            let inputs = Inputs { folders: &folders, root: &root, listed: &listed, enabled: &enabled };
+            let snap = slots::Snapshot::capture(&folders, &root, &listed);
             if !listed.is_empty() {
-                return Ok(Resolved::build(&inputs));
+                return Ok(snap.build());
             }
-            let fp = slots::fingerprint(&inputs);
             if let Some((stored, data)) = store.slot_resolution(&key)?
-                && stored == fp
+                && stored == snap.fingerprint
                 && let Ok(r) = serde_json::from_value::<Resolved>(data)
             {
                 return Ok(r);
             }
-            let r = Resolved::build(&inputs);
-            store.slot_resolution_set(&key, &fp, &serde_json::to_value(&r)?, &at)?;
+            let r = snap.build();
+            store.slot_resolution_set(&key, &snap.fingerprint, &serde_json::to_value(&r)?, &at)?;
             Ok(r)
         })
         .await?
     }
 
-    async fn caps(&self) -> Caps {
-        match self.t3.call("orchestrator_capabilities", json!({})).await {
-            Ok(v) => Caps::Got(v),
-            Err(e) => Caps::Failed(e.to_string()),
+    async fn caps_for(&self, r: &Resolved) -> Caps {
+        let mut base = match self.t3.call("orchestrator_capabilities", json!({})).await {
+            Ok(v) => v,
+            Err(e) => return Caps::Failed(e.to_string()),
+        };
+        let searches = r.model_searches();
+        if !searches.is_empty() {
+            let needs_search = |caps: &Value, model: &str| {
+                r.models.iter().any(|m| match &m.spec {
+                    None => model == slots::DEFAULT_MODEL && slots::default_model_needs_search(caps),
+                    Some(s) if s.contains_key("pool") => false,
+                    Some(s) => {
+                        s.get("model").and_then(Value::as_str) == Some(model) && slots::model_needs_search(s, caps)
+                    }
+                })
+            };
+            for model in searches {
+                if needs_search(&base, &model)
+                    && let Ok(extra) = self.t3.call("orchestrator_capabilities", json!({"search": model})).await
+                {
+                    slots::merge_caps(&mut base, &extra);
+                }
+            }
         }
+        Caps::Got(base)
     }
 
     pub async fn slot_call(&self, method: &str, caller: Option<&str>, rep: &Reported, args: Value) -> Result<Value> {
@@ -299,7 +317,7 @@ impl Wf {
                 let a: Where = parse(method, args)?;
                 let ctx = self.slot_ctx(caller, rep, a.repo.as_deref(), a.instance.as_deref()).await?;
                 let r = self.resolve_slots(&ctx, &a.skills.unwrap_or_default()).await?;
-                let mut v = r.all(&self.caps().await);
+                let mut v = r.all(&self.caps_for(&r).await);
                 v["problems"] = json!(r.problems());
                 v["context"] = ctx.view();
                 v["warnings"] = json!(ctx.warnings);
@@ -312,7 +330,7 @@ impl Wf {
                 }
                 let ctx = self.slot_ctx(caller, rep, a.repo.as_deref(), a.instance.as_deref()).await?;
                 let r = self.resolve_slots(&ctx, &a.skills.unwrap_or_default()).await?;
-                let caps = if a.name == "models" { self.caps().await } else { Caps::Unchecked };
+                let caps = if a.name == "models" { self.caps_for(&r).await } else { Caps::Unchecked };
                 let eff = r.all(&caps);
                 let mut out = slot_view(&a.name, &eff, ctx.instance.as_deref(), &caps);
                 out["line"] = json!(slots::slot_line(&eff, &a.name).join("\n"));
@@ -350,8 +368,6 @@ fn with_how(e: &Value) -> Value {
     e
 }
 
-const EFFORT_OPTIONS: &[&str] = &["effort", "thinking_level", "reasoningEffort"];
-
 fn model_selection(m: &Value, instance: Option<&str>, caps: &Caps) -> Value {
     let spec = &m["spec"];
     if let Some(pool) = spec["pool"].as_str() {
@@ -362,7 +378,7 @@ fn model_selection(m: &Value, instance: Option<&str>, caps: &Caps) -> Value {
     let option_of = |entry: &Value| -> Option<Value> {
         let effort = effort?;
         entry["options"].as_array().into_iter().flatten().find_map(|o| {
-            let fits = o["id"].as_str().is_some_and(|i| EFFORT_OPTIONS.contains(&i))
+            let fits = o["id"].as_str().is_some_and(|i| slots::EFFORT_OPTIONS.contains(&i))
                 && o["values"].as_array().is_some_and(|v| v.iter().any(|x| x == effort));
             fits.then(|| json!({"id": o["id"], "value": effort}))
         })

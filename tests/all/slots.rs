@@ -480,4 +480,113 @@ fn the_cli_resolves_offline_and_doctor_names_a_removed_skill() {
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     let problems: Vec<&str> = v["problems"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
     assert!(problems.iter().any(|p| p.contains("credentials[0].match: not a regular expression")), "{problems:?}");
+    assert!(!home.path().join("state").exists(), "offline doctor must not create a missing state directory");
+}
+
+#[tokio::test]
+async fn model_checks_search_catalog_validate_codex_effort_and_default_effort() {
+    let s = S::new("claudeAgent");
+    let claude = s.home.join(".claude");
+    // Unfiltered capabilities omit catalog-only model (short_list = 1); search returns it.
+    s.h.fake.set_providers(vec![provider("claudeAgent", "claudeAgent", &["claude-opus-5-5", "claude-catalog-only"])]);
+    s.h.fake.set_short_list(1);
+    s.config(json!({"models": {"worker": {"model": "claude-catalog-only", "effort": "high"}}}));
+    let m = s.call("async () => wf.slot(\"models\")", own(&claude)).await;
+    assert!(m["worker"].get("problem").is_none(), "{}", m["worker"]);
+    assert_eq!(m["worker"]["modelSelection"]["model"], "claude-catalog-only");
+
+    // Codex reasoningEffort is validated consistently: high passes, turbo fails.
+    let mut codex = provider("codex", "codex", &["gpt-6.2-sol"]);
+    codex["models"][0]["options"] = json!([{"id": "reasoningEffort", "values": ["low", "high"]}]);
+    s.h.fake.set_providers(vec![provider("claudeAgent", "claudeAgent", &["claude-opus-5-5"]), codex]);
+    s.h.fake.set_short_list(0);
+    s.config(json!({"models": {
+        "ticket": {"provider": "codex", "model": "gpt-6.2-sol", "effort": "high"},
+        "worker": {"provider": "codex", "model": "gpt-6.2-sol", "effort": "turbo"}
+    }}));
+    let m = s.call("async () => wf.slot(\"models\")", own(&claude)).await;
+    assert!(m["ticket"].get("problem").is_none(), "{}", m["ticket"]);
+    assert!(
+        m["worker"]["problem"].as_str().is_some_and(|p| p.contains("effort turbo is not offered")),
+        "{}",
+        m["worker"]
+    );
+
+    // Default model does not advertise high effort when Claude only offers low.
+    let mut low_only = provider("claudeAgent", "claudeAgent", &["claude-opus-5-5"]);
+    low_only["models"][0]["options"] = json!([{"id": "effort", "values": ["low"]}]);
+    s.h.fake.set_providers(vec![low_only]);
+    s.config(json!({}));
+    let m = s.call("async () => wf.slot(\"models\")", own(&claude)).await;
+    assert!(m["worker"]["spec"].is_null(), "{}", m["worker"]);
+    assert!(
+        m["worker"]["problem"].as_str().is_some_and(|p| p.contains("effort high is not offered")),
+        "{}",
+        m["worker"]
+    );
+
+    // Default model also requires high effort to be explicitly offered, not omitted from options metadata.
+    let mut no_options = provider("claudeAgent", "claudeAgent", &["claude-opus-5-5"]);
+    no_options["models"][0]["options"] = json!([]);
+    s.h.fake.set_providers(vec![no_options]);
+    let m = s.call("async () => wf.slot(\"models\")", own(&claude)).await;
+    assert!(m["worker"]["spec"].is_null(), "{}", m["worker"]);
+    assert!(
+        m["worker"]["problem"].as_str().is_some_and(|p| p.contains("effort high is not offered")),
+        "{}",
+        m["worker"]
+    );
+}
+
+#[tokio::test]
+async fn unreadable_agents_md_and_malformed_plugin_records_are_handled_safely() {
+    let s = S::new("claudeAgent");
+    let claude = s.home.join(".claude");
+    // A directory at AGENTS.md is unreadable as a file and must report a problem.
+    std::fs::create_dir(s.repo.join("AGENTS.md")).unwrap();
+    let v = s.call("async () => wf.slots()", own(&claude)).await;
+    assert!(
+        v["problems"].as_array().unwrap().iter().any(|p| p.as_str().is_some_and(|s| s.contains("AGENTS.md"))),
+        "{}",
+        v["problems"]
+    );
+    std::fs::remove_dir(s.repo.join("AGENTS.md")).unwrap();
+
+    // A null record or malformed projectPath in installed_plugins.json must be skipped
+    // without dropping projectPath scoping or turning malformed project records into global ones.
+    let other_repo = s.h.dir.path().join("other-repo");
+    std::fs::create_dir_all(&other_repo).unwrap();
+    let scoped_root = claude.join("plugins/cache/acme/scoped/1.0.0");
+    skill(&scoped_root.join("skills"), "secret-skill", false);
+    let false_path_root = claude.join("plugins/cache/acme/badproj/1.0.0");
+    skill(&false_path_root.join("skills"), "leaked-skill", false);
+    let user_root = claude.join("plugins/cache/acme/userok/1.0.0");
+    skill(&user_root.join("skills"), "allowed-skill", false);
+    let path = claude.join("plugins/installed_plugins.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        json!({
+            "version": 2,
+            "plugins": {
+                "broken@acme": [null],
+                "scoped@acme": [{"scope": "project", "projectPath": other_repo.to_string_lossy(), "installPath": scoped_root.to_string_lossy()}],
+                "badproj@acme": [{"scope": "project", "projectPath": false, "installPath": false_path_root.to_string_lossy()}],
+                "userok@acme": [{"scope": "user", "installPath": user_root.to_string_lossy()}]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    s.config(json!({"passes": ["scoped:secret-skill", "badproj:leaked-skill", "userok:allowed-skill"]}));
+    let v = s.call("async () => wf.slot(\"passes\")", own(&claude)).await;
+    assert_eq!(
+        v["skills"][0]["status"], "missing",
+        "project-scoped plugin for another repo must not leak via cache fallback"
+    );
+    assert_eq!(
+        v["skills"][1]["status"], "missing",
+        "project-scoped plugin with projectPath: false must not be treated as unscoped"
+    );
+    assert_eq!(v["skills"][2]["status"], "ok", "valid user-scoped plugin without projectPath still resolves");
 }

@@ -470,12 +470,15 @@ async fn exec_value(port: u16, code: String, thread: Option<&str>) -> Result<Val
     if let Some(note) = v["truncated"].as_str() {
         bail!("the service cut its answer, so it is incomplete ({note}); pass --no-t3 to resolve here in full");
     }
-    Ok(v["result"].clone())
+    let Some(result) = v.as_object().and_then(|o| o.get("result")) else {
+        bail!("the service answered without a result: {text}");
+    };
+    Ok(result.clone())
 }
 
 async fn service_slots(port: u16, root: &Path, thread: Option<&str>) -> Result<Value> {
     let code = format!("async () => wf.slots({{ repo: {} }})", serde_json::to_string(&root.to_string_lossy())?);
-    exec_value(port, code, thread).await.map_err(|e| {
+    let v = exec_value(port, code, thread).await.map_err(|e| {
         if format!("{e}").contains("not a function") {
             anyhow::anyhow!(
                 "the t3cm service on 127.0.0.1:{port} is older than this t3cm and has no wf.slots; restart it on this binary, or pass --no-t3"
@@ -483,7 +486,11 @@ async fn service_slots(port: u16, root: &Path, thread: Option<&str>) -> Result<V
         } else {
             e
         }
-    })
+    })?;
+    if !v.is_object() {
+        bail!("the t3cm service on 127.0.0.1:{port} returned unexpected slots data: {v}");
+    }
+    Ok(v)
 }
 
 fn repo_root(repo: Option<&Path>) -> Result<PathBuf> {
@@ -610,9 +617,15 @@ async fn run_doctor(a: DoctorArgs) -> Result<ExitCode> {
     f.extend(doctor::skills(&home, &bundle));
     f.extend(doctor::stale_copies(&home, &bundle, &folders.codex));
     f.extend(doctor::t3wf_leftovers(&folders));
-    match Store::open(&state_dir(&a.state)).and_then(|s| s.instance_folders()) {
-        Ok(records) => f.extend(doctor::instances(&records, &folders, &root, caps.as_ref())),
-        Err(e) => f.warnings.push(format!("instances: cannot read t3cm's store ({e:#})")),
+    let store_dir = state_dir(&a.state);
+    let store_file = store_dir.join("store.db");
+    if store_file.exists() {
+        match Store::open(&store_dir).and_then(|s| s.instance_folders()) {
+            Ok(records) => f.extend(doctor::instances(&records, &folders, &root, caps.as_ref())),
+            Err(e) => f.warnings.push(format!("instances: cannot read t3cm's store ({e:#})")),
+        }
+    } else {
+        f.warnings.push(format!("instances: no t3cm store at {} yet", store_file.display()));
     }
     if a.json {
         println!(
