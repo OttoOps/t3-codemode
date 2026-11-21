@@ -33,7 +33,13 @@ async fn a_clean_pr_on_a_merge_queue_repo_is_enqueued_at_the_approved_head() {
 
     let r = merge(&h, args(7)).await;
 
-    assert_eq!(r, json!({"status": "queued", "repo": REPO, "pr": 7, "head": HEAD, "position": 3}));
+    let waits = h.app.store.merge_waits().unwrap();
+    assert_eq!(waits.len(), 1);
+    assert!(!waits[0].approval.is_empty());
+    assert_eq!(
+        r,
+        json!({"status": "queued", "repo": REPO, "pr": 7, "head": HEAD, "position": 3, "approval": waits[0].approval})
+    );
     assert_eq!(h.github.operations(), ["read", "enqueuePullRequest"]);
     let enqueue = &h.github.calls()[1]["variables"];
     assert_eq!(enqueue["head"], HEAD);
@@ -49,7 +55,12 @@ async fn a_merge_queue_pr_that_is_not_ready_waits_and_is_never_set_to_auto_merge
 
     let r = merge(&h, json!({"repo": "Acme/Widgets", "pr": 7, "head": HEAD.to_uppercase()})).await;
 
-    assert_eq!(r, json!({"status": "waiting", "repo": REPO, "pr": 7, "head": HEAD, "mergeState": "BLOCKED"}));
+    let approval = r["approval"].as_str().unwrap_or_default().to_string();
+    assert!(!approval.is_empty(), "{r}");
+    assert_eq!(
+        r,
+        json!({"status": "waiting", "repo": REPO, "pr": 7, "head": HEAD, "mergeState": "BLOCKED", "approval": approval})
+    );
     assert!(mutations(&h).is_empty(), "no mutation while waiting: {:?}", h.github.operations());
     h.reopen();
     let waits = h.app.store.merge_waits().unwrap();
@@ -62,6 +73,7 @@ async fn a_merge_queue_pr_that_is_not_ready_waits_and_is_never_set_to_auto_merge
     assert_eq!(w["thread"], TICKET);
     assert_eq!(w["label"], "widgets#7");
     assert_eq!(w["mergeState"], "BLOCKED");
+    assert_eq!(w["approval"], approval);
     assert_eq!(w["at"], T0);
 }
 
@@ -266,7 +278,15 @@ async fn the_catalog_documents_wf_merge() {
     let entry = result(&out);
     assert_eq!(entry["kind"], "wf");
     let sig = entry["signature"].as_str().unwrap();
-    for part in ["wf.merge(input: {", "head: string", "\"queued\"", "\"merged\"", "\"waiting\"", "\"refused\""] {
+    for part in [
+        "wf.merge(input: {",
+        "head: string",
+        "\"queued\"",
+        "\"merged\"",
+        "\"waiting\"",
+        "\"refused\"",
+        "approval: string",
+    ] {
         assert!(sig.contains(part), "{part} missing from {sig}");
     }
 }

@@ -343,10 +343,16 @@ End the turn.
 1. Check the PR against the head the answered gate names: it is open, not a
    draft, and at that head, every check has finished and none failed, and
    take the full SHA from its `headRefOid`. A pending check is waited out
-   (end the turn; the worker reports again). A failing check goes back to
-   the worker, even when GitHub would merge the PR anyway (`UNSTABLE`).
-   `wf.merge` handles the merge state. A head that moved since that gate
-   gets a new gate, not a merge.
+   on the approved head: do not call `wf.merge` yet, and do not rely on the
+   worker to report again (it sends "ready to merge" once per head). Start
+   "The merge watch" below with outcome `"pending"` (no `approval` id yet),
+   hold `wf.gate({ open: "merge" })` when this thread has a parent so the
+   watcher does not nudge it, tell the user which check is still running,
+   and end the turn; the watch wakes this thread when the check finishes so
+   the approved merge proceeds without a second "merge". A failing check
+   goes back to the worker, even when GitHub would merge the PR anyway
+   (`UNSTABLE`). `wf.merge` handles the merge state. A head that moved
+   since that gate gets a new gate, not a merge.
 2. Merge at that head with `wf.merge`. Never use `gh pr merge` or T3's
    merge button or PR action (Hard rules). Call
    `wf.merge({ repo: "<owner>/<name>", pr: <number>, head: "<sha>",
@@ -356,11 +362,12 @@ End the turn.
    outcome in one line with the PR URL, and send it to the parent as a
    note. Then act on its `status`:
    - `merged`: go on to item 3 with its `commit`.
-   - `queued`: name its `position`. End the turn and wait as "The merge
-     wait" says.
+   - `queued`: name its `position`, and keep its `approval` id if starting
+     a merge watch. End the turn and wait as "The merge wait" says.
    - `waiting`: GitHub does not show the PR mergeable yet; name its
-     `mergeState`. The board queues it once GitHub shows it mergeable at
-     this head. End the turn and wait as "The merge wait" says.
+     `mergeState`, and keep its `approval` id if starting a merge watch.
+     The board queues it once GitHub shows it mergeable at this head. End
+     the turn and wait as "The merge wait" says.
    - `refused`: name its `reason`. A moved head goes through "Ready to
      merge" again for a new gate. A draft, or a PR that is not mergeable
      yet, goes back to the worker. A closed PR gets the gate "reopen
@@ -436,43 +443,96 @@ the merge watch after `queued` or `waiting` instead when:
 
 #### The merge watch
 
-The merge watch serves only the root-ticket and reconcile-off cases "The
-merge wait" names.
+The merge watch serves three cases:
+
+- a pending check on an approved head in "On the user's word" item 1
+  (outcome `"pending"`, before `wf.merge`), for any ticket,
+- the root-ticket case "The merge wait" names, after `queued` or `waiting`,
+- the reconcile-off case "The merge wait" names (`board.reconcileIdleMinutes`
+  `0`), after `queued` or `waiting`.
+
 Create it as items 1 and 2 of "The deploy watch" say, with `title` `<#n or
 slug> PR n/N merge watch`, and a prompt that names the task id, the PR
-number and URL, its head SHA and branch, the main workspace root, the
-user's reply ("merge" or "merge and deploy"), the `wf.merge` outcome, and
-the flag "Seen queued: no". End it with "Follow 'Each merge-watch run' in
-the t3-ticket skill."
+number and URL, its approved head SHA (full 40-character SHA) and branch,
+the main workspace root, the user's reply ("merge" or "merge and deploy"),
+the outcome (`"pending"`, `"queued"`, or `"waiting"`), the `approval` id
+returned by `wf.merge` (or `"none"` while the outcome is `"pending"`),
+whether this ticket uses the reconcile (has a parent and
+`board.reconcileIdleMinutes` is not `0`), and the flag "Seen queued: no".
+End it with "Follow 'Each merge-watch run' in the t3-ticket skill."
 
-Each merge-watch run reads the PR state in one query (`gh api graphql -f
+Each merge-watch run reads the PR state and its head checks in one query
+(`gh api graphql -f
 query='query{repository(owner:"<owner>",name:"<name>"){pullRequest(number:<number>){state
-mergeCommit{oid} headRefOid mergeStateStatus isInMergeQueue
-autoMergeRequest{enabledAt}}}}'`):
+isDraft mergeCommit{oid} headRefOid mergeStateStatus isInMergeQueue
+autoMergeRequest{enabledAt} commits(last:1){nodes{commit{oid
+statusCheckRollup{contexts(first:100){pageInfo{hasNextPage} nodes{__typename
+... on CheckRun{name status conclusion} ... on StatusContext{context
+state}}}}}}}}}}'`, falling back to `gh pr view <number> -R <repo> --json
+statusCheckRollup` when `hasNextPage` is true):
 
-- **`MERGED`:** delete the task with `delete_scheduled_task`, then go on
-  from item 3.
-- **Still queued, or waiting on auto-merge:** when the flag says "Seen
-  queued: no", update it to "yes". End the turn quietly.
+- **`MERGED`:** delete the task with `delete_scheduled_task`, clear
+  `wf.gate({ clear: true })` when this thread has a parent, then go on from
+  item 3.
+- **`CLOSED`:** delete the task, clear `wf.gate({ clear: true })` when this
+  thread has a parent, and send the gate "reopen #<number>, then reply
+  \"merge\" to queue it again at head <sha>, here: <PR URL>". End the turn.
+- **Head moved away from the approved head (`headRefOid` differs from the
+  approved head SHA):** delete the task and clear `wf.gate({ clear: true })`
+  when this thread has a parent. Approval never carries over to a new head:
+  when the PR is `OPEN` and out of the queue, run "Ready to merge" for the
+  new head; when GitHub already has the new head queued, tell the user and
+  send a gate naming the new head. End the turn.
+- **Still queued, or waiting on auto-merge (at the approved head):** when
+  the flag says "Seen queued: no", update it to "yes". End the turn quietly.
+- **`OPEN`, out of the queue, at the approved head, with outcome
+  `"pending"`:** repeat "On the user's word" item 1's check gate on the
+  approved head.
+  - When `isDraft` is true or any check failed (even at `UNSTABLE`): delete
+    the task, clear `wf.gate({ clear: true })` when this thread has a
+    parent, and send it back to the worker. End the turn.
+  - When any check is still pending (still running, queued, or expected):
+    end the turn quietly.
+  - Once every check has finished and none failed: call `wf.merge` at the
+    approved head (item 2) and act on its outcome:
+    - `merged` or `refused`: delete the task, clear
+      `wf.gate({ clear: true })` when this thread has a parent, and handle
+      the outcome as item 2 says.
+    - `queued` or `waiting`: when this ticket uses the reconcile (has a
+      parent and `board.reconcileIdleMinutes` is not `0`), delete the task,
+      keep `wf.gate({ open: "merge" })`, and hand off to "The merge wait".
+      Otherwise update this task's prompt with the new outcome and its
+      `approval` id and start no new watch. End the turn.
 - **`OPEN` and out of the queue, after a `waiting` outcome, at the
-  approved head, with "Seen queued: no", and no open board card names
-  the PR:** the board has not queued it yet. End the turn quietly. Look
-  for the card with `wf.cards()`: one whose `text` has the PR's label,
-  `<owner>/<name>#<number>` in lower case and not followed by a digit,
-  means the board gave up on the approval or wants a decision on it, so
-  the next case applies. The board puts the label before any GitHub
-  error, which it may cut short. With
-  the reconcile off, nothing queues it for you: once `mergeStateStatus` is
-  `CLEAN` or `HAS_HOOKS`, call `wf.merge` again at the approved head and
-  act on its outcome as item 2 says, except that a `queued` or `waiting`
-  outcome updates this task's prompt with the new outcome and starts no
-  new watch.
+  approved head, with "Seen queued: no", and no open board card matches this
+  watch's `approval` id:**
+  Look for a matching card with `wf.cards()`: match only an open board card
+  whose `approval` field equals this watch's `approval` id
+  (`c.approval === "<approval>"`), which means the board gave up on this
+  approval or wants a decision on it, so the next case applies. Ignore cards
+  with no `approval` or a different `approval`, even when their text names
+  `<owner>/<name>#<number>`.
+  - With the reconcile on (root ticket): the board has not queued it yet.
+    End the turn quietly.
+  - With the reconcile off (`board.reconcileIdleMinutes` `0`): nothing
+    queues it for you. Before calling `wf.merge` again, repeat "On the
+    user's word" item 1's check gate on the approved head: when `isDraft` is
+    true or any check failed (even at `UNSTABLE`), delete the task, clear
+    `wf.gate({ clear: true })` when this thread has a parent, and send it
+    back to the worker; when any check is still pending (including an
+    optional check that re-ran while `mergeStateStatus` is `CLEAN` or
+    `HAS_HOOKS`), do not call `wf.merge` and end the turn quietly. Only once
+    every check has finished with none failed and `mergeStateStatus` is
+    `CLEAN`, `HAS_HOOKS`, or `UNSTABLE`, call `wf.merge` again at the
+    approved head and act on its outcome as item 2 says, except that a
+    `queued` or `waiting` outcome updates this task's prompt with the new
+    outcome and its new `approval` id and starts no new watch, while
+    `merged` or `refused` deletes this task (and clears
+    `wf.gate({ clear: true })` when this thread has a parent) first.
 - **`OPEN`, out of the queue, with no `autoMergeRequest`, in any other
-  case:** delete the task and send the gate "reply \"merge\" to queue
-  #<number> again at head <sha>, or check why it left the queue, here: <PR
-  URL>". End the turn.
-- **`CLOSED`:** delete the task and send the gate "reopen #<number>, then
-  reply \"merge\" to queue it again at head <sha>, here: <PR URL>". End the
+  case:** delete the task, clear `wf.gate({ clear: true })` when this thread
+  has a parent, and send the gate "reply \"merge\" to queue #<number> again
+  at head <sha>, or check why it left the queue, here: <PR URL>". End the
   turn.
 
 ### Deploy
@@ -584,9 +644,9 @@ After the last PR is delivered:
    handoff wakes it and leaves it unsettled. Settle each such worker with
    `t3_thread_organize`, action `settle`, once its turn has ended
    (`t3_thread_wait`).
-2. `list_scheduled_tasks`: none of this work's deploy watches remain.
-   Delete any that do. Then `await wf.sweep()`: it names any worker link
-   still open.
+2. `list_scheduled_tasks`: none of this work's deploy or merge watches
+   remain. Delete any that do. Then `await wf.sweep()`: it names any worker
+   link still open.
 3. Run `git -C <main workspace root> worktree list` and look for a
    worktree on any of this work's branches, or bound to any worker's
    subagent child thread (found as "The handoff" item 4 says). A message to

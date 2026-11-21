@@ -303,6 +303,8 @@ pub struct Card {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<String>,
     pub token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval: Option<String>,
     #[serde(skip)]
     pub seq: i64,
     #[serde(skip)]
@@ -318,6 +320,7 @@ pub struct NewCard<'a> {
     pub handle: Option<&'a str>,
     pub options: Option<Vec<String>>,
     pub pr: Option<CardPr>,
+    pub approval: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -643,6 +646,7 @@ impl Wf {
                     resolved,
                     resolution,
                     token: seq.to_string(),
+                    approval: s("approval"),
                     seq,
                     pr: serde_json::from_value(d["pr"].clone()).ok().flatten(),
                 }
@@ -668,7 +672,10 @@ impl Wf {
     pub(crate) fn card_add(&self, c: NewCard) -> Result<String> {
         let options = c.options.unwrap_or_else(|| reply_options(c.body));
         let pr = c.pr.or_else(|| card_pr(c.body));
-        let data = json!({"kind": c.kind, "ticket": c.ticket, "handle": c.handle, "options": options, "pr": pr});
+        let mut data = json!({"kind": c.kind, "ticket": c.ticket, "handle": c.handle, "options": options, "pr": pr});
+        if let Some(a) = c.approval {
+            data["approval"] = json!(a);
+        }
         let id = self.alloc_waiting(
             BOARD,
             &card_text(c.body),
@@ -731,6 +738,7 @@ impl Wf {
                 handle: Some(handle),
                 options: Some(options.clone()),
                 pr: None,
+                approval: None,
             })?;
             let mut out = json!({"handle": handle, "delivery": "board", "card": id, "options": options,
                 "detail": format!("on the user's board as {id}; the answer arrives here as a [t3cm reply]")});
@@ -963,6 +971,7 @@ impl Wf {
             handle: None,
             options: None,
             pr: None,
+            approval: None,
         })?;
         Ok(json!({"ok": false, "label": label, "error": text, "card": card}))
     }

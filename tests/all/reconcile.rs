@@ -1035,3 +1035,60 @@ async fn a_held_card_resolves_when_the_pr_is_queued_outside_the_board() {
     assert!(h.github.operations().iter().all(|o| !o.ends_with("PullRequest")), "{:?}", h.github.operations());
     assert_eq!(wait_status(&h), ["sent"]);
 }
+
+#[tokio::test]
+async fn a_reconcile_card_carries_its_approvals_id_and_unrelated_cards_do_not() {
+    let h = H::new();
+    let root = "mcp:root-ticket";
+    h.wf(root, "init", json!({"role": "ticket", "root": true})).await;
+    h.wf("mcp:other", "join", json!({"parent": BOARD, "label": "other#1", "role": "ticket"})).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+
+    let first = result(
+        &h.exec_as(root, &format!("async () => wf.merge({})", json!({"repo": REPO, "pr": 7, "head": HEAD}))).await,
+    );
+    assert_eq!(first["status"], "waiting");
+    let a1 = first["approval"].as_str().unwrap().to_string();
+    assert!(!a1.is_empty());
+
+    // An unrelated board card whose text names the same PR carries no approval id.
+    let unrelated = format!("**ACTION NEEDED:** check {REPO}#7 notes before release, here: {URL}");
+    h.wf("mcp:other", "send", json!({"kind": "report", "body": unrelated})).await;
+    let via_js = result(&h.exec("async () => wf.cards()").await);
+    let open = via_js.as_array().unwrap();
+    assert_eq!(open.len(), 1);
+    assert!(open[0]["text"].as_str().unwrap().contains("acme/widgets#7"));
+    assert!(open[0].get("approval").is_none(), "unrelated card must not carry an approval id: {}", open[0]);
+
+    // Three enqueue refusals retire approval A1 and stamp A1 on the reconcile report card.
+    h.github.update_pr(REPO, 7, json!({"mergeStateStatus": "CLEAN"}));
+    h.github.fail_operation("enqueuePullRequest", "Pull request is in clean status but is not mergeable");
+    check(&h, 2).await;
+    check(&h, 4).await;
+    check(&h, 6).await;
+
+    let via_js = result(&h.exec("async () => wf.cards()").await);
+    let open = via_js.as_array().unwrap();
+    let matching: Vec<&Value> = open.iter().filter(|c| c["approval"].as_str() == Some(a1.as_str())).collect();
+    assert_eq!(matching.len(), 1, "{open:?}");
+    assert!(matching[0]["text"].as_str().unwrap().contains("GitHub would not queue acme/widgets#7"), "{}", matching[0]);
+    assert_eq!(open.iter().filter(|c| c.get("approval").is_none()).count(), 1, "{open:?}");
+
+    // A second approval A2 held on a failing optional check gets its own distinct approval id.
+    h.github.update_pr(REPO, 7, json!({"mergeStateStatus": "BLOCKED"}));
+    let second = result(
+        &h.exec_as(root, &format!("async () => wf.merge({})", json!({"repo": REPO, "pr": 7, "head": HEAD}))).await,
+    );
+    assert_eq!(second["status"], "waiting");
+    let a2 = second["approval"].as_str().unwrap().to_string();
+    assert_ne!(a1, a2);
+    h.github.update_pr(REPO, 7, json!({"mergeStateStatus": "UNSTABLE"}));
+    h.github.set_checks(REPO, 7, json!([check_run("lint", "FAILURE")]));
+    check(&h, 8).await;
+
+    let via_js = result(&h.exec("async () => wf.cards()").await);
+    let open = via_js.as_array().unwrap();
+    let a2_cards: Vec<&Value> = open.iter().filter(|c| c["approval"].as_str() == Some(a2.as_str())).collect();
+    assert_eq!(a2_cards.len(), 1, "{open:?}");
+    assert!(a2_cards[0]["text"].as_str().unwrap().contains("has a failing check"), "{}", a2_cards[0]);
+}
