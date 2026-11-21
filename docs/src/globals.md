@@ -134,7 +134,10 @@ parent and a child, and the service keeps every link and message in its store.
   `limitReason` names the thread whose limit stop set the mark and where its
   reset time came from. `usageLeft` stays `null` until t3cm has a usage
   source. The watcher sets and clears the marks, as
-  [Limits](config.md#limits) describes.
+  [Limits](config.md#limits) describes. Each pool also has `warnings`, which
+  flags a member that is the only one that can run the pool's model, or in a
+  mixed pool the only one of its driver that can run its model, as
+  [Sole members](config.md#sole-members) describes.
 - `wf.status()` returns the service's state as the board header shows it:
   `version`, `t3`, `tokenExpiresAt`, `watcher`, `openLinks`, `update` and
   `skills`, the check of the installed T3 workflow skills and setup steps

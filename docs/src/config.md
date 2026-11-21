@@ -162,6 +162,32 @@ The pick's reason starts with the driver, model and effort it chose, such as
 `claudeAgent claude-opus-5-5, effort high; weighted: weight 1 of 4`, and
 `wf.pick` returns them as `driver`, `model` and `effort`.
 
+#### Sole members
+
+A pool can depend on one account without saying so: when only one member can
+run the pool's model, every launch from the pool waits on that member, and the
+pool launches nothing while it is limited. `wf.pools()` flags that member in
+the pool's `warnings` and suggests a reserve on it:
+
+```text
+only claude-b can run claude-opus-5-5, so the pool launches nothing while claude-b is out. Set a reserve on claude-b to keep room for the work only it can run.
+```
+
+With a usage source, the reserve is a floor that keeps part of the account's
+usage for launches that name it directly. Until t3cm has one, a reserve only
+makes the member a last resort, as the pick rules above say, so in this pool,
+where nothing else can run the model, it changes no pick yet.
+
+A member can run the model when T3 lists the model for it and offers the
+member's effort. Limits and usage do not count, so the warning does not come
+and go as members are benched. A mixed pool's members run different models by
+design, so there the check groups members by driver: a member that is the only
+one of its driver that can run its model is flagged. Once the member has a reserve, the warning drops the suggestion and
+stays, since the pool still has one member for that model. A pool that is not
+mixed gets no warning when two members can run its model, and a mixed pool
+gets none for a driver with two members that can run their models. A pool
+whose `error` is set gets no warning until the error is fixed.
+
 #### Mixed pools
 
 A pool with `"mixed": true` takes members of any driver, and each member names
