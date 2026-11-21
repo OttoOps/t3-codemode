@@ -699,10 +699,6 @@ async fn run_doctor(a: DoctorArgs) -> Result<ExitCode> {
 
 async fn direct_caps(state: &StateArgs) -> Result<Value> {
     use t3_codemode::t3::T3Client;
-    let runtime_file = t3_codemode::t3_http::t3_home().join("userdata").join("server-runtime.json");
-    if !runtime_file.is_file() {
-        bail!("T3 Code is not running here: no readable {}", runtime_file.display());
-    }
     let store = Arc::new(Store::open(&state_dir(state))?);
     let clock = Arc::new(SystemClock);
     let t3 = HttpT3::new(store, clock);

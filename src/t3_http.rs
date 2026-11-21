@@ -30,12 +30,18 @@ struct Runtime {
 
 fn runtime() -> Result<Runtime, T3Error> {
     let path = t3_home().join("userdata").join("server-runtime.json");
+    let explicit = std::env::var("T3CM_T3_ORIGIN").ok().filter(|s| !s.is_empty());
+    let parsed = std::fs::read_to_string(&path).ok().and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    if let Some(origin) = explicit {
+        let pid = parsed.as_ref().and_then(|v| v["pid"].as_u64()).map(|p| p as u32);
+        return Ok(Runtime { origin: origin.trim_end_matches('/').to_string(), pid });
+    }
     let raw = std::fs::read_to_string(&path)
         .map_err(|_| T3Error::Unavailable(format!("T3 Code is not running here: no readable {}", path.display())))?;
     let v: Value = serde_json::from_str(&raw).map_err(|e| T3Error::Unavailable(format!("{}: {e}", path.display())))?;
-    let origin = std::env::var("T3CM_T3_ORIGIN")
-        .ok()
-        .or_else(|| v["origin"].as_str().map(String::from))
+    let origin = v["origin"]
+        .as_str()
+        .map(String::from)
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", v["port"].as_u64().unwrap_or(3773)));
     Ok(Runtime { origin: origin.trim_end_matches('/').to_string(), pid: v["pid"].as_u64().map(|p| p as u32) })
 }
