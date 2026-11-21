@@ -294,29 +294,21 @@ fn run_skills(cmd: SkillsCmd) -> Result<ExitCode> {
     } else {
         steps::OpenLinksReport::default()
     };
-    let mut pending_nudges = steps::load_pending_nudges(&env);
-    if retiring_t3wf {
-        for t in open_links.t3cm_threads.iter().chain(open_links.t3wf_threads.iter()) {
-            if !pending_nudges.contains(t) {
-                pending_nudges.push(t.clone());
-            }
-        }
-        if !pending_nudges.is_empty() {
-            steps::save_pending_nudges(&env, &pending_nudges)?;
-        }
-    }
     let report = skills::sync(&paths, &bundle, opts)?;
     let mut applied = steps::apply(&env, &bundle)?;
     applied.notes.extend(open_links.warnings.clone());
-    if !pending_nudges.is_empty() {
-        let t3_bin = t3_codemode::t3_http::find_t3_binary();
-        let (nudged, nudge_notes) = steps::nudge_threads(t3_bin.as_deref(), &pending_nudges);
-        let remaining: Vec<String> = pending_nudges.into_iter().filter(|t| !nudged.contains(t)).collect();
-        steps::save_pending_nudges(&env, &remaining)?;
-        applied.nudged = nudged;
-        applied.notes.extend(nudge_notes);
-        if remaining.is_empty() {
-            applied.steps = steps::check(&env, &bundle)?;
+    if retiring_t3wf {
+        let mut threads: Vec<String> = open_links.t3cm_threads.clone();
+        for t in &open_links.t3wf_threads {
+            if !threads.contains(t) {
+                threads.push(t.clone());
+            }
+        }
+        if !threads.is_empty() {
+            let t3_bin = t3_codemode::t3_http::find_t3_binary();
+            let (nudged, nudge_notes) = steps::nudge_threads(t3_bin.as_deref(), &threads);
+            applied.nudged = nudged;
+            applied.notes.extend(nudge_notes);
         }
     }
     let linked = claude_link::link(&env.claude, &paths.dir, &bundle.skills());
