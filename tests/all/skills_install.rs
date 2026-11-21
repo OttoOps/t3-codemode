@@ -14,6 +14,7 @@ fn t3cm(home: &Path, args: &[&str]) -> Output {
         .env_remove("CODEX_HOME")
         .env_remove("GEMINI_HOME")
         .env_remove("T3WF_CONFIG")
+        .env_remove("T3CODE_HOME")
         .output()
         .unwrap()
 }
@@ -427,6 +428,7 @@ fn claude_config_dir_picks_the_folder_to_link_into() {
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("CODEX_HOME")
         .env_remove("T3WF_CONFIG")
+        .env_remove("T3CODE_HOME")
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", text(&out));

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::skills::{Bundle, user_home, write_atomic};
 use crate::store::Store;
@@ -20,6 +20,10 @@ pub const RETIRE_T3WF_STEP: &str = "retire:t3wf";
 pub const T3WF_UNITS: [&str; 2] = ["t3wf-tick", "cbrip-t3wf-tick"];
 pub const SKILLS_CHANGED_NOTE: &str =
     "The workflow skills changed. Invoke the t3-workflow skill again before your next step.";
+pub const ANTIGRAVITY_STEP: &str = "mcp:antigravity";
+pub const ANTIGRAVITY_CAVEAT: &str = "adding t3cm to Antigravity's mcp_config.json stops T3 Code from using \
+Antigravity as its system text-generation model (for titles and similar tasks). Antigravity agent threads still work; \
+select another system model in T3 Code if you use Antigravity there.";
 pub const MCP_NAME: &str = "t3cm";
 pub const CONFIG_DIR_HEADER: &str = "X-T3-Config-Dir";
 pub const CONFIG_DIR_VALUE: &str = "${CLAUDE_CONFIG_DIR:-}";
@@ -59,7 +63,7 @@ pub fn catalog(bundle: &Bundle) -> Result<Vec<Step>> {
     }
     for s in &c.steps {
         match s.kind {
-            Kind::Auto if s.id != RULE_STEP && s.id != HEADER_STEP && s.id != RETIRE_T3WF_STEP => {
+            Kind::Auto if !matches!(s.id.as_str(), RULE_STEP | HEADER_STEP | RETIRE_T3WF_STEP | ANTIGRAVITY_STEP) => {
                 bail!("{CATALOG}: t3cm does not know how to apply step {}", s.id)
             }
             Kind::Interview if s.slot.is_none() => bail!("{CATALOG}: interview step {} names no slot", s.id),
@@ -81,6 +85,8 @@ pub struct Env {
     pub t3wf_state: PathBuf,
     pub skills_dir: PathBuf,
     pub systemctl_cmd: Option<PathBuf>,
+    pub t3_home: PathBuf,
+    pub t3cm_bin: PathBuf,
 }
 
 impl Env {
@@ -108,11 +114,22 @@ impl Env {
         if let Some(p) = var("GEMINI_HOME") {
             env.gemini = p;
         }
+        if let Some(p) = var("T3CODE_HOME") {
+            env.t3_home = p;
+        }
+        #[cfg(windows)]
+        if let Some(p) = var("LOCALAPPDATA") {
+            env.t3cm_bin = p.join("Programs").join("t3-codemode").join("t3cm.exe");
+        }
         Ok(env)
     }
 
     pub fn under(home: &Path, config_home: Option<&Path>) -> Env {
         let config = config_home.map(Path::to_path_buf).unwrap_or_else(|| home.join(".config"));
+        #[cfg(windows)]
+        let t3cm_bin = home.join("AppData").join("Local").join("Programs").join("t3-codemode").join("t3cm.exe");
+        #[cfg(not(windows))]
+        let t3cm_bin = home.join(".local").join("bin").join("t3cm");
         Env {
             config: config.join("t3-workflow").join("config.json"),
             claude: home.join(".claude"),
@@ -125,6 +142,8 @@ impl Env {
             t3wf_state: home.join(".local").join("state").join("t3-workflow"),
             skills_dir: home.join(".agents").join("skills"),
             systemctl_cmd: None,
+            t3_home: home.join(".t3"),
+            t3cm_bin,
         }
     }
 }
@@ -677,13 +696,265 @@ pub fn nudge_threads(t3_bin: Option<&Path>, threads: &[String]) -> (Vec<String>,
     (nudged, notes)
 }
 
-fn auto_state(id: &str, rule: &[RuleTarget], reg: &Registration, retire: &T3wfRetire) -> AutoState {
-    if id == HEADER_STEP {
-        reg_state(reg)
-    } else if id == RETIRE_T3WF_STEP {
-        retire_state(retire)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AntigravityState {
+    Current,
+    Missing,
+    Stale,
+    Conflict,
+    Problem,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityTarget {
+    pub path: PathBuf,
+    pub status: AntigravityState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+}
+
+pub fn antigravity_entry(t3cm_bin: &Path) -> Value {
+    json!({
+        "command": t3cm_bin.to_string_lossy(),
+        "args": ["stdio"],
+        "tools": {
+            "search": { "eager": true },
+            "execute": { "eager": true },
+        },
+    })
+}
+
+fn is_t3cm_command(cmd: &str) -> bool {
+    let base = cmd.rsplit(['/', '\\']).next().unwrap_or(cmd);
+    base == MCP_NAME || base.eq_ignore_ascii_case("t3cm.exe")
+}
+
+fn is_t3cm_stdio_entry(entry: &Map<String, Value>) -> bool {
+    let cmd_ok = entry.get("command").and_then(Value::as_str).is_some_and(is_t3cm_command);
+    let args_ok =
+        entry.get("args").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_str) == Some("stdio");
+    cmd_ok && args_ok
+}
+
+fn inspect_t3cm_entry(entry: &Map<String, Value>) -> (AntigravityState, Option<String>) {
+    if !is_t3cm_stdio_entry(entry) {
+        return (AntigravityState::Conflict, Some(format!("mcpServers.{MCP_NAME} is not a t3cm stdio entry")));
+    }
+    let Some(tools_val) = entry.get("tools") else {
+        return (AntigravityState::Stale, None);
+    };
+    let Some(tools) = tools_val.as_object() else {
+        return (AntigravityState::Problem, Some(format!("mcpServers.{MCP_NAME}.tools is not a JSON object")));
+    };
+    let mut stale = false;
+    for tool_name in ["search", "execute"] {
+        match tools.get(tool_name) {
+            None => stale = true,
+            Some(Value::Object(t)) => {
+                if t.get("eager") != Some(&Value::Bool(true)) {
+                    stale = true;
+                }
+            }
+            Some(_) => {
+                return (
+                    AntigravityState::Problem,
+                    Some(format!("mcpServers.{MCP_NAME}.tools.{tool_name} is not a JSON object")),
+                );
+            }
+        }
+    }
+    if stale { (AntigravityState::Stale, None) } else { (AntigravityState::Current, None) }
+}
+
+fn inspect_antigravity(path: &Path) -> AntigravityTarget {
+    let raw = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return AntigravityTarget { path: path.to_path_buf(), status: AntigravityState::Missing, problem: None };
+        }
+        Err(e) => {
+            return AntigravityTarget {
+                path: path.to_path_buf(),
+                status: AntigravityState::Problem,
+                problem: Some(format!("cannot read: {e}")),
+            };
+        }
+    };
+    let trimmed = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&raw);
+    if trimmed.iter().all(u8::is_ascii_whitespace) {
+        return AntigravityTarget { path: path.to_path_buf(), status: AntigravityState::Missing, problem: None };
+    }
+    let val = match serde_json::from_slice::<Value>(trimmed) {
+        Ok(v) => v,
+        Err(e) => {
+            return AntigravityTarget {
+                path: path.to_path_buf(),
+                status: AntigravityState::Problem,
+                problem: Some(format!("not valid JSON: {e}")),
+            };
+        }
+    };
+    let Some(root) = val.as_object() else {
+        return AntigravityTarget {
+            path: path.to_path_buf(),
+            status: AntigravityState::Problem,
+            problem: Some("top level must be a JSON object".into()),
+        };
+    };
+    match root.get("mcpServers") {
+        None => AntigravityTarget { path: path.to_path_buf(), status: AntigravityState::Missing, problem: None },
+        Some(Value::Object(servers)) => match servers.get(MCP_NAME) {
+            None => AntigravityTarget { path: path.to_path_buf(), status: AntigravityState::Missing, problem: None },
+            Some(Value::Object(entry)) => {
+                let (status, problem) = inspect_t3cm_entry(entry);
+                AntigravityTarget { path: path.to_path_buf(), status, problem }
+            }
+            Some(_) => AntigravityTarget {
+                path: path.to_path_buf(),
+                status: AntigravityState::Problem,
+                problem: Some(format!("mcpServers.{MCP_NAME} is not a JSON object")),
+            },
+        },
+        Some(_) => AntigravityTarget {
+            path: path.to_path_buf(),
+            status: AntigravityState::Problem,
+            problem: Some("mcpServers is not a JSON object".into()),
+        },
+    }
+}
+
+pub fn antigravity_targets(env: &Env) -> Vec<AntigravityTarget> {
+    let root = env.t3_home.join("userdata").join("providers").join("antigravity");
+    let Ok(rd) = std::fs::read_dir(&root) else { return Vec::new() };
+    let mut profiles: Vec<PathBuf> =
+        rd.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir() && p.join("config").is_dir()).collect();
+    profiles.sort();
+    profiles.into_iter().map(|p| inspect_antigravity(&p.join("config").join("mcp_config.json"))).collect()
+}
+
+fn merge_eager_flags(entry: &mut Map<String, Value>) -> Result<()> {
+    let tools = match entry.get_mut("tools") {
+        Some(Value::Object(m)) => m,
+        Some(_) => bail!("mcpServers.{MCP_NAME}.tools is not a JSON object"),
+        None => {
+            entry.insert("tools".into(), Value::Object(Map::new()));
+            entry.get_mut("tools").and_then(Value::as_object_mut).expect("just inserted")
+        }
+    };
+    for tool_name in ["search", "execute"] {
+        let tool = match tools.get_mut(tool_name) {
+            Some(Value::Object(m)) => m,
+            Some(_) => bail!("mcpServers.{MCP_NAME}.tools.{tool_name} is not a JSON object"),
+            None => {
+                tools.insert(tool_name.into(), Value::Object(Map::new()));
+                tools.get_mut(tool_name).and_then(Value::as_object_mut).expect("just inserted")
+            }
+        };
+        tool.insert("eager".into(), Value::Bool(true));
+    }
+    Ok(())
+}
+
+pub fn write_antigravity(path: &Path, t3cm_bin: &Path) -> Result<bool> {
+    let raw = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let trimmed = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&raw);
+    let mut root = if trimmed.iter().all(u8::is_ascii_whitespace) {
+        Map::new()
     } else {
-        rule_state(rule)
+        match serde_json::from_slice::<Value>(trimmed)
+            .with_context(|| format!("{} is not valid JSON", path.display()))?
+        {
+            Value::Object(m) => m,
+            _ => bail!("{} top level must be a JSON object", path.display()),
+        }
+    };
+    let servers = match root.get_mut("mcpServers") {
+        Some(Value::Object(m)) => m,
+        Some(_) => bail!("{} mcpServers is not a JSON object", path.display()),
+        None => {
+            root.insert("mcpServers".into(), Value::Object(Map::new()));
+            root.get_mut("mcpServers").and_then(Value::as_object_mut).expect("just inserted")
+        }
+    };
+    match servers.get_mut(MCP_NAME) {
+        None => {
+            servers.insert(MCP_NAME.into(), antigravity_entry(t3cm_bin));
+        }
+        Some(Value::Object(entry)) => match inspect_t3cm_entry(entry) {
+            (AntigravityState::Current, _) => return Ok(false),
+            (AntigravityState::Stale, _) => merge_eager_flags(entry)?,
+            (_, Some(why)) => bail!("{why}"),
+            (_, None) => bail!("mcpServers.{MCP_NAME} cannot be updated"),
+        },
+        Some(_) => bail!("mcpServers.{MCP_NAME} is not a JSON object"),
+    }
+    let mut text = serde_json::to_string_pretty(&Value::Object(root))?;
+    text.push('\n');
+    write_atomic(&real(path), text.as_bytes())?;
+    Ok(true)
+}
+
+pub fn remove_antigravity(path: &Path) -> Result<bool> {
+    let raw = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let trimmed = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&raw);
+    if trimmed.iter().all(u8::is_ascii_whitespace) {
+        return Ok(false);
+    }
+    let mut root = match serde_json::from_slice::<Value>(trimmed)
+        .with_context(|| format!("{} is not valid JSON", path.display()))?
+    {
+        Value::Object(m) => m,
+        _ => bail!("{} top level must be a JSON object", path.display()),
+    };
+    let Some(servers_val) = root.get_mut("mcpServers") else {
+        return Ok(false);
+    };
+    let Some(servers) = servers_val.as_object_mut() else {
+        bail!("{} mcpServers is not a JSON object", path.display());
+    };
+    if servers.shift_remove(MCP_NAME).is_none() {
+        return Ok(false);
+    }
+    let mut text = serde_json::to_string_pretty(&Value::Object(root))?;
+    text.push('\n');
+    write_atomic(&real(path), text.as_bytes())?;
+    Ok(true)
+}
+
+fn antigravity_state(targets: &[AntigravityTarget]) -> AutoState {
+    if targets.is_empty() {
+        AutoState::NotApplicable
+    } else if targets.iter().any(|t| matches!(t.status, AntigravityState::Missing | AntigravityState::Stale)) {
+        AutoState::Missing
+    } else if targets.iter().all(|t| t.status == AntigravityState::Current) {
+        AutoState::Done
+    } else {
+        AutoState::NotApplicable
+    }
+}
+
+fn auto_state(
+    id: &str,
+    rule: &[RuleTarget],
+    reg: &Registration,
+    retire: &T3wfRetire,
+    agy: &[AntigravityTarget],
+) -> AutoState {
+    match id {
+        HEADER_STEP => reg_state(reg),
+        RETIRE_T3WF_STEP => retire_state(retire),
+        ANTIGRAVITY_STEP => antigravity_state(agy),
+        _ => rule_state(rule),
     }
 }
 
@@ -780,6 +1051,7 @@ pub struct Steps {
     pub rule: Vec<RuleTarget>,
     pub registration: Registration,
     pub retire_t3wf: T3wfRetire,
+    pub antigravity: Vec<AntigravityTarget>,
 }
 
 impl Steps {
@@ -797,6 +1069,7 @@ pub fn check(env: &Env, bundle: &Bundle) -> Result<Steps> {
     let rule = rule_targets(env, bundle)?;
     let reg = registration(env);
     let retire = inspect_retire(env);
+    let agy = antigravity_targets(env);
     let config = load_config(&env.config);
     let (state, problem, written_by, recorded) = match &config {
         Config::Absent => (ConfigState::Absent, None, None, Vec::new()),
@@ -811,7 +1084,7 @@ pub fn check(env: &Env, bundle: &Bundle) -> Result<Steps> {
     let mut missing = Vec::new();
     for s in &steps {
         let fix = match s.kind {
-            Kind::Auto if auto_state(&s.id, &rule, &reg, &retire) == AutoState::Missing => {
+            Kind::Auto if auto_state(&s.id, &rule, &reg, &retire, &agy) == AutoState::Missing => {
                 "t3cm skills update".to_string()
             }
             Kind::Auto => continue,
@@ -832,6 +1105,7 @@ pub fn check(env: &Env, bundle: &Bundle) -> Result<Steps> {
         rule,
         registration: reg,
         retire_t3wf: retire,
+        antigravity: agy,
     })
 }
 
@@ -846,6 +1120,7 @@ pub struct Applied {
     pub registered: Vec<PathBuf>,
     pub removed: Vec<PathBuf>,
     pub nudged: Vec<String>,
+    pub antigravity: Vec<PathBuf>,
     pub notes: Vec<String>,
     pub newly_recorded: Vec<String>,
     pub steps: Steps,
@@ -862,7 +1137,7 @@ pub fn apply(env: &Env, bundle: &Bundle) -> Result<Applied> {
             wrote.push(t.path.clone());
         }
     }
-    let (mut registered, mut removed, mut notes) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut registered, mut removed, mut antigravity, mut notes) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut reg = registration(env);
     if steps.iter().any(|s| s.id == HEADER_STEP) && reg.status == RegState::Stale {
         match reregister(env, &reg) {
@@ -890,6 +1165,40 @@ pub fn apply(env: &Env, bundle: &Bundle) -> Result<Applied> {
         retire = inspect_retire(env);
     }
     let retired_any = !removed.is_empty();
+    let mut agy = antigravity_targets(env);
+    if steps.iter().any(|s| s.id == ANTIGRAVITY_STEP) {
+        for t in &mut agy {
+            match t.status {
+                AntigravityState::Missing | AntigravityState::Stale => {
+                    match write_antigravity(&t.path, &env.t3cm_bin) {
+                        Ok(true) => {
+                            t.status = AntigravityState::Current;
+                            antigravity.push(t.path.clone());
+                        }
+                        Ok(false) => {
+                            t.status = AntigravityState::Current;
+                        }
+                        Err(e) => notes.push(format!(
+                            "could not register {MCP_NAME} for Antigravity in {} ({e:#}); left as is",
+                            t.path.display()
+                        )),
+                    }
+                }
+                AntigravityState::Conflict => notes.push(format!(
+                    "Antigravity already has an incompatible MCP server named {MCP_NAME} in {}; left as is",
+                    t.path.display()
+                )),
+                AntigravityState::Problem => {
+                    let why = t.problem.as_deref().unwrap_or("invalid JSON");
+                    notes.push(format!(
+                        "could not register {MCP_NAME} for Antigravity in {} ({why}); left as is",
+                        t.path.display()
+                    ));
+                }
+                AntigravityState::Current => {}
+            }
+        }
+    }
     let mut newly = Vec::new();
     if let Config::Found { mut cfg, recorded } = load_config(&env.config) {
         let mut ids = done_ids(&steps, &recorded);
@@ -897,7 +1206,7 @@ pub fn apply(env: &Env, bundle: &Bundle) -> Result<Applied> {
             let done = if s.id == RETIRE_T3WF_STEP {
                 retired_any && retire_complete && retire.status == RetireState::Clean
             } else {
-                auto_state(&s.id, &rule, &reg, &retire) == AutoState::Done
+                auto_state(&s.id, &rule, &reg, &retire, &agy) == AutoState::Done
             };
             if done && !ids.contains(&s.id) {
                 ids.push(s.id.clone());
@@ -920,6 +1229,7 @@ pub fn apply(env: &Env, bundle: &Bundle) -> Result<Applied> {
         registered,
         removed,
         nudged: Vec::new(),
+        antigravity,
         notes,
         newly_recorded: newly,
         steps: check(env, bundle)?,
@@ -982,7 +1292,36 @@ pub fn describe_steps(s: &Steps) -> String {
             items.extend(s.retire_t3wf.pycache.iter().map(|p| p.display().to_string()));
             out.push_str(&format!("setup step {RETIRE_T3WF_STEP}: t3wf leftovers remain ({})\n", items.join(", ")));
         }
+        for t in &s.antigravity {
+            match t.status {
+                AntigravityState::Missing => out.push_str(&format!(
+                    "setup step {ANTIGRAVITY_STEP}: Antigravity's {MCP_NAME} server is missing from {}\n",
+                    t.path.display()
+                )),
+                AntigravityState::Stale => out.push_str(&format!(
+                    "setup step {ANTIGRAVITY_STEP}: Antigravity's {MCP_NAME} server in {} is missing eager tool flags\n",
+                    t.path.display()
+                )),
+                _ => {}
+            }
+        }
         out.push_str("fix: t3cm skills update\n");
+    }
+    for t in &s.antigravity {
+        match t.status {
+            AntigravityState::Conflict => out.push_str(&format!(
+                "warning: Antigravity MCP config at {} already has an incompatible {MCP_NAME} entry; left as is\n",
+                t.path.display()
+            )),
+            AntigravityState::Problem => {
+                let why = t.problem.as_deref().unwrap_or("invalid JSON");
+                out.push_str(&format!(
+                    "warning: Antigravity MCP config at {} could not be read ({why}); fix it, then run t3cm skills update\n",
+                    t.path.display()
+                ));
+            }
+            _ => {}
+        }
     }
     setup_lines(s, &mut out);
     if out.is_empty() {
@@ -1008,6 +1347,12 @@ pub fn describe_applied(a: &Applied) -> String {
     if !a.nudged.is_empty() {
         out.push_str(&format!("nudged {} open workflow thread(s): {}\n", a.nudged.len(), a.nudged.join(", ")));
     }
+    for p in &a.antigravity {
+        out.push_str(&format!("registered {MCP_NAME} for Antigravity in {}\n", p.display()));
+    }
+    if !a.antigravity.is_empty() {
+        out.push_str(&format!("note: {ANTIGRAVITY_CAVEAT}\n"));
+    }
     for n in &a.notes {
         out.push_str(&format!("warning: {n}\n"));
     }
@@ -1030,6 +1375,8 @@ mod tests {
     fn the_embedded_catalog_parses_and_t3cm_applies_every_auto_step() {
         let steps = catalog(&Bundle::embedded()).unwrap();
         assert!(steps.iter().any(|s| s.id == RULE_STEP && s.kind == Kind::Auto));
+        assert!(steps.iter().any(|s| s.id == HEADER_STEP && s.kind == Kind::Auto));
+        assert!(steps.iter().any(|s| s.id == ANTIGRAVITY_STEP && s.kind == Kind::Auto));
         for slot in ["review", "passes", "credentials", "delivery", "models"] {
             assert!(steps.iter().any(|s| s.slot.as_deref() == Some(slot) && s.legacy), "{slot}");
         }

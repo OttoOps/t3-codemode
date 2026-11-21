@@ -1242,3 +1242,33 @@ fn setup_detect_and_write_handle_delivery_steps_and_repo_config() {
     let out = s.write_err(&bad_shape, &["--no-t3", "--repo-config"]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("builtin merge step must be first"));
 }
+
+#[test]
+fn steps_detect_reports_missing_antigravity_step_until_registered() {
+    let s = SetupEnv::new();
+    s.write_config(&json!({"version": 1, "steps": SLOT_STEPS}));
+    assert!(!s.missing_steps().contains(&"mcp:antigravity".to_string()));
+    let agy = s.home.join(".t3/userdata/providers/antigravity/abc123/config/mcp_config.json");
+    std::fs::create_dir_all(agy.parent().unwrap()).unwrap();
+    std::fs::write(&agy, "").unwrap();
+    assert!(s.missing_steps().contains(&"mcp:antigravity".to_string()));
+    // Existing t3cm stdio missing eager flags still counts as missing (stale).
+    std::fs::write(&agy, json!({"mcpServers": {"t3cm": {"command": "/bin/t3cm", "args": ["stdio"]}}}).to_string())
+        .unwrap();
+    assert!(s.missing_steps().contains(&"mcp:antigravity".to_string()));
+    std::fs::write(
+        &agy,
+        json!({
+            "mcpServers": {
+                "t3cm": {
+                    "command": "/bin/t3cm",
+                    "args": ["stdio"],
+                    "tools": {"search": {"eager": true}, "execute": {"eager": true}}
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(!s.missing_steps().contains(&"mcp:antigravity".to_string()));
+}

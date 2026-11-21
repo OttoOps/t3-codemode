@@ -16,6 +16,7 @@ fn t3cm(home: &Path, args: &[&str]) -> Output {
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
         .env_remove("T3WF_CONFIG")
+        .env_remove("T3CODE_HOME")
         .output()
         .unwrap()
 }
@@ -551,4 +552,338 @@ fn retire_t3wf_surfaces_systemctl_failure_and_leaves_unit_detectable_for_retry()
         steps::check(&env, &Bundle::embedded()).unwrap().missing.iter().any(|m| m.id == steps::RETIRE_T3WF_STEP),
         "retire:t3wf must remain missing after systemctl failure"
     );
+}
+
+fn agy_profile(home: &Path, hash: &str) -> PathBuf {
+    let dir = home.join(".t3").join("userdata").join("providers").join("antigravity").join(hash).join("config");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("mcp_config.json")
+}
+
+#[test]
+fn update_registers_t3cm_stdio_for_every_antigravity_profile_and_merges_json() {
+    let home = tempfile::tempdir().unwrap();
+    let p1 = agy_profile(home.path(), "aaaa1111");
+    let p2 = agy_profile(home.path(), "bbbb2222");
+    // Fresh Antigravity profiles carry a 0-byte mcp_config.json.
+    std::fs::write(&p1, "").unwrap();
+    std::fs::write(
+        &p2,
+        json!({
+            "extra": 1,
+            "mcpServers": {
+                "other": {"command": "other-mcp", "args": ["--flag"]}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // Stray file next to profiles must be ignored; ~/.gemini must stay untouched.
+    let providers_dir = home.path().join(".t3/userdata/providers/antigravity");
+    std::fs::write(providers_dir.join("stray.txt"), "ignore\n").unwrap();
+    let gemini_cfg = home.path().join(".gemini/config/mcp_config.json");
+    std::fs::create_dir_all(gemini_cfg.parent().unwrap()).unwrap();
+    std::fs::write(&gemini_cfg, r#"{"mcpServers":{"mine":{"command":"x"}}}"#).unwrap();
+
+    write_config(home.path(), &json!({"version": 1, "passes": ["pr"]}));
+    let env = Env::under(home.path(), None);
+
+    let before = steps::check(&env, &Bundle::embedded()).unwrap();
+    assert!(before.missing.iter().any(|m| m.id == steps::ANTIGRAVITY_STEP && m.fix == "t3cm skills update"));
+    let shown_before = steps::describe_steps(&before);
+    assert!(shown_before.contains(&p1.display().to_string()), "{shown_before}");
+    assert!(shown_before.contains(&p2.display().to_string()), "{shown_before}");
+
+    let applied = steps::apply(&env, &Bundle::embedded()).unwrap();
+    assert_eq!(applied.antigravity, vec![p1.clone(), p2.clone()], "{:?}", applied.notes);
+    assert!(applied.notes.is_empty(), "{:?}", applied.notes);
+    let shown = steps::describe_applied(&applied);
+    assert_eq!(shown.matches("system text-generation model").count(), 1, "caveat must print once: {shown}");
+
+    let want = steps::antigravity_entry(&env.t3cm_bin);
+    let v1: Value = serde_json::from_str(&std::fs::read_to_string(&p1).unwrap()).unwrap();
+    assert_eq!(v1, json!({"mcpServers": {"t3cm": want}}));
+    let v2: Value = serde_json::from_str(&std::fs::read_to_string(&p2).unwrap()).unwrap();
+    assert_eq!(v2["extra"], 1);
+    assert_eq!(v2["mcpServers"]["other"], json!({"command": "other-mcp", "args": ["--flag"]}));
+    assert_eq!(v2["mcpServers"]["t3cm"], want);
+    assert_eq!(
+        std::fs::read_to_string(&gemini_cfg).unwrap(),
+        r#"{"mcpServers":{"mine":{"command":"x"}}}"#,
+        "~/.gemini/config/mcp_config.json must never be modified"
+    );
+    assert!(read_config(home.path())["steps"].as_array().unwrap().contains(&json!(steps::ANTIGRAVITY_STEP)));
+
+    // Rerun is idempotent and does not repeat the caveat.
+    let raw2_before = std::fs::read_to_string(&p2).unwrap();
+    let again = steps::apply(&env, &Bundle::embedded()).unwrap();
+    assert!(again.antigravity.is_empty());
+    assert!(!steps::describe_applied(&again).contains("system text-generation model"));
+    assert_eq!(std::fs::read_to_string(&p2).unwrap(), raw2_before);
+    assert!(!steps::check(&env, &Bundle::embedded()).unwrap().missing.iter().any(|m| m.id == steps::ANTIGRAVITY_STEP));
+}
+
+#[test]
+fn antigravity_merges_eager_flags_into_existing_stdio_and_reports_conflicts_and_invalid_json() {
+    let home = tempfile::tempdir().unwrap();
+    let stale = agy_profile(home.path(), "stale000");
+    let conflict = agy_profile(home.path(), "conflict1");
+    let broken = agy_profile(home.path(), "broken22");
+    std::fs::write(
+        &stale,
+        json!({
+            "mcpServers": {
+                "t3cm": {
+                    "command": "/opt/custom/t3cm",
+                    "args": ["stdio", "--state-dir", "/tmp/x"],
+                    "env": {"FOO": "bar"},
+                    "tools": {"search": {"eager": false, "note": "keep"}}
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let conflict_raw = json!({"mcpServers": {"t3cm": {"url": "http://127.0.0.1:47731/mcp"}}}).to_string();
+    std::fs::write(&conflict, &conflict_raw).unwrap();
+    std::fs::write(&broken, "{not valid json").unwrap();
+
+    let env = Env::under(home.path(), None);
+    let st = steps::check(&env, &Bundle::embedded()).unwrap();
+    assert!(st.needs_update(), "stale stdio entry needs eager flags: {:?}", st.missing);
+    let shown_before = steps::describe_steps(&st);
+    assert!(shown_before.contains("missing eager tool flags"), "{shown_before}");
+    assert!(shown_before.contains("incompatible t3cm entry"), "{shown_before}");
+    assert!(shown_before.contains("could not be read"), "{shown_before}");
+
+    let applied = steps::apply(&env, &Bundle::embedded()).unwrap();
+    assert_eq!(applied.antigravity, vec![stale.clone()]);
+    assert_eq!(applied.notes.len(), 2, "{:?}", applied.notes);
+    assert!(applied.notes.iter().any(|n| n.contains(&conflict.display().to_string()) && n.contains("incompatible")));
+    assert!(applied.notes.iter().any(|n| n.contains(&broken.display().to_string())));
+
+    let updated: Value = serde_json::from_str(&std::fs::read_to_string(&stale).unwrap()).unwrap();
+    assert_eq!(updated["mcpServers"]["t3cm"]["command"], "/opt/custom/t3cm");
+    assert_eq!(updated["mcpServers"]["t3cm"]["args"], json!(["stdio", "--state-dir", "/tmp/x"]));
+    assert_eq!(updated["mcpServers"]["t3cm"]["env"], json!({"FOO": "bar"}));
+    assert_eq!(updated["mcpServers"]["t3cm"]["tools"]["search"], json!({"eager": true, "note": "keep"}));
+    assert_eq!(updated["mcpServers"]["t3cm"]["tools"]["execute"], json!({"eager": true}));
+    assert_eq!(std::fs::read_to_string(&conflict).unwrap(), conflict_raw);
+    assert_eq!(std::fs::read_to_string(&broken).unwrap(), "{not valid json");
+    assert!(!steps::check(&env, &Bundle::embedded()).unwrap().needs_update());
+}
+
+#[test]
+fn t3code_home_env_selects_antigravity_profile_root() {
+    let home = tempfile::tempdir().unwrap();
+    let custom_t3 = home.path().join("custom-t3");
+    let cfg = custom_t3.join("userdata/providers/antigravity/deadbeef/config/mcp_config.json");
+    std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_t3cm"))
+        .args(["skills", "install"])
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("T3CODE_HOME", &custom_t3)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .env_remove("T3WF_CONFIG")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+    assert_eq!(saved["mcpServers"]["t3cm"]["args"], json!(["stdio"]));
+    assert_eq!(saved["mcpServers"]["t3cm"]["tools"]["search"]["eager"], true);
+    assert_eq!(saved["mcpServers"]["t3cm"]["tools"]["execute"]["eager"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn antigravity_registration_keeps_file_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let cfg = agy_profile(home.path(), "mode0600");
+    std::fs::write(&cfg, "").unwrap();
+    std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let applied = steps::apply(&Env::under(home.path(), None), &Bundle::embedded()).unwrap();
+    assert_eq!(applied.antigravity, vec![cfg.clone()]);
+    assert_eq!(std::fs::metadata(&cfg).unwrap().permissions().mode() & 0o777, 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn install_sh_registers_and_uninstalls_antigravity_in_scratch_home() {
+    use sha2::{Digest, Sha256};
+
+    let scratch = tempfile::tempdir().unwrap();
+    let pkg = tempfile::tempdir().unwrap();
+    let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let version = env!("CARGO_PKG_VERSION");
+    let stem = format!("t3cm-{version}-test-target");
+    let stage = pkg.path().join(&stem);
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_t3cm"), stage.join("t3cm")).unwrap();
+    std::fs::copy(crate_root.join("deploy/t3-codemode.service"), stage.join("t3-codemode.service")).unwrap();
+    std::fs::copy(crate_root.join("deploy/com.ottoops.t3-codemode.plist"), stage.join("com.ottoops.t3-codemode.plist"))
+        .unwrap();
+
+    let archive_name = format!("{stem}.tar.gz");
+    let archive = pkg.path().join(&archive_name);
+    let tar = Command::new("tar")
+        .args(["-czf", archive.to_str().unwrap(), "-C", pkg.path().to_str().unwrap(), &stem])
+        .output()
+        .unwrap();
+    assert!(tar.status.success(), "{}", text(&tar));
+    let digest: String = Sha256::digest(std::fs::read(&archive).unwrap()).iter().map(|b| format!("{b:02x}")).collect();
+    let sums = pkg.path().join("SHA256SUMS");
+    std::fs::write(&sums, format!("{digest}  {archive_name}\n")).unwrap();
+
+    let p1 = agy_profile(scratch.path(), "prof1111");
+    let p2 = agy_profile(scratch.path(), "prof2222");
+    std::fs::write(&p1, "").unwrap();
+    std::fs::write(&p2, json!({"keep": true, "mcpServers": {"other": {"command": "other"}}}).to_string()).unwrap();
+    let gemini = scratch.path().join(".gemini/config/mcp_config.json");
+    std::fs::create_dir_all(gemini.parent().unwrap()).unwrap();
+    std::fs::write(&gemini, r#"{"mcpServers":{"stay":{"command":"y"}}}"#).unwrap();
+
+    let run_install = |args: &[&str]| {
+        Command::new("bash")
+            .arg(crate_root.join("deploy/install.sh"))
+            .args(args)
+            .env_clear()
+            .env("HOME", scratch.path())
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap()
+    };
+
+    // 1. Install with --no-workflow exercises install.sh's own JSON registration path.
+    let out = run_install(&[
+        "--files-only",
+        "--no-workflow",
+        "--archive",
+        archive.to_str().unwrap(),
+        "--sums",
+        sums.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", text(&out));
+    let shown = text(&out);
+    assert_eq!(shown.matches("system text-generation model").count(), 1, "{shown}");
+
+    let expected_bin = scratch.path().join(".local/bin/t3cm").to_string_lossy().into_owned();
+    let expected_entry = json!({
+        "command": expected_bin,
+        "args": ["stdio"],
+        "tools": {
+            "search": {"eager": true},
+            "execute": {"eager": true}
+        }
+    });
+    let v1: Value = serde_json::from_str(&std::fs::read_to_string(&p1).unwrap()).unwrap();
+    assert_eq!(v1, json!({"mcpServers": {"t3cm": expected_entry}}));
+    let v2: Value = serde_json::from_str(&std::fs::read_to_string(&p2).unwrap()).unwrap();
+    assert_eq!(v2["keep"], true);
+    assert_eq!(v2["mcpServers"]["other"], json!({"command": "other"}));
+    assert_eq!(v2["mcpServers"]["t3cm"], expected_entry);
+    assert_eq!(std::fs::read_to_string(&gemini).unwrap(), r#"{"mcpServers":{"stay":{"command":"y"}}}"#);
+
+    // 2. Rerun is idempotent and does not repeat the caveat.
+    let p2_before = std::fs::read_to_string(&p2).unwrap();
+    let rerun = run_install(&[
+        "--files-only",
+        "--no-workflow",
+        "--archive",
+        archive.to_str().unwrap(),
+        "--sums",
+        sums.to_str().unwrap(),
+    ]);
+    assert!(rerun.status.success(), "{}", text(&rerun));
+    assert!(!text(&rerun).contains("system text-generation model"), "{}", text(&rerun));
+    assert_eq!(std::fs::read_to_string(&p2).unwrap(), p2_before);
+
+    // 3. Uninstall removes only t3cm, keeping other servers and top-level keys.
+    let un = run_install(&["--uninstall", "--files-only"]);
+    assert!(un.status.success(), "{}", text(&un));
+    let v1_after: Value = serde_json::from_str(&std::fs::read_to_string(&p1).unwrap()).unwrap();
+    assert_eq!(v1_after, json!({"mcpServers": {}}));
+    let v2_after: Value = serde_json::from_str(&std::fs::read_to_string(&p2).unwrap()).unwrap();
+    assert_eq!(v2_after, json!({"keep": true, "mcpServers": {"other": {"command": "other"}}}));
+    assert_eq!(std::fs::read_to_string(&gemini).unwrap(), r#"{"mcpServers":{"stay":{"command":"y"}}}"#);
+
+    // 4. Install with --workflow (default) also prints the caveat only once (steps::apply writes, register_mcp skips).
+    let wf = run_install(&[
+        "--files-only",
+        "--workflow",
+        "--archive",
+        archive.to_str().unwrap(),
+        "--sums",
+        sums.to_str().unwrap(),
+    ]);
+    assert!(wf.status.success(), "{}", text(&wf));
+    let wf_shown = text(&wf);
+    assert_eq!(wf_shown.matches("system text-generation model").count(), 1, "{wf_shown}");
+    let v1_wf: Value = serde_json::from_str(&std::fs::read_to_string(&p1).unwrap()).unwrap();
+    assert_eq!(v1_wf["mcpServers"]["t3cm"], expected_entry);
+
+    // 5. Minimal PATH without python3 or jq still registers (--no-workflow) and uninstalls via installed t3cm.
+    let min_bin = tempfile::tempdir().unwrap();
+    for cmd in [
+        "awk",
+        "basename",
+        "bash",
+        "cat",
+        "chmod",
+        "dirname",
+        "gzip",
+        "install",
+        "mkdir",
+        "mktemp",
+        "mv",
+        "plutil",
+        "rm",
+        "sed",
+        "sha256sum",
+        "shasum",
+        "tar",
+        "uname",
+    ] {
+        for dir in ["/usr/bin", "/bin"] {
+            let p = Path::new(dir).join(cmd);
+            if p.is_file() {
+                let _ = std::os::unix::fs::symlink(&p, min_bin.path().join(cmd));
+                break;
+            }
+        }
+    }
+    let un_min = Command::new("bash")
+        .arg(crate_root.join("deploy/install.sh"))
+        .args(["--uninstall", "--files-only"])
+        .env_clear()
+        .env("HOME", scratch.path())
+        .env("PATH", min_bin.path())
+        .output()
+        .unwrap();
+    assert!(un_min.status.success(), "{}", text(&un_min));
+    let v1_min_un: Value = serde_json::from_str(&std::fs::read_to_string(&p1).unwrap()).unwrap();
+    assert_eq!(v1_min_un, json!({"mcpServers": {}}));
+
+    let in_min = Command::new("bash")
+        .arg(crate_root.join("deploy/install.sh"))
+        .args([
+            "--files-only",
+            "--no-workflow",
+            "--archive",
+            archive.to_str().unwrap(),
+            "--sums",
+            sums.to_str().unwrap(),
+        ])
+        .env_clear()
+        .env("HOME", scratch.path())
+        .env("PATH", min_bin.path())
+        .output()
+        .unwrap();
+    assert!(in_min.status.success(), "{}", text(&in_min));
+    let v1_min_in: Value = serde_json::from_str(&std::fs::read_to_string(&p1).unwrap()).unwrap();
+    assert_eq!(v1_min_in["mcpServers"]["t3cm"], expected_entry);
 }

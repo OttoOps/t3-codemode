@@ -66,9 +66,19 @@ token from that state directory, or signs in again on its own. See
   `backoff` means it failed to connect; `lastError` says why and `retryAt` says
   when it tries again. `disabled` means `enabled: false` in the config. A tool
   that `allow` leaves out, or `deny` names, has no catalog entry at all.
-- **The client's tool list.** Claude Code loads MCP servers at session start.
-  A thread opened before you installed or re-registered `t3cm` has the old list
-  until it restarts.
+- **The client's tool list.** Claude Code and Antigravity load MCP servers at
+  session start. A thread opened before you installed or re-registered `t3cm`
+  keeps its old tool list until a new session starts.
+
+## Antigravity text generation is unavailable
+
+T3 Code checks `<profile>/config/mcp_config.json` before using an Antigravity
+profile for system text-generation tasks such as title generation, and disables
+that role whenever `mcpServers` is non-empty. Antigravity agent threads still
+run as normal. Pick another provider as T3's system model, or remove `t3cm`
+from `mcpServers` in `~/.t3/userdata/providers/antigravity/<hash>/config/mcp_config.json`
+when no other servers remain in that object if you want Antigravity for system
+text generation.
 
 ## `t3cm is busy`
 
