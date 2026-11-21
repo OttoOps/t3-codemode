@@ -17,7 +17,7 @@
       ],
       "checks": [
         {
-          "bash": "setup_workflow\\.py.*detect"
+          "bash": "t3cm\\s+setup\\s+detect"
         },
         {
           "text": "model worker"
@@ -26,7 +26,7 @@
           "text": "\\A[^?]*review(?:(?!model|pass|deliver|credential)[^?]){0,400}\\?"
         },
         {
-          "bash": "setup_workflow\\.py.*write",
+          "bash": "t3cm\\s+setup\\s+write",
           "none": true
         },
         {
@@ -59,7 +59,7 @@
           "input": "wf\\.pools\\("
         },
         {
-          "bash": "setup_workflow\\.py.*write"
+          "bash": "t3cm\\s+setup\\s+write"
         },
         {
           "file": "../config/t3-workflow/config.json",

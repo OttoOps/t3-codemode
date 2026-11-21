@@ -351,7 +351,7 @@ class Checks(unittest.TestCase):
         ev = live.load("setup-t3-workflow", "evals")["evals"][0]
         with_skill = [{"type": "assistant", "message": {"content": [
                           {"type": "tool_use", "name": "Bash",
-                           "input": {"command": "python3 x/setup_workflow.py detect --skills a"}}]}},
+                           "input": {"command": "t3cm setup detect --skills a"}}]}},
                       {"type": "result", "result": "review: none\nmodel worker: default\nWhich reviewer?",
                        "total_cost_usd": 0.25, "num_turns": 4}]
         without = [{"type": "result", "result": "Which reviewer?", "total_cost_usd": 0.1, "num_turns": 2}]

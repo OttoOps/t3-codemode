@@ -8,14 +8,10 @@ one; this skill fills them for this user. What each slot means, the config
 shape and how settings layer:
 [slots.md](../t3-workflow/slots.md).
 
-`setup` below means
-`python3 <this skill's base directory>/scripts/setup_workflow.py`. It needs
-the `t3-workflow` skill installed beside this one.
-
 ## 1. Detect
 
 ```bash
-setup detect --skills '<every skill this session lists, comma separated>'
+t3cm setup detect --skills '<every skill this session lists, comma separated>'
 ```
 
 Add `--repo <dir>` when the user means a repository other than the current
@@ -87,7 +83,7 @@ Gather the answers into one JSON object with only the slots that changed,
 and write it, with the same `--repo` as step 1 when you passed one:
 
 ```bash
-setup write --skills '<same list as step 1>' <<'JSON'
+t3cm setup write --skills '<same list as step 1>' <<'JSON'
 {"review": "cbrip:sol-loop", "passes": ["unslop", "pr"]}
 JSON
 ```
@@ -98,7 +94,7 @@ interview, and write `{}` when every slot was kept. The write records those
 slots as done setup steps, so a later release names only the slots it adds.
 
 It merges into the user config at `config.path` (`models` by role), checks
-the result, and prints the new `t3wf slots` lines. `--unset <slot>` (or
+the result, and prints the new `t3cm slots` lines. `--unset <slot>` (or
 `--unset models.worker`) returns a slot to its default. `--replace` starts
 from an empty file.
 
@@ -121,7 +117,7 @@ says where that rule stands for each agent. When either agent's `status`
 is `missing` or `stale`, install it, on a one-slot change too:
 
 ```bash
-setup rule
+t3cm setup rule
 ```
 
 It writes the rule to `rules/t3-workflow-filed-issues.md` in the Claude

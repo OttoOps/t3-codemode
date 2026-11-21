@@ -15,7 +15,7 @@ use t3_codemode::slots::{self, Caps, Enabled, Folders, Inputs, Resolved};
 use t3_codemode::store::Store;
 use t3_codemode::t3_http::HttpT3;
 use t3_codemode::wf_slots::Reported;
-use t3_codemode::{bench, claude_link, doctor, platform, server, skills, steps, upgrade, watcher};
+use t3_codemode::{bench, claude_link, doctor, platform, server, setup, skills, steps, upgrade, watcher};
 
 #[derive(Parser)]
 #[command(
@@ -156,6 +156,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SkillsCmd,
     },
+    /// Detect installed candidates, write slot settings, or install the filed-issue rule
+    Setup {
+        #[command(subcommand)]
+        cmd: SetupCmd,
+    },
     #[command(hide = true)]
     Bench {
         #[arg(short, default_value_t = 1000)]
@@ -191,6 +196,56 @@ enum SkillsCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum SetupCmd {
+    /// Print platform, current slots, installed candidates, T3 providers, rule, steps and t3cm status as JSON
+    Detect {
+        /// The repository (default: the current directory's)
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Skills listed in this session, comma or space separated
+        #[arg(long)]
+        skills: Option<String>,
+        /// Output JSON (default)
+        #[arg(long)]
+        json: bool,
+        /// Skip querying T3 capabilities through the running service
+        #[arg(long)]
+        no_t3: bool,
+        #[arg(long, env = "T3CM_PORT")]
+        port: Option<String>,
+        #[arg(long, env = "T3CODE_THREAD_ID")]
+        thread: Option<String>,
+    },
+    /// Merge slot settings from stdin into the user config file and print the resulting slots
+    Write {
+        /// The repository (default: the current directory's)
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Skills listed in this session, comma or space separated
+        #[arg(long)]
+        skills: Option<String>,
+        /// Drop a slot (or models.ticket / models.worker) so its default applies
+        #[arg(long, value_name = "SLOT[.ROLE]")]
+        unset: Vec<String>,
+        /// Start from an empty config instead of merging with the current file
+        #[arg(long)]
+        replace: bool,
+        /// A slot the user was asked about, kept ones too, recorded as a done setup step
+        #[arg(long, value_name = "SLOT[,SLOT]")]
+        asked: Vec<String>,
+        /// Skip querying T3 capabilities through the running service
+        #[arg(long)]
+        no_t3: bool,
+        #[arg(long, env = "T3CM_PORT")]
+        port: Option<String>,
+        #[arg(long, env = "T3CODE_THREAD_ID")]
+        thread: Option<String>,
+    },
+    /// Install the always-loaded filed-issue rule for Claude Code and Codex
+    Rule,
 }
 
 fn run_skills(cmd: SkillsCmd) -> Result<ExitCode> {
@@ -638,6 +693,100 @@ async fn run_doctor(a: DoctorArgs) -> Result<ExitCode> {
     Ok(if f.problems.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
+async fn run_setup(cmd: SetupCmd) -> Result<ExitCode> {
+    let folders = Folders::from_env()?;
+    let env = steps::Env::from_env()?;
+    let bundle = skills::Bundle::embedded();
+    match cmd {
+        SetupCmd::Detect { repo, skills, json: _, no_t3, port, thread } => {
+            let root = repo_root(repo.as_deref())?;
+            let listed = setup::parse_listed(skills.as_deref());
+            let probe = setup::probe_t3cm(&folders.home, port.as_deref()).await;
+            let (caps, providers) = if no_t3 {
+                (Caps::Unchecked, json!({"error": "T3 unreachable (skipped with --no-t3)"}))
+            } else if let (Some(p), true) = (probe.port, probe.running) {
+                match exec_value(p, "async () => t3.orchestrator_capabilities({})".into(), thread.as_deref()).await {
+                    Ok(c) => {
+                        let prov = setup::format_providers(&c);
+                        (Caps::Got(c), prov)
+                    }
+                    Err(e) => {
+                        let msg = format!("T3 unreachable ({e:#})");
+                        (Caps::Failed(msg.clone()), json!({"error": msg}))
+                    }
+                }
+            } else {
+                let why = probe.json["error"].as_str().unwrap_or("t3cm service is not running");
+                let msg = format!("T3 unreachable ({why})");
+                (Caps::Failed(msg.clone()), json!({"error": msg}))
+            };
+            let out = setup::detect_json(&setup::DetectInputs {
+                folders: &folders,
+                env: &env,
+                bundle: &bundle,
+                root: &root,
+                listed: &listed,
+                caps: &caps,
+                providers,
+                t3cm: probe.json,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
+        SetupCmd::Write { repo, skills, unset, replace, asked, no_t3, port, thread } => {
+            let root = repo_root(repo.as_deref())?;
+            let listed = setup::parse_listed(skills.as_deref());
+            let mut stdin_buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut stdin_buf)?;
+            let res = setup::write_config(
+                &folders,
+                &env,
+                &bundle,
+                &stdin_buf,
+                &setup::WriteOpts { repo: root.clone(), listed: listed.clone(), unset, replace, asked },
+            )?;
+            println!("wrote {}", res.path.display());
+            for w in &res.warnings {
+                println!("warn: {w}");
+            }
+            let caps = if no_t3 {
+                Caps::Unchecked
+            } else {
+                let port_num = port
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::parse::<u16>)
+                    .transpose()
+                    .ok()
+                    .flatten()
+                    .unwrap_or(setup::DEFAULT_PORT);
+                match exec_value(port_num, "async () => t3.orchestrator_capabilities({})".into(), thread.as_deref())
+                    .await
+                {
+                    Ok(c) => Caps::Got(c),
+                    Err(_) => Caps::Unchecked,
+                }
+            };
+            let enabled = Enabled::load(&folders.claude, &root);
+            let resolved =
+                Resolved::build(&Inputs { folders: &folders, root: &root, listed: &listed, enabled: &enabled });
+            let eff = resolved.all(&caps);
+            for p in resolved.problems() {
+                println!("config problem (ignored): {p}");
+            }
+            for line in slots::report_lines(&eff) {
+                println!("{line}");
+            }
+        }
+        SetupCmd::Rule => {
+            for line in setup::apply_rule(&env, &bundle)? {
+                println!("{line}");
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 async fn run(cli: Cli) -> Result<ExitCode> {
     match cli.cmd {
         Cmd::Serve { port, state, no_watcher, log_file } => {
@@ -742,6 +891,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             .await?;
         }
         Cmd::Skills { cmd } => return run_skills(cmd),
+        Cmd::Setup { cmd } => return run_setup(cmd).await,
         Cmd::Slots { repo, json, no_t3, port, thread } => return run_slots(repo, json, no_t3, port.port, thread).await,
         Cmd::Doctor { repo, json, no_t3, resolve, port, state, thread } => {
             return run_doctor(DoctorArgs { repo, json, no_t3, resolve, port: port.port, state, thread }).await;
