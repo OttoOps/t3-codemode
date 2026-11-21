@@ -14,6 +14,7 @@ const EXTRA_WAKE_KINDS: &[&str] = &["escalate", "reply"];
 
 pub const MAX_LIMIT_HOLD_MINUTES: u64 = 7 * 24 * 60;
 pub const LEGACY_BOARD_TICKET_KEYS: &[&str] = &["instanceId", "ticketModel", "ticketEffort", "pool"];
+const BOARD_ASK_KEYS: &[&str] = &["askInstanceId", "askModel", "askEffort", "askPool"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 
@@ -62,6 +63,10 @@ pub struct BoardConfig {
     pub pool: Option<String>,
     pub ticket_model: String,
     pub ticket_effort: Option<String>,
+    #[serde(default)]
+    pub ask_instance_id: Option<String>,
+    #[serde(default)]
+    pub ask_pool: Option<String>,
     pub ask_model: String,
     pub ask_effort: Option<String>,
     pub runtime_mode: Option<String>,
@@ -74,6 +79,8 @@ pub struct BoardConfig {
     pub open_links: OpenLinks,
     #[serde(skip)]
     pub legacy_ticket_keys: Vec<String>,
+    #[serde(skip)]
+    pub ask_configured: bool,
 }
 
 impl BoardConfig {
@@ -150,6 +157,8 @@ pub fn builtin_defaults() -> Value {
             "pool": null,
             "ticketModel": "claude-opus-5-5",
             "ticketEffort": "high",
+            "askInstanceId": null,
+            "askPool": null,
             "askModel": "claude-haiku-5-5",
             "askEffort": null,
             "runtimeMode": "full-access",
@@ -219,6 +228,13 @@ impl Config {
                     .collect()
             })
             .unwrap_or_default();
+        let ask_configured = over.get("board").and_then(Value::as_object).is_some_and(|b| {
+            BOARD_ASK_KEYS.iter().any(|&k| match b.get(k) {
+                Some(v) if matches!(k, "askInstanceId" | "askEffort" | "askPool") => !v.is_null(),
+                Some(_) => true,
+                None => false,
+            })
+        });
         let mut v = builtin_defaults();
         if !over.is_null() {
             merge(&mut v, over);
@@ -231,6 +247,7 @@ impl Config {
         }
         let mut cfg: Config = serde_json::from_value(v)?;
         cfg.board.legacy_ticket_keys = legacy_ticket_keys;
+        cfg.board.ask_configured = ask_configured;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -278,6 +295,20 @@ impl Config {
             && !self.pools.contains_key(p)
         {
             bail!("board.pool names {p:?}, which is not in pools");
+        }
+        if let Some(p) = &self.board.ask_pool
+            && !self.pools.contains_key(p)
+        {
+            bail!("board.askPool names {p:?}, which is not in pools");
+        }
+        if self.board.ask_model.trim().is_empty() {
+            bail!("board.askModel must not be empty");
+        }
+        if self.board.ask_instance_id.as_deref().is_some_and(|s| s.trim().is_empty()) {
+            bail!("board.askInstanceId must not be empty");
+        }
+        if self.board.ask_effort.as_deref().is_some_and(|s| s.trim().is_empty()) {
+            bail!("board.askEffort must not be empty");
         }
         Ok(())
     }

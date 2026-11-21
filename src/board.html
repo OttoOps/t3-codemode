@@ -72,7 +72,7 @@ body {
 a { color: var(--accent); text-decoration: none; }
 a:hover, a:focus-visible { text-decoration: underline; text-underline-offset: 2px; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-button, input, textarea { font: inherit; color: inherit; margin: 0; }
+button, input, textarea, select { font: inherit; color: inherit; margin: 0; }
 h1, h2, h3, p, ol, ul { margin: 0; padding: 0; }
 ol, ul { list-style: none; }
 .sr {
@@ -129,6 +129,13 @@ input[type=text], input[type=search] { height: 32px; }
 input[type=text]:focus, input[type=search]:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
 input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 textarea { resize: none; display: block; }
+select {
+  width: 100%; min-width: 0; height: 32px; background: var(--canvas); color: var(--ink);
+  border: 1px solid var(--field); border-radius: 6px; padding: 0 8px;
+  font-size: 13px; line-height: 18px;
+}
+select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+select:disabled { opacity: 0.55; cursor: default; }
 
 .mark { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; line-height: 16px; font-weight: 600; white-space: nowrap; }
 .mark::before {
@@ -178,6 +185,43 @@ textarea { resize: none; display: block; }
 .drift-pop p { margin: 0; }
 .drift-fix { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
 .drift-fix code { overflow-wrap: anywhere; }
+#models-btn { max-width: 240px; }
+#models-btn.model-err { border-color: var(--fail); color: var(--fail); }
+.model-line {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px;
+  font-size: 12px; line-height: 16px; color: var(--ink-2); min-width: 0;
+}
+.model-line .ml-val { color: var(--ink); font-weight: 500; overflow-wrap: anywhere; }
+.model-line .ml-err { color: var(--fail); font-weight: 500; overflow-wrap: anywhere; }
+.model-line .ml-ovr { color: var(--need); }
+.model-line .linkish { font-size: 12px; line-height: 16px; flex: none; }
+#models-dlg { width: min(520px, calc(100vw - 24px)); max-width: 520px; max-height: calc(100dvh - 32px); overflow-y: auto; }
+.md-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+.md-head h2 { margin: 0; }
+.md-sec { display: grid; gap: 8px; padding: 12px 0; border-top: 1px solid var(--line); }
+.md-sec:first-of-type { border-top: 0; padding-top: 0; }
+.md-sec-h { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.md-sec-h h3 { font-size: 14px; line-height: 20px; font-weight: 600; }
+.md-cur { font-size: 12px; line-height: 16px; color: var(--ink-2); overflow-wrap: anywhere; }
+.md-cur.bad { color: var(--fail); }
+.md-modes { display: inline-flex; gap: 0; justify-self: start; }
+.md-modes .btn { border-radius: 0; color: var(--ink-2); height: 28px; }
+.md-modes .btn:first-child { border-radius: 4px 0 0 4px; }
+.md-modes .btn:last-child { border-radius: 0 4px 4px 0; border-left: 0; }
+.md-modes .btn[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; position: relative; z-index: 1; }
+.md-fields { display: grid; gap: 8px; }
+.md-field { display: grid; gap: 4px; }
+.md-field label { font-size: 12px; line-height: 16px; font-weight: 500; color: var(--ink-2); }
+.md-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.md-ovr { padding: 8px 10px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--line); display: grid; gap: 4px; font-size: 12px; line-height: 16px; }
+.md-ovr ul { display: grid; gap: 4px; }
+.md-ovr li { color: var(--ink); overflow-wrap: anywhere; }
+.md-ovr .bad { color: var(--fail); }
+.md-acts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.md-msg { font-size: 12px; line-height: 16px; color: var(--ink-2); }
+.md-msg.bad { color: var(--fail); }
+.md-msg.good { color: var(--done); }
+@media (max-width: 540px) { .md-grid { grid-template-columns: minmax(0, 1fr); } }
 
 .fbar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0;
@@ -467,7 +511,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
 #main.lay .form .ph { min-height: 0; }
 #main.lay .lcol > .collapsed { flex: 0 0 auto !important; }
 .lay .collapsed > .body, .lay #composer.collapsed #out, .lay #composer.collapsed #ask,
-.lay #composer.collapsed #launch .row { display: none; }
+.lay #composer.collapsed #launch .row, .lay #composer.collapsed #launch .model-line { display: none; }
 #main.lay .lcol > * > .ph, #main.lay #launch .ph { cursor: grab; }
 .lay .lctl { display: flex; align-items: center; gap: 4px; flex: none; margin-left: 4px; }
 .lay #launch .lctl { margin-left: auto; }
@@ -544,7 +588,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .mode .btn[aria-pressed="true"] { background: var(--panel-2); color: var(--ink); font-weight: 600; }
   .forms { display: flex; align-items: flex-end; gap: 8px; padding: 12px; }
   .form { padding: 0; flex: 1 1 auto; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
-  .form .ph, .form .hint { display: none; }
+  .form .ph, .form .hint, .form .model-line { display: none; }
   .form .row { display: contents; }
   #composer[data-mode="launch"] #ask, #composer[data-mode="ask"] #launch { display: none; }
   #issues { height: 32px; padding-top: 4px; }
@@ -676,6 +720,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
         <div id="drift-fixes"></div>
       </div>
     </span>
+    <button class="btn" type="button" id="models-btn" aria-haspopup="dialog" aria-label="Launch and Ask models"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="2.25"/><path d="M8 2v2M8 12v2M2 8h2M12 8h2M3.8 3.8l1.4 1.4M10.8 10.8l1.4 1.4M12.2 3.8l-1.4 1.4M5.2 10.8l-1.4 1.4"/></svg><span class="w clip" id="models-btn-text">Models</span></button>
     <button class="btn" type="button" id="notify" hidden><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 11V7a4 4 0 0 1 8 0v4l1 1.5H3z"/><path d="M6.5 14h3"/></svg><span class="w" id="notify-text">Notify me</span></button>
     <button class="btn" type="button" id="lay-reset" hidden>Reset layout</button>
     <button class="btn" type="button" id="keys-btn" aria-haspopup="dialog"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4 7h1M7 7h2M11 7h1M5 9.5h6"/></svg><span class="w">Shortcuts</span></button>
@@ -782,12 +827,20 @@ kbd { font-family: var(--mono); font-size: 12px; }
             <button class="btn go" type="submit" id="launch-btn">Launch</button>
             <span class="meta hint" id="launch-hint">Ctrl+Enter launches.</span>
           </div>
+          <div class="model-line" id="launch-model">
+            <span id="launch-model-text">Model: loading...</span>
+            <button class="linkish" type="button" id="launch-model-edit">Change</button>
+          </div>
         </form>
         <form class="form" id="ask" aria-labelledby="h-ask">
           <div class="ph"><h2 id="h-ask">Ask about the board</h2></div>
           <div class="row">
             <input type="text" id="question" placeholder="Which tickets wait on me, and why?" aria-label="Question about the board" autocomplete="off">
             <button class="btn go" type="submit" id="ask-btn">Ask</button>
+          </div>
+          <div class="model-line" id="ask-model">
+            <span id="ask-model-text">Ask model: loading...</span>
+            <button class="linkish" type="button" id="ask-model-edit">Change</button>
           </div>
         </form>
       </div>
@@ -823,6 +876,93 @@ kbd { font-family: var(--mono); font-size: 12px; }
     <label><input type="checkbox" id="keys-on" checked> Single-key shortcuts</label>
     <button class="btn" type="button" id="keys-close">Close</button>
   </div>
+</dialog>
+<dialog id="models-dlg" aria-labelledby="models-h">
+  <div class="md-head">
+    <h2 id="models-h">Launch and Ask models</h2>
+    <button class="btn quiet" type="button" id="models-close">Close</button>
+  </div>
+  <p class="md-msg bad" id="models-cap-err" hidden></p>
+  <section class="md-sec" id="md-sec-ticket" aria-labelledby="md-ticket-h">
+    <div class="md-sec-h">
+      <h3 id="md-ticket-h">Ticket launches</h3>
+      <span class="md-cur" id="md-ticket-cur"></span>
+    </div>
+    <p class="meta">Writes the user-config layer of <code class="mono">models.ticket</code>. Takes effect on the next launch with no restart.</p>
+    <div class="md-modes" role="group" aria-label="Ticket launch mode">
+      <button class="btn" type="button" id="tm-mode-model" aria-pressed="true">Specific model</button>
+      <button class="btn" type="button" id="tm-mode-pool" aria-pressed="false">Pool</button>
+    </div>
+    <div class="md-fields" id="tm-model-fields">
+      <div class="md-field">
+        <label for="tm-provider">Instance</label>
+        <select id="tm-provider"></select>
+      </div>
+      <div class="md-grid">
+        <div class="md-field">
+          <label for="tm-model">Model</label>
+          <select id="tm-model"></select>
+        </div>
+        <div class="md-field">
+          <label for="tm-effort">Effort</label>
+          <select id="tm-effort"></select>
+        </div>
+      </div>
+    </div>
+    <div class="md-fields" id="tm-pool-fields" hidden>
+      <div class="md-field">
+        <label for="tm-pool">Pool</label>
+        <select id="tm-pool"></select>
+      </div>
+      <p class="meta" id="tm-pool-info"></p>
+    </div>
+    <div class="md-ovr" id="md-repo-overrides" hidden>
+      <p class="meta">Repo overrides take precedence over the user setting above for those projects:</p>
+      <ul id="md-repo-list"></ul>
+    </div>
+    <div class="md-acts">
+      <button class="btn go" type="button" id="tm-save">Save ticket model</button>
+      <span class="md-msg" id="tm-msg" aria-live="polite"></span>
+    </div>
+  </section>
+  <section class="md-sec" id="md-sec-ask" aria-labelledby="md-ask-h">
+    <div class="md-sec-h">
+      <h3 id="md-ask-h">Ask box</h3>
+      <span class="md-cur" id="md-ask-cur"></span>
+    </div>
+    <p class="meta">Saves to t3cm's <code class="mono">board</code> config. Takes effect on the next question with no restart.</p>
+    <div class="md-modes" role="group" aria-label="Ask box mode">
+      <button class="btn" type="button" id="am-mode-model" aria-pressed="true">Specific model</button>
+      <button class="btn" type="button" id="am-mode-pool" aria-pressed="false">Pool</button>
+    </div>
+    <div class="md-fields" id="am-model-fields">
+      <div class="md-field">
+        <label for="am-provider">Instance</label>
+        <select id="am-provider"></select>
+      </div>
+      <div class="md-grid">
+        <div class="md-field">
+          <label for="am-model">Model</label>
+          <select id="am-model"></select>
+        </div>
+        <div class="md-field">
+          <label for="am-effort">Effort</label>
+          <select id="am-effort"></select>
+        </div>
+      </div>
+    </div>
+    <div class="md-fields" id="am-pool-fields" hidden>
+      <div class="md-field">
+        <label for="am-pool">Pool</label>
+        <select id="am-pool"></select>
+      </div>
+      <p class="meta" id="am-pool-info"></p>
+    </div>
+    <div class="md-acts">
+      <button class="btn go" type="button" id="am-save">Save ask model</button>
+      <span class="md-msg" id="am-msg" aria-live="polite"></span>
+    </div>
+  </section>
 </dialog>
 <script>
 "use strict";
@@ -3228,6 +3368,7 @@ function render(s) {
   paintService(s);
   paintUpdate(s);
   paintDrift(s);
+  syncModelsRev(s);
   document.title = (s.counts.cards ? "(" + s.counts.cards + ") " : "") + "t3 board";
   firstState = false;
 }
@@ -3433,8 +3574,7 @@ document.addEventListener("keydown", (e) => {
   const t = e.target || document.activeElement;
   const field = t && t.closest && t.closest("input, textarea, select, [contenteditable]");
   if (e.key === "Escape") {
-    const dlg = $("keys");
-    if (dlg.open) return;
+    if ($("keys").open || $("models-dlg").open) return;
     if (field || (t && t.closest && t.closest("#composer"))) {
       const l = listOf(t);
       if (l) { e.preventDefault(); focusList(l); }
@@ -3445,7 +3585,7 @@ document.addEventListener("keydown", (e) => {
     }
     return;
   }
-  if ($("keys").open) { gPending = false; return; }
+  if ($("keys").open || $("models-dlg").open) { gPending = false; return; }
   if (field || e.ctrlKey || e.metaKey || e.altKey) return;
   const list = listOf(t);
   if (list && itemOf(list, t) === t) {
@@ -4050,6 +4190,7 @@ function wire() {
   });
   initUpdate();
   initDrift();
+  initModels();
   $("settled-filter").addEventListener("input", () => {
     if (state) { panels.settled.filterChanged = true; syncSettled(state, true); }
   });
@@ -4104,6 +4245,421 @@ function wire() {
   loadHash();
 }
 
+const modelsState = {
+  data: null,
+  rev: -1,
+  t3Seen: false,
+  t3WasConnected: false,
+  ticket: { mode: "model" },
+  ask: { mode: "model" },
+  dirty: { ticket: false, ask: false },
+  busy: { ticket: false, ask: false },
+};
+
+function sourceLabel(src) {
+  if (src === "user") return "user config";
+  if (src === "board") return "board setting";
+  if (src === "default") return "default";
+  return String(src || "");
+}
+
+function formatModelChoice(m) {
+  if (!m) return "unset";
+  if (m.mode === "pool") {
+    const base = "pool " + (m.pool || "?");
+    if (m.mixed) return base + " (mixed)";
+    const detail = [m.model, m.effort].filter(Boolean).join(" · ");
+    return detail ? base + " (" + detail + ")" : base;
+  }
+  return [m.instanceId || m.provider, m.model, m.effort].filter(Boolean).join(" · ") || "unset";
+}
+
+function parseIssueRepo(raw) {
+  let s = String(raw || "").trim().replace(/\/+$/, "");
+  if (!s) return null;
+  if (!s.includes("://") && !/^github\.com\//i.test(s)) {
+    const i = s.indexOf("#");
+    if (i > 0) {
+      const path = s.slice(0, i);
+      const parts = path.split("/");
+      if (parts.length === 2 && parts[0] && parts[1] && /^\d+$/.test(s.slice(i + 1))) {
+        return (parts[0] + "/" + parts[1]).toLowerCase();
+      }
+    }
+    return null;
+  }
+  s = s.replace(/^https?:\/\//i, "").replace(/^www\./i, "");
+  if (!/^github\.com\//i.test(s)) return null;
+  const parts = s.slice("github.com/".length).split(/[?#]/)[0].split("/").filter(Boolean);
+  if (parts.length >= 4 && (parts[2] === "issues" || parts[2] === "pull") && /^\d+$/.test(parts[3])) {
+    return (parts[0] + "/" + parts[1]).toLowerCase();
+  }
+  return null;
+}
+
+function paintModelsButton() {
+  const btn = $("models-btn");
+  const txt = $("models-btn-text");
+  const d = modelsState.data;
+  if (!d) {
+    setText(txt, "Models");
+    btn.classList.remove("model-err");
+    setAttr(btn, "title", "Launch and Ask models");
+    return;
+  }
+  const t = d.ticket || {};
+  const a = d.ask || {};
+  const shortLabel = t.mode === "pool"
+    ? "Pool: " + (t.pool || "?")
+    : ([t.model, t.effort].filter(Boolean).join(" · ") || "Models");
+  setText(txt, shortLabel);
+  btn.classList.toggle("model-err", !!(t.error || a.error));
+  const tip = "Launch: " + formatModelChoice(t) + " (" + sourceLabel(t.source) + ")" +
+    (t.error ? " - " + t.error : "") +
+    ". Ask: " + formatModelChoice(a) + " (" + sourceLabel(a.source) + ")" +
+    (a.error ? " - " + a.error : "");
+  setAttr(btn, "title", tip);
+  setAttr(btn, "aria-label", "Launch and Ask models. " + tip);
+}
+
+function paintLaunchModelLine() {
+  const el = $("launch-model-text");
+  const d = modelsState.data;
+  if (!d) { setText(el, "Model: loading..."); return; }
+  const t = d.ticket || {};
+  const ovrs = d.repoOverrides || [];
+  const typed = ($("issues").value || "").split(/[\s,]+/).map(parseIssueRepo).filter(Boolean);
+  const matched = [];
+  let hasDefaultRepo = false;
+  for (const repo of typed) {
+    const o = ovrs.find((x) => x.repo && x.repo.toLowerCase() === repo);
+    if (o) {
+      if (!matched.includes(o)) matched.push(o);
+    } else {
+      hasDefaultRepo = true;
+    }
+  }
+  if (matched.length === 1 && !hasDefaultRepo) {
+    const o = matched[0];
+    if (o.error) {
+      el.replaceChildren(h("span", { class: "ml-err" }, o.title + " (" + sourceLabel(o.source) + "): " + o.error));
+    } else {
+      el.replaceChildren(
+        h("span", {}, o.title + ": "),
+        h("span", { class: "ml-val" }, formatModelChoice(o)),
+        h("span", { class: "ml-ovr" }, " (" + sourceLabel(o.source) + " overrides " + sourceLabel(t.source) + ")"));
+    }
+    return;
+  }
+  if (matched.length > 0) {
+    const parts = matched.map((o) => o.title + " uses " + sourceLabel(o.source) + " (" + (o.error ? "error" : formatModelChoice(o)) + ")");
+    if (hasDefaultRepo) parts.push("others use " + formatModelChoice(t) + " (" + sourceLabel(t.source) + ")");
+    el.replaceChildren(h("span", { class: "ml-ovr" }, parts.join("; ")));
+    return;
+  }
+  const kids = [];
+  if (t.error) {
+    kids.push(h("span", { class: "ml-err" }, "Model error (" + sourceLabel(t.source) + "): " + t.error));
+  } else {
+    kids.push(h("span", {}, "Model: "), h("span", { class: "ml-val" }, formatModelChoice(t)), h("span", {}, " (" + sourceLabel(t.source) + ")"));
+  }
+  if (ovrs.length === 1) {
+    kids.push(h("span", { class: "ml-ovr" }, " · " + ovrs[0].title + " overrides via " + sourceLabel(ovrs[0].source)));
+  } else if (ovrs.length > 1) {
+    kids.push(h("span", { class: "ml-ovr" }, " · " + ovrs.length + " repos override"));
+  }
+  el.replaceChildren(...kids);
+}
+
+function paintAskModelLine() {
+  const el = $("ask-model-text");
+  const d = modelsState.data;
+  if (!d) { setText(el, "Ask model: loading..."); return; }
+  const a = d.ask || {};
+  if (a.error) {
+    el.replaceChildren(h("span", { class: "ml-err" }, "Ask model error (" + sourceLabel(a.source) + "): " + a.error));
+  } else {
+    el.replaceChildren(h("span", {}, "Ask: "), h("span", { class: "ml-val" }, formatModelChoice(a)), h("span", {}, " (" + sourceLabel(a.source) + ")"));
+  }
+}
+
+function pickerPrefix(which) { return which === "ticket" ? "tm" : "am"; }
+
+function setPickerMode(which, mode, markDirty) {
+  const p = pickerPrefix(which);
+  modelsState[which].mode = mode;
+  if (markDirty) modelsState.dirty[which] = true;
+  setAttr($(p + "-mode-model"), "aria-pressed", mode === "model" ? "true" : "false");
+  setAttr($(p + "-mode-pool"), "aria-pressed", mode === "pool" ? "true" : "false");
+  $(p + "-model-fields").hidden = mode !== "model";
+  $(p + "-pool-fields").hidden = mode !== "pool";
+  updateSaveEnabled(which);
+}
+
+function populateOptions(sel, items, selectedVal) {
+  sel.replaceChildren(...items.map((it) => {
+    const o = h("option", { value: it.value }, it.label);
+    if (it.disabled) o.disabled = true;
+    return o;
+  }));
+  if (selectedVal !== undefined && items.some((it) => it.value === selectedVal)) {
+    sel.value = selectedVal;
+  } else if (items.length) {
+    const first = items.find((it) => !it.disabled) || items[0];
+    sel.value = first.value;
+  } else {
+    sel.value = "";
+  }
+}
+
+function syncEffortSelect(which, modelObj, wantedEffort) {
+  const p = pickerPrefix(which);
+  const sel = $(p + "-effort");
+  const efforts = (modelObj && modelObj.efforts) || [];
+  if (!efforts.length) {
+    populateOptions(sel, [{ value: "", label: "No effort options" }], "");
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  const def = modelObj.defaultEffort ? "Default (" + modelObj.defaultEffort + ")" : "Default";
+  const opts = [{ value: "", label: def }, ...efforts.map((e) => ({ value: e, label: e }))];
+  populateOptions(sel, opts, wantedEffort && efforts.includes(wantedEffort) ? wantedEffort : "");
+}
+
+function syncModelSelect(which, providerId, wantedModel, wantedEffort) {
+  const p = pickerPrefix(which);
+  const d = modelsState.data;
+  const prov = (d && d.providers || []).find((x) => x.id === providerId) || null;
+  const models = (prov && prov.models) || [];
+  const msel = $(p + "-model");
+  if (!models.length) {
+    populateOptions(msel, [{ value: "", label: prov ? "No models listed" : "No enabled instances" }], "");
+    msel.disabled = true;
+    syncEffortSelect(which, null, null);
+    return;
+  }
+  msel.disabled = false;
+  populateOptions(msel, models.map((m) => ({ value: m.id, label: m.id })), wantedModel);
+  const chosen = models.find((m) => m.id === msel.value) || models[0];
+  syncEffortSelect(which, chosen, wantedEffort);
+}
+
+function paintPoolInfo(which) {
+  const p = pickerPrefix(which);
+  const d = modelsState.data;
+  const pools = (d && d.pools) || [];
+  const info = $(p + "-pool-info");
+  if (!pools.length) {
+    setText(info, "No pools are configured in t3cm's config.json.");
+    return;
+  }
+  const chosen = pools.find((x) => x.name === $(p + "-pool").value);
+  if (!chosen) { setText(info, ""); return; }
+  const count = (chosen.members || []).length;
+  const membersWord = count === 1 ? "1 member" : count + " members";
+  if (chosen.mixed) {
+    const desc = (chosen.members || []).map((m) => m.instanceId + ": " + m.model + (m.effort ? " " + m.effort : "")).join(", ");
+    setText(info, "Mixed pool · " + chosen.strategy + " (" + membersWord + "): " + desc);
+  } else {
+    const parts = [chosen.driver, chosen.model, chosen.effort, chosen.strategy + " (" + membersWord + ")"].filter(Boolean);
+    setText(info, parts.join(" · "));
+  }
+}
+
+function updateSaveEnabled(which) {
+  const p = pickerPrefix(which);
+  const d = modelsState.data;
+  const mode = modelsState[which].mode;
+  const btn = $(p + "-save");
+  if (!d || modelsState.busy[which]) { btn.disabled = true; return; }
+  if (mode === "pool") {
+    btn.disabled = !(d.pools && d.pools.length && $(p + "-pool").value);
+  } else {
+    btn.disabled = !(d.providers && d.providers.length && $(p + "-provider").value && $(p + "-model").value);
+  }
+}
+
+function syncPickerSection(which, force) {
+  const d = modelsState.data;
+  if (!d) return;
+  const p = pickerPrefix(which);
+  const cfg = d[which] || {};
+  const cur = $("md-" + which + "-cur");
+  if (cfg.error) {
+    setText(cur, sourceLabel(cfg.source) + " · " + cfg.error);
+    cur.classList.add("bad");
+  } else {
+    setText(cur, formatModelChoice(cfg) + " · " + sourceLabel(cfg.source));
+    cur.classList.remove("bad");
+  }
+  if (!force && modelsState.dirty[which]) {
+    updateSaveEnabled(which);
+    return;
+  }
+  const providers = d.providers || [];
+  const psel = $(p + "-provider");
+  if (!providers.length) {
+    populateOptions(psel, [{ value: "", label: "No enabled instances" }], "");
+    psel.disabled = true;
+    syncModelSelect(which, "", null, null);
+  } else {
+    psel.disabled = false;
+    const pOpts = providers.map((x) => ({
+      value: x.id,
+      label: x.name && x.name !== x.id ? x.name + " (" + x.id + ")" : x.id,
+    }));
+    const wantProv = cfg.instanceId || cfg.provider || "";
+    populateOptions(psel, pOpts, wantProv);
+    syncModelSelect(which, psel.value, cfg.model || "", cfg.effort || "");
+  }
+  const pools = d.pools || [];
+  const poolSel = $(p + "-pool");
+  if (!pools.length) {
+    populateOptions(poolSel, [{ value: "", label: "No pools configured" }], "");
+    poolSel.disabled = true;
+  } else {
+    poolSel.disabled = false;
+    populateOptions(poolSel, pools.map((x) => ({ value: x.name, label: x.name })), cfg.pool || "");
+  }
+  paintPoolInfo(which);
+  setPickerMode(which, cfg.mode === "pool" ? "pool" : "model", false);
+}
+
+function paintRepoOverrides() {
+  const d = modelsState.data;
+  const box = $("md-repo-overrides");
+  const list = $("md-repo-list");
+  const ovrs = (d && d.repoOverrides) || [];
+  box.hidden = !ovrs.length;
+  if (!ovrs.length) { list.replaceChildren(); return; }
+  list.replaceChildren(...ovrs.map((o) => {
+    const label = o.repo ? o.title + " (" + o.repo + ")" : o.title;
+    return o.error
+      ? h("li", { class: "bad" }, label + ": " + sourceLabel(o.source) + " - " + o.error)
+      : h("li", {}, label + ": " + sourceLabel(o.source) + " sets " + formatModelChoice(o));
+  }));
+}
+
+function paintModels(forceForm) {
+  paintModelsButton();
+  paintLaunchModelLine();
+  paintAskModelLine();
+  const d = modelsState.data;
+  const capErr = $("models-cap-err");
+  const errs = d ? [d.capabilitiesError ? "T3 capabilities: " + d.capabilitiesError : "", d.projectsError ? "Projects: " + d.projectsError : ""].filter(Boolean) : [];
+  capErr.hidden = !errs.length;
+  setText(capErr, errs.join(" · "));
+  syncPickerSection("ticket", forceForm);
+  syncPickerSection("ask", forceForm);
+  paintRepoOverrides();
+}
+
+async function refreshModels(forceForm) {
+  try {
+    const r = await fetch("/api/models");
+    if (!r.ok) return;
+    const d = await r.json();
+    modelsState.data = d;
+    if (typeof d.modelsRev === "number") modelsState.rev = d.modelsRev;
+    paintModels(!!forceForm);
+  } catch (_) {}
+}
+
+function syncModelsRev(s) {
+  const rev = s && s.service && typeof s.service.modelsRev === "number" ? s.service.modelsRev : -1;
+  const t3Up = !!(s && s.service && s.service.t3 && s.service.t3.connected);
+  const becameConnected = modelsState.t3Seen && t3Up && !modelsState.t3WasConnected;
+  modelsState.t3Seen = true;
+  modelsState.t3WasConnected = t3Up;
+  const revChanged = rev >= 0 && modelsState.rev >= 0 && rev !== modelsState.rev;
+  if (rev >= 0) modelsState.rev = rev;
+  if (revChanged || becameConnected) refreshModels(false);
+}
+
+async function saveModelSection(which) {
+  const p = pickerPrefix(which);
+  const msg = $(p + "-msg");
+  const mode = modelsState[which].mode;
+  const payload = mode === "pool"
+    ? { mode: "pool", pool: $(p + "-pool").value }
+    : { mode: "model", provider: $(p + "-provider").value, model: $(p + "-model").value, effort: $(p + "-effort").value || null };
+  modelsState.busy[which] = true;
+  updateSaveEnabled(which);
+  setText(msg, "Saving...");
+  msg.className = "md-msg";
+  try {
+    const updated = await send("PUT", "/api/models/" + which, payload);
+    modelsState.data = updated;
+    if (typeof updated.modelsRev === "number") modelsState.rev = updated.modelsRev;
+    modelsState.dirty[which] = false;
+    paintModels(true);
+    setText(msg, "Saved.");
+    msg.className = "md-msg good";
+    announce((which === "ticket" ? "Ticket launch" : "Ask") + " model saved: " + formatModelChoice(updated[which]) + ".");
+  } catch (err) {
+    setText(msg, err.message);
+    msg.className = "md-msg bad";
+    announce(err.message, true);
+  } finally {
+    modelsState.busy[which] = false;
+    updateSaveEnabled(which);
+  }
+}
+
+function openModelsDlg(focusSection) {
+  const dlg = $("models-dlg");
+  modelsState.dirty.ticket = false;
+  modelsState.dirty.ask = false;
+  setText($("tm-msg"), "");
+  setText($("am-msg"), "");
+  if (modelsState.data) paintModels(true);
+  if (dlg.showModal) dlg.showModal();
+  else dlg.open = true;
+  refreshModels(true);
+  const target = focusSection === "ask" ? $("am-mode-" + modelsState.ask.mode) : $("tm-mode-" + modelsState.ticket.mode);
+  if (target && target.focus) target.focus();
+}
+
+function closeModelsDlg() {
+  const dlg = $("models-dlg");
+  if (dlg.close) dlg.close();
+  else dlg.open = false;
+}
+
+function initModels() {
+  $("models-btn").addEventListener("click", () => openModelsDlg("ticket"));
+  $("launch-model-edit").addEventListener("click", () => openModelsDlg("ticket"));
+  $("ask-model-edit").addEventListener("click", () => openModelsDlg("ask"));
+  $("models-close").addEventListener("click", closeModelsDlg);
+  $("issues").addEventListener("input", paintLaunchModelLine);
+  for (const which of ["ticket", "ask"]) {
+    const p = pickerPrefix(which);
+    $(p + "-mode-model").addEventListener("click", () => setPickerMode(which, "model", true));
+    $(p + "-mode-pool").addEventListener("click", () => setPickerMode(which, "pool", true));
+    $(p + "-provider").addEventListener("change", () => {
+      modelsState.dirty[which] = true;
+      syncModelSelect(which, $(p + "-provider").value, $(p + "-model").value, $(p + "-effort").value);
+      updateSaveEnabled(which);
+    });
+    $(p + "-model").addEventListener("change", () => {
+      modelsState.dirty[which] = true;
+      const d = modelsState.data;
+      const prov = (d && d.providers || []).find((x) => x.id === $(p + "-provider").value);
+      const m = prov && (prov.models || []).find((x) => x.id === $(p + "-model").value);
+      syncEffortSelect(which, m, $(p + "-effort").value);
+      updateSaveEnabled(which);
+    });
+    $(p + "-effort").addEventListener("change", () => { modelsState.dirty[which] = true; });
+    $(p + "-pool").addEventListener("change", () => {
+      modelsState.dirty[which] = true;
+      paintPoolInfo(which);
+      updateSaveEnabled(which);
+    });
+    $(p + "-save").addEventListener("click", () => saveModelSection(which));
+  }
+}
+
 async function onLaunch(e) {
   e.preventDefault();
   const ta = $("issues");
@@ -4117,14 +4673,18 @@ async function onLaunch(e) {
   $("dock").classList.add("show-out");
   try {
     const r = await post("/api/launch", { issues });
-    out.replaceChildren(h("li", { class: "oh" }, "Launch results"), ...r.results.map((x) => x.ok
-      ? h("li", { class: "good" }, h("span", {}, "Launched " + x.label), threadLink(x.link, "thread", "Open thread for " + x.label))
-      : h("li", { class: "bad" }, h("span", {}, x.issue + ": " + x.error + (x.card ? " (card " + x.card + ")" : "")))));
+    out.replaceChildren(h("li", { class: "oh" }, "Launch results"), ...r.results.map((x) => {
+      if (!x.ok) return h("li", { class: "bad" }, h("span", {}, x.issue + ": " + x.error + (x.card ? " (card " + x.card + ")" : "")));
+      const via = [x.instanceId, x.model, x.effort].filter(Boolean).join(" · ");
+      const tail = via ? " (" + via + (x.modelSource ? ", " + sourceLabel(x.modelSource) : "") + ")" : "";
+      return h("li", { class: "good" }, h("span", {}, "Launched " + x.label + tail), threadLink(x.link, "thread", "Open thread for " + x.label));
+    }));
     const ok = r.results.filter((x) => x.ok);
     const bad = r.results.filter((x) => !x.ok);
     if (ok.length) announce("Launched " + ok.map((x) => x.label).join(", ") + ".");
     if (bad.length) announce(bad.map((x) => x.issue + ": " + x.error).join(". "), true);
     if (!bad.length && ta.value === draft) ta.value = "";
+    paintLaunchModelLine();
   } catch (err) {
     out.replaceChildren(h("li", { class: "oh" }, "Launch results"), h("li", { class: "bad" }, err.message));
     announce("Launch failed: " + err.message, true);
@@ -4162,6 +4722,7 @@ setInterval(() => {
 
 wire();
 fetch("/api/state").then((r) => r.ok ? r.json() : null).then((s) => { if (s && !state) render(s); }).catch(() => {});
+refreshModels(true);
 connect();
 </script>
 </body>
