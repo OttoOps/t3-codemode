@@ -520,3 +520,13 @@ class Steps(SetupTestCase):
         self.assertEqual(self.env.run("check-config").stdout.strip(), "config ok")
         self.write_config({"version": 1, "steps": "slot:review"})
         self.assertIn("steps: must be a list", self.env.run("check-config", ok=False).stdout)
+
+    def test_malformed_claude_headers_does_not_abort_steps_status(self):
+        self.write_config({"version": 1, "steps": SLOT_STEPS})
+        claude_json = self.env.home / ".claude.json"
+        claude_json.write_text(json.dumps({"mcpServers": {"t3cm": {"type": "http", "headers": 1}}}))
+        self.assertIn("mcp:config-dir-header", self.missing())
+        claude_json.write_text(json.dumps({"mcpServers": {"t3cm": {"type": "http", "headers": {"X-T3-Config-Dir": None}}}}))
+        self.assertIn("mcp:config-dir-header", self.missing())
+        claude_json.write_text(json.dumps({"mcpServers": {"t3cm": {"type": "http", "headers": {"X-T3-Config-Dir": "${CLAUDE_CONFIG_DIR:-}"}}}}))
+        self.assertNotIn("mcp:config-dir-header", self.missing())

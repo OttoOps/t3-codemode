@@ -325,3 +325,59 @@ fn a_registration_that_cannot_be_restored_fails_and_names_the_add_command() {
     let dir = own.display().to_string();
     assert_eq!(log, format!("remove {dir}\nadd-json {dir}\nadd-json {dir}\n"));
 }
+
+#[test]
+fn null_header_value_is_stale_and_recovery_commands_quote_for_unix_and_powershell() {
+    let home = tempfile::tempdir().unwrap();
+    let entry = json!({
+        "type": "http",
+        "url": "http://127.0.0.1:47731/mcp",
+        "headers": {
+            "Authorization": "Bearer foo bar",
+            "X-Path": r"C:\dir\",
+            "X-User": "O'Neil",
+            "X-T3-Thread": "${T3CODE_THREAD_ID}",
+            "x-t3-config-dir": null
+        }
+    });
+    std::fs::write(home.path().join(".claude.json"), json!({"mcpServers": {"t3cm": entry}}).to_string()).unwrap();
+    let own = home.path().join("o'neil/.claude-2");
+    let env = Env { claude_config_dir: Some(own.clone()), ..Env::under(home.path(), None) };
+    let reg = steps::registration(&env);
+    assert_eq!(reg.status, steps::RegState::Stale, "null X-T3-Config-Dir must not count as current");
+
+    let updated = steps::registered_entry(&reg).unwrap();
+    let headers = updated["headers"].as_object().unwrap();
+    assert_eq!(headers.get("X-T3-Config-Dir"), Some(&json!("${CLAUDE_CONFIG_DIR:-}")));
+    assert!(!headers.contains_key("x-t3-config-dir"), "lowercase duplicate key should be normalized");
+
+    let unix_cmd = steps::reregister_command_for(&env, &reg, false, false);
+    assert!(unix_cmd.contains(r"CLAUDE_CONFIG_DIR='") && unix_cmd.contains(r"o'\''neil/.claude-2'"), "{unix_cmd}");
+    assert!(unix_cmd.contains(" && "), "{unix_cmd}");
+
+    let ps_cmd = steps::reregister_command_for(&env, &reg, false, true);
+    assert!(ps_cmd.contains("$env:CLAUDE_CONFIG_DIR = '") && ps_cmd.contains("o''neil/.claude-2'"), "{ps_cmd}");
+    assert!(!ps_cmd.contains(" && "), "PowerShell 5.1 does not support &&: {ps_cmd}");
+    assert!(!ps_cmd.contains("Start-Process"), "Start-Process fails on npm .ps1 shims: {ps_cmd}");
+    assert!(
+        ps_cmd.contains("claude mcp remove --scope user t3cm; if ($? -and $LASTEXITCODE -eq 0) { claude mcp add-json --scope user t3cm $j }"),
+        "Windows recovery command must invoke claude directly and gate add on remove: {ps_cmd}"
+    );
+    assert!(
+        ps_cmd.contains(r#"\"Authorization\":\"Bearer\u0020foo\u0020bar\""#)
+            && ps_cmd.contains(r#"\"X-Path\":\"C:\\dir\\\\\""#)
+            && ps_cmd.contains(r#"\"X-User\":\"O''Neil\""#)
+            && ps_cmd.contains(r#"\"X-T3-Config-Dir\":\"${CLAUDE_CONFIG_DIR:-}\""#)
+            && ps_cmd.contains(r#""Authorization":"Bearer\u0020foo\u0020bar""#),
+        "Windows command must select Legacy vs modern quoting with space-escaped JSON: {ps_cmd}"
+    );
+
+    let ps_add_only = steps::reregister_command_for(&env, &reg, true, true);
+    assert!(!ps_add_only.contains("mcp remove"), "{ps_add_only}");
+    assert!(ps_add_only.contains("$env:CLAUDE_CONFIG_DIR = '"), "{ps_add_only}");
+    assert!(
+        ps_add_only.ends_with("claude mcp add-json --scope user t3cm $j")
+            && ps_add_only.contains(r#"\"X-T3-Config-Dir\":\"${CLAUDE_CONFIG_DIR:-}\""#),
+        "{ps_add_only}"
+    );
+}

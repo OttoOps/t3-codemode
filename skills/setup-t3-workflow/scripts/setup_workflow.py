@@ -127,10 +127,14 @@ def header_missing():
     try:
         with open(path, encoding="utf-8") as f:
             entry = json.load(f)["mcpServers"]["t3cm"]
-        headers = entry.get("headers") or {}
+        if not isinstance(entry, dict):
+            return False
+        headers = entry.get("headers")
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return False
-    return not any(str(k).lower() == "x-t3-config-dir" for k in headers)
+    if not isinstance(headers, dict):
+        return True
+    return not any(str(k).lower() == "x-t3-config-dir" and isinstance(v, str) for k, v in headers.items())
 
 
 def steps_status(slots):

@@ -570,9 +570,12 @@ async fn run_all(inst: Instance) {
         let config = fx.config.to_string_lossy().into_owned();
         let mut want = python(&fx, inst, case.caps);
         let got = service(&fx, inst, case.caps).await;
+        let got_obj = got.as_object().expect("wf.slots returns an object");
         let mut got_same: serde_json::Map<String, Value> = serde_json::Map::new();
         for k in want.as_object().unwrap().keys() {
-            got_same.insert(k.clone(), got[k].clone());
+            if let Some(val) = got_obj.get(k) {
+                got_same.insert(k.clone(), val.clone());
+            }
         }
         let mut got_same = Value::Object(got_same);
         normalize(&mut want, &config);
@@ -598,4 +601,104 @@ async fn wf_slots_matches_t3wf_for_a_default_instance() {
 #[tokio::test(flavor = "multi_thread")]
 async fn wf_slots_matches_t3wf_for_an_instance_with_its_own_config_folder() {
     run_all(Instance::OwnFolder).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wf_renewal_matches_python_re_for_ascii_flag_and_character_classes() {
+    let cases: &[(&str, &str)] = &[
+        ("(?a)^token expired$", "token expired"),
+        ("(?a)^token expired$", "TOKEN EXPIRED"),
+        ("[(?a)X]", "a"),
+        ("[(?a)X]", "X"),
+        ("[(?a)X]", "("),
+        ("[(?a)X]", "z"),
+        (r"(?a)^\w+$", "token_1"),
+        (r"(?a)^\w+$", "café"),
+        (r"(?a)\W", "café"),
+        (r"(?a)\W", "abc_123"),
+        (r"(?a)\d+", "123"),
+        (r"(?a)\d+", "\u{0662}\u{0663}"),
+        (r"(?a)\D", "\u{0662}"),
+        (r"(?a)\s+", " \t\n"),
+        (r"(?a)\s+", "\u{00a0}"),
+        (r"(?a)\S", "\u{00a0}"),
+        (r"(?a)\btoken\b", "étoken!"),
+        (r"(?a)\Btoken", "étoken"),
+        (r"(?a)[\w]", "é"),
+        (r"(?a)[\w]", "a"),
+        (r"(?a)[\W]", "é"),
+        (r"(?ai)^TOKEN", "token expired"),
+        (r"(?ai)k", "\u{212a}"),
+        (r"(?ai)é", "é"),
+        (r"(?ai)é", "É"),
+        (r"(?ai)^\x6b$", "K"),
+        (r"(?ai)^\x6b$", "k"),
+        (r"(?ai)^\x6b$", "\u{212a}"),
+        (r"(?ai)^[a-\x7a]$", "A"),
+        (r"(?ai)^[a-\x7a]$", "z"),
+        (r"(?ai)^[a-\x7a]$", "_"),
+        (r"(?ai)^[a-\x7a]$", "["),
+        (r"(?ai)^[\x41-Z]$", "a"),
+        (r"(?ai)^[\x41-Z]$", "_"),
+        (r"(?ai)[a-z]", "\u{212a}"),
+        (r"(?ai)[a-z]", "K"),
+        (r"(?a)\w(?u:\w)", "aé"),
+        (r"(?a)\w(?u:\w)", "éa"),
+        (r"\\(?a:\w+)", r"\abc"),
+        (r"\\(?a:\w+)", r"\é"),
+        ("(?x) # (?a)\n\\w+", "é"),
+    ];
+    let py_input = serde_json::to_string(cases).unwrap();
+    let py_out = Command::new("python3")
+        .args([
+            "-c",
+            "import json, re, sys; print(json.dumps([bool(re.search(p, t)) for p, t in json.loads(sys.argv[1])]))",
+            &py_input,
+        ])
+        .output()
+        .expect("python3 runs re.search");
+    assert!(py_out.status.success(), "{}", String::from_utf8_lossy(&py_out.stderr));
+    let expected: Vec<bool> = serde_json::from_slice(&py_out.stdout).unwrap();
+
+    for ((pattern, output), want) in cases.iter().zip(expected) {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().to_path_buf();
+        let home = tmp.join("home");
+        let claude = home.join(".claude");
+        let fx = Fx {
+            tmp: tmp.clone(),
+            config: home.join(".config/t3-workflow/config.json"),
+            home,
+            claude,
+            repo: tmp.join("repo"),
+        };
+        std::fs::create_dir_all(&fx.repo).unwrap();
+        std::fs::create_dir_all(&fx.home).unwrap();
+        fx.skill(&fx.claude.join("skills"), "aws-sso-login");
+        fx.write_config(json!({"credentials": [{"match": pattern, "skill": "aws-sso-login"}]}));
+
+        let h = H::build(Vec::new(), Config::default());
+        h.app.wf.set_slot_folders(Folders::under(&fx.home, None));
+        let mut th = thread(CALLER, "running", common::T0);
+        th["providerInstanceId"] = json!("claudeAgent");
+        th["projectId"] = json!("proj:widgets");
+        h.fake.put(th);
+        h.fake.set_projects(vec![project("proj:widgets", &fx.repo.to_string_lossy())]);
+        h.fake.set_providers(claude_caps(false));
+        let code = format!("async () => wf.renewal({{ output: {} }})", serde_json::to_string(output).unwrap());
+        let out = h
+            .app
+            .execute(ExecuteRequest {
+                code,
+                session: None,
+                timeout_ms: None,
+                caller: Some(CALLER.into()),
+                reported: Reported { own: Some(String::new()), claude: None, codex: None },
+            })
+            .await;
+        assert!(!out.is_error, "pattern={pattern:?} output={output:?}: {}", out.text);
+        let v: Value = serde_json::from_str(&out.text).unwrap();
+        let got = !v["result"].is_null();
+        assert_eq!(got, want, "wf.renewal parity failed for pattern={pattern:?} output={output:?}");
+    }
 }

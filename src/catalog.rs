@@ -350,7 +350,7 @@ const SLOT_SKILL: &str = "{ ref: string; status: \"ok\" | \"ambiguous\" | \"miss
 const SLOT_MODEL: &str = "{ slot: string; source: string; spec: { model?: string; effort?: string; provider?: string; pool?: string } | null; note?: string | null; problem?: string; modelSelection: { instanceId: string; model: string; options?: { id: string; value: string }[] } | { pool: string; pick: string } | null }";
 
 fn slot_result() -> String {
-    "{ slot: string; source?: string; line: string; warnings: string[]; skill?: SlotSkill; note?: string; skills?: SlotSkill[]; renewals?: { match: string; skill: SlotSkill }[]; mode?: string; problem?: string; ticket?: SlotModel; worker?: SlotModel }"
+    "{ slot: string; source?: string; line: string; warnings: string[]; skill?: SlotSkill; note?: string; skills?: (SlotSkill)[]; renewals?: { match: string; skill: SlotSkill }[]; mode?: string; problem?: string; ticket?: SlotModel; worker?: SlotModel }"
         .replace("SlotSkill", SLOT_SKILL)
         .replace("SlotModel", SLOT_MODEL)
 }
@@ -483,5 +483,17 @@ impl Catalog {
             s.push('\n');
         }
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slot_result_parenthesizes_nullable_skill_array() {
+        let sig = slot_result();
+        assert!(!sig.contains("| null[]"), "{sig}");
+        assert!(sig.contains(&format!("skills?: ({SLOT_SKILL})[]")), "{sig}");
     }
 }

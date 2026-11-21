@@ -15,7 +15,7 @@ pub const DELIVERY_MODES: &[&str] = &["merge", "tag-deploy"];
 pub const MODEL_ROLES: &[&str] = &["ticket", "worker"];
 const DEFAULT_REVIEW: &str = "sol-loop";
 const DEFAULT_PROVIDER: &str = "claudeAgent";
-const DEFAULT_MODEL: &str = "claude-opus-5-5";
+pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 const DEFAULT_EFFORT: &str = "high";
 const REVIEW_SUGGESTION: &str = "sol-loop from https://github.com/t3dotgg/tstack";
 const POOL_NOTE: &str = "t3cm picks the instance at launch with wf.pick";
@@ -41,20 +41,484 @@ fn group<'t>(c: &fancy_regex::Captures<'t>, i: usize) -> &'t str {
     c.get(i).map_or("", |m| m.as_str())
 }
 
-static PY_ASCII_FLAG: LazyLock<Regex> = LazyLock::new(|| re(r"(?<!\\)\(\?([imsxu]*)a([imsxu]*)(-[imsx]+)?([:)])"));
+pub const EFFORT_OPTIONS: &[&str] = &["effort", "thinking_level", "reasoningEffort"];
 
-fn without_ascii_flag(pattern: &str) -> std::borrow::Cow<'_, str> {
-    PY_ASCII_FLAG.replace_all(pattern, |c: &fancy_regex::Captures| {
-        let on = format!("{}{}", group(c, 1), group(c, 2));
-        match (on.is_empty(), group(c, 3), group(c, 4)) {
-            (true, "", ")") => String::new(),
-            (_, off, end) => format!("(?{on}{off}{end}"),
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ReFlags {
+    ascii: bool,
+    icase: bool,
+    verbose: bool,
+}
+
+impl ReFlags {
+    fn engine_icase(self) -> bool {
+        self.icase && !self.ascii
+    }
+}
+
+struct ParsedFlags {
+    consumed: usize,
+    on: String,
+    off: String,
+    scoped: bool,
+}
+
+fn parse_inline_flags(chars: &[char]) -> Option<ParsedFlags> {
+    let mut i = 0;
+    let mut neg = false;
+    let mut on = String::new();
+    let mut off = String::new();
+    let mut has_a = false;
+    let mut has_u = false;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            ')' | ':' => {
+                let scoped = c == ':';
+                if has_a && has_u {
+                    return None;
+                }
+                if neg && off.is_empty() {
+                    return None;
+                }
+                if !scoped && on.is_empty() && off.is_empty() {
+                    return None;
+                }
+                return Some(ParsedFlags { consumed: i + 1, on, off, scoped });
+            }
+            '-' if !neg => neg = true,
+            'a' if !neg => {
+                has_a = true;
+                on.push(c);
+            }
+            'u' if !neg => {
+                has_u = true;
+                on.push(c);
+            }
+            'i' | 'm' | 's' | 'x' => {
+                if neg {
+                    off.push(c);
+                } else {
+                    on.push(c);
+                }
+            }
+            _ => return None,
         }
-    })
+        i += 1;
+    }
+    None
+}
+
+fn consume_escape(chars: &[char], idx: &mut usize, in_class: bool) -> String {
+    let mut out = String::new();
+    out.push(chars[*idx]);
+    *idx += 1;
+    let Some(&next) = chars.get(*idx) else { return out };
+    out.push(next);
+    *idx += 1;
+    match next {
+        'x' => {
+            if chars.get(*idx) == Some(&'{') {
+                while let Some(&c) = chars.get(*idx) {
+                    out.push(c);
+                    *idx += 1;
+                    if c == '}' {
+                        break;
+                    }
+                }
+            } else {
+                for _ in 0..2 {
+                    if let Some(&c) = chars.get(*idx).filter(|c| c.is_ascii_hexdigit()) {
+                        out.push(c);
+                        *idx += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        'u' => {
+            if chars.get(*idx) == Some(&'{') {
+                while let Some(&c) = chars.get(*idx) {
+                    out.push(c);
+                    *idx += 1;
+                    if c == '}' {
+                        break;
+                    }
+                }
+            } else {
+                for _ in 0..4 {
+                    if let Some(&c) = chars.get(*idx).filter(|c| c.is_ascii_hexdigit()) {
+                        out.push(c);
+                        *idx += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        'U' => {
+            for _ in 0..8 {
+                if let Some(&c) = chars.get(*idx).filter(|c| c.is_ascii_hexdigit()) {
+                    out.push(c);
+                    *idx += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        'N' | 'p' | 'P' if chars.get(*idx) == Some(&'{') => {
+            while let Some(&c) = chars.get(*idx) {
+                out.push(c);
+                *idx += 1;
+                if c == '}' {
+                    break;
+                }
+            }
+        }
+        'g' if !in_class && chars.get(*idx) == Some(&'<') => {
+            while let Some(&c) = chars.get(*idx) {
+                out.push(c);
+                *idx += 1;
+                if c == '>' {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+fn ascii_class_escape(next: char) -> Option<&'static str> {
+    match next {
+        'w' => Some("0-9A-Za-z_"),
+        'W' => Some(r"\x00-\x2f\x3a-\x40\x5b-\x5e\x60\x7b-\u{10ffff}"),
+        'd' => Some("0-9"),
+        'D' => Some(r"\x00-\x2f\x3a-\u{10ffff}"),
+        's' => Some(r"\x09-\x0d\x20"),
+        'S' => Some(r"\x00-\x08\x0e-\x1f\x21-\u{10ffff}"),
+        _ => None,
+    }
+}
+
+fn parse_escaped_char(esc: &str, in_class: bool) -> Option<char> {
+    let rest = esc.strip_prefix('\\')?;
+    let mut chars = rest.chars();
+    let first = chars.next()?;
+    let tail = chars.as_str();
+    match first {
+        'x' | 'u' => {
+            let hex = tail.strip_prefix('{').and_then(|s| s.strip_suffix('}')).unwrap_or(tail);
+            if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+        }
+        'U' if tail.len() == 8 && tail.chars().all(|c| c.is_ascii_hexdigit()) => {
+            u32::from_str_radix(tail, 16).ok().and_then(char::from_u32)
+        }
+        'n' => Some('\n'),
+        'r' => Some('\r'),
+        't' => Some('\t'),
+        'f' => Some('\x0c'),
+        'v' => Some('\x0b'),
+        'a' => Some('\x07'),
+        'b' if in_class => Some('\x08'),
+        c if tail.is_empty() && !c.is_ascii_alphanumeric() => Some(c),
+        _ => None,
+    }
+}
+
+enum ClassAtom {
+    Shorthand(&'static str),
+    Literal { raw: String, ch: Option<char> },
+}
+
+fn next_class_atom(chars: &[char], idx: &mut usize, flags: ReFlags) -> ClassAtom {
+    let c = chars[*idx];
+    if c == '\\' {
+        if flags.ascii
+            && let Some(&next) = chars.get(*idx + 1)
+            && let Some(expanded) = ascii_class_escape(next)
+        {
+            *idx += 2;
+            return ClassAtom::Shorthand(expanded);
+        }
+        let raw = consume_escape(chars, idx, true);
+        let ch = parse_escaped_char(&raw, true);
+        ClassAtom::Literal { raw, ch }
+    } else {
+        *idx += 1;
+        ClassAtom::Literal { raw: c.to_string(), ch: Some(c) }
+    }
+}
+
+fn translate_class(chars: &[char], idx: &mut usize, flags: ReFlags, out: &mut String) {
+    out.push('[');
+    *idx += 1;
+    if chars.get(*idx) == Some(&'^') {
+        out.push('^');
+        *idx += 1;
+    }
+    if chars.get(*idx) == Some(&']') {
+        out.push(']');
+        *idx += 1;
+    }
+    while *idx < chars.len() {
+        if chars[*idx] == ']' {
+            out.push(']');
+            *idx += 1;
+            break;
+        }
+        let first = next_class_atom(chars, idx, flags);
+        match first {
+            ClassAtom::Shorthand(expanded) => {
+                out.push_str(expanded);
+                if chars.get(*idx) == Some(&'-') && chars.get(*idx + 1).is_some_and(|&n| n != ']') {
+                    out.push_str(r"\-");
+                    *idx += 1;
+                }
+            }
+            ClassAtom::Literal { raw: lo_raw, ch: lo_ch } => {
+                if flags.ascii && flags.icase {
+                    if let Some(lo) = lo_ch
+                        && chars.get(*idx) == Some(&'-')
+                        && chars.get(*idx + 1).is_some_and(|&n| n != ']')
+                    {
+                        let dash_idx = *idx;
+                        *idx += 1;
+                        if let ClassAtom::Literal { raw: hi_raw, ch: Some(hi) } = next_class_atom(chars, idx, flags) {
+                            out.push_str(&lo_raw);
+                            out.push('-');
+                            out.push_str(&hi_raw);
+                            if lo <= hi {
+                                let (l0, l1) = (lo.max('a'), hi.min('z'));
+                                if l0 <= l1 {
+                                    out.push(l0.to_ascii_uppercase());
+                                    out.push('-');
+                                    out.push(l1.to_ascii_uppercase());
+                                }
+                                let (u0, u1) = (lo.max('A'), hi.min('Z'));
+                                if u0 <= u1 {
+                                    out.push(u0.to_ascii_lowercase());
+                                    out.push('-');
+                                    out.push(u1.to_ascii_lowercase());
+                                }
+                            }
+                            continue;
+                        }
+                        *idx = dash_idx;
+                    }
+                    if let Some(ch) = lo_ch.filter(char::is_ascii_alphabetic) {
+                        out.push(ch.to_ascii_lowercase());
+                        out.push(ch.to_ascii_uppercase());
+                        continue;
+                    }
+                }
+                out.push_str(&lo_raw);
+            }
+        }
+    }
+}
+
+fn translate_python_ascii(pattern: &str) -> std::borrow::Cow<'_, str> {
+    if !pattern.contains("(?") {
+        return std::borrow::Cow::Borrowed(pattern);
+    }
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = String::with_capacity(pattern.len());
+    let mut stack: Vec<ReFlags> = Vec::new();
+    let mut flags = ReFlags::default();
+    let mut idx = 0;
+    while idx < chars.len() {
+        let c = chars[idx];
+        if flags.verbose && c == '#' {
+            while idx < chars.len() {
+                let ch = chars[idx];
+                out.push(ch);
+                idx += 1;
+                if ch == '\n' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if c == '\\' {
+            if flags.ascii
+                && let Some(&next) = chars.get(idx + 1)
+            {
+                let replacement = match next {
+                    'w' => Some("[0-9A-Za-z_]"),
+                    'W' => Some("[^0-9A-Za-z_]"),
+                    'd' => Some("[0-9]"),
+                    'D' => Some("[^0-9]"),
+                    's' => Some(r"[\x09-\x0d\x20]"),
+                    'S' => Some(r"[^\x09-\x0d\x20]"),
+                    'b' => Some("(?:(?<=[0-9A-Za-z_])(?![0-9A-Za-z_])|(?<![0-9A-Za-z_])(?=[0-9A-Za-z_]))"),
+                    'B' => Some("(?:(?<=[0-9A-Za-z_])(?=[0-9A-Za-z_])|(?<![0-9A-Za-z_])(?![0-9A-Za-z_]))"),
+                    _ => None,
+                };
+                if let Some(r) = replacement {
+                    out.push_str(r);
+                    idx += 2;
+                    continue;
+                }
+            }
+            let esc = consume_escape(&chars, &mut idx, false);
+            if flags.ascii
+                && flags.icase
+                && let Some(ch) = parse_escaped_char(&esc, false).filter(char::is_ascii_alphabetic)
+            {
+                out.push('[');
+                out.push(ch.to_ascii_lowercase());
+                out.push(ch.to_ascii_uppercase());
+                out.push(']');
+            } else {
+                out.push_str(&esc);
+            }
+            continue;
+        }
+        if c == '[' {
+            translate_class(&chars, &mut idx, flags, &mut out);
+            continue;
+        }
+        if c == '(' {
+            if chars.get(idx + 1) == Some(&'?') {
+                if chars.get(idx + 2) == Some(&'#') {
+                    while idx < chars.len() {
+                        let ch = chars[idx];
+                        out.push(ch);
+                        idx += 1;
+                        if ch == ')' {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if let Some(parsed) = parse_inline_flags(&chars[idx + 2..]) {
+                    let old = flags;
+                    let mut new = flags;
+                    for f in parsed.on.chars() {
+                        match f {
+                            'a' => new.ascii = true,
+                            'u' => new.ascii = false,
+                            'i' => new.icase = true,
+                            'x' => new.verbose = true,
+                            _ => {}
+                        }
+                    }
+                    for f in parsed.off.chars() {
+                        match f {
+                            'i' => new.icase = false,
+                            'x' => new.verbose = false,
+                            _ => {}
+                        }
+                    }
+                    if !old.ascii && !new.ascii {
+                        for &ch in &chars[idx..idx + 2 + parsed.consumed] {
+                            out.push(ch);
+                        }
+                    } else {
+                        let mut em_on: String = parsed.on.chars().filter(|&f| !matches!(f, 'a' | 'i')).collect();
+                        let mut em_off: String = parsed.off.chars().filter(|&f| f != 'i').collect();
+                        if new.engine_icase() && !old.engine_icase() {
+                            em_on.push('i');
+                        } else if !new.engine_icase() && old.engine_icase() {
+                            em_off.push('i');
+                        }
+                        if parsed.scoped {
+                            out.push_str("(?");
+                            out.push_str(&em_on);
+                            if !em_off.is_empty() {
+                                out.push('-');
+                                out.push_str(&em_off);
+                            }
+                            out.push(':');
+                        } else if !em_on.is_empty() || !em_off.is_empty() {
+                            out.push_str("(?");
+                            out.push_str(&em_on);
+                            if !em_off.is_empty() {
+                                out.push('-');
+                                out.push_str(&em_off);
+                            }
+                            out.push(')');
+                        }
+                    }
+                    if parsed.scoped {
+                        stack.push(old);
+                    }
+                    flags = new;
+                    idx += 2 + parsed.consumed;
+                    continue;
+                }
+                if chars.get(idx + 2) == Some(&'P') && chars.get(idx + 3) == Some(&'=') {
+                    while idx < chars.len() {
+                        let ch = chars[idx];
+                        out.push(ch);
+                        idx += 1;
+                        if ch == ')' {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                let is_named = (chars.get(idx + 2) == Some(&'P') && chars.get(idx + 3) == Some(&'<'))
+                    || (chars.get(idx + 2) == Some(&'<') && !matches!(chars.get(idx + 3), Some('=' | '!')));
+                stack.push(flags);
+                if is_named {
+                    while idx < chars.len() {
+                        let ch = chars[idx];
+                        out.push(ch);
+                        idx += 1;
+                        if ch == '>' {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push('(');
+                    out.push('?');
+                    idx += 2;
+                    if matches!(chars.get(idx), Some('=' | '!' | '>')) {
+                        out.push(chars[idx]);
+                        idx += 1;
+                    } else if chars.get(idx) == Some(&'<') && matches!(chars.get(idx + 1), Some('=' | '!')) {
+                        out.push('<');
+                        out.push(chars[idx + 1]);
+                        idx += 2;
+                    }
+                }
+                continue;
+            }
+            stack.push(flags);
+            out.push('(');
+            idx += 1;
+            continue;
+        }
+        if c == ')' {
+            if let Some(prev) = stack.pop() {
+                flags = prev;
+            }
+            out.push(')');
+            idx += 1;
+            continue;
+        }
+        if flags.ascii && flags.icase && c.is_ascii_alphabetic() {
+            out.push('[');
+            out.push(c.to_ascii_lowercase());
+            out.push(c.to_ascii_uppercase());
+            out.push(']');
+            idx += 1;
+            continue;
+        }
+        out.push(c);
+        idx += 1;
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 pub fn compile(pattern: &str) -> std::result::Result<Regex, String> {
-    Regex::new(&without_ascii_flag(pattern)).map_err(|e| e.to_string())
+    Regex::new(&translate_python_ascii(pattern)).map_err(|e| e.to_string())
 }
 
 pub fn search(pattern: &str, text: &str) -> std::result::Result<bool, String> {
@@ -306,17 +770,21 @@ pub fn validate_config(cfg: &Map<String, Value>, at: &str) -> Vec<String> {
     problems
 }
 
+pub fn parse_user_config(path: &Path, raw: &[u8]) -> std::result::Result<Map<String, Value>, String> {
+    match serde_json::from_slice::<Value>(raw) {
+        Ok(Value::Object(m)) => Ok(m),
+        Ok(_) => Err(format!("{}: the top level must be a JSON object", path.display())),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
 pub fn load_user_config(path: &Path) -> std::result::Result<Map<String, Value>, String> {
     let raw = match std::fs::read(path) {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    match serde_json::from_slice::<Value>(&raw) {
-        Ok(Value::Object(m)) => Ok(m),
-        Ok(_) => Err(format!("{}: the top level must be a JSON object", path.display())),
-        Err(e) => Err(format!("{}: {e}", path.display())),
-    }
+    parse_user_config(path, &raw)
 }
 
 fn split_lines(text: &str) -> Vec<&str> {
@@ -466,15 +934,16 @@ pub fn parse_agent_workflow(text: &str) -> (Map<String, Value>, Vec<String>) {
 }
 
 pub fn repo_override(root: &Path) -> (Map<String, Value>, Vec<String>) {
-    match std::fs::read(root.join("AGENTS.md")) {
+    let path = root.join("AGENTS.md");
+    match std::fs::read(&path) {
         Ok(raw) => parse_agent_workflow(&String::from_utf8_lossy(&raw)),
-        Err(_) => (Map::new(), Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Map::new(), Vec::new()),
+        Err(e) => (Map::new(), vec![format!("{}: {e}", path.display())]),
     }
 }
 
-fn frontmatter(path: &Path) -> HashMap<String, String> {
-    let Ok(raw) = std::fs::read(path) else { return HashMap::new() };
-    let all = String::from_utf8_lossy(&raw);
+fn frontmatter_from_bytes(raw: &[u8]) -> HashMap<String, String> {
+    let all = String::from_utf8_lossy(raw);
     let head: String = all.chars().take(8192).collect();
     let Some(m) = captures(&FRONTMATTER, &head) else { return HashMap::new() };
     let mut meta = HashMap::new();
@@ -484,6 +953,11 @@ fn frontmatter(path: &Path) -> HashMap<String, String> {
         }
     }
     meta
+}
+
+fn frontmatter(path: &Path) -> HashMap<String, String> {
+    let Ok(raw) = std::fs::read(path) else { return HashMap::new() };
+    frontmatter_from_bytes(&raw)
 }
 
 fn is_inline(meta: &HashMap<String, String>) -> bool {
@@ -553,15 +1027,10 @@ pub fn realpath(p: &Path) -> PathBuf {
 pub struct Enabled(Option<HashMap<String, bool>>);
 
 impl Enabled {
-    pub fn load(claude: &Path, root: &Path) -> Enabled {
+    fn from_raw_files(raws: &[Option<&[u8]>]) -> Enabled {
         let mut merged: Option<HashMap<String, bool>> = None;
-        for p in [
-            claude.join("settings.json"),
-            root.join(".claude").join("settings.json"),
-            root.join(".claude").join("settings.local.json"),
-        ] {
-            let Ok(raw) = std::fs::read(&p) else { continue };
-            let Ok(v) = serde_json::from_slice::<Value>(&raw) else { continue };
+        for raw in raws.iter().flatten() {
+            let Ok(v) = serde_json::from_slice::<Value>(raw) else { continue };
             if let Some(m) = v.get("enabledPlugins").and_then(Value::as_object) {
                 let into = merged.get_or_insert_with(HashMap::new);
                 for (k, v) in m {
@@ -570,6 +1039,17 @@ impl Enabled {
             }
         }
         Enabled(merged)
+    }
+
+    pub fn load(claude: &Path, root: &Path) -> Enabled {
+        let paths = [
+            claude.join("settings.json"),
+            root.join(".claude").join("settings.json"),
+            root.join(".claude").join("settings.local.json"),
+        ];
+        let bufs: Vec<Option<Vec<u8>>> = paths.iter().map(|p| std::fs::read(p).ok()).collect();
+        let refs: Vec<Option<&[u8]>> = bufs.iter().map(|b| b.as_deref()).collect();
+        Enabled::from_raw_files(&refs)
     }
 
     pub fn all() -> Enabled {
@@ -587,9 +1067,8 @@ impl Enabled {
     }
 }
 
-fn installed_plugin_roots(claude: &Path, root: &Path) -> Option<Vec<(String, String, PathBuf)>> {
-    let raw = std::fs::read(claude.join("plugins").join("installed_plugins.json")).ok()?;
-    let v: Value = serde_json::from_slice(&raw).ok()?;
+fn installed_plugin_roots_from_bytes(raw: &[u8], root: &Path) -> Option<Vec<(String, String, PathBuf)>> {
+    let v: Value = serde_json::from_slice(raw).ok()?;
     let top = v.as_object()?;
     let Some(installed) = top.get("plugins") else { return Some(Vec::new()) };
     let installed = installed.as_object()?;
@@ -602,18 +1081,48 @@ fn installed_plugin_roots(claude: &Path, root: &Path) -> Option<Vec<(String, Str
             other => vec![other.clone()],
         };
         for e in list {
-            let e = e.as_object()?;
-            if let Some(scoped) = e.get("projectPath").filter(|s| truthy(s))
-                && realpath(Path::new(scoped.as_str()?)) != want
-            {
+            let Some(e) = e.as_object() else {
+                tracing::warn!("skipping malformed plugin record for {key} in installed_plugins.json");
                 continue;
+            };
+            let project_scoped = matches!(e.get("scope").and_then(Value::as_str), Some("project" | "local"));
+            match e.get("projectPath") {
+                None | Some(Value::Null) => {
+                    if project_scoped {
+                        tracing::warn!("skipping project-scoped plugin record for {key} with missing projectPath");
+                        continue;
+                    }
+                }
+                Some(Value::String(s)) if s.is_empty() => {
+                    if project_scoped {
+                        tracing::warn!("skipping project-scoped plugin record for {key} with empty projectPath");
+                        continue;
+                    }
+                }
+                Some(Value::String(scoped)) => {
+                    if realpath(Path::new(scoped)) != want {
+                        continue;
+                    }
+                }
+                Some(_) => {
+                    tracing::warn!("skipping plugin record for {key} with non-string projectPath");
+                    continue;
+                }
             }
-            if let Some(ip) = e.get("installPath").filter(|s| truthy(s)) {
-                roots.push((name.clone(), key.clone(), Path::new(ip.as_str()?).join("skills")));
+            match e.get("installPath") {
+                None | Some(Value::Null) => {}
+                Some(Value::String(s)) if s.is_empty() => {}
+                Some(Value::String(ip)) => roots.push((name.clone(), key.clone(), Path::new(ip).join("skills"))),
+                Some(_) => tracing::warn!("skipping plugin record for {key} with non-string installPath"),
             }
         }
     }
     Some(roots)
+}
+
+fn installed_plugin_roots(claude: &Path, root: &Path) -> Option<Vec<(String, String, PathBuf)>> {
+    let raw = std::fs::read(claude.join("plugins").join("installed_plugins.json")).ok()?;
+    installed_plugin_roots_from_bytes(&raw, root)
 }
 
 fn truthy(v: &Value) -> bool {
@@ -627,6 +1136,16 @@ fn truthy(v: &Value) -> bool {
     }
 }
 
+fn claude_plugin_roots_with(
+    claude: &Path,
+    root: &Path,
+    installed_raw: Option<&[u8]>,
+) -> Vec<(String, String, PathBuf)> {
+    installed_raw
+        .and_then(|raw| installed_plugin_roots_from_bytes(raw, root))
+        .unwrap_or_else(|| newest_cached(&claude.join("plugins").join("cache")))
+}
+
 fn claude_plugin_roots(claude: &Path, root: &Path) -> Vec<(String, String, PathBuf)> {
     installed_plugin_roots(claude, root).unwrap_or_else(|| newest_cached(&claude.join("plugins").join("cache")))
 }
@@ -636,6 +1155,23 @@ pub struct SearchRoot {
     pub label: String,
     pub namespace: Option<String>,
     pub dir: PathBuf,
+}
+
+fn search_roots_with(f: &Folders, root: &Path, enabled: &Enabled, installed_raw: Option<&[u8]>) -> Vec<SearchRoot> {
+    let plain = |label: &str, dir: PathBuf| SearchRoot { label: label.into(), namespace: None, dir };
+    let mut roots = vec![
+        plain("~/.claude/skills", f.claude.join("skills")),
+        plain("~/.agents/skills", f.home.join(".agents").join("skills")),
+        plain("project .claude/skills", root.join(".claude").join("skills")),
+        plain("~/.codex/skills", f.codex.join("skills")),
+    ];
+    let claude =
+        claude_plugin_roots_with(&f.claude, root, installed_raw).into_iter().filter(|(_, key, _)| enabled.allows(key));
+    let codex = newest_cached(&f.codex.join("plugins").join("cache"));
+    for (plugin, _, dir) in claude.chain(codex) {
+        roots.push(SearchRoot { label: "plugin cache".into(), namespace: Some(plugin), dir });
+    }
+    roots
 }
 
 pub fn search_roots(f: &Folders, root: &Path, enabled: &Enabled) -> Vec<SearchRoot> {
@@ -719,9 +1255,13 @@ pub struct Resolver {
 
 impl Resolver {
     pub fn new(roots: &[SearchRoot], listed: &[String]) -> Resolver {
+        Resolver::from_disk(installed_skills(roots), listed)
+    }
+
+    pub fn from_disk(disk: Vec<Skill>, listed: &[String]) -> Resolver {
         let listed =
             listed.iter().map(|s| s.trim().trim_start_matches('/').to_string()).filter(|s| !s.is_empty()).collect();
-        Resolver { listed, disk: installed_skills(roots) }
+        Resolver { listed, disk }
     }
 
     pub fn candidates(&self, reference: &str) -> Vec<Skill> {
@@ -885,13 +1425,23 @@ fn merged(user: &Map<String, Value>, block: &Map<String, Value>) -> Eff {
 
 impl Resolved {
     pub fn build(i: &Inputs) -> Resolved {
-        let config_file = &i.folders.config;
-        let config_exists = config_file.exists();
+        Snapshot::capture_with(i.folders, i.root, i.listed, Some(i.enabled)).build()
+    }
+
+    fn build_from_snapshot(s: &Snapshot) -> Resolved {
+        let config_file = &s.folders.config;
         let mut config_problems = Vec::new();
-        let mut user = match load_user_config(config_file) {
-            Ok(c) => c,
+        let mut user = match &s.config_raw {
+            Ok(Some(raw)) => match parse_user_config(config_file, raw) {
+                Ok(c) => c,
+                Err(e) => {
+                    config_problems.push(e);
+                    Map::new()
+                }
+            },
+            Ok(None) => Map::new(),
             Err(e) => {
-                config_problems.push(e);
+                config_problems.push(e.clone());
                 Map::new()
             }
         };
@@ -902,9 +1452,13 @@ impl Resolved {
         if !config_problems.is_empty() {
             user = Map::new();
         }
-        let (block, repo_problems) = repo_override(i.root);
+        let (block, repo_problems) = match &s.agents_md_raw {
+            Ok(Some(raw)) => parse_agent_workflow(&String::from_utf8_lossy(raw)),
+            Ok(None) => (Map::new(), Vec::new()),
+            Err(e) => (Map::new(), vec![e.clone()]),
+        };
         let eff = merged(&user, &block);
-        let resolver = Resolver::new(&search_roots(i.folders, i.root, i.enabled), i.listed);
+        let resolver = Resolver::from_disk(s.skills.clone(), &s.listed);
         let review = if !eff.review_set {
             let hit = resolver.resolve(DEFAULT_REVIEW);
             if hit["status"] == "missing" {
@@ -939,8 +1493,8 @@ impl Resolved {
             eff.models.into_iter().map(|(role, (spec, source))| ModelSlot { role, spec, source }).collect();
         models.sort_by_key(|m| MODEL_ROLES.iter().position(|r| *r == m.role));
         Resolved {
-            repo: text(i.root),
-            config: config_exists.then(|| text(config_file)),
+            repo: text(&s.root),
+            config: s.config_exists.then(|| text(config_file)),
             review,
             passes,
             credentials,
@@ -1051,9 +1605,37 @@ pub fn model_offers(caps: &Value, model: &str, provider: Option<&str>) -> Vec<(S
     offers
 }
 
+pub fn merge_caps(base: &mut Value, extra: &Value) {
+    let Some(extra_providers) = extra["providers"].as_array() else { return };
+    if !base["providers"].is_array() {
+        base["providers"] = json!([]);
+    }
+    let Some(base_providers) = base["providers"].as_array_mut() else { return };
+    for ep in extra_providers {
+        let Some(pid) = ep["providerInstanceId"].as_str() else { continue };
+        match base_providers.iter_mut().find(|bp| bp["providerInstanceId"].as_str() == Some(pid)) {
+            Some(bp) => {
+                let extra_models = ep["models"].as_array().into_iter().flatten();
+                if !bp["models"].is_array() {
+                    bp["models"] = json!([]);
+                }
+                if let Some(bm) = bp["models"].as_array_mut() {
+                    for em in extra_models {
+                        let id = em["id"].as_str();
+                        if !bm.iter().any(|m| m["id"].as_str() == id) {
+                            bm.push(em.clone());
+                        }
+                    }
+                }
+            }
+            None => base_providers.push(ep.clone()),
+        }
+    }
+}
+
 fn effort_values(entry: &Value) -> Option<Vec<String>> {
     for o in entry["options"].as_array().into_iter().flatten() {
-        if matches!(o["id"].as_str(), Some("effort" | "thinking_level")) {
+        if o["id"].as_str().is_some_and(|i| EFFORT_OPTIONS.contains(&i)) {
             return Some(
                 o["values"]
                     .as_array()
@@ -1085,17 +1667,62 @@ fn check_model(spec: &Map<String, Value>, caps: &Value) -> Option<String> {
     None
 }
 
+fn default_model_spec() -> Map<String, Value> {
+    [
+        ("provider".to_string(), json!(DEFAULT_PROVIDER)),
+        ("model".to_string(), json!(DEFAULT_MODEL)),
+        ("effort".to_string(), json!(DEFAULT_EFFORT)),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn check_default_model(caps: &Value) -> Option<String> {
+    let offers = model_offers(caps, DEFAULT_MODEL, Some(DEFAULT_PROVIDER));
+    if offers.is_empty() {
+        return Some(format!("T3 offers no enabled provider with model {DEFAULT_MODEL} on {DEFAULT_PROVIDER}"));
+    }
+    let allowed: Vec<Option<Vec<String>>> = offers.iter().map(|(_, m)| effort_values(m)).collect();
+    if allowed.iter().any(|a| a.as_ref().is_some_and(|v| v.iter().any(|x| x == DEFAULT_EFFORT))) {
+        return None;
+    }
+    match allowed.iter().flatten().next() {
+        Some(first) => Some(format!(
+            "effort {DEFAULT_EFFORT} is not offered for {DEFAULT_MODEL} on {DEFAULT_PROVIDER} ({})",
+            first.join(", ")
+        )),
+        None => Some(format!(
+            "effort {DEFAULT_EFFORT} is not offered for {DEFAULT_MODEL} on {DEFAULT_PROVIDER} (no effort options)"
+        )),
+    }
+}
+
+pub fn model_needs_search(spec: &Map<String, Value>, caps: &Value) -> bool {
+    check_model(spec, caps).is_some()
+}
+
+pub fn default_model_needs_search(caps: &Value) -> bool {
+    check_default_model(caps).is_some()
+}
+
 fn model_entry(m: &ModelSlot, caps: &Caps) -> Value {
     let slot = format!("model.{}", m.role);
     let Some(spec) = &m.spec else {
-        let (spec, note) = match caps.get() {
-            None => (Value::Null, Value::String(format!("{}, so Claude is unconfirmed", caps.why()))),
-            Some(c) if !model_offers(c, DEFAULT_MODEL, Some(DEFAULT_PROVIDER)).is_empty() => {
-                (json!({"provider": DEFAULT_PROVIDER, "model": DEFAULT_MODEL, "effort": DEFAULT_EFFORT}), Value::Null)
+        let mut out = json!({"slot": slot, "source": "default", "spec": Value::Null, "note": Value::Null});
+        match caps.get() {
+            None => out["note"] = Value::String(format!("{}, so Claude is unconfirmed", caps.why())),
+            Some(c) => {
+                if model_offers(c, DEFAULT_MODEL, Some(DEFAULT_PROVIDER)).is_empty() {
+                    out["note"] = json!("T3 offers no Claude");
+                } else {
+                    match check_default_model(c) {
+                        None => out["spec"] = Value::Object(default_model_spec()),
+                        Some(problem) => out["problem"] = json!(problem),
+                    }
+                }
             }
-            Some(_) => (Value::Null, json!("T3 offers no Claude")),
-        };
-        return json!({"slot": slot, "source": "default", "spec": spec, "note": note});
+        }
+        return out;
     };
     let mut out = json!({"slot": slot, "source": m.source, "spec": spec});
     if spec.contains_key("pool") {
@@ -1322,15 +1949,28 @@ pub fn renewal(r: &Resolved, output: &str) -> (Value, Vec<String>) {
     (Value::Null, warnings)
 }
 
-fn stamp_contents(h: &mut Sha256, p: &Path) {
+fn stamp_bytes(h: &mut Sha256, p: &Path, read: &std::result::Result<Option<Vec<u8>>, String>) {
     h.update(text(p).as_bytes());
-    match std::fs::read(p) {
-        Ok(raw) => {
+    match read {
+        Ok(Some(raw)) => {
             h.update(b"|");
-            h.update(Sha256::digest(&raw));
+            h.update(Sha256::digest(raw));
             h.update(b"\n");
         }
-        Err(_) => h.update(b"|missing\n"),
+        Ok(None) => h.update(b"|missing\n"),
+        Err(e) => {
+            h.update(b"|err:");
+            h.update(e.as_bytes());
+            h.update(b"\n");
+        }
+    }
+}
+
+fn read_optional(p: &Path) -> std::result::Result<Option<Vec<u8>>, String> {
+    match std::fs::read(p) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", p.display())),
     }
 }
 
@@ -1346,34 +1986,145 @@ fn stamp(h: &mut Sha256, p: &Path) {
     }
 }
 
-pub fn fingerprint(i: &Inputs) -> String {
-    let mut h = Sha256::new();
-    h.update(env!("CARGO_PKG_VERSION").as_bytes());
-    for s in i.listed {
-        h.update(s.as_bytes());
-        h.update(b",");
+fn read_skill_file(p: &Path) -> Option<(std::fs::Metadata, Vec<u8>)> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(p).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
     }
-    let f = i.folders;
-    for p in [
-        f.config.clone(),
-        i.root.join("AGENTS.md"),
-        f.claude.join("plugins").join("installed_plugins.json"),
-        f.claude.join("settings.json"),
-        i.root.join(".claude").join("settings.json"),
-        i.root.join(".claude").join("settings.local.json"),
-        f.manifest(),
-    ] {
-        stamp_contents(&mut h, &p);
+    let mut raw = Vec::new();
+    file.read_to_end(&mut raw).ok()?;
+    Some((meta, raw))
+}
+
+pub struct Snapshot {
+    pub fingerprint: String,
+    folders: Folders,
+    root: PathBuf,
+    listed: Vec<String>,
+    config_exists: bool,
+    config_raw: std::result::Result<Option<Vec<u8>>, String>,
+    agents_md_raw: std::result::Result<Option<Vec<u8>>, String>,
+    skills: Vec<Skill>,
+}
+
+impl Snapshot {
+    pub fn capture(folders: &Folders, root: &Path, listed: &[String]) -> Snapshot {
+        Snapshot::capture_with(folders, root, listed, None)
     }
-    for r in search_roots(f, i.root, i.enabled) {
-        stamp(&mut h, &r.dir);
-        for n in sorted_names(&r.dir) {
-            let skill = r.dir.join(&n).join("SKILL.md");
-            stamp(&mut h, &skill);
-            stamp_contents(&mut h, &skill);
+
+    pub fn capture_with(
+        folders: &Folders,
+        root: &Path,
+        listed: &[String],
+        enabled_override: Option<&Enabled>,
+    ) -> Snapshot {
+        let mut h = Sha256::new();
+        h.update(env!("CARGO_PKG_VERSION").as_bytes());
+        for s in listed {
+            h.update(s.as_bytes());
+            h.update(b",");
+        }
+        let config_raw = read_optional(&folders.config);
+        let config_exists = !matches!(config_raw, Ok(None));
+        stamp_bytes(&mut h, &folders.config, &config_raw);
+
+        let agents_path = root.join("AGENTS.md");
+        let agents_md_raw = read_optional(&agents_path);
+        stamp_bytes(&mut h, &agents_path, &agents_md_raw);
+
+        let installed_path = folders.claude.join("plugins").join("installed_plugins.json");
+        let installed_raw = read_optional(&installed_path);
+        stamp_bytes(&mut h, &installed_path, &installed_raw);
+
+        let settings_paths = [
+            folders.claude.join("settings.json"),
+            root.join(".claude").join("settings.json"),
+            root.join(".claude").join("settings.local.json"),
+        ];
+        let mut settings_bufs = Vec::with_capacity(settings_paths.len());
+        for p in &settings_paths {
+            let r = read_optional(p);
+            stamp_bytes(&mut h, p, &r);
+            settings_bufs.push(r.ok().flatten());
+        }
+        let manifest_path = folders.manifest();
+        let manifest_raw = read_optional(&manifest_path);
+        stamp_bytes(&mut h, &manifest_path, &manifest_raw);
+
+        let owned_enabled;
+        let enabled = match enabled_override {
+            Some(e) => e,
+            None => {
+                let refs: Vec<Option<&[u8]>> = settings_bufs.iter().map(|b| b.as_deref()).collect();
+                owned_enabled = Enabled::from_raw_files(&refs);
+                &owned_enabled
+            }
+        };
+        let installed_bytes = installed_raw.as_ref().ok().and_then(|o| o.as_deref());
+        let roots = search_roots_with(folders, root, enabled, installed_bytes);
+
+        let mut seen = HashSet::new();
+        let mut skills = Vec::new();
+        for r in &roots {
+            h.update(r.label.as_bytes());
+            h.update(b"|");
+            h.update(r.namespace.as_deref().unwrap_or_default().as_bytes());
+            h.update(b"|");
+            stamp(&mut h, &r.dir);
+            for n in sorted_names(&r.dir) {
+                let path = r.dir.join(&n).join("SKILL.md");
+                let real = realpath(&path);
+                h.update(text(&path).as_bytes());
+                h.update(text(&real).as_bytes());
+                match read_skill_file(&path) {
+                    Some((m, raw)) => {
+                        let mtime = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok());
+                        h.update(format!("|{}|{}|{:?}|", m.is_dir(), m.len(), mtime).as_bytes());
+                        h.update(Sha256::digest(&raw));
+                        h.update(b"\n");
+                        let meta = frontmatter_from_bytes(&raw);
+                        let bare = meta.get("name").filter(|x| !x.is_empty()).cloned().unwrap_or_else(|| n.clone());
+                        let name = match &r.namespace {
+                            Some(ns) => format!("{ns}:{bare}"),
+                            None => bare.clone(),
+                        };
+                        if seen.insert((real, name.clone())) {
+                            skills.push(Skill {
+                                name,
+                                bare,
+                                dir: Some(n),
+                                path: Some(text(&path)),
+                                inline: is_inline(&meta),
+                                at: r.label.clone(),
+                            });
+                        }
+                    }
+                    None => h.update(b"|missing\n"),
+                }
+            }
+        }
+        let fingerprint = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        Snapshot {
+            fingerprint,
+            folders: folders.clone(),
+            root: root.to_path_buf(),
+            listed: listed.to_vec(),
+            config_exists,
+            config_raw,
+            agents_md_raw,
+            skills,
         }
     }
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+
+    pub fn build(&self) -> Resolved {
+        Resolved::build_from_snapshot(self)
+    }
+}
+
+pub fn fingerprint(i: &Inputs) -> String {
+    Snapshot::capture_with(i.folders, i.root, i.listed, Some(i.enabled)).fingerprint
 }
 
 pub fn git_root(start: &Path) -> PathBuf {
@@ -1387,7 +2138,7 @@ pub fn git_root(start: &Path) -> PathBuf {
         .output();
     match out {
         Ok(o) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let s = String::from_utf8_lossy(&o.stdout).trim_end_matches(['\r', '\n']).to_string();
             if s.is_empty() { start } else { PathBuf::from(s) }
         }
         _ => start,
@@ -1443,5 +2194,66 @@ mod tests {
         assert!(search("(?a)^token expired$", "token expired").unwrap());
         assert!(search("(?ai)^TOKEN", "token").unwrap());
         assert!(search("(?a:x)y", "xy").unwrap());
+        assert!(search("[(?a)X]", "a").unwrap());
+        assert!(search("[(?a)X]", "(").unwrap());
+        assert!(search("[(?a)X]", "X").unwrap());
+        assert!(!search("(?a)^\\w+$", "café").unwrap());
+        assert!(search("(?a)^\\w+$", "cafe_1").unwrap());
+        assert!(search("(?a)\\W", "é").unwrap());
+        assert!(!search("(?a)\\d", "\u{0662}").unwrap());
+        assert!(search("(?a)\\D", "\u{0662}").unwrap());
+        assert!(!search("(?a)\\s", "\u{00a0}").unwrap());
+        assert!(search("(?a)\\S", "\u{00a0}").unwrap());
+        assert!(search("(?a)\\ba", "éa").unwrap());
+        assert!(!search("(?a)\\Ba", "éa").unwrap());
+        assert!(!search("(?ai)k", "\u{212a}").unwrap());
+        assert!(!search("(?ai)é", "É").unwrap());
+        assert!(!search("(?a)[\\w]", "é").unwrap());
+        assert!(search("(?a)[\\W]", "é").unwrap());
+        assert!(search(r"\\(?a:\w)", r"\a").unwrap());
+        assert!(!search(r"\\(?a:\w)", r"\é").unwrap());
+        assert!(search("(?x) # (?a)\n\\w", "é").unwrap());
+        assert!(search("(?a)\\w(?u:\\w)", "aé").unwrap());
+        assert!(!search("(?a)\\w(?u:\\w)", "éa").unwrap());
+        assert!(compile("(?au)x").is_err());
+        assert!(compile("(?-a:x)").is_err());
+    }
+
+    #[test]
+    fn snapshot_resolves_the_exact_bytes_it_fingerprinted() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let skill_dir = home.join(".claude/skills/pr");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let md = skill_dir.join("SKILL.md");
+        std::fs::write(&md, "---\nname: pr\ndescription: test\n---\n\nBody.\n").unwrap();
+        let folders = Folders::under(&home, None);
+        std::fs::create_dir_all(folders.config.parent().unwrap()).unwrap();
+        std::fs::write(&folders.config, json!({"passes": ["pr"]}).to_string()).unwrap();
+
+        let snap = Snapshot::capture(&folders, &repo, &[]);
+        // Mutate on disk AFTER capture; building from the snapshot must still reflect captured bytes.
+        std::fs::write(&md, "---\nname: pr\ndisable-model-invocation: true\n---\n\nBody.\n").unwrap();
+        let resolved = snap.build();
+        assert_eq!(resolved.passes["skills"][0]["invoke"], "skill");
+
+        let next = Snapshot::capture(&folders, &repo, &[]);
+        assert_ne!(snap.fingerprint, next.fingerprint);
+        assert_eq!(next.build().passes["skills"][0]["invoke"], "inline");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_root_preserves_trailing_space_in_worktree_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo ");
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        let ok = std::process::Command::new("git").arg("init").arg("-q").arg(&repo).status().is_ok_and(|s| s.success());
+        if !ok {
+            return;
+        }
+        assert_eq!(realpath(&git_root(&repo.join("sub"))), realpath(&repo));
     }
 }

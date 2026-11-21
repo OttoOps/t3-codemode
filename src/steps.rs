@@ -225,7 +225,7 @@ pub fn registration(env: &Env) -> Registration {
     let has = entry
         .get("headers")
         .and_then(Value::as_object)
-        .is_some_and(|h| h.keys().any(|k| k.eq_ignore_ascii_case(CONFIG_DIR_HEADER)));
+        .is_some_and(|h| h.iter().any(|(k, v)| k.eq_ignore_ascii_case(CONFIG_DIR_HEADER) && v.is_string()));
     let status = if has { RegState::Current } else { RegState::Stale };
     Registration { path: env.claude_json.clone(), status, entry: Some(entry.clone()) }
 }
@@ -241,6 +241,7 @@ fn reg_state(r: &Registration) -> AutoState {
 pub fn registered_entry(r: &Registration) -> Option<Value> {
     let mut entry = r.entry.clone()?;
     let mut headers = entry.get("headers").and_then(Value::as_object).cloned().unwrap_or_default();
+    headers.retain(|k, _| !k.eq_ignore_ascii_case(CONFIG_DIR_HEADER));
     headers.insert(CONFIG_DIR_HEADER.into(), Value::String(CONFIG_DIR_VALUE.into()));
     entry.insert("headers".into(), Value::Object(headers));
     Some(Value::Object(entry))
@@ -283,12 +284,106 @@ fn reregister(env: &Env, r: &Registration) -> Result<(), Reregister> {
     Ok(())
 }
 
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+fn ps_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        out.push(c);
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn json_escape_win_shell(s: &str) -> String {
+    // Compact serde_json output has none of these characters outside JSON string
+    // literals. Escaping them as `\u00xx` keeps the JSON valid while preventing
+    // PowerShell 5.1 Legacy whitespace splitting and cmd.exe metacharacter parsing
+    // when `claude` resolves to an exe, .ps1, or .cmd shim.
+    let mut out = String::with_capacity(s.len() + 16);
+    for c in s.chars() {
+        match c {
+            ' ' | '%' | '&' | '|' | '<' | '>' | '^' | '!' | '(' | ')' => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn ps_legacy_quote(s: &str) -> String {
+    // Under PowerShell 5.1 / Legacy argument passing, embedded `"` is not escaped
+    // for CommandLineToArgvW. Pre-escape k backslashes before `"` as 2k+1
+    // backslashes + `"` (the input has no whitespace after json_escape_win_shell).
+    let mut escaped = String::with_capacity(s.len() + 16);
+    let mut slashes = 0usize;
+    for c in s.chars() {
+        if c == '\\' {
+            slashes += 1;
+        } else if c == '"' {
+            for _ in 0..slashes * 2 + 1 {
+                escaped.push('\\');
+            }
+            escaped.push('"');
+            slashes = 0;
+        } else {
+            for _ in 0..slashes {
+                escaped.push('\\');
+            }
+            slashes = 0;
+            escaped.push(c);
+        }
+    }
+    for _ in 0..slashes {
+        escaped.push('\\');
+    }
+    ps_quote(&escaped)
+}
+
+pub fn reregister_command_for(env: &Env, r: &Registration, removed: bool, windows: bool) -> String {
+    let entry = registered_entry(r).map(|v| v.to_string()).unwrap_or_default();
+    if windows {
+        let raw = json_escape_win_shell(&entry);
+        let legacy = ps_legacy_quote(&raw);
+        let modern = ps_quote(&raw);
+        let prefix = env
+            .claude_config_dir
+            .as_ref()
+            .map_or(String::new(), |d| format!("$env:CLAUDE_CONFIG_DIR = {}; ", ps_quote(&d.to_string_lossy())));
+        let select = format!(
+            "$j = if ($PSVersionTable.PSVersion -lt [version]'7.3' -or $PSNativeCommandArgumentPassing -eq 'Legacy' \
+             -or ($PSNativeCommandArgumentPassing -eq 'Windows' -and ($c = Get-Command claude -ErrorAction SilentlyContinue) -and $c.Source -match '\\.(cmd|bat)$')) \
+             {{ {legacy} }} else {{ {modern} }}; "
+        );
+        let add = format!("claude mcp add-json --scope user {MCP_NAME} $j");
+        if removed {
+            format!("{prefix}{select}{add}")
+        } else {
+            format!(
+                "{prefix}{select}claude mcp remove --scope user {MCP_NAME}; if ($? -and $LASTEXITCODE -eq 0) {{ {add} }}"
+            )
+        }
+    } else {
+        let json = sh_quote(&entry);
+        let prefix = env
+            .claude_config_dir
+            .as_ref()
+            .map_or(String::new(), |d| format!("CLAUDE_CONFIG_DIR={} ", sh_quote(&d.to_string_lossy())));
+        let add = format!("{prefix}claude mcp add-json --scope user {MCP_NAME} {json}");
+        if removed { add } else { format!("{prefix}claude mcp remove --scope user {MCP_NAME} && {add}") }
+    }
+}
+
 pub fn reregister_command(env: &Env, r: &Registration, removed: bool) -> String {
-    let json = registered_entry(r).map(|v| v.to_string()).unwrap_or_default().replace('\'', r"'\''");
-    let prefix =
-        env.claude_config_dir.as_ref().map_or(String::new(), |d| format!("CLAUDE_CONFIG_DIR='{}' ", d.display()));
-    let add = format!("{prefix}claude mcp add-json --scope user {MCP_NAME} '{json}'");
-    if removed { add } else { format!("{prefix}claude mcp remove --scope user {MCP_NAME} && {add}") }
+    reregister_command_for(env, r, removed, cfg!(windows))
 }
 
 fn auto_state(id: &str, rule: &[RuleTarget], reg: &Registration) -> AutoState {
