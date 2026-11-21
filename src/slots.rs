@@ -1160,39 +1160,50 @@ pub struct SearchRoot {
     pub label: String,
     pub namespace: Option<String>,
     pub dir: PathBuf,
+    pub inline: bool,
 }
 
 fn search_roots_with(f: &Folders, root: &Path, enabled: &Enabled, installed_raw: Option<&[u8]>) -> Vec<SearchRoot> {
-    let plain = |label: &str, dir: PathBuf| SearchRoot { label: label.into(), namespace: None, dir };
+    let plain = |label: &str, dir: PathBuf| SearchRoot { label: label.into(), namespace: None, dir, inline: false };
     let mut roots = vec![
         plain("~/.claude/skills", f.claude.join("skills")),
         plain("~/.agents/skills", f.home.join(".agents").join("skills")),
         plain("project .claude/skills", root.join(".claude").join("skills")),
         plain("~/.codex/skills", f.codex.join("skills")),
-        plain("~/.gemini/config/skills", f.gemini.join("config").join("skills")),
+        SearchRoot {
+            label: "~/.gemini/config/skills".into(),
+            namespace: None,
+            dir: f.gemini.join("config").join("skills"),
+            inline: true,
+        },
     ];
     let claude =
         claude_plugin_roots_with(&f.claude, root, installed_raw).into_iter().filter(|(_, key, _)| enabled.allows(key));
     let codex = newest_cached(&f.codex.join("plugins").join("cache"));
     for (plugin, _, dir) in claude.chain(codex) {
-        roots.push(SearchRoot { label: "plugin cache".into(), namespace: Some(plugin), dir });
+        roots.push(SearchRoot { label: "plugin cache".into(), namespace: Some(plugin), dir, inline: false });
     }
     roots
 }
 
 pub fn search_roots(f: &Folders, root: &Path, enabled: &Enabled) -> Vec<SearchRoot> {
-    let plain = |label: &str, dir: PathBuf| SearchRoot { label: label.into(), namespace: None, dir };
+    let plain = |label: &str, dir: PathBuf| SearchRoot { label: label.into(), namespace: None, dir, inline: false };
     let mut roots = vec![
         plain("~/.claude/skills", f.claude.join("skills")),
         plain("~/.agents/skills", f.home.join(".agents").join("skills")),
         plain("project .claude/skills", root.join(".claude").join("skills")),
         plain("~/.codex/skills", f.codex.join("skills")),
-        plain("~/.gemini/config/skills", f.gemini.join("config").join("skills")),
+        SearchRoot {
+            label: "~/.gemini/config/skills".into(),
+            namespace: None,
+            dir: f.gemini.join("config").join("skills"),
+            inline: true,
+        },
     ];
     let claude = claude_plugin_roots(&f.claude, root).into_iter().filter(|(_, key, _)| enabled.allows(key));
     let codex = newest_cached(&f.codex.join("plugins").join("cache"));
     for (plugin, _, dir) in claude.chain(codex) {
-        roots.push(SearchRoot { label: "plugin cache".into(), namespace: Some(plugin), dir });
+        roots.push(SearchRoot { label: "plugin cache".into(), namespace: Some(plugin), dir, inline: false });
     }
     roots
 }
@@ -1243,7 +1254,7 @@ pub fn installed_skills(roots: &[SearchRoot]) -> Vec<Skill> {
                 bare,
                 dir: Some(dir),
                 path: Some(text(&path)),
-                inline: is_inline(&meta),
+                inline: r.inline || is_inline(&meta),
                 at: r.label.clone(),
             });
         }
@@ -2133,7 +2144,7 @@ impl Snapshot {
                                 bare,
                                 dir: Some(n),
                                 path: Some(text(&path)),
-                                inline: is_inline(&meta),
+                                inline: r.inline || is_inline(&meta),
                                 at: r.label.clone(),
                             });
                         }

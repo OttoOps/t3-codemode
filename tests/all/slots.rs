@@ -142,7 +142,9 @@ async fn an_antigravity_thread_reads_every_skill_on_disk_inline() {
 
     s.thread("mcp:claude-user", "claudeAgent");
     let out = s.run(Some("mcp:claude-user"), "async () => wf.slots()", own(&s.home.join(".claude"))).await;
-    assert_eq!(ok_json(&out)["result"]["review"]["skill"]["invoke"], "skill");
+    let v = &ok_json(&out)["result"];
+    assert_eq!(v["passes"]["skills"][0]["invoke"], "skill");
+    assert_eq!(v["review"]["skill"]["invoke"], "inline", "the Skill tool cannot load from Antigravity's folder");
 }
 
 #[tokio::test]

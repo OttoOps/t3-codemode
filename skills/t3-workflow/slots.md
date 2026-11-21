@@ -160,7 +160,8 @@ plugins never resolve. The search order:
 3. the project's `.claude/skills`;
 4. `~/.codex/skills` (or `$CODEX_HOME/skills`);
 5. `~/.gemini/config/skills` (or `$GEMINI_HOME/config/skills`), where
-   Antigravity reads skills;
+   Antigravity reads skills; the Skill tool cannot load from there, so a
+   skill found only there resolves as **inline**;
 6. the Claude plugin cache (enabled plugins only), then the Codex plugin
    cache, as `plugin:name`.
 
