@@ -310,7 +310,10 @@ of its pool, or `wait` to leave it until the reset. In a mixed pool, a move
 considers only the members of the thread's own driver. A move forks the thread
 with its context and worktree, switches the fork to the new member, moves the
 thread's workflow links to the fork, resumes the fork, and settles the old
-thread. The pick history and the feed record the move.
+thread. The pick history and the feed record the move. The links, the pick,
+the feed entry and the answer are saved together, so if saving them fails,
+nothing moves and the card stays open. Answering `move` again then reuses the
+same fork.
 
 The card goes only to a thread with a recorded pick: a ticket the board
 launched, or a launch reported with [`wf.picked`](globals.md#wf). A thread

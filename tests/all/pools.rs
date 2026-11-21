@@ -1321,6 +1321,42 @@ async fn a_thread_that_ran_again_is_not_moved_and_its_card_goes() {
 }
 
 #[tokio::test]
+async fn a_move_that_fails_to_record_moves_nothing_and_a_retry_reuses_its_fork() {
+    let h = pooled("weighted", two(1, 1));
+    let old = launch(&h, 45).await["thread"].as_str().unwrap().to_string();
+    h.wf(&old, "join", json!({"parent": BOARD, "label": "widgets#45", "role": "ticket"})).await;
+    limit_stop_on(&h, &old);
+    mark(&h).await;
+    let id = move_cards(&h)[0].id.clone();
+    let db = rusqlite::Connection::open(h.app.store.path()).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER no_pick BEFORE UPDATE ON pool_picks BEGIN SELECT RAISE(ABORT, 'disk is full'); END;",
+    )
+    .unwrap();
+    let e = format!("{:#}", h.app.wf.answer(&id, "move").await.unwrap_err());
+    assert!(e.contains("as fork:1, but moving its workflow links to the fork failed"), "{e}");
+    assert!(e.contains("answering \"move\" again reuses that fork"), "{e}");
+    assert!(e.contains("disk is full"), "{e}");
+    assert_eq!(h.app.store.link_get(&old).unwrap().unwrap().label, "widgets#45");
+    assert!(h.app.store.link_get("fork:1").unwrap().is_none());
+    assert_eq!(move_cards(&h).len(), 1);
+    assert!(!h.app.wf.feed(20).unwrap().iter().any(|f| f["head"].as_str().unwrap().starts_with("moved ")));
+    assert!(h.app.store.pick_by_thread("fork:1").unwrap().is_none());
+    assert!(h.sent().iter().all(|s| s["threadId"] != "fork:1"));
+    assert!(h.fake.organized().is_empty());
+
+    db.execute_batch("DROP TRIGGER no_pick;").unwrap();
+    let out = h.app.wf.answer(&id, "move").await.unwrap();
+    assert_eq!(out["thread"], "fork:1", "{out}");
+    assert_eq!(h.fake.calls().iter().filter(|c| *c == "t3_thread_transfer").count(), 1);
+    assert_eq!(h.app.store.link_get("fork:1").unwrap().unwrap().label, "widgets#45");
+    assert_eq!(h.app.store.pick_by_thread("fork:1").unwrap().unwrap().moved_from.as_deref(), Some(old.as_str()));
+    assert!(move_cards(&h).is_empty());
+    let again = format!("{:#}", h.app.wf.answer(&id, "move").await.unwrap_err());
+    assert_eq!(h.fake.calls().iter().filter(|c| *c == "t3_thread_transfer").count(), 1, "{again}");
+}
+
+#[tokio::test]
 async fn a_move_in_a_mixed_pool_keeps_the_thread_on_its_driver() {
     let members = json!([{"instanceId": "codex-a", "model": ASTRA, "effort": "xhigh"},
                          {"instanceId": "claude-a", "model": OPUS, "effort": "high"},

@@ -327,6 +327,18 @@ pub struct StoredToken {
     pub obtained_at: String,
 }
 
+pub struct Rebind<'a> {
+    pub old: &'a str,
+    pub new: &'a str,
+    pub link: Option<&'a str>,
+    pub board: &'a str,
+    pub card: i64,
+    pub resolution: &'a str,
+    pub pick: i64,
+    pub summary: &'a str,
+    pub at: &'a str,
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
     path: PathBuf,
@@ -880,7 +892,8 @@ impl Store {
         })
     }
 
-    pub fn rebind(&self, old: &str, new: &str, link: Option<&str>, board: &str, at: &str) -> Result<bool> {
+    pub fn rebind(&self, m: &Rebind) -> Result<bool> {
+        let Rebind { old, new, link, board, at, .. } = *m;
         fn read<T: serde::de::DeserializeOwned>(
             tx: &rusqlite::Transaction,
             sql: &str,
@@ -974,6 +987,28 @@ impl Store {
                 *t = new.into();
             }
             tx.execute("UPDATE pr_seen SET data = ?2 WHERE rowid = ?1", params![row, serde_json::to_string(&p)?])?;
+        }
+        let resolved = tx.execute(
+            "UPDATE waiting SET resolved_at = ?3, note = ?4 WHERE owner = ?1 AND seq = ?2 AND resolved_at IS NULL",
+            params![board, m.card, at, m.resolution],
+        )?;
+        if resolved == 0 {
+            anyhow::bail!("its card was already answered");
+        }
+        let handle = Self::msg_insert(&tx, board, board, "note", m.summary, at)?;
+        let pick: Option<String> =
+            tx.query_row("SELECT data FROM pool_picks WHERE seq = ?1", [m.pick], |r| r.get(0)).optional()?;
+        if let Some(raw) = pick {
+            let p = PickRecord {
+                handle: Some(handle.clone()),
+                thread: Some(new.into()),
+                moved_from: Some(old.into()),
+                ..serde_json::from_str(&raw)?
+            };
+            tx.execute(
+                "UPDATE pool_picks SET handle = ?2, data = ?3 WHERE seq = ?1",
+                params![m.pick, handle, serde_json::to_string(&p)?],
+            )?;
         }
         tx.commit()?;
         Ok(rebound)

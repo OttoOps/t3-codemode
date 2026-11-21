@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 
 use crate::board::{BOARD, Card, NewCard};
 use crate::clock::local_clock;
+use crate::store::Rebind;
 use crate::wf::Wf;
 
 pub const MOVE: &str = "move";
@@ -21,6 +22,10 @@ pub struct Offer {
 
 fn offered_key(thread: &str, run: &str) -> String {
     format!("move_offer:{thread}:{run}")
+}
+
+fn fork_key(thread: &str, run: &str) -> String {
+    format!("move_fork:{thread}:{run}")
 }
 
 impl Wf {
@@ -110,22 +115,16 @@ impl Wf {
                 self.changed();
                 return Ok(json!({"card": card.id, "moved": false}));
             }
-            MOVE => self.move_thread(offer).await?,
+            MOVE => self.move_thread(card.seq, offer).await?,
             _ => bail!("card {} takes \"{MOVE}\" or \"{WAIT}\"", card.id),
         };
-        self.store.waiting_resolve_seq(
-            BOARD,
-            card.seq,
-            Some(&format!("answered: move; {}", note["summary"].as_str().unwrap_or_default())),
-            &self.now(),
-        )?;
         self.changed();
         let mut out = note;
         out["card"] = json!(card.id);
         Ok(out)
     }
 
-    async fn move_thread(&self, o: &Offer) -> Result<Value> {
+    async fn move_thread(&self, card: i64, o: &Offer) -> Result<Value> {
         let old = &o.thread;
         let th = self.t3.call("t3_thread_read", json!({"threadId": old, "limit": 1, "maxCharsPerItem": 1})).await?;
         let th = &th["thread"];
@@ -134,12 +133,22 @@ impl Wf {
         }
         let why = "is the member the thread stopped on";
         let picked = self.pick_avoiding(&o.pool, Some((&o.instance_id, why))).await?;
-        let fork =
-            self.t3.call("t3_thread_transfer", json!({"action": "fork", "threadId": old, "title": o.title})).await?;
-        let new = fork["targetThreadId"]
-            .as_str()
-            .ok_or_else(|| anyhow!("t3_thread_transfer returned no fork thread for {}", o.title))?
-            .to_string();
+        let key = fork_key(old, &o.run);
+        let new = match self.store.meta_get(&key)? {
+            Some(new) => new,
+            None => {
+                let fork = self
+                    .t3
+                    .call("t3_thread_transfer", json!({"action": "fork", "threadId": old, "title": o.title}))
+                    .await?;
+                let new = fork["targetThreadId"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("t3_thread_transfer returned no fork thread for {}", o.title))?
+                    .to_string();
+                self.store.meta_set(&key, &new)?;
+                new
+            }
+        };
         self.t3
             .call("t3_thread_configure", json!({"threadId": new, "modelSelection": picked.model_selection}))
             .await
@@ -157,22 +166,29 @@ impl Wf {
             );
         }
         let link = f["link"].as_str().map(String::from);
-        let rebound = self.store.rebind(old, &new, link.as_deref(), BOARD, &self.now()).map_err(|e| {
-            anyhow!("forked {} as {new}, but moving its workflow links to the fork failed: {e:#}", o.title)
-        })?;
-        self.note_live(&new, f);
         let summary = format!("moved {} from {} to {new} {}", o.title, o.instance_id, picked.summary());
-        let mut warnings = Vec::new();
-        let handle = self
+        let rebound = self
             .store
-            .msg_new(BOARD, BOARD, "note", &summary, &self.now())
-            .map_err(|e| warnings.push(format!("adding the move to the feed failed: {e:#}")))
-            .ok();
-        if let Err(e) = self.store.pick_bind(picked.seq, handle.as_deref(), &new, Some(old)) {
-            warnings.push(format!(
-                "recording the fork in the pick history failed, so a later usage limit on it gets no offer: {e:#}"
-            ));
-        }
+            .rebind(&Rebind {
+                old,
+                new: &new,
+                link: link.as_deref(),
+                board: BOARD,
+                card,
+                resolution: &format!("answered: move; {summary}"),
+                pick: picked.seq,
+                summary: &summary,
+                at: &self.now(),
+            })
+            .map_err(|e| {
+                anyhow!(
+                    "forked {} as {new}, but moving its workflow links to the fork failed, \
+                     so nothing moved and answering \"{MOVE}\" again reuses that fork: {e:#}",
+                    o.title
+                )
+            })?;
+        self.note_live(&new, f);
+        let mut warnings = Vec::new();
         let resume = format!(
             "This thread is a fork of {}, which stopped on a usage limit on {}. It now runs on {}{}. \
              The last run may have stopped partway: check where the work stands, then carry on from there.",
