@@ -33,9 +33,10 @@ const SESSION_CHECK: Duration = Duration::from_secs(1);
 const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; \
 img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct AuthSession {
-    seq: i64,
+    seq: Option<i64>,
+    tailscale_login: Option<String>,
 }
 
 #[derive(Clone)]
@@ -137,7 +138,7 @@ impl Web {
         let hash = pairing::hash_token(raw);
         let now = iso(self.app.clock.now());
         match self.app.store.board_session_verify(&hash, &now) {
-            Ok(Some(session)) => Ok(AuthSession { seq: session.seq }),
+            Ok(Some(session)) => Ok(AuthSession { seq: Some(session.seq), tailscale_login: None }),
             Ok(None) => Err((StatusCode::UNAUTHORIZED, "remote board session is invalid or expired")),
             Err(e) => {
                 tracing::warn!("board session lookup failed: {e:#}");
@@ -150,7 +151,7 @@ impl Web {
         &self,
         cfg: &BoardRemoteConfig,
         headers: &HeaderMap,
-    ) -> Result<(), (StatusCode, &'static str)> {
+    ) -> Result<String, (StatusCode, &'static str)> {
         let login = match single_header(headers, "tailscale-user-login") {
             SingleHeader::Present(v)
                 if !v.is_empty()
@@ -165,14 +166,14 @@ impl Web {
         };
         if !cfg.allow_users.is_empty() {
             if cfg.allow_users.iter().any(|u| u.eq_ignore_ascii_case(login)) {
-                return Ok(());
+                return Ok(login.to_string());
             }
             return Err((StatusCode::FORBIDDEN, "Tailscale user is not allowed to access this board"));
         }
         match self.app.tailscale_host_login_async().await {
             Ok(Some(host_login)) => {
                 if host_login.eq_ignore_ascii_case(login) {
-                    Ok(())
+                    Ok(login.to_string())
                 } else {
                     Err((StatusCode::FORBIDDEN, "Tailscale user is not allowed to access this board"))
                 }
@@ -183,6 +184,22 @@ impl Web {
                 Err((StatusCode::UNAUTHORIZED, "Tailscale host login is unavailable"))
             }
         }
+    }
+
+    async fn tailscale_login_still_allowed(&self, login: &str) -> bool {
+        let Some((cfg, _)) = &self.remote else {
+            return false;
+        };
+        if cfg.mode != RemoteMode::Tailscale {
+            return false;
+        }
+        if !cfg.allow_users.is_empty() {
+            return cfg.allow_users.iter().any(|u| u.eq_ignore_ascii_case(login));
+        }
+        matches!(
+            self.app.tailscale_host_login_async().await,
+            Ok(Some(ref host_login)) if host_login.eq_ignore_ascii_case(login)
+        )
     }
 
     /// Authenticate a remote board request. Pairing-cookie auth verifies a
@@ -198,8 +215,9 @@ impl Web {
         match cfg.mode {
             RemoteMode::Pairing => self.authenticate_pairing_cookie(headers).map(Some),
             RemoteMode::Tailscale => {
-                self.authenticate_tailscale(cfg, headers).await?;
-                if cfg.require_pairing { self.authenticate_pairing_cookie(headers).map(Some) } else { Ok(None) }
+                let login = self.authenticate_tailscale(cfg, headers).await?;
+                let seq = if cfg.require_pairing { self.authenticate_pairing_cookie(headers)?.seq } else { None };
+                Ok(Some(AuthSession { seq, tailscale_login: Some(login) }))
             }
             RemoteMode::Off => Err((StatusCode::FORBIDDEN, "remote board access is disabled")),
         }
@@ -408,65 +426,87 @@ fn session_valid(app: &App, session_seq: Option<i64>) -> bool {
     }
 }
 
+async fn auth_still_valid(web: &Web, auth: Option<&AuthSession>) -> bool {
+    let Some(auth) = auth else {
+        return true;
+    };
+    if let Some(seq) = auth.seq
+        && !session_valid(&web.app, Some(seq))
+    {
+        return false;
+    }
+    if let Some(login) = auth.tailscale_login.as_deref()
+        && !web.tailscale_login_still_allowed(login).await
+    {
+        return false;
+    }
+    true
+}
+
 async fn events(State(web): State<Web>, session: Option<Extension<AuthSession>>) -> Response {
     let rx = web.app.wf.subscribe();
     let stop = web.app.stopping.subscribe();
-    let session_seq = session.map(|Extension(s)| s.seq);
-    let s = stream::unfold(
-        (web.app.clone(), rx, stop, session_seq, None::<String>),
-        |(app, mut rx, mut stop, session_seq, last)| async move {
-            let mut wait = last.is_some();
-            loop {
-                if *stop.borrow() || !session_valid(&app, session_seq) {
-                    return None;
-                }
-                if wait {
-                    let mut got_event = false;
-                    while !got_event {
-                        if let Some(seq) = session_seq {
-                            tokio::select! {
-                                r = rx.recv() => match r {
-                                    Ok(()) | Err(RecvError::Lagged(_)) => got_event = true,
-                                    Err(RecvError::Closed) => return None,
-                                },
-                                _ = stop.wait_for(|s| *s) => return None,
-                                _ = tokio::time::sleep(SESSION_CHECK) => {
-                                    if !session_valid(&app, Some(seq)) {
-                                        return None;
-                                    }
-                                }
-                            }
-                        } else {
-                            tokio::select! {
-                                r = rx.recv() => match r {
-                                    Ok(()) | Err(RecvError::Lagged(_)) => got_event = true,
-                                    Err(RecvError::Closed) => return None,
-                                },
-                                _ = stop.wait_for(|s| *s) => return None,
+    let auth = session.map(|Extension(s)| s);
+    let s = stream::unfold((web, rx, stop, auth, None::<String>), |(web, mut rx, mut stop, auth, last)| async move {
+        let mut wait = last.is_some();
+        loop {
+            if *stop.borrow() {
+                return None;
+            }
+            if !auth_still_valid(&web, auth.as_ref()).await {
+                return None;
+            }
+            if wait {
+                let mut got_event = false;
+                while !got_event {
+                    if auth.is_some() {
+                        let mut check_auth = false;
+                        tokio::select! {
+                            r = rx.recv() => match r {
+                                Ok(()) | Err(RecvError::Lagged(_)) => got_event = true,
+                                Err(RecvError::Closed) => return None,
+                            },
+                            _ = stop.wait_for(|s| *s) => return None,
+                            _ = tokio::time::sleep(SESSION_CHECK) => {
+                                check_auth = true;
                             }
                         }
-                    }
-                    tokio::time::sleep(SETTLE).await;
-                    while matches!(rx.try_recv(), Ok(()) | Err(TryRecvError::Lagged(_))) {}
-                    if *stop.borrow() || !session_valid(&app, session_seq) {
-                        return None;
+                        if check_auth && !auth_still_valid(&web, auth.as_ref()).await {
+                            return None;
+                        }
+                    } else {
+                        tokio::select! {
+                            r = rx.recv() => match r {
+                                Ok(()) | Err(RecvError::Lagged(_)) => got_event = true,
+                                Err(RecvError::Closed) => return None,
+                            },
+                            _ = stop.wait_for(|s| *s) => return None,
+                        }
                     }
                 }
-                wait = true;
-                let snap = match app.wf.snapshot() {
-                    Ok(v) => v.to_string(),
-                    Err(e) => {
-                        tracing::warn!("board snapshot failed: {e:#}");
-                        continue;
-                    }
-                };
-                if last.as_deref() != Some(snap.as_str()) {
-                    let ev = Event::default().event("state").data(snap.clone());
-                    return Some((Ok::<_, Infallible>(ev), (app, rx, stop, session_seq, Some(snap))));
+                tokio::time::sleep(SETTLE).await;
+                while matches!(rx.try_recv(), Ok(()) | Err(TryRecvError::Lagged(_))) {}
+                if *stop.borrow() {
+                    return None;
+                }
+                if !auth_still_valid(&web, auth.as_ref()).await {
+                    return None;
                 }
             }
-        },
-    );
+            wait = true;
+            let snap = match web.app.wf.snapshot() {
+                Ok(v) => v.to_string(),
+                Err(e) => {
+                    tracing::warn!("board snapshot failed: {e:#}");
+                    continue;
+                }
+            };
+            if last.as_deref() != Some(snap.as_str()) {
+                let ev = Event::default().event("state").data(snap.clone());
+                return Some((Ok::<_, Infallible>(ev), (web, rx, stop, auth, Some(snap))));
+            }
+        }
+    });
     Sse::new(s).keep_alive(KeepAlive::new().interval(KEEPALIVE).text("keepalive")).into_response()
 }
 

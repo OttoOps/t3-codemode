@@ -6993,6 +6993,142 @@ fn doctor_reports_tailscale_serve_cert_origin_and_config_drift() {
     let f = doctor::remote_board(Some(&off_cfg), 47731, None, &ts);
     assert!(f.problems.is_empty(), "{:?}", f.problems);
     assert!(f.warnings.is_empty(), "{:?}", f.warnings);
+
+    // 8. Mount overriding a board route (e.g. /api/state) is flagged while unrelated mount (/files) is allowed.
+    ts.set_host_login("alice@acme.example");
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "47732": { "HTTPS": true } },
+                "Web": {
+                    "box.acme.ts.net:47732": {
+                        "Handlers": {
+                            "/": { "Proxy": "http://127.0.0.1:47731" },
+                            "/files": { "Path": "/srv/files" }
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let f = doctor::remote_board(Some(&cfg), 47731, None, &ts);
+    assert!(f.problems.is_empty(), "unrelated /files mount should be allowed: {:?}", f.problems);
+
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "47732": { "HTTPS": true } },
+                "Web": {
+                    "box.acme.ts.net:47732": {
+                        "Handlers": {
+                            "/": { "Proxy": "http://127.0.0.1:47731" },
+                            "/api/state": { "Text": "override" }
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let f = doctor::remote_board(Some(&cfg), 47731, None, &ts);
+    assert!(
+        f.problems.iter().any(|p| p.contains("/api/state") && p.contains("intercepts board routes")),
+        "{:?}",
+        f.problems
+    );
+
+    // 9. Foreground-only raw TCP forwarder in `serve status --json` is detected by doctor.
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "Foreground": {
+                    "sess-1": {
+                        "TCP": { "9000": { "TCPForward": "127.0.0.1:47731" } }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let f = doctor::remote_board(Some(&off_cfg), 47731, None, &ts);
+    assert!(f.problems.iter().any(|p| p.contains("raw TCP port 9000")), "{:?}", f.problems);
+
+    // 10. Funnel on an additional board listener (8443) is flagged as a problem while a tailnet-only
+    //     alternate listener stays a warning.
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "47732": { "HTTPS": true }, "8443": { "HTTPS": true } },
+                "Web": {
+                    "box.acme.ts.net:47732": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:47731" } } },
+                    "box.acme.ts.net:8443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:47731" } } }
+                },
+                "AllowFunnel": { "box.acme.ts.net:8443": true }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let f = doctor::remote_board(Some(&cfg), 47731, None, &ts);
+    assert!(
+        f.problems.iter().any(|p| p.contains("Tailscale Funnel is enabled for box.acme.ts.net:8443")),
+        "{:?}",
+        f.problems
+    );
+
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "47732": { "HTTPS": true }, "8443": { "HTTPS": true } },
+                "Web": {
+                    "box.acme.ts.net:47732": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:47731" } } },
+                    "box.acme.ts.net:8443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:47731" } } }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let f = doctor::remote_board(Some(&cfg), 47731, None, &ts);
+    assert!(f.problems.is_empty(), "{:?}", f.problems);
+    assert!(f.warnings.iter().any(|w| w.contains("box.acme.ts.net:8443")), "{:?}", f.warnings);
+}
+
+#[tokio::test]
+async fn tailscale_sse_stream_closes_when_host_login_is_no_longer_authorized() {
+    let h = H::build(Vec::new(), tailscale_config(None, false));
+    h.tailscale.set_host_login("alice@acme.example");
+    let s = start(h).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+
+    let mut sse = s
+        .http
+        .get(format!("{}/api/events", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sse.status(), 200);
+    let first = tokio::time::timeout(Duration::from_secs(5), sse.chunk()).await.unwrap().unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&first).contains("event: state"));
+
+    // Host login changes to another user: open SSE stream closes cleanly without delivering new state.
+    s.h.tailscale.set_host_login("bob@acme.example");
+    s.h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": GATE})).await;
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = sse.chunk().await.unwrap() {
+            let text = String::from_utf8_lossy(&chunk);
+            assert!(!text.contains("event: state"), "unauthorized tailscale stream received state: {text}");
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "tailscale SSE stream stayed open after host login changed");
 }
 
 #[test]
