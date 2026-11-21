@@ -910,15 +910,7 @@ mod tests {
     use super::*;
 
     fn make_exec(path: &Path) {
-        if let Some(p) = path.parent() {
-            std::fs::create_dir_all(p).unwrap();
-        }
-        std::fs::write(path, "#!/bin/sh\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::fake::write_executable(path, "#!/bin/sh\n");
     }
 
     #[test]
@@ -1045,11 +1037,7 @@ mod tests {
     fn run_command_with_timeout_kills_stalled_subprocess() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("slow-tailscale");
-        std::fs::write(&script, "#!/bin/sh\nexec sleep 5\n").unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::fake::write_executable(&script, "#!/bin/sh\nexec sleep 5\n");
         let start = Instant::now();
         let err = run_command_with_timeout(&script, &["status", "--json"], Duration::from_millis(150)).unwrap_err();
         assert!(format!("{err:#}").contains("timed out"), "{err:#}");
@@ -1061,11 +1049,7 @@ mod tests {
     fn run_command_with_timeout_bounds_output_when_helper_keeps_stdout_open() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("leaking-tailscale");
-        std::fs::write(&script, "#!/bin/sh\nsleep 5 &\nprintf '{\"ok\":true}'\nexit 0\n").unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::fake::write_executable(&script, "#!/bin/sh\nsleep 5 &\nprintf '{\"ok\":true}'\nexit 0\n");
         let start = Instant::now();
         let err = run_command_with_timeout(&script, &["status", "--json"], Duration::from_millis(150)).unwrap_err();
         assert!(format!("{err:#}").contains("timed out"), "{err:#}");
