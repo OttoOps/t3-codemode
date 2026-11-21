@@ -1051,3 +1051,73 @@ async fn a_mixed_cheapest_pool_sends_launches_to_the_cheapest_member_on_its_own_
         "{r}"
     );
 }
+
+async fn warnings(h: &H) -> Vec<String> {
+    let pools = result(&h.exec("async () => wf.pools()").await);
+    serde_json::from_value(pools[0]["warnings"].clone()).unwrap()
+}
+
+#[tokio::test]
+async fn wf_pools_warns_when_only_one_member_can_run_the_model() {
+    let h = pooled("weighted", json!([{"instanceId": "claude-b"}, {"instanceId": "claude-c"}]));
+    assert_eq!(
+        warnings(&h).await,
+        [format!(
+            "only claude-b can run {OPUS}, so the pool launches nothing while claude-b is out. \
+             Set a reserve on claude-b to keep room for the work only it can run."
+        )]
+    );
+}
+
+#[tokio::test]
+async fn wf_pools_stays_quiet_when_two_members_offer_the_model() {
+    let h =
+        pooled("weighted", json!([{"instanceId": "claude-a"}, {"instanceId": "claude-b"}, {"instanceId": "claude-c"}]));
+    assert!(warnings(&h).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_sole_member_with_a_reserve_is_flagged_without_the_suggestion() {
+    let h = pooled("weighted", json!([{"instanceId": "claude-b", "reserve": 20}, {"instanceId": "claude-off"}]));
+    assert_eq!(
+        warnings(&h).await,
+        [format!("only claude-b can run {OPUS}, so the pool launches nothing while claude-b is out.")]
+    );
+}
+
+#[tokio::test]
+async fn a_pool_with_a_bad_member_reports_the_error_and_no_warnings() {
+    let h = pooled("weighted", json!([{"instanceId": "claude-b"}, {"instanceId": "codex"}]));
+    let pools = result(&h.exec("async () => wf.pools()").await);
+    assert!(pools[0]["error"].as_str().unwrap().contains("codex is a codex instance"), "{pools}");
+    assert_eq!(pools[0]["warnings"], json!([]));
+}
+
+#[tokio::test]
+async fn a_mixed_pool_warns_about_the_only_member_of_a_driver() {
+    let h = mixed(
+        json!([{"instanceId": "claude-a", "model": OPUS, "effort": "high"},
+               {"instanceId": "codex-a", "model": ASTRA, "effort": "xhigh"},
+               {"instanceId": "codex-b", "model": ASTRA, "effort": "low"}]),
+        false,
+    );
+    assert_eq!(
+        warnings(&h).await,
+        [format!(
+            "claude-a is the only claudeAgent member that can run its model, {OPUS}, so the pool runs no \
+             claudeAgent launch while claude-a is out. Set a reserve on claude-a to keep room for the work only it can run."
+        )]
+    );
+}
+
+#[tokio::test]
+async fn a_mixed_pool_counts_only_members_that_can_run_their_model() {
+    let h = mixed(
+        json!([{"instanceId": "codex-a", "model": ASTRA, "effort": "xhigh"},
+               {"instanceId": "codex-b", "model": ASTRA, "effort": "high"}]),
+        false,
+    );
+    let w = warnings(&h).await;
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(w[0].starts_with("codex-a is the only codex member"), "{w:?}");
+}

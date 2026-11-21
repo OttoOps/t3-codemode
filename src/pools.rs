@@ -186,6 +186,49 @@ pub fn check_members(name: &str, pool: &PoolConfig, caps: &Value) -> Result<()> 
     Ok(())
 }
 
+fn lists_model(p: &Value, model: &str) -> bool {
+    p["models"].as_array().is_some_and(|ms| ms.iter().any(|m| m["id"] == model))
+}
+
+fn can_run(pool: &PoolConfig, m: &PoolMember, p: &Value) -> bool {
+    let model = pool.model_of(m);
+    lists_model(p, model) && effort_options(model, pool.effort_of(m), p).is_some()
+}
+
+fn reserve_hint(m: &PoolMember) -> String {
+    if m.reserve > 0.0 {
+        String::new()
+    } else {
+        format!(" Set a reserve on {} to keep room for the work only it can run.", m.instance_id)
+    }
+}
+
+pub fn sole_warnings(pool: &PoolConfig, caps: &Value) -> Vec<String> {
+    let mut groups: BTreeMap<&str, Vec<&PoolMember>> = BTreeMap::new();
+    for m in &pool.members {
+        let Some(p) = provider(caps, &m.instance_id).filter(|p| can_run(pool, m, p)) else { continue };
+        let key = if pool.mixed { p["driverKind"].as_str().unwrap_or_default() } else { pool.model_of(m) };
+        groups.entry(key).or_default().push(m);
+    }
+    groups
+        .into_iter()
+        .filter_map(|(key, ms)| match ms.as_slice() {
+            [m] if pool.mixed => Some(format!(
+                "{id} is the only {key} member that can run its model, {model}, so the pool runs no {key} launch while {id} is out.{hint}",
+                id = m.instance_id,
+                model = pool.model_of(m),
+                hint = reserve_hint(m)
+            )),
+            [m] => Some(format!(
+                "only {id} can run {key}, so the pool launches nothing while {id} is out.{hint}",
+                id = m.instance_id,
+                hint = reserve_hint(m)
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum State {
     Ready,
@@ -243,7 +286,7 @@ fn member_state(pool: &PoolConfig, m: &PoolMember, p: &Value, limit: Option<&Lim
         return State::Constrained(constraints.join("; "));
     }
     let model = pool.model_of(m);
-    if !p["models"].as_array().is_some_and(|ms| ms.iter().any(|m| m["id"] == model)) {
+    if !lists_model(p, model) {
         return State::MissingModel;
     }
     if effort_options(model, pool.effort_of(m), p).is_none() {
@@ -763,6 +806,10 @@ impl Wf {
                 Ok(c) => check_members(name, pool, c).err().map(|e| format!("{e:#}")),
                 Err(e) => Some(format!("T3 did not answer: {e:#}")),
             };
+            let warnings = match (&caps, &error) {
+                (Ok(c), None) => sole_warnings(pool, c),
+                _ => Vec::new(),
+            };
             let stats = self.store.pick_stats(name)?;
             let members: Vec<Value> = pool
                 .members
@@ -807,6 +854,7 @@ impl Wf {
                 "effort": pool.effort,
                 "strategy": pool.strategy,
                 "error": error,
+                "warnings": warnings,
                 "members": members,
             }));
         }
