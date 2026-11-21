@@ -16,6 +16,7 @@ fn t3cm(home: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_t3cm"));
     cmd.env("T3CODE_HOME", home)
         .env("T3CM_T3_BIN", home.join("no-t3"))
+        .env("T3CM_TAILSCALE_BIN", home.join("no-tailscale"))
         .env("T3CM_CONFIG", home.join("none.json"))
         .env("T3CM_NO_UPDATE_CHECK", "1")
         .env("RUST_LOG", "info");
@@ -283,4 +284,232 @@ fn board_pair_sessions_and_revoke_cli_lifecycle() {
     assert!(out.status.success());
     let empty: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(empty, json!({"sessions": []}));
+}
+
+#[cfg(unix)]
+#[test]
+fn board_expose_unexpose_status_and_doctor_cli_with_fake_tailscale() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use serde_json::{Value, json};
+
+    let home = tempfile::tempdir().unwrap();
+    let repo = home.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let state = home.path().join("state");
+    let cfg_path = home.path().join("config.json");
+    let ts_log = home.path().join("tailscale.log");
+    let ts_serve_file = home.path().join("serve-status.json");
+    let fake_ts = home.path().join("fake-tailscale");
+
+    std::fs::write(&ts_serve_file, "{}\n").unwrap();
+    let script = format!(
+        r#"#!/bin/sh
+echo "$@" >> "{log}"
+if [ "$1" = "status" ] && [ "$2" = "--json" ]; then
+  cat <<'JSON'
+{{"BackendState":"Running","Self":{{"DNSName":"box.acme.ts.net.","UserID":101}},"CertDomains":["box.acme.ts.net"],"User":{{"101":{{"ID":101,"LoginName":"alice@acme.example"}}}}}}
+JSON
+  exit 0
+fi
+if [ "$1" = "serve" ] && [ "$2" = "status" ] && [ "$3" = "--json" ]; then
+  cat "{serve}"
+  exit 0
+fi
+if [ "$1" = "serve" ] && [ "$2" = "--bg" ]; then
+  https_port="${{3#--https=}}"
+  target="$4"
+  cat > "{serve}" <<JSON
+{{"TCP":{{"$https_port":{{"HTTPS":true}}}},"Web":{{"box.acme.ts.net:$https_port":{{"Handlers":{{"/":{{"Proxy":"$target"}}}}}}}}}}
+JSON
+  exit 0
+fi
+if [ "$1" = "serve" ] && [ "$4" = "off" ]; then
+  if [ "$(tr -d ' \n' < "{serve}")" = "{{}}" ]; then
+    echo "error: serve handler does not exist" >&2
+    exit 1
+  fi
+  echo '{{}}' > "{serve}"
+  exit 0
+fi
+echo "unexpected args: $@" >&2
+exit 1
+"#,
+        log = ts_log.display(),
+        serve = ts_serve_file.display()
+    );
+    std::fs::write(&fake_ts, script).unwrap();
+    std::fs::set_permissions(&fake_ts, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port_str = port.to_string();
+
+    // 1. `t3cm board expose --tailscale` runs `tailscale serve` and writes config.json.
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .env("T3CM_TAILSCALE_BIN", &fake_ts)
+        .args(["board", "expose", "--tailscale", "--port", &port_str, "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let exposed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(exposed["mode"], "tailscale");
+    assert_eq!(exposed["origin"], "https://box.acme.ts.net:47732");
+    assert_eq!(exposed["httpsPort"], 47732);
+    assert_eq!(exposed["localPort"], port);
+    assert_eq!(exposed["hostLogin"], "alice@acme.example");
+    assert_eq!(exposed["requirePairing"], false);
+
+    // 2. Without requirePairing, `t3cm board pair` explains that Tailscale-User-Login suffices.
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .env("T3CM_TAILSCALE_BIN", &fake_ts)
+        .args(["board", "pair", "--no-qr", "--state-dir"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("requirePairing"), "{err}");
+
+    // 3. Re-exposing with `--require-pairing` updates config and enables `t3cm board pair`.
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .env("T3CM_TAILSCALE_BIN", &fake_ts)
+        .args(["board", "expose", "--tailscale", "--require-pairing", "--port", &port_str])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .env("T3CM_TAILSCALE_BIN", &fake_ts)
+        .args(["board", "pair", "--no-qr", "--json", "--state-dir"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let minted: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(minted["url"].as_str().unwrap().starts_with("https://box.acme.ts.net:47732/pair#"));
+
+    // 4. `t3cm serve` reports remote state through `t3cm status` and NEVER mutates Tailscale Serve.
+    std::fs::write(&ts_log, "").unwrap();
+    let child = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .env("T3CM_TAILSCALE_BIN", &fake_ts)
+        .args(["serve", "--no-watcher", "--port", &port_str, "--state-dir"])
+        .arg(&state)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _guard = Kill(child);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status_json = loop {
+        let out = t3cm(home.path())
+            .env("T3CM_CONFIG", &cfg_path)
+            .env("T3CM_TAILSCALE_BIN", &fake_ts)
+            .args(["status", "--port", &port_str])
+            .output()
+            .unwrap();
+        if out.status.success() {
+            break serde_json::from_slice::<Value>(&out.stdout).unwrap();
+        }
+        assert!(Instant::now() < deadline, "t3cm serve never answered /healthz");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(status_json["remote"]["mode"], "tailscale", "{status_json}");
+    assert_eq!(status_json["remote"]["origin"], "https://box.acme.ts.net:47732");
+    assert_eq!(status_json["remote"]["requirePairing"], true);
+    assert_eq!(status_json["remote"]["allowUsers"], json!(["alice@acme.example"]));
+    assert_eq!(status_json["remote"]["allowUsersSource"], "tailscale");
+
+    let serve_calls = std::fs::read_to_string(&ts_log).unwrap();
+    assert!(
+        !serve_calls.lines().any(|l| l.starts_with("serve ")),
+        "`t3cm serve` must never mutate Tailscale Serve, saw:\n{serve_calls}"
+    );
+    drop(_guard);
+
+    // 5. `t3cm doctor` reports no remote problems when Serve matches config, and flags drift when Serve is cleared.
+    let out = t3cm(home.path())
+        .env("HOME", home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .env("T3CM_TAILSCALE_BIN", &fake_ts)
+        .env("T3CM_STATE_DIR", &state)
+        .args(["doctor", "--no-t3", "--json", "--port", &port_str, "--repo"])
+        .arg(&repo)
+        .output()
+        .unwrap();
+    let doc_ok: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let remote_probs: Vec<&str> = doc_ok["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|p| p.starts_with("remote:"))
+        .collect();
+    assert!(remote_probs.is_empty(), "{remote_probs:?}");
+
+    std::fs::write(&ts_serve_file, "{}\n").unwrap();
+    let out = t3cm(home.path())
+        .env("HOME", home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .env("T3CM_TAILSCALE_BIN", &fake_ts)
+        .env("T3CM_STATE_DIR", &state)
+        .args(["doctor", "--no-t3", "--json", "--port", &port_str, "--repo"])
+        .arg(&repo)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let doc_drift: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        doc_drift["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|p| p.contains("Tailscale Serve is not serving")),
+        "{doc_drift}"
+    );
+
+    // 6. `t3cm board unexpose` disables Tailscale Serve with exact --set-path and turns off board.remote in config.json.
+    // First test when Serve handler is already absent: unexpose still turns off config without calling `off`.
+    std::fs::write(&ts_log, "").unwrap();
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .env("T3CM_TAILSCALE_BIN", &fake_ts)
+        .args(["board", "unexpose", "--port", &port_str, "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let un_absent: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(un_absent["previousMode"], "tailscale");
+    assert_eq!(un_absent["disabledTailscalePorts"], json!([]));
+    assert_eq!(un_absent["configUpdated"], true);
+    let calls = std::fs::read_to_string(&ts_log).unwrap();
+    assert!(!calls.lines().any(|l| l.ends_with(" off")), "{calls}");
+
+    // Now re-expose and unexpose while active: removes exact --set-path=/ mount and sets config to off.
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .env("T3CM_TAILSCALE_BIN", &fake_ts)
+        .args(["board", "expose", "--tailscale", "--port", &port_str])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    std::fs::write(&ts_log, "").unwrap();
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .env("T3CM_TAILSCALE_BIN", &fake_ts)
+        .args(["board", "unexpose", "--port", &port_str, "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let un: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(un["previousMode"], "tailscale");
+    assert_eq!(un["disabledTailscalePorts"], json!([47732]));
+    assert_eq!(un["configUpdated"], true);
+    let calls = std::fs::read_to_string(&ts_log).unwrap();
+    assert!(calls.lines().any(|l| l == "serve --https=47732 --set-path=/ off"), "{calls}");
 }

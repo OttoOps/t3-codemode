@@ -405,6 +405,7 @@ fn t3cm(home: &Path) -> std::process::Command {
     cmd.env("HOME", home)
         .env("USERPROFILE", home)
         .env("T3CM_CONFIG", home.join("none.json"))
+        .env("T3CM_TAILSCALE_BIN", home.join("no-tailscale"))
         .env("T3CM_NO_UPDATE_CHECK", "1")
         .env("T3CM_STATE_DIR", home.join("state"))
         .env_remove("XDG_CONFIG_HOME")

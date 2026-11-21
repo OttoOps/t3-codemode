@@ -6489,3 +6489,754 @@ async fn revoking_or_expiring_a_session_closes_its_open_sse_stream_and_cuts_off_
         .unwrap();
     assert_eq!(r.status(), 401);
 }
+
+fn tailscale_config(allow_users: Option<Vec<&str>>, require_pairing: bool) -> Config {
+    let mut remote = serde_json::Map::new();
+    remote.insert("mode".into(), json!("tailscale"));
+    remote.insert("origin".into(), json!("https://box.acme.ts.net:47732"));
+    if let Some(users) = allow_users {
+        remote.insert("allowUsers".into(), json!(users));
+    }
+    if require_pairing {
+        remote.insert("requirePairing".into(), json!(true));
+    }
+    Config::from_value(json!({"board": {"remote": Value::Object(remote)}})).unwrap()
+}
+
+#[test]
+fn board_remote_config_validates_tailscale_allow_users_and_require_pairing() {
+    let cfg = tailscale_config(Some(vec!["alice@acme.example", "bob@acme.example"]), true);
+    let (remote, origin) = cfg.board.active_remote_config().unwrap();
+    assert_eq!(remote.allow_users, vec!["alice@acme.example", "bob@acme.example"]);
+    assert!(remote.require_pairing);
+    assert!(remote.pairing_enabled());
+    assert_eq!(origin.canonical(), "https://box.acme.ts.net:47732");
+
+    let no_pair = tailscale_config(None, false);
+    let (remote, _) = no_pair.board.active_remote_config().unwrap();
+    assert!(remote.allow_users.is_empty());
+    assert!(!remote.require_pairing);
+    assert!(!remote.pairing_enabled());
+
+    for bad in [
+        json!({"board": {"remote": {"mode": "tailscale", "origin": "https://box.acme.ts.net:47732", "allowUsers": [""]}}}),
+        json!({"board": {"remote": {"mode": "tailscale", "origin": "https://box.acme.ts.net:47732", "allowUsers": [" alice@acme.example"]}}}),
+        json!({"board": {"remote": {"mode": "tailscale", "origin": "https://box.acme.ts.net:47732", "allowUsers": ["alice bob"]}}}),
+        json!({"board": {"remote": {"mode": "tailscale", "origin": "https://box.acme.ts.net:47732", "allowUsers": ["alice\n@acme.example"]}}}),
+    ] {
+        assert!(Config::from_value(bad.clone()).is_err(), "expected invalid config: {bad}");
+    }
+}
+
+#[tokio::test]
+async fn tailscale_mode_authenticates_host_login_and_allow_users() {
+    // 1. Default allowUsers: admits the host's own Tailscale login (case-insensitive), refuses others.
+    let h = H::build(Vec::new(), tailscale_config(None, false));
+    h.tailscale.set_host_login("alice@acme.example");
+    let s = start(h).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    let sent = s.h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": GATE})).await;
+    let handle = sent["handle"].as_str().unwrap().to_string();
+    let csrf = s.csrf();
+
+    // Host login gets into every board read route and mutating route (with CSRF).
+    for route in ["/", "/api/state", &format!("/api/msg/{handle}"), "/api/contexts", "/api/new-issues"] {
+        let r = s
+            .http
+            .get(format!("{}{route}", s.base))
+            .header("Host", "box.acme.ts.net:47732")
+            .header("X-Forwarded-Proto", "https")
+            .header("Tailscale-User-Login", "ALICE@ACME.EXAMPLE")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "host login GET {route}");
+    }
+    let mut sse = s
+        .http
+        .get(format!("{}/api/events", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sse.status(), 200);
+    let first = tokio::time::timeout(Duration::from_secs(5), sse.chunk()).await.unwrap().unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&first).contains("event: state"));
+    drop(sse);
+
+    // Mutating route still requires CSRF even for an allowed Tailscale user.
+    let r = s
+        .http
+        .post(format!("{}/api/cards/a1/answer", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("Origin", "https://box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .json(&json!({"text": "merge"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    let r = s
+        .http
+        .post(format!("{}/api/cards/a1/answer", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("Origin", "https://box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .header("X-T3CM-CSRF", &csrf)
+        .json(&json!({"text": "merge"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    // Another Tailscale login is refused with 403; missing/empty/duplicate login is refused with 401.
+    let r = s
+        .http
+        .get(format!("{}/api/state", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "bob@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    let r = s
+        .http
+        .get(format!("{}/api/state", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+
+    let r = s
+        .http
+        .get(format!("{}/api/state", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .header("Tailscale-User-Login", "bob@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+
+    // /pair is disabled when requirePairing is false, and /mcp + /healthz remain loopback-only.
+    let r = s
+        .http
+        .get(format!("{}/pair", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    let r = s
+        .http
+        .post(format!("{}/mcp", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    let r = s
+        .http
+        .get(format!("{}/healthz", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    // 2. Explicit allowUsers overrides host login.
+    let h2 = H::build(Vec::new(), tailscale_config(Some(vec!["bob@acme.example"]), false));
+    h2.tailscale.set_host_login("alice@acme.example");
+    let s2 = start(h2).await;
+
+    let r = s2
+        .http
+        .get(format!("{}/api/state", s2.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "bob@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = s2
+        .http
+        .get(format!("{}/api/state", s2.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+}
+
+#[tokio::test]
+async fn tailscale_header_grants_nothing_when_tailscale_mode_is_off() {
+    // 1. Mode "off": Tailscale-User-Login is refused with 403 even when matching host login.
+    let h_off = H::new();
+    h_off.tailscale.set_host_login("alice@acme.example");
+    let s_off = start(h_off).await;
+    let r = s_off
+        .http
+        .get(format!("{}/api/state", s_off.base))
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    // 2. Mode "pairing": Tailscale-User-Login does not bypass pairing cookie auth (returns 401).
+    let h_pair = H::build(Vec::new(), pairing_config());
+    h_pair.tailscale.set_host_login("alice@acme.example");
+    let s_pair = start(h_pair).await;
+    let r = s_pair
+        .http
+        .get(format!("{}/api/state", s_pair.base))
+        .header("Host", "board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+}
+
+#[tokio::test]
+async fn tailscale_mode_with_require_pairing_layers_cookie_auth() {
+    use t3_codemode::clock::{Clock, iso};
+    use t3_codemode::config::RemoteOrigin;
+    use t3_codemode::pairing;
+
+    let h = H::build(Vec::new(), tailscale_config(None, true));
+    h.tailscale.set_host_login("alice@acme.example");
+    let s = start(h).await;
+    let origin = RemoteOrigin::parse("https://box.acme.ts.net:47732").unwrap();
+
+    // 1. Allowed Tailscale user without pairing cookie gets 401 on board routes.
+    let r = s
+        .http
+        .get(format!("{}/api/state", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+
+    // 2. Disallowed Tailscale user is refused on GET /pair and POST /api/pair before consuming tokens.
+    let minted = pairing::mint_pairing_token(&s.h.app.store, &origin, Some("Phone"), s.h.clock.now()).unwrap();
+    let r = s
+        .http
+        .get(format!("{}/pair", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "bob@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    let r = s
+        .http
+        .post(format!("{}/api/pair", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("Origin", "https://box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "bob@acme.example")
+        .json(&json!({"token": minted.token}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    // Direct loopback also cannot consume the pairing token.
+    let r = s.http.post(format!("{}/api/pair", s.base)).json(&json!({"token": minted.token})).send().await.unwrap();
+    assert_eq!(r.status(), 403);
+
+    // 3. Allowed Tailscale user can load /pair and redeem the untouched token for a session cookie.
+    let r = s
+        .http
+        .get(format!("{}/pair", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = s
+        .http
+        .post(format!("{}/api/pair", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("Origin", "https://box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .json(&json!({"token": minted.token}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let set_cookie = r.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
+    let cookie = cookie_pair_from_set_cookie(&set_cookie);
+
+    // 4. Both allowed Tailscale login and valid cookie -> 200; wrong login even with valid cookie -> 403.
+    let r = s
+        .http
+        .get(format!("{}/api/state", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = s
+        .http
+        .get(format!("{}/api/state", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "bob@acme.example")
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    // 5. Revoking the session cuts off access (401) even with valid Tailscale-User-Login.
+    assert!(s.h.app.store.board_session_revoke(1, &iso(s.h.clock.now())).unwrap());
+    let r = s
+        .http
+        .get(format!("{}/api/state", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+}
+
+#[tokio::test]
+async fn healthz_reports_remote_board_state_and_stays_loopback_only() {
+    use t3_codemode::clock::Clock;
+    use t3_codemode::config::RemoteOrigin;
+    use t3_codemode::pairing;
+
+    // 1. Default off mode.
+    let s_off = start(H::new()).await;
+    let v: Value = s_off.http.get(format!("{}/healthz", s_off.base)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v["remote"]["mode"], "off");
+    assert_eq!(v["remote"]["enabled"], false);
+    assert_eq!(v["remote"]["origin"], Value::Null);
+    assert_eq!(v["remote"]["activeSessions"], 0);
+
+    // 2. Tailscale mode with host login and an active pairing session.
+    let h = H::build(Vec::new(), tailscale_config(None, true));
+    h.tailscale.set_host_login("alice@acme.example");
+    let origin = RemoteOrigin::parse("https://box.acme.ts.net:47732").unwrap();
+    let minted = pairing::mint_pairing_token(&h.app.store, &origin, Some("Phone"), h.clock.now()).unwrap();
+    assert!(pairing::redeem_pairing_token(&h.app.store, &minted.token, None, h.clock.now()).unwrap().is_some());
+    let s = start(h).await;
+
+    let v: Value = s.http.get(format!("{}/healthz", s.base)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v["remote"]["mode"], "tailscale");
+    assert_eq!(v["remote"]["enabled"], true);
+    assert_eq!(v["remote"]["origin"], "https://box.acme.ts.net:47732");
+    assert_eq!(v["remote"]["requirePairing"], true);
+    assert_eq!(v["remote"]["allowUsers"], json!(["alice@acme.example"]));
+    assert_eq!(v["remote"]["allowUsersSource"], "tailscale");
+    assert_eq!(v["remote"]["hostLogin"], "alice@acme.example");
+    assert_eq!(v["remote"]["tailscaleError"], Value::Null);
+    assert_eq!(v["remote"]["activeSessions"], 1);
+
+    // Loopback isolation still holds on /healthz.
+    let r = s
+        .http
+        .get(format!("{}/healthz", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+}
+
+#[test]
+fn doctor_reports_tailscale_serve_cert_origin_and_config_drift() {
+    use t3_codemode::doctor;
+    use t3_codemode::fake::FakeTailscale;
+    use t3_codemode::tailscale::{ServeStatus, TailscaleStatus, parse_serve_status_json};
+
+    let clean_serve = || -> ServeStatus {
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "47732": { "HTTPS": true } },
+                "Web": {
+                    "box.acme.ts.net:47732": {
+                        "Handlers": { "/": { "Proxy": "http://127.0.0.1:47731" } }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+    };
+
+    let cfg = tailscale_config(None, false);
+    let ts = FakeTailscale::default();
+    ts.set_host_login("alice@acme.example");
+    ts.set_serve_status(clean_serve());
+
+    let matching_health = json!({
+        "remote": {
+            "mode": "tailscale",
+            "origin": "https://box.acme.ts.net:47732",
+            "requirePairing": false,
+            "allowUsers": ["alice@acme.example"],
+            "allowUsersSource": "tailscale"
+        }
+    });
+
+    // 1. Clean state: zero problems, zero warnings.
+    let f = doctor::remote_board(Some(&cfg), 47731, Some(&matching_health), &ts);
+    assert!(f.problems.is_empty(), "{:?}", f.problems);
+    assert!(f.warnings.is_empty(), "{:?}", f.warnings);
+
+    // 2. Service vs config drift (running service still off, or older binary without `remote`).
+    let stale_health = json!({"remote": {"mode": "off", "origin": null, "requirePairing": false}});
+    let f = doctor::remote_board(Some(&cfg), 47731, Some(&stale_health), &ts);
+    assert!(f.problems.iter().any(|p| p.contains("restart t3cm")), "{:?}", f.problems);
+
+    let legacy_health = json!({"version": "0.6.0", "t3": {"connected": true}});
+    let f = doctor::remote_board(Some(&cfg), 47731, Some(&legacy_health), &ts);
+    assert!(
+        f.problems.iter().any(|p| p.contains("does not report remote status") && p.contains("restart t3cm")),
+        "{:?}",
+        f.problems
+    );
+
+    // 3. Missing CLI.
+    ts.set_missing();
+    let f = doctor::remote_board(Some(&cfg), 47731, None, &ts);
+    assert!(f.problems.iter().any(|p| p.contains("tailscale CLI was not found")), "{:?}", f.problems);
+
+    // 4. Tailscale stopped, wrong DNSName, missing cert domain, missing host login.
+    ts.set_status(TailscaleStatus {
+        backend_state: Some("Stopped".into()),
+        dns_name: Some("other.acme.ts.net".into()),
+        cert_domains: vec![],
+        host_login: None,
+    });
+    ts.set_serve_status(ServeStatus::default());
+    let f = doctor::remote_board(Some(&cfg), 47731, None, &ts);
+    assert!(f.problems.iter().any(|p| p.contains("not running")), "{:?}", f.problems);
+    assert!(f.problems.iter().any(|p| p.contains("does not match")), "{:?}", f.problems);
+    assert!(f.problems.iter().any(|p| p.contains("HTTPS certificates are not enabled")), "{:?}", f.problems);
+    assert!(f.problems.iter().any(|p| p.contains("allowUsers is empty")), "{:?}", f.problems);
+    assert!(f.problems.iter().any(|p| p.contains("not serving https://box.acme.ts.net:47732")), "{:?}", f.problems);
+
+    // 5. Wrong backend proxy port + Funnel enabled.
+    ts.set_host_login("alice@acme.example");
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "47732": { "HTTPS": true } },
+                "Web": {
+                    "box.acme.ts.net:47732": {
+                        "Handlers": { "/": { "Proxy": "http://127.0.0.1:9999" } }
+                    }
+                },
+                "AllowFunnel": { "box.acme.ts.net:47732": true }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let f = doctor::remote_board(Some(&cfg), 47731, None, &ts);
+    assert!(f.problems.iter().any(|p| p.contains("http://127.0.0.1:9999")), "{:?}", f.problems);
+    assert!(f.problems.iter().any(|p| p.contains("Tailscale Funnel is enabled")), "{:?}", f.problems);
+
+    // 6. Config off while Tailscale Serve still exposes local port -> drift problem.
+    let off_cfg = Config::default();
+    ts.set_serve_status(clean_serve());
+    let f = doctor::remote_board(Some(&off_cfg), 47731, None, &ts);
+    assert!(f.problems.iter().any(|p| p.contains("board.remote is off")), "{:?}", f.problems);
+
+    // 7. Config off and no Serve routes -> clean even when Tailscale is installed.
+    ts.set_serve_status(ServeStatus::default());
+    let f = doctor::remote_board(Some(&off_cfg), 47731, None, &ts);
+    assert!(f.problems.is_empty(), "{:?}", f.problems);
+    assert!(f.warnings.is_empty(), "{:?}", f.warnings);
+}
+
+#[test]
+fn expose_and_unexpose_drive_tailscale_serve_and_config() {
+    use t3_codemode::fake::FakeTailscale;
+    use t3_codemode::tailscale::{
+        DEFAULT_HTTPS_PORT, ExposeOptions, expose_tailscale, parse_serve_status_json, unexpose_board,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.json");
+    std::fs::write(&cfg_path, json!({"board": {"settleAfterHours": 48}}).to_string()).unwrap();
+
+    let ts = FakeTailscale::default();
+    ts.set_host_login("alice@acme.example");
+
+    // 1. Refuse to overwrite a port already serving a different target (e.g. T3 Code on :443).
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "443": { "HTTPS": true } },
+                "Web": { "box.acme.ts.net:443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:3773" } } } }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let err = expose_tailscale(
+        &ts,
+        &cfg_path,
+        &ExposeOptions { https_port: 443, local_port: 47731, allow_users: vec![], require_pairing: false },
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").contains("already in use"), "{err:#}");
+
+    // 2. Expose on default 47732 preserves existing config keys and calls `tailscale serve`.
+    let report = expose_tailscale(
+        &ts,
+        &cfg_path,
+        &ExposeOptions {
+            https_port: DEFAULT_HTTPS_PORT,
+            local_port: 47731,
+            allow_users: vec!["bob@acme.example".into()],
+            require_pairing: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(report.origin, "https://box.acme.ts.net:47732");
+    assert_eq!(report.host_login.as_deref(), Some("alice@acme.example"));
+    assert_eq!(report.allow_users, vec!["bob@acme.example"]);
+    assert!(report.require_pairing);
+    assert!(ts.calls().iter().any(|c| c == "serve --bg --https=47732 http://127.0.0.1:47731"));
+
+    let loaded = Config::load(&cfg_path).unwrap();
+    assert_eq!(loaded.board.settle_after_hours, 48);
+    let (remote, origin) = loaded.board.active_remote_config().unwrap();
+    assert_eq!(remote.mode, t3_codemode::config::RemoteMode::Tailscale);
+    assert_eq!(origin.canonical(), "https://box.acme.ts.net:47732");
+    assert_eq!(remote.allow_users, vec!["bob@acme.example"]);
+    assert!(remote.require_pairing);
+
+    // 3. Unexpose only removes mounts targeting the board using exact --set-path, preserving unrelated mounts.
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "47732": { "HTTPS": true } },
+                "Web": {
+                    "box.acme.ts.net:47732": {
+                        "Handlers": {
+                            "/": { "Proxy": "http://127.0.0.1:47731" },
+                            "/other": { "Proxy": "http://127.0.0.1:9000" }
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let un = unexpose_board(&ts, &cfg_path, None, 47731).unwrap();
+    assert_eq!(un.previous_mode, "tailscale");
+    assert_eq!(un.disabled_tailscale_ports, vec![47732]);
+    assert!(un.config_updated);
+    assert!(ts.calls().iter().any(|c| c == "serve --https=47732 --set-path=/ off"));
+    assert!(!ts.calls().iter().any(|c| c.contains("/other")));
+
+    let loaded_after = Config::load(&cfg_path).unwrap();
+    assert_eq!(loaded_after.board.settle_after_hours, 48);
+    assert!(loaded_after.board.active_remote().is_none());
+
+    // 4. Unexpose succeeds and turns off config even when the Serve handler was already removed
+    //    (without calling `off` on an absent route).
+    std::fs::write(
+        &cfg_path,
+        json!({"board": {"remote": {"mode": "tailscale", "origin": "https://box.acme.ts.net:47732"}}}).to_string(),
+    )
+    .unwrap();
+    ts.set_serve_status(t3_codemode::tailscale::ServeStatus::default());
+    ts.set_disable_error(Some("error: handler does not exist"));
+    let un_absent = unexpose_board(&ts, &cfg_path, None, 47731).unwrap();
+    assert_eq!(un_absent.previous_mode, "tailscale");
+    assert!(un_absent.disabled_tailscale_ports.is_empty());
+    assert!(un_absent.config_updated);
+    assert!(Config::load(&cfg_path).unwrap().board.active_remote().is_none());
+
+    // 5. Explicit --https-port refuses to remove a port serving an unrelated target.
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "443": { "HTTPS": true } },
+                "Web": { "box.acme.ts.net:443": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:3773" } } } }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let err = unexpose_board(&ts, &cfg_path, Some(443), 47731).unwrap_err();
+    assert!(format!("{err:#}").contains("unrelated handler"), "{err:#}");
+
+    // 6. Renamed-node protection: a stale route under an old hostname never triggers `off`
+    //    against an unrelated route at the same port/path on the current hostname.
+    std::fs::write(
+        &cfg_path,
+        json!({"board": {"remote": {"mode": "tailscale", "origin": "https://box.acme.ts.net:47732"}}}).to_string(),
+    )
+    .unwrap();
+    ts.set_disable_error(None);
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "47732": { "HTTPS": true } },
+                "Web": {
+                    "old-box.acme.ts.net:47732": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:47731" } } },
+                    "box.acme.ts.net:47732": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:9000" } } }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let calls_before_rename = ts.calls().len();
+    let un_renamed = unexpose_board(&ts, &cfg_path, None, 47731).unwrap();
+    assert!(un_renamed.disabled_tailscale_ports.is_empty());
+    assert!(!ts.calls()[calls_before_rename..].iter().any(|c| c.ends_with(" off")));
+
+    // 7. In Tailscale mode, a missing CLI or a --https-port override that leaves the configured route live
+    //    returns an error and preserves board.remote in config.json.
+    std::fs::write(
+        &cfg_path,
+        json!({"board": {"remote": {"mode": "tailscale", "origin": "https://box.acme.ts.net:47732"}}}).to_string(),
+    )
+    .unwrap();
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "47732": { "HTTPS": true } },
+                "Web": { "box.acme.ts.net:47732": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:47731" } } } }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let err = unexpose_board(&ts, &cfg_path, Some(48000), 47731).unwrap_err();
+    assert!(format!("{err:#}").contains("port 47732"), "{err:#}");
+    assert!(Config::load(&cfg_path).unwrap().board.active_remote().is_some(), "config must stay intact on error");
+
+    ts.set_missing();
+    let err = unexpose_board(&ts, &cfg_path, None, 47731).unwrap_err();
+    assert!(format!("{err:#}").contains("not found"), "{err:#}");
+    assert!(
+        Config::load(&cfg_path).unwrap().board.active_remote().is_some(),
+        "config must stay intact when CLI missing"
+    );
+
+    // 8. If the configured port drifted to HTTP-only while still proxying to the board, unexpose fails
+    //    and preserves config.json both with default arguments and with a different --https-port.
+    ts.set_host_login("alice@acme.example");
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "47732": { "HTTP": true } },
+                "Web": { "box.acme.ts.net:47732": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:47731" } } } }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let err = unexpose_board(&ts, &cfg_path, None, 47731).unwrap_err();
+    assert!(format!("{err:#}").contains("plain HTTP"), "{err:#}");
+    assert!(format!("{err:#}").contains("tailscale serve --http=47732 --set-path=/ off"), "{err:#}");
+    assert!(Config::load(&cfg_path).unwrap().board.active_remote().is_some());
+    let err = unexpose_board(&ts, &cfg_path, Some(48000), 47731).unwrap_err();
+    assert!(format!("{err:#}").contains("plain HTTP"), "{err:#}");
+    assert!(format!("{err:#}").contains("tailscale serve --http=47732 --set-path=/ off"), "{err:#}");
+    assert!(Config::load(&cfg_path).unwrap().board.active_remote().is_some());
+
+    // A mount path containing spaces is shell-quoted in the suggested removal command.
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "47732": { "HTTP": true } },
+                "Web": { "box.acme.ts.net:47732": { "Handlers": { "/team board": { "Proxy": "http://127.0.0.1:47731" } } } }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let err = unexpose_board(&ts, &cfg_path, None, 47731).unwrap_err();
+    assert!(format!("{err:#}").contains("tailscale serve --http=47732 --set-path='/team board' off"), "{err:#}");
+    assert!(Config::load(&cfg_path).unwrap().board.active_remote().is_some());
+
+    // 9. Re-exposing over an existing working board route does not roll back that route if config write fails.
+    let bad_cfg_dir = dir.path().join("bad-cfg-dir");
+    std::fs::create_dir_all(&bad_cfg_dir).unwrap();
+    ts.set_host_login("alice@acme.example");
+    ts.set_disable_error(None);
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "47732": { "HTTPS": true } },
+                "Web": { "box.acme.ts.net:47732": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:47731" } } } }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let calls_before = ts.calls().len();
+    assert!(
+        expose_tailscale(
+            &ts,
+            &bad_cfg_dir,
+            &ExposeOptions {
+                https_port: DEFAULT_HTTPS_PORT,
+                local_port: 47731,
+                allow_users: vec![],
+                require_pairing: false
+            },
+        )
+        .is_err()
+    );
+    let calls_after = ts.calls();
+    assert!(
+        !calls_after[calls_before..].iter().any(|c| c.ends_with(" off")),
+        "must not disable pre-existing working route: {:?}",
+        &calls_after[calls_before..]
+    );
+}

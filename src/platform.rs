@@ -68,6 +68,7 @@ pub fn installed_exe() -> PathBuf {
 pub struct Service {
     pub status: &'static str,
     pub start: &'static str,
+    pub restart: &'static str,
     pub logs: &'static str,
 }
 
@@ -75,6 +76,7 @@ pub struct Service {
 pub const SERVICE: Service = Service {
     status: "launchctl print gui/$(id -u)/com.ottoops.t3-codemode",
     start: "launchctl kickstart gui/$(id -u)/com.ottoops.t3-codemode",
+    restart: "launchctl kickstart -k gui/$(id -u)/com.ottoops.t3-codemode",
     logs: "~/Library/Logs/t3-codemode/t3cm.log",
 };
 
@@ -82,6 +84,7 @@ pub const SERVICE: Service = Service {
 pub const SERVICE: Service = Service {
     status: "Get-ScheduledTask t3-codemode | Get-ScheduledTaskInfo",
     start: "Enable-ScheduledTask t3-codemode; Start-ScheduledTask t3-codemode",
+    restart: "Stop-ScheduledTask t3-codemode; Start-ScheduledTask t3-codemode",
     logs: "Get-Content \"$env:LOCALAPPDATA\\t3-codemode\\logs\\t3cm.log\"",
 };
 
@@ -89,6 +92,7 @@ pub const SERVICE: Service = Service {
 pub const SERVICE: Service = Service {
     status: "systemctl --user status t3-codemode",
     start: "systemctl --user start t3-codemode",
+    restart: "systemctl --user restart t3-codemode",
     logs: "journalctl --user -u t3-codemode",
 };
 

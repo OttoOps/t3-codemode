@@ -7,7 +7,7 @@ use t3_codemode::app::{App, ExecuteRequest, ToolOutput};
 use t3_codemode::clock::FakeClock;
 use t3_codemode::config::Config;
 use t3_codemode::drift::Home;
-use t3_codemode::fake::{FakeDesktop, FakeGitHub, FakeRemotes, FakeT3, provider, thread};
+use t3_codemode::fake::{FakeDesktop, FakeGitHub, FakeRemotes, FakeT3, FakeTailscale, provider, thread};
 use t3_codemode::store::Store;
 
 pub const BOSS: &str = "mcp:boss";
@@ -33,6 +33,7 @@ pub struct H {
     pub remotes: Arc<FakeRemotes>,
     pub github: Arc<FakeGitHub>,
     pub desktop: Arc<FakeDesktop>,
+    pub tailscale: Arc<FakeTailscale>,
     config: Config,
 }
 
@@ -57,7 +58,8 @@ impl H {
         let remotes = Arc::new(FakeRemotes::default());
         let github = Arc::new(FakeGitHub::default());
         let desktop = Arc::new(FakeDesktop::default());
-        let app = App::with_host(
+        let tailscale = Arc::new(FakeTailscale::default());
+        let app = App::with_host_and_tailscale(
             config.clone(),
             store,
             fake.clone(),
@@ -65,11 +67,12 @@ impl H {
             remotes.clone(),
             github.clone(),
             desktop.clone(),
+            tailscale.clone(),
         );
         app.wf.set_skills_home(Home::under(&dir.path().join("home")));
         app.wf.set_slot_folders(t3_codemode::slots::Folders::under(&dir.path().join("home"), None));
         app.wf.set_config_path(dir.path().join("t3cm-config.json"));
-        H { dir, fake, clock, app, remotes, github, desktop, config }
+        H { dir, fake, clock, app, remotes, github, desktop, tailscale, config }
     }
 
     pub async fn load_catalog(&self) {
@@ -78,7 +81,7 @@ impl H {
 
     pub fn reopen(&mut self) {
         let store = Arc::new(Store::open(self.dir.path()).unwrap());
-        self.app = App::with_host(
+        self.app = App::with_host_and_tailscale(
             self.config.clone(),
             store,
             self.fake.clone(),
@@ -86,6 +89,7 @@ impl H {
             self.remotes.clone(),
             self.github.clone(),
             self.desktop.clone(),
+            self.tailscale.clone(),
         );
         self.app.wf.set_skills_home(Home::under(&self.dir.path().join("home")));
         self.app.wf.set_slot_folders(t3_codemode::slots::Folders::under(&self.dir.path().join("home"), None));
@@ -93,7 +97,7 @@ impl H {
     }
 
     pub fn peer(&self) -> Arc<App> {
-        let app = App::with_host(
+        let app = App::with_host_and_tailscale(
             self.config.clone(),
             Arc::new(Store::open(self.dir.path()).unwrap()),
             self.fake.clone(),
@@ -101,6 +105,7 @@ impl H {
             self.remotes.clone(),
             self.github.clone(),
             self.desktop.clone(),
+            self.tailscale.clone(),
         );
         app.wf.set_skills_home(Home::under(&self.dir.path().join("home")));
         app.wf.set_slot_folders(t3_codemode::slots::Folders::under(&self.dir.path().join("home"), None));

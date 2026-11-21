@@ -8,12 +8,13 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::board::{GitRemotes, Remotes};
 use crate::catalog::{Catalog, aliases};
 use crate::clock::{Clock, iso};
-use crate::config::{Config, OpenLinks};
+use crate::config::{Config, OpenLinks, RemoteMode};
 use crate::desktop::{Desktop, WindowsDesktop, app_link};
 use crate::github::{GhCli, GitHub};
 use crate::sandbox::{self, Host, Limits, NoHost, Run};
 use crate::store::Store;
 use crate::t3::{BoxFut, T3Client};
+use crate::tailscale::{TailscaleCli, TailscaleRunner};
 use crate::upstream::{T3_NAMESPACE, UpstreamManager, qualified, redact_json, split_qualified};
 use crate::wf::{LAST_PASS, Wf, join_target};
 use crate::{js, truncate};
@@ -115,13 +116,20 @@ pub struct App {
     pub wf: Arc<Wf>,
     pub upstreams: Arc<UpstreamManager>,
     pub desktop: Arc<dyn Desktop>,
+    pub tailscale: Arc<dyn TailscaleRunner>,
     pub csrf: String,
     pub stopping: tokio::sync::watch::Sender<bool>,
     built: RwLock<Built>,
     last_refresh: Mutex<Option<Instant>>,
+    ts_host_cache: Mutex<Option<CachedHostLogin>>,
     started: Instant,
     runs: Arc<Semaphore>,
     queued: AtomicUsize,
+}
+
+struct CachedHostLogin {
+    checked_at: Instant,
+    result: Result<Option<String>, String>,
 }
 
 struct Built {
@@ -168,6 +176,7 @@ struct Outside {
     remotes: Arc<dyn Remotes>,
     github: Arc<dyn GitHub>,
     desktop: Arc<dyn Desktop>,
+    tailscale: Arc<dyn TailscaleRunner>,
 }
 
 impl App {
@@ -205,8 +214,31 @@ impl App {
         github: Arc<dyn GitHub>,
         desktop: Arc<dyn Desktop>,
     ) -> Arc<App> {
+        App::with_host_and_tailscale(
+            config,
+            store,
+            t3,
+            clock,
+            remotes,
+            github,
+            desktop,
+            Arc::new(TailscaleCli::from_env()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_host_and_tailscale(
+        config: Config,
+        store: Arc<Store>,
+        t3: Arc<dyn T3Client>,
+        clock: Arc<dyn Clock>,
+        remotes: Arc<dyn Remotes>,
+        github: Arc<dyn GitHub>,
+        desktop: Arc<dyn Desktop>,
+        tailscale: Arc<dyn TailscaleRunner>,
+    ) -> Arc<App> {
         let upstreams = Arc::new(UpstreamManager::new(config.upstreams.clone()));
-        App::assemble(config, store, t3, clock, upstreams, Outside { remotes, github, desktop })
+        App::assemble(config, store, t3, clock, upstreams, Outside { remotes, github, desktop, tailscale })
     }
 
     pub fn build(
@@ -223,7 +255,12 @@ impl App {
             t3,
             clock,
             upstreams,
-            Outside { remotes, github: Arc::new(GhCli), desktop: Arc::new(WindowsDesktop) },
+            Outside {
+                remotes,
+                github: Arc::new(GhCli),
+                desktop: Arc::new(WindowsDesktop),
+                tailscale: Arc::new(TailscaleCli::from_env()),
+            },
         )
     }
 
@@ -233,7 +270,7 @@ impl App {
         t3: Arc<dyn T3Client>,
         clock: Arc<dyn Clock>,
         upstreams: Arc<UpstreamManager>,
-        Outside { remotes, github, desktop }: Outside,
+        Outside { remotes, github, desktop, tailscale }: Outside,
     ) -> Arc<App> {
         let config = Arc::new(config);
         let wf = Arc::new(Wf::new(store.clone(), t3.clone(), clock.clone(), config.clone(), remotes, github));
@@ -250,10 +287,12 @@ impl App {
             wf,
             upstreams,
             desktop,
+            tailscale,
             csrf: csrf_token(),
             stopping: tokio::sync::watch::channel(false).0,
             built: RwLock::new(Built { catalog, t3_tools: Arc::new(cached), generation }),
             last_refresh: Mutex::new(None),
+            ts_host_cache: Mutex::new(None),
             started: Instant::now(),
             runs,
             queued: AtomicUsize::new(0),
@@ -469,7 +508,128 @@ impl App {
         Ok(v)
     }
 
-    pub fn health(&self) -> Value {
+    fn cached_tailscale_host_login(&self) -> Option<Result<Option<String>, String>> {
+        let base_ttl = self.tailscale.cache_ttl();
+        if base_ttl.is_zero() {
+            return None;
+        }
+        let guard = self.ts_host_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = guard.as_ref()?;
+        let ttl = if entry.result.is_ok() { base_ttl } else { base_ttl.min(Duration::from_secs(10)) };
+        (entry.checked_at.elapsed() < ttl).then(|| entry.result.clone())
+    }
+
+    pub fn tailscale_host_login(&self) -> Result<Option<String>, String> {
+        if let Some(hit) = self.cached_tailscale_host_login() {
+            return hit;
+        }
+        let res = match self.tailscale.status() {
+            Ok(st) if !st.is_running() => Err(format!(
+                "Tailscale is not running (BackendState: {})",
+                st.backend_state.as_deref().unwrap_or("unknown")
+            )),
+            Ok(st) => Ok(st.host_login),
+            Err(e) => Err(format!("{e:#}")),
+        };
+        if !self.tailscale.cache_ttl().is_zero() {
+            *self.ts_host_cache.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(CachedHostLogin { checked_at: Instant::now(), result: res.clone() });
+        }
+        res
+    }
+
+    pub async fn tailscale_host_login_async(self: &Arc<Self>) -> Result<Option<String>, String> {
+        if let Some(hit) = self.cached_tailscale_host_login() {
+            return hit;
+        }
+        let app = self.clone();
+        tokio::task::spawn_blocking(move || app.tailscale_host_login())
+            .await
+            .unwrap_or_else(|e| Err(format!("tailscale status task failed: {e}")))
+    }
+
+    fn remote_health_with(&self, ts_login: Option<Result<Option<String>, String>>) -> Value {
+        let active_sessions = self.store.board_sessions_active(&iso(self.clock.now())).map(|s| s.len()).unwrap_or(0);
+        let Some((cfg, origin)) = self.config.board.active_remote_config() else {
+            return json!({
+                "mode": "off",
+                "enabled": false,
+                "origin": Value::Null,
+                "requirePairing": false,
+                "activeSessions": active_sessions,
+            });
+        };
+        match cfg.mode {
+            RemoteMode::Off => json!({
+                "mode": "off",
+                "enabled": false,
+                "origin": Value::Null,
+                "requirePairing": false,
+                "activeSessions": active_sessions,
+            }),
+            RemoteMode::Pairing => json!({
+                "mode": "pairing",
+                "enabled": true,
+                "origin": origin.canonical(),
+                "requirePairing": true,
+                "activeSessions": active_sessions,
+            }),
+            RemoteMode::Tailscale => {
+                if !cfg.allow_users.is_empty() {
+                    json!({
+                        "mode": "tailscale",
+                        "enabled": true,
+                        "origin": origin.canonical(),
+                        "requirePairing": cfg.require_pairing,
+                        "allowUsers": cfg.allow_users,
+                        "allowUsersSource": "config",
+                        "hostLogin": Value::Null,
+                        "tailscaleError": Value::Null,
+                        "activeSessions": active_sessions,
+                    })
+                } else {
+                    let lookup = ts_login.unwrap_or_else(|| self.tailscale_host_login());
+                    match lookup {
+                        Ok(Some(login)) => json!({
+                            "mode": "tailscale",
+                            "enabled": true,
+                            "origin": origin.canonical(),
+                            "requirePairing": cfg.require_pairing,
+                            "allowUsers": [login],
+                            "allowUsersSource": "tailscale",
+                            "hostLogin": login,
+                            "tailscaleError": Value::Null,
+                            "activeSessions": active_sessions,
+                        }),
+                        Ok(None) => json!({
+                            "mode": "tailscale",
+                            "enabled": true,
+                            "origin": origin.canonical(),
+                            "requirePairing": cfg.require_pairing,
+                            "allowUsers": [],
+                            "allowUsersSource": "unavailable",
+                            "hostLogin": Value::Null,
+                            "tailscaleError": "Tailscale status did not report a host user login",
+                            "activeSessions": active_sessions,
+                        }),
+                        Err(e) => json!({
+                            "mode": "tailscale",
+                            "enabled": true,
+                            "origin": origin.canonical(),
+                            "requirePairing": cfg.require_pairing,
+                            "allowUsers": [],
+                            "allowUsersSource": "unavailable",
+                            "hostLogin": Value::Null,
+                            "tailscaleError": e,
+                            "activeSessions": active_sessions,
+                        }),
+                    }
+                }
+            }
+        }
+    }
+
+    fn health_with_remote(&self, remote: Value) -> Value {
         let last_pass = self.store.meta_get(LAST_PASS).ok().flatten();
         json!({
             "version": env!("CARGO_PKG_VERSION"),
@@ -490,7 +650,26 @@ impl App {
             "upstreams": self.upstreams.status(),
             "update": self.wf.update_view(),
             "skills": self.wf.skills_view(),
+            "remote": remote,
         })
+    }
+
+    pub fn health(&self) -> Value {
+        self.health_with_remote(self.remote_health_with(None))
+    }
+
+    pub async fn health_async(self: &Arc<Self>) -> Value {
+        let ts_login = if self
+            .config
+            .board
+            .active_remote_config()
+            .is_some_and(|(cfg, _)| cfg.mode == RemoteMode::Tailscale && cfg.allow_users.is_empty())
+        {
+            Some(self.tailscale_host_login_async().await)
+        } else {
+            None
+        };
+        self.health_with_remote(self.remote_health_with(ts_login))
     }
 
     async fn host_op(

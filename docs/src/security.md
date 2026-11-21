@@ -56,17 +56,26 @@ for the split trust boundary and reverse-proxy trust assumptions.
     If `X-Forwarded-Host` is present alongside a non-loopback `Host`, both must
     match the configured `origin`.
   - `Origin`, when present, must match the configured `https://` `origin`.
-  - Remote authentication must succeed. In `pairing` mode, the request must
-    carry a valid `__Host-t3cm_session` cookie (`HttpOnly; Secure;
-    SameSite=Strict; Path=/`) backed by a SHA-256-hashed 30-day session in
-    `store.db`, minted from a single-use 5-minute `/pair#<token>` token via
-    `t3cm board pair` and `POST /api/pair` (`GET /pair` and `POST /api/pair`
-    enforce the same remote `Host`, `X-Forwarded-Proto`, and `Origin` checks
-    before session auth; `/pair` never embeds the board CSRF token, and
-    `POST /api/pair` requires `Content-Type: application/json`). Revoking or
-    expiring a session cuts off API calls with 401 and closes open `/api/events`
-    streams. Until Tailscale Serve auth is implemented, `tailscale` mode still
-    refuses remote board requests with 401.
+  - Remote authentication must succeed:
+    - In `pairing` mode, the request must carry a valid `__Host-t3cm_session`
+      cookie (`HttpOnly; Secure; SameSite=Strict; Path=/`) backed by a
+      SHA-256-hashed 30-day session in `store.db`, minted from a single-use
+      5-minute `/pair#<token>` token via `t3cm board pair` and `POST /api/pair`
+      (`GET /pair` and `POST /api/pair` enforce the same remote `Host`,
+      `X-Forwarded-Proto`, and `Origin` checks before session auth; `/pair`
+      never embeds the board CSRF token, and `POST /api/pair` requires
+      `Content-Type: application/json`). Revoking or expiring a session cuts
+      off API calls with 401 and closes open `/api/events` streams.
+    - In `tailscale` mode, the request must carry a single
+      `Tailscale-User-Login` header matching `board.remote.allowUsers` (or,
+      when `allowUsers` is empty, the host's own login from
+      `tailscale status --json`). Any other login is refused with 403, and a
+      missing header or unavailable host login is refused with 401. When
+      `requirePairing: true` is also set, the request must also carry a
+      valid `__Host-t3cm_session` cookie (and `/pair` and `POST /api/pair`
+      require an allowed `Tailscale-User-Login` before redeeming a token).
+      `Tailscale-User-Login` grants no access when `board.remote.mode` is
+      `"off"` or `"pairing"`.
   - Every mutating method (`POST`, `PUT`, `DELETE`) on authenticated board
     routes still requires the per-process `X-T3CM-CSRF` header.
 - **Reverse-proxy trust assumption.** Because `t3cm` listens on `127.0.0.1`,

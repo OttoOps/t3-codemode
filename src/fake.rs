@@ -671,3 +671,132 @@ impl crate::github::GitHub for FakeGitHub {
         })
     }
 }
+
+struct FakeTailscaleState {
+    bin: Option<std::path::PathBuf>,
+    status: Result<crate::tailscale::TailscaleStatus, String>,
+    serve_status: Result<crate::tailscale::ServeStatus, String>,
+    enable_err: Option<String>,
+    disable_err: Option<String>,
+    calls: Vec<String>,
+}
+
+impl Default for FakeTailscaleState {
+    fn default() -> Self {
+        Self {
+            bin: None,
+            status: Err("tailscale CLI not configured in fake".into()),
+            serve_status: Ok(crate::tailscale::ServeStatus::default()),
+            enable_err: None,
+            disable_err: None,
+            calls: Vec::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct FakeTailscale {
+    state: Mutex<FakeTailscaleState>,
+}
+
+impl FakeTailscale {
+    pub fn set_missing(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.bin = None;
+        st.status = Err("tailscale CLI not found".into());
+        st.serve_status = Err("tailscale CLI not found".into());
+    }
+
+    pub fn set_status(&self, status: crate::tailscale::TailscaleStatus) {
+        let mut st = self.state.lock().unwrap();
+        if st.bin.is_none() {
+            st.bin = Some(std::path::PathBuf::from("/fake/tailscale"));
+        }
+        st.status = Ok(status);
+    }
+
+    pub fn set_host_login(&self, login: &str) {
+        self.set_status(crate::tailscale::TailscaleStatus {
+            backend_state: Some("Running".into()),
+            dns_name: Some("box.acme.ts.net".into()),
+            cert_domains: vec!["box.acme.ts.net".into()],
+            host_login: Some(login.into()),
+        });
+    }
+
+    pub fn set_status_error(&self, err: &str) {
+        let mut st = self.state.lock().unwrap();
+        if st.bin.is_none() {
+            st.bin = Some(std::path::PathBuf::from("/fake/tailscale"));
+        }
+        st.status = Err(err.into());
+    }
+
+    pub fn set_serve_status(&self, serve: crate::tailscale::ServeStatus) {
+        let mut st = self.state.lock().unwrap();
+        if st.bin.is_none() {
+            st.bin = Some(std::path::PathBuf::from("/fake/tailscale"));
+        }
+        st.serve_status = Ok(serve);
+    }
+
+    pub fn set_serve_status_error(&self, err: &str) {
+        let mut st = self.state.lock().unwrap();
+        if st.bin.is_none() {
+            st.bin = Some(std::path::PathBuf::from("/fake/tailscale"));
+        }
+        st.serve_status = Err(err.into());
+    }
+
+    pub fn set_enable_error(&self, err: Option<&str>) {
+        self.state.lock().unwrap().enable_err = err.map(String::from);
+    }
+
+    pub fn set_disable_error(&self, err: Option<&str>) {
+        self.state.lock().unwrap().disable_err = err.map(String::from);
+    }
+
+    pub fn calls(&self) -> Vec<String> {
+        self.state.lock().unwrap().calls.clone()
+    }
+}
+
+impl crate::tailscale::TailscaleRunner for FakeTailscale {
+    fn binary(&self) -> Option<std::path::PathBuf> {
+        self.state.lock().unwrap().bin.clone()
+    }
+
+    fn status(&self) -> anyhow::Result<crate::tailscale::TailscaleStatus> {
+        let mut st = self.state.lock().unwrap();
+        st.calls.push("status".into());
+        st.status.clone().map_err(anyhow::Error::msg)
+    }
+
+    fn serve_status(&self) -> anyhow::Result<crate::tailscale::ServeStatus> {
+        let mut st = self.state.lock().unwrap();
+        st.calls.push("serve status".into());
+        st.serve_status.clone().map_err(anyhow::Error::msg)
+    }
+
+    fn serve_enable(&self, https_port: u16, local_port: u16) -> anyhow::Result<()> {
+        let mut st = self.state.lock().unwrap();
+        st.calls.push(format!("serve --bg --https={https_port} http://127.0.0.1:{local_port}"));
+        if let Some(e) = &st.enable_err {
+            return Err(anyhow::Error::msg(e.clone()));
+        }
+        Ok(())
+    }
+
+    fn serve_disable(&self, https_port: u16, mount: &str) -> anyhow::Result<()> {
+        let mut st = self.state.lock().unwrap();
+        st.calls.push(format!("serve --https={https_port} --set-path={mount} off"));
+        if let Some(e) = &st.disable_err {
+            return Err(anyhow::Error::msg(e.clone()));
+        }
+        Ok(())
+    }
+
+    fn cache_ttl(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
+}

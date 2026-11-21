@@ -15,6 +15,7 @@ use t3_codemode::release::{self, Version};
 use t3_codemode::slots::{self, Caps, Enabled, Folders, Inputs, Resolved};
 use t3_codemode::store::Store;
 use t3_codemode::t3_http::HttpT3;
+use t3_codemode::tailscale::{self, ExposeOptions, TailscaleCli};
 use t3_codemode::wf_slots::Reported;
 use t3_codemode::{agent_link, bench, doctor, platform, server, setup, skills, steps, upgrade, watcher};
 
@@ -162,7 +163,7 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SetupCmd,
     },
-    /// Manage remote board pairing links and browser sessions
+    /// Expose the board remotely, pair browsers, and manage sessions
     Board {
         #[command(subcommand)]
         cmd: BoardCmd,
@@ -271,6 +272,37 @@ enum SetupCmd {
 
 #[derive(Subcommand)]
 enum BoardCmd {
+    /// Expose the board over HTTPS using Tailscale Serve and write board.remote config
+    Expose {
+        /// Expose via Tailscale Serve
+        #[arg(long)]
+        tailscale: bool,
+        /// Tailscale Serve HTTPS port (default 47732 to avoid colliding with T3 Code on 443)
+        #[arg(long, default_value_t = tailscale::DEFAULT_HTTPS_PORT)]
+        https_port: u16,
+        /// Allowed Tailscale login(s); repeatable (defaults to the host's own login)
+        #[arg(long = "allow-user", value_name = "LOGIN")]
+        allow_users: Vec<String>,
+        /// Also require per-browser pairing cookies on top of Tailscale identity
+        #[arg(long)]
+        require_pairing: bool,
+        /// Output JSON instead of text
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        port: PortArgs,
+    },
+    /// Stop exposing the board remotely (disables Tailscale Serve and sets board.remote to off)
+    Unexpose {
+        /// Tailscale Serve HTTPS port to turn off (defaults to the port in board.remote.origin or 47732)
+        #[arg(long)]
+        https_port: Option<u16>,
+        /// Output JSON instead of text
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        port: PortArgs,
+    },
     /// Mint a single-use 5-minute pairing URL and print a QR code for a remote browser
     Pair {
         /// Optional label for the paired browser (e.g. "Phone", "Laptop")
@@ -317,22 +349,79 @@ fn run_board(cmd: BoardCmd) -> Result<ExitCode> {
     let now = SystemClock.now();
     let now_iso = iso(now);
     match cmd {
+        BoardCmd::Expose { tailscale: use_tailscale, https_port, allow_users, require_pairing, json, port } => {
+            if !use_tailscale {
+                bail!(
+                    "pass `--tailscale` to expose the board over Tailscale Serve \
+                     (for Caddy, nginx, or cloudflared, configure board.remote in {})",
+                    config::default_path().display()
+                );
+            }
+            let cfg_path = config::default_path();
+            let ts = TailscaleCli::from_env();
+            let report = tailscale::expose_tailscale(
+                &ts,
+                &cfg_path,
+                &ExposeOptions { https_port, local_port: port.port, allow_users, require_pairing },
+            )?;
+            if json {
+                let mut v = serde_json::to_value(&report)?;
+                v["restartHint"] = json!(platform::SERVICE.restart);
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                println!("Board exposed via Tailscale Serve: {}/", report.origin);
+                if report.allow_users.is_empty() {
+                    if let Some(login) = &report.host_login {
+                        println!("Allowed user: {login} (host Tailscale login)");
+                    }
+                } else {
+                    println!("Allowed users: {}", report.allow_users.join(", "));
+                }
+                if report.require_pairing {
+                    println!("Pairing required: yes (run `t3cm board pair` to pair each browser)");
+                }
+                println!("Updated config: {}", report.config_path);
+                println!("Restart the service to apply: {}", platform::SERVICE.restart);
+            }
+        }
+        BoardCmd::Unexpose { https_port, json, port } => {
+            let cfg_path = config::default_path();
+            let ts = TailscaleCli::from_env();
+            let report = tailscale::unexpose_board(&ts, &cfg_path, https_port, port.port)?;
+            if json {
+                let mut v = serde_json::to_value(&report)?;
+                v["restartHint"] = json!(platform::SERVICE.restart);
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                if !report.disabled_tailscale_ports.is_empty() {
+                    let ports: Vec<String> = report.disabled_tailscale_ports.iter().map(u16::to_string).collect();
+                    println!("Disabled Tailscale Serve HTTPS port(s): {}", ports.join(", "));
+                }
+                if report.config_updated {
+                    println!("Disabled board.remote in {}", report.config_path);
+                    println!("Restart the service to apply: {}", platform::SERVICE.restart);
+                } else if report.disabled_tailscale_ports.is_empty() {
+                    println!("Remote board access is already off.");
+                }
+            }
+        }
         BoardCmd::Pair { label, json, no_qr, state } => {
             let cfg_path = config::default_path();
             let cfg = Config::load(&cfg_path)?;
-            let origin = match cfg.board.active_remote() {
-                Some((RemoteMode::Pairing, origin)) => origin,
-                Some((RemoteMode::Tailscale, _)) => {
+            let origin = match cfg.board.active_remote_config() {
+                Some((remote, origin)) if remote.pairing_enabled() => origin,
+                Some((remote, _)) if remote.mode == RemoteMode::Tailscale => {
                     bail!(
-                        "board.remote.mode is \"tailscale\", which does not use pairing tokens yet; \
-                         set board.remote.mode to \"pairing\" in {}",
+                        "board.remote.mode is \"tailscale\" with requirePairing disabled; \
+                         Tailscale-User-Login authenticates browsers directly, or set \
+                         board.remote.requirePairing to true in {} to also require browser pairing",
                         cfg_path.display()
                     );
                 }
-                None | Some((RemoteMode::Off, _)) => {
+                _ => {
                     bail!(
                         "remote board access is disabled; configure board.remote with mode \"pairing\" \
-                         and an https:// origin in {}",
+                         (or \"tailscale\" with requirePairing: true) and an https:// origin in {}",
                         cfg_path.display()
                     );
                 }
@@ -846,13 +935,17 @@ async fn run_doctor(a: DoctorArgs) -> Result<ExitCode> {
     }
     let mut f = doctor::Findings::default();
     let mut caps = None;
+    let mut health_val = None;
     let eff = if a.no_t3 {
         local_view(&local_slots(&folders, &root), &Caps::Unchecked)
     } else {
         match service_slots(a.port, &root, a.thread.as_deref()).await {
             Ok(v) => {
                 match health(a.port).await {
-                    Ok(h) => f.extend(doctor::service(Some(&h), None)),
+                    Ok(h) => {
+                        f.extend(doctor::service(Some(&h), None));
+                        health_val = Some(h);
+                    }
                     Err(e) => f.extend(doctor::service(None, Some(&format!("{e:#}")))),
                 }
                 caps = exec_value(a.port, "async () => t3.orchestrator_capabilities({})".into(), None).await.ok();
@@ -871,6 +964,7 @@ async fn run_doctor(a: DoctorArgs) -> Result<ExitCode> {
     f.extend(found);
     f.extend(doctor::pools(&eff, cfg.as_ref()));
     f.extend(doctor::legacy_board(cfg.as_ref()));
+    f.extend(doctor::remote_board(cfg.as_ref(), a.port, health_val.as_ref(), &TailscaleCli::from_env()));
     let home = t3_codemode::drift::Home::from_env()?;
     let bundle = skills::Bundle::embedded();
     f.extend(doctor::skills(&home, &bundle));

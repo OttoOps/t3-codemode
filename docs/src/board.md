@@ -426,14 +426,72 @@ hand.
 ## Remote access
 
 The board is loopback-only by default. To open it from another device over
-HTTPS, put a reverse proxy in front of `127.0.0.1:47731`, configure
-[`board.remote`](config.md#remote-board) in `config.json`, restart `t3cm`, and
-pair each remote browser from the CLI. `/mcp` and `/healthz` stay loopback-only.
+HTTPS, expose it with Tailscale Serve or put your own HTTPS reverse proxy in
+front of `127.0.0.1:47731`, configure [`board.remote`](config.md#remote-board)
+in `config.json`, and restart `t3cm`. `/mcp` and `/healthz` stay loopback-only.
+
+### Tailscale Serve
+
+Tailscale Serve terminates HTTPS with an automatic certificate on your
+tailnet's MagicDNS hostname (`https://box.acme.ts.net:47732/`) and injects the
+caller's `Tailscale-User-Login` header. `t3cm` defaults to HTTPS port `47732`
+so it does not collide with T3 Code's own `:443` binding.
+
+1. Make sure MagicDNS and HTTPS Certificates are enabled in your Tailscale
+   admin console and the node is signed in (`tailscale status`). On Linux, if
+   you run `tailscale serve` without `sudo`, grant your user operator access
+   once with `sudo tailscale set --operator=$USER`.
+
+2. Expose the board and write `board.remote` in `config.json`:
+
+   ```sh
+   t3cm board expose --tailscale
+   ```
+
+   This runs `tailscale serve --bg --https=47732 http://127.0.0.1:47731` and
+   writes `board.remote` with `mode: "tailscale"` and
+   `origin: "https://box.acme.ts.net:47732"`. Restart the `t3cm` service so the
+   new config takes effect.
+
+   Optional flags:
+
+   - `--https-port <PORT>`: serve on a port other than `47732` (refuses to
+     overwrite a port already serving a different target).
+   - `--port <PORT>`: target a non-default local `t3cm` port (defaults to
+     `T3CM_PORT` or `47731`).
+   - `--allow-user <LOGIN>`: repeatable explicit Tailscale login allowlist
+     (defaults to the host's own login from `tailscale status --json`).
+   - `--require-pairing`: also require a per-browser pairing cookie on top of
+     `Tailscale-User-Login`. With this enabled, run `t3cm board pair` for each
+     remote browser.
+   - `--json`: machine-readable output.
+
+3. Check remote state and drift at any time:
+
+   - `t3cm status` (and loopback `GET /healthz`) includes a `remote` object
+     with `mode`, `enabled`, `origin`, `requirePairing`, `allowUsers`,
+     `allowUsersSource`, `hostLogin`, and `activeSessions`.
+   - `t3cm doctor` verifies that `config.json`, the running service, Tailscale
+     status, MagicDNS, HTTPS certificates (`CertDomains`), and
+     `tailscale serve status` agree, and flags any drift or accidental Funnel /
+     raw-TCP exposure.
+   - `t3cm serve` never mutates Tailscale state on start or restart; only
+     `t3cm board expose` and `t3cm board unexpose` change `tailscale serve`.
+
+4. To turn remote access back off, disable the Tailscale Serve port and set
+   `board.remote.mode` to `"off"`, then restart the service:
+
+   ```sh
+   t3cm board unexpose
+   ```
 
 ### Pairing a browser
 
-1. Enable pairing mode with your public HTTPS origin in `config.json` and
-   restart the service:
+Use pairing mode behind Caddy, Cloudflare Tunnel, or nginx, or layer it on top
+of Tailscale Serve with `requirePairing: true`:
+
+1. Enable pairing mode with your public HTTPS origin in `config.json` (or run
+   `t3cm board expose --tailscale --require-pairing`) and restart the service:
 
    ```json
    {
@@ -480,8 +538,10 @@ Any proxy fronting the board must follow the rules in
 [Security model](security.md#network): terminate TLS, refuse `/mcp` and
 `/healthz`, strip client-supplied forwarding and identity headers, always inject
 a trusted forwarding header, and reject or overwrite any `Host` that does not
-match `board.remote.origin`. Never front the board with a raw TCP forwarder such
-as `ssh -L`, `socat`, or `tailscale serve --tcp`.
+match `board.remote.origin`. Do not configure the proxy to log `POST /api/pair`
+request bodies, which carry the raw pairing token during redemption. Never front
+the board with a raw TCP forwarder such as `ssh -L`, `socat`, or
+`tailscale serve --tcp`.
 
 #### Caddy
 
@@ -580,8 +640,8 @@ server {
 | Route | Does |
 |---|---|
 | `GET /` | The page, with a per-process CSRF token embedded |
-| `GET /pair` | Remote browser pairing page (enabled when `board.remote.mode` is `"pairing"`); reads the token from `#<token>`, clears the fragment, and posts to `POST /api/pair` |
-| `POST /api/pair` `{token, label?}` | Redeem a single-use 5-minute pairing token (`Content-Type: application/json`) and set a 30-day `HttpOnly; Secure; SameSite=Strict; Path=/` session cookie |
+| `GET /pair` | Remote browser pairing page (enabled when `board.remote.mode` is `"pairing"`, or `"tailscale"` with `requirePairing: true`); reads the token from `#<token>`, clears the fragment, and posts to `POST /api/pair` |
+| `POST /api/pair` `{token, label?}` | Redeem a single-use 5-minute pairing token (`Content-Type: application/json`) over the remote HTTPS origin and set a 30-day `HttpOnly; Secure; SameSite=Strict; Path=/` session cookie |
 | `GET /api/state` | `{rev, cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, counts, service}`, with `counts.newIssues`. `rev` is the board revision: it goes up with every change, keeps going up across a restart, and a state whose `rev` is at least a write's `rev` already holds that write; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
 | `GET /api/events` | SSE: a `state` event on every change, carrying the same `rev` (closes when a remote pairing session is revoked or expires) |
 | `GET /api/msg/{handle}` | One stored message in full |
