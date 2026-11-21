@@ -129,3 +129,158 @@ fn sigterm_stops_serve_promptly_while_a_board_streams_events() {
     let status = status.expect("serve still runs 5s after SIGTERM with a board stream open");
     assert!(status.success(), "serve exited with {status} after SIGTERM");
 }
+
+#[test]
+fn board_pair_sessions_and_revoke_cli_lifecycle() {
+    use serde_json::{Value, json};
+    use t3_codemode::clock::{Clock, SystemClock};
+    use t3_codemode::pairing;
+    use t3_codemode::store::Store;
+
+    let home = tempfile::tempdir().unwrap();
+    let state = home.path().join("state");
+    let cfg_path = home.path().join("config.json");
+
+    // 1. With board.remote off, `t3cm board pair` fails with an actionable message.
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .args(["board", "pair", "--state-dir"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("board.remote"), "{err}");
+
+    // 2. Enable pairing mode in config and mint a pairing link with QR output.
+    std::fs::write(
+        &cfg_path,
+        json!({
+            "board": {
+                "remote": {
+                    "mode": "pairing",
+                    "origin": "https://board.acme.example:47732"
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .args(["board", "pair", "--label", "Phone", "--state-dir"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let url1 = stdout
+        .lines()
+        .find(|l| l.starts_with("https://board.acme.example:47732/pair#"))
+        .unwrap_or_else(|| panic!("no pairing URL in output:\n{stdout}"));
+    assert!(stdout.contains("Label: Phone"), "{stdout}");
+    assert!(
+        stdout.contains('\u{2588}') || stdout.contains('\u{2580}') || stdout.contains('\u{2584}'),
+        "expected Unicode QR code in stdout:\n{stdout}"
+    );
+    let token1 = url1.split_once('#').unwrap().1.to_string();
+
+    // 3. Mint a second pairing link in JSON mode.
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .args(["board", "pair", "--label", "Laptop", "--json", "--state-dir"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let minted2: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let url2 = minted2["url"].as_str().unwrap();
+    assert!(url2.starts_with("https://board.acme.example:47732/pair#"), "{minted2}");
+    assert_eq!(minted2["label"], "Laptop");
+    assert_eq!(minted2["ttlSeconds"], 300);
+    let token2 = url2.split_once('#').unwrap().1.to_string();
+
+    // 4. Before redeeming, `board sessions` reports none.
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .args(["board", "sessions", "--state-dir"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("No active remote board sessions."));
+
+    // 5. Redeem both tokens into the store, then list and revoke through the CLI.
+    let store = Store::open(&state).unwrap();
+    let now = SystemClock.now();
+    assert!(pairing::redeem_pairing_token(&store, &token1, None, now).unwrap().is_some());
+    assert!(pairing::redeem_pairing_token(&store, &token2, None, now).unwrap().is_some());
+    drop(store);
+
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .args(["board", "sessions", "--json", "--state-dir"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let listed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listed["sessions"].as_array().unwrap().len(), 2);
+    assert_eq!(listed["sessions"][0]["id"], "s1");
+    assert_eq!(listed["sessions"][0]["label"], "Phone");
+    assert_eq!(listed["sessions"][1]["id"], "s2");
+    assert_eq!(listed["sessions"][1]["label"], "Laptop");
+
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .args(["board", "sessions", "--state-dir"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let table = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        table.contains("ID") && table.contains("s1") && table.contains("Phone") && table.contains("Laptop"),
+        "{table}"
+    );
+
+    // 6. Revoke s1 by id, then verify revoking s1 again fails.
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .args(["board", "revoke", "s1", "--state-dir"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Revoked remote board session s1."));
+
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .args(["board", "revoke", "s1", "--state-dir"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+
+    // 7. Revoke remaining sessions with --all --json and confirm list is empty.
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .args(["board", "revoke", "--all", "--json", "--state-dir"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let rev: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(rev, json!({"revoked": 1, "all": true}));
+
+    let out = t3cm(home.path())
+        .env("T3CM_CONFIG", &cfg_path)
+        .args(["board", "sessions", "--json", "--state-dir"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let empty: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(empty, json!({"sessions": []}));
+}

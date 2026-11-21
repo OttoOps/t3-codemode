@@ -86,6 +86,33 @@ All under `board`:
 | `reconcileActiveMinutes` | `2` | Minutes between GitHub checks while any tracked pull request is queued or waiting to be queued. From 1 to `reconcileIdleMinutes`. |
 | `reconcileIdleMinutes` | `10` | Minutes between GitHub checks otherwise; `0` turns the check off, page loads included. See [The board](board.md#github-reconcile). |
 | `openLinks` | `desktop` | `desktop`: thread links open in the running T3 Code desktop app, or in a new tab when it is not running. The app check needs Windows, natively or through WSL, so macOS and Linux without WSL always get a tab. `tab`: always a new tab. |
+| `remote` | `null` | Opt-in HTTPS remote board access behind a reverse proxy. `null` or `{"mode": "off"}` keeps the board loopback-only. See [Remote board](#remote-board). |
+
+#### Remote board
+
+`board.remote` is off by default (`null`). To serve the board behind an HTTPS
+reverse proxy with browser pairing, set `mode` and `origin` in `config.json`
+and restart the service:
+
+```json
+{
+  "board": {
+    "remote": {
+      "mode": "pairing",
+      "origin": "https://board.example.com"
+    }
+  }
+}
+```
+
+| Key | Default | Does |
+|---|---|---|
+| `mode` | `"off"` | `"off"`: refuse all remote and proxied requests (403). `"pairing"`: require a session cookie minted via `t3cm board pair` and redeemed through `/pair#<token>`. `"tailscale"`: reserved for Tailscale Serve identity auth (currently refuses remote requests with 401). |
+| `origin` | unset | Required when `mode` is not `"off"`. Canonical `https://` origin with no path, query, fragment, or credentials, such as `"https://board.example.com"` or `"https://board.example.com:47732"`. |
+
+`/mcp` and `/healthz` remain strictly loopback-only regardless of `board.remote`.
+See [Remote access](board.md#remote-access) for pairing commands and reverse-proxy
+examples, and [Security model](security.md#network) for the proxy trust rules.
 
 ### Pools
 
@@ -305,10 +332,11 @@ Pools are per T3 environment, since instance ids belong to one T3 server.
 
 State lives in SQLite at `store.db` in the state directory above
 (`--state-dir` or `T3CM_STATE_DIR` override it). It holds the T3 session, `mem`
-and `vars`, the workflow links and messages, the board's cards and feed, pool
-member credits, limits and pick history, and the cached T3 catalog for when T3
-is down. Everything survives restarts. Next to it, `update-check.json` holds
-the latest release the last check found and when.
+and `vars`, the workflow links and messages, the board's cards and feed, hashed
+remote pairing tokens and browser sessions, pool member credits, limits and pick
+history, and the cached T3 catalog for when T3 is down. Everything survives
+restarts. Next to it, `update-check.json` holds the latest release the last
+check found and when.
 
 On Linux and macOS the directory is `0700` and the database `0600`. On Windows
 t3cm sets no ACL of its own: the store relies on the per-user ACL that
