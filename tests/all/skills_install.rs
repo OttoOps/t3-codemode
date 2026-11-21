@@ -448,3 +448,36 @@ fn npx_relative_links_count_as_linked_after_a_take_over() {
     assert_eq!(v["claudeLinks"]["made"], json!([]));
     assert!(v["claudeLinks"]["links"].as_array().unwrap().iter().all(|l| l["state"] == "linked"), "{v}");
 }
+
+#[test]
+fn takeover_over_a_pre_retirement_bundle_removes_retired_python_and_role_files() {
+    let home = tempfile::tempdir().unwrap();
+    npx_install(home.path(), false);
+    let retired = [
+        "setup-t3-workflow/scripts/setup_workflow.py",
+        "t3-overseer/t3-role.json",
+        "t3-ticket/t3-role.json",
+        "t3-worker/t3-role.json",
+        "t3-workflow/defaults.json",
+        "t3-workflow/scripts/slots.py",
+        "t3-workflow/scripts/t3api.py",
+        "t3-workflow/scripts/t3wf.py",
+    ];
+    for rel in retired {
+        let p = rel.split('/').fold(skills_dir(home.path()), |acc, part| acc.join(part));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "old\n").unwrap();
+    }
+
+    let out = t3cm(home.path(), &["skills", "install", "--take-over", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let removed: Vec<&str> = v["removed"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert_eq!(removed, retired);
+    for rel in retired {
+        let p = rel.split('/').fold(skills_dir(home.path()), |acc, part| acc.join(part));
+        assert!(!p.exists(), "{rel} should have been removed on takeover");
+    }
+    assert!(!skills_dir(home.path()).join("t3-workflow").join("scripts").exists());
+    assert!(!skills_dir(home.path()).join("setup-t3-workflow").join("scripts").exists());
+}

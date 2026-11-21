@@ -120,11 +120,11 @@ class Sandbox:
         def skill_entry(name):
             spec = home_skills.get(name)
             if spec is None:
-                return {"name": name, "status": "ok", "inline": False, "how": "Skill tool"}
+                return {"name": name, "status": "ok", "invoke": "skill", "how": "Skill tool"}
             path = str(self.home / ".claude" / "skills" / name / "SKILL.md")
-            inline = bool(spec.get("inline"))
-            how = f"inline: read {path} and apply it" if inline else "Skill tool"
-            return {"name": name, "status": "ok", "path": path, "inline": inline, "how": how}
+            invoke = "inline" if spec.get("inline") else "skill"
+            how = f"inline: read {path} and apply it" if invoke == "inline" else "Skill tool"
+            return {"name": name, "status": "ok", "path": path, "invoke": invoke, "how": how}
 
         review_name = cfg.get("review")
         review = {"source": "config" if "review" in cfg else "default",

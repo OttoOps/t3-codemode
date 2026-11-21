@@ -34,14 +34,15 @@ thread's project root (for example, an overseer checking another repo, or a
 worker reading its worktree's `AGENTS.md`).
 
 `wf.slot(name)` returns the slot's resolved fields, its `source` layer, a
-one-line `line`, and `warnings`. Each skill object carries `status` (`"ok"`
-or `"missing"`), `name`, `path`, `inline`, and `how`. Act on each skill
-object by its fields:
+one-line `line`, and `warnings`. Each skill object carries `status` (`"ok"`,
+`"ambiguous"`, or `"missing"`), `name`, `path`, `invoke` (`"skill"` or
+`"inline"`), `others` (when `"ambiguous"`), and `how`. `"ambiguous"` still
+returns a usable first match; act on each skill object by its fields:
 
 | Fields | Do |
 |---|---|
-| `status: "ok"`, `how: "Skill tool"` | invoke `name` with the Skill tool |
-| `status: "ok"`, `inline: true` (`how: "inline: read <path> and apply it"`) | read `path` and apply it step by step, as if invoked; the Skill tool refuses it |
+| `status: "ok"` or `"ambiguous"`, `invoke: "skill"` (`how: "Skill tool"`) | invoke `name` with the Skill tool |
+| `status: "ok"` or `"ambiguous"`, `invoke: "inline"` (`how: "inline: read <path> and apply it"`) | read `path` and apply it step by step, as if invoked; the Skill tool refuses it |
 | `status: "missing"` | **skip** it (below) |
 | `skill: null` (or `skills: []`) | the slot is off |
 

@@ -78,7 +78,7 @@ Run every call below inside `mcp__t3cm__execute`, or pipe the same
 | Merging a PR on the user's word | `await wf.merge({ repo: "<owner>/<name>", pr: <n>, head: "<sha>", method: "<method>" })` |
 | The work is done | `await wf.send({ kind: "handoff", body })` (closes the link) |
 | The work stopped without finishing | `await wf.send({ kind: "closed", body })` (closes the link) |
-| A child's work ends without its handoff | `await wf.close({ link: "<child id>" })` |
+| A child's work ends without its handoff | `await wf.close({ child: "<label or thread id>" })` |
 | Where do my children stand? | `(await wf.board()).children` (live status, gate, link) |
 | Notes not yet seen | `await wf.inbox()` |
 | A body cut short with `wf.show("mN")` | `(await wf.show("mN")).body` |

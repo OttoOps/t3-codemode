@@ -433,12 +433,17 @@ pub struct T3wfRetire {
 
 pub fn inspect_retire(env: &Env) -> T3wfRetire {
     let mut units = Vec::new();
+    let wants = env.systemd_user.join("timers.target.wants");
     for unit in T3WF_UNITS {
         for ext in ["timer", "service"] {
             let p = env.systemd_user.join(format!("{unit}.{ext}"));
             if p.exists() || std::fs::symlink_metadata(&p).is_ok() {
                 units.push(p);
             }
+        }
+        let link = wants.join(format!("{unit}.timer"));
+        if link.exists() || std::fs::symlink_metadata(&link).is_ok() {
+            units.push(link);
         }
     }
     let shim_path = env.t3wf_state.join("v2").join("bin").join("t3wf-tick");
@@ -460,38 +465,78 @@ fn retire_state(r: &T3wfRetire) -> AutoState {
     }
 }
 
-fn run_systemctl(cmd: &Path, args: &[&str]) {
-    let _ = std::process::Command::new(cmd)
-        .arg("--user")
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+enum SysctlOutcome {
+    Ok,
+    NotInstalled,
+    Failed(String),
 }
 
-fn apply_retire(env: &Env, r: &T3wfRetire) -> Result<Vec<PathBuf>> {
+fn run_systemctl(cmd: &Path, args: &[&str]) -> SysctlOutcome {
+    match std::process::Command::new(cmd).arg("--user").args(args).stdin(std::process::Stdio::null()).output() {
+        Ok(o) if o.status.success() => SysctlOutcome::Ok,
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            let msg = err.trim();
+            SysctlOutcome::Failed(if msg.is_empty() {
+                format!("`systemctl --user {}` exited {}", args.join(" "), o.status)
+            } else {
+                format!("`systemctl --user {}` exited {}: {msg}", args.join(" "), o.status)
+            })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SysctlOutcome::NotInstalled,
+        Err(e) => SysctlOutcome::Failed(format!("could not run {}: {e}", cmd.display())),
+    }
+}
+
+fn apply_retire(env: &Env, r: &T3wfRetire) -> Result<(Vec<PathBuf>, Vec<String>, bool)> {
     let mut removed = Vec::new();
+    let mut notes = Vec::new();
+    let mut complete = true;
     if !r.units.is_empty() {
+        let mut failed_units = BTreeSet::new();
+        let mut sysctl_present = false;
         if let Some(sysctl) = &env.systemctl_cmd {
             for unit in T3WF_UNITS {
                 let has_unit = r.units.iter().any(|p| {
                     p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(&format!("{unit}.")))
                 });
-                if has_unit {
-                    run_systemctl(sysctl, &["disable", "--now", &format!("{unit}.timer")]);
+                if !has_unit {
+                    continue;
+                }
+                match run_systemctl(sysctl, &["disable", "--now", &format!("{unit}.timer")]) {
+                    SysctlOutcome::Ok => sysctl_present = true,
+                    SysctlOutcome::NotInstalled => {}
+                    SysctlOutcome::Failed(e) => {
+                        sysctl_present = true;
+                        complete = false;
+                        failed_units.insert(unit);
+                        notes.push(format!(
+                            "could not disable {unit}.timer ({e}); leaving its unit files in place so `t3cm skills update` retries"
+                        ));
+                    }
                 }
             }
         }
         for path in &r.units {
+            let blocked = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| failed_units.iter().any(|u| n.starts_with(&format!("{u}."))));
+            if blocked {
+                continue;
+            }
             match std::fs::remove_file(path) {
                 Ok(()) => removed.push(path.clone()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
             }
         }
-        if let Some(sysctl) = &env.systemctl_cmd {
-            run_systemctl(sysctl, &["daemon-reload"]);
+        if sysctl_present
+            && let Some(sysctl) = &env.systemctl_cmd
+            && let SysctlOutcome::Failed(e) = run_systemctl(sysctl, &["daemon-reload"])
+        {
+            complete = false;
+            notes.push(format!("could not reload systemd user daemon after removing t3wf timers ({e})"));
         }
     }
     if let Some(shim) = &r.shim {
@@ -514,7 +559,7 @@ fn apply_retire(env: &Env, r: &T3wfRetire) -> Result<Vec<PathBuf>> {
             let _ = std::fs::remove_dir(scripts_dir);
         }
     }
-    Ok(removed)
+    Ok((removed, notes, complete))
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -831,8 +876,12 @@ pub fn apply(env: &Env, bundle: &Bundle) -> Result<Applied> {
         }
     }
     let mut retire = inspect_retire(env);
+    let mut retire_complete = true;
     if steps.iter().any(|s| s.id == RETIRE_T3WF_STEP) && retire.status == RetireState::Present {
-        removed = apply_retire(env, &retire)?;
+        let (retire_removed, retire_notes, ok) = apply_retire(env, &retire)?;
+        removed = retire_removed;
+        notes.extend(retire_notes);
+        retire_complete = ok;
         retire = inspect_retire(env);
     }
     let retired_any = !removed.is_empty();
@@ -841,7 +890,7 @@ pub fn apply(env: &Env, bundle: &Bundle) -> Result<Applied> {
         let mut ids = done_ids(&steps, &recorded);
         for s in steps.iter().filter(|s| s.kind == Kind::Auto) {
             let done = if s.id == RETIRE_T3WF_STEP {
-                retired_any && retire.status == RetireState::Clean
+                retired_any && retire_complete && retire.status == RetireState::Clean
             } else {
                 auto_state(&s.id, &rule, &reg, &retire) == AutoState::Done
             };

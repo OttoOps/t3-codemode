@@ -13,6 +13,16 @@ mod bundled {
 pub const RELEASE: &str = env!("CARGO_PKG_VERSION");
 pub const STAMP_KEY: &str = "t3-codemode-release";
 pub const MANIFEST_SCHEMA: u32 = 1;
+const RETIRED_FILES: &[&str] = &[
+    "setup-t3-workflow/scripts/setup_workflow.py",
+    "t3-overseer/t3-role.json",
+    "t3-ticket/t3-role.json",
+    "t3-worker/t3-role.json",
+    "t3-workflow/defaults.json",
+    "t3-workflow/scripts/slots.py",
+    "t3-workflow/scripts/t3api.py",
+    "t3-workflow/scripts/t3wf.py",
+];
 
 pub struct Bundle {
     pub release: String,
@@ -524,6 +534,14 @@ pub fn sync(paths: &Paths, bundle: &Bundle, opts: Options) -> Result<Report> {
                     report.written.push(rel.clone());
                 }
                 files.insert(rel.clone(), hash(want));
+            }
+            if opts.take_over {
+                for rel in RETIRED_FILES {
+                    if !expected.contains_key(*rel) && on_disk(&paths.dir, rel).exists() {
+                        remove_with_empty_parents(&paths.dir, rel)?;
+                        report.removed.push((*rel).to_string());
+                    }
+                }
             }
         }
         Some(m) => {

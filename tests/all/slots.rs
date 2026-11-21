@@ -590,3 +590,91 @@ async fn unreadable_agents_md_and_malformed_plugin_records_are_handled_safely() 
     );
     assert_eq!(v["skills"][2]["status"], "ok", "valid user-scoped plugin without projectPath still resolves");
 }
+
+#[tokio::test]
+async fn real_shaped_config_with_deploying_repo_overrides_resolves_for_default_and_custom_instances() {
+    const DEPLOYING_BLOCK: &str = "# Repo\n\n## Agent workflow\n\n\
+        - Tracker: github-issues (see Backlog)\n\
+        - Delivery: tag-deploy (see Deploying)\n\
+        - Deploy skill: `deploy` (`content/v*` when only `training/` changed, else `deploy/v*`)\n\
+        - Merge method: rebase\n\
+        - PR format: the `pr` skill\n\
+        - Checks: `npm test` (runs `tsc` first) and `npm run build`\n\
+        - In-progress label: none\n\
+        - Identity: the user's own; no bot\n";
+
+    for (instance, custom_folder) in [("claudeAgent", false), ("claude-2", true)] {
+        let s = S::new(instance);
+        let claude = if custom_folder { s.home.join(".claude-2") } else { s.home.join(".claude") };
+        let cbrip = claude.join("plugins/cache/acme/cbrip/1.40.0");
+        let sol_path = skill(&cbrip.join("skills"), "sol-loop", false);
+        let aws_path = skill(&cbrip.join("skills"), "aws-sso-login", false);
+        let deploy_path = skill(&cbrip.join("skills"), "deploy", false);
+        let voice = claude.join("plugins/cache/acme/paul-otto/1.2.0");
+        let voice_path = skill(&voice.join("skills"), "paul-voice", false);
+        let installed = claude.join("plugins/installed_plugins.json");
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(
+            &installed,
+            json!({
+                "version": 2,
+                "plugins": {
+                    "cbrip@acme": [{"scope": "user", "installPath": cbrip.to_string_lossy()}],
+                    "paul-otto@acme": [{"scope": "user", "installPath": voice.to_string_lossy()}]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            claude.join("settings.json"),
+            json!({"enabledPlugins": {"cbrip@acme": true, "paul-otto@acme": true}}).to_string(),
+        )
+        .unwrap();
+        let agents = s.home.join(".agents/skills");
+        let pr_path = skill(&agents, "pr", false);
+        let unslop_path = skill(&agents, "unslop", true);
+        s.config(json!({
+            "version": 1,
+            "writtenBy": "0.6.0",
+            "steps": ["slot:review", "slot:passes", "slot:credentials", "slot:delivery", "slot:models", "rule:filed-issues"],
+            "review": "cbrip:sol-loop",
+            "passes": ["pr", "paul-otto:paul-voice", "unslop"],
+            "credentials": [{"match": "ExpiredToken|Token has expired|SSO session|aws sso login", "skill": "cbrip:aws-sso-login"}],
+            "delivery": {"mode": "merge"},
+            "models": {
+                "ticket": {"provider": "claude-2", "model": "claude-opus-5-5", "effort": "high"},
+                "worker": {"provider": "claude-2", "model": "claude-opus-5-5", "effort": "high"}
+            }
+        }));
+        let reported =
+            if custom_folder { own(&claude) } else { Reported { own: Some(String::new()), ..Reported::default() } };
+
+        let plain = s.call("async () => wf.slots()", reported.clone()).await;
+        assert_eq!(plain["problems"], json!([]));
+        assert_eq!(plain["warnings"], json!([]));
+        assert_eq!(plain["review"]["source"], "user");
+        assert_eq!(plain["review"]["skill"]["path"].as_str(), sol_path.to_str());
+        assert_eq!(plain["review"]["skill"]["invoke"], "skill");
+        let passes = plain["passes"]["skills"].as_array().unwrap();
+        assert_eq!(passes.len(), 3);
+        assert_eq!((passes[0]["path"].as_str(), passes[0]["invoke"].as_str()), (pr_path.to_str(), Some("skill")));
+        assert_eq!((passes[1]["path"].as_str(), passes[1]["invoke"].as_str()), (voice_path.to_str(), Some("skill")));
+        assert_eq!((passes[2]["path"].as_str(), passes[2]["invoke"].as_str()), (unslop_path.to_str(), Some("inline")));
+        assert_eq!(plain["credentials"]["renewals"][0]["skill"]["path"].as_str(), aws_path.to_str());
+        assert_eq!(plain["delivery"]["mode"], "merge");
+        assert_eq!(plain["delivery"]["source"], "user");
+        assert_eq!(plain["models"]["ticket"]["spec"]["provider"], "claude-2");
+        assert_eq!(plain["models"]["worker"]["spec"]["model"], "claude-opus-5-5");
+
+        std::fs::write(s.repo.join("AGENTS.md"), DEPLOYING_BLOCK).unwrap();
+        let deploying = s.call("async () => wf.slots()", reported).await;
+        assert_eq!(deploying["problems"], json!([]));
+        assert_eq!(deploying["warnings"], json!([]));
+        assert_eq!(deploying["delivery"]["mode"], "tag-deploy");
+        assert_eq!(deploying["delivery"]["source"], "AGENTS.md");
+        assert_eq!(deploying["delivery"]["skill"]["path"].as_str(), deploy_path.to_str());
+        assert_eq!(deploying["delivery"]["skill"]["invoke"], "skill");
+        assert_eq!(deploying["review"]["skill"]["path"].as_str(), sol_path.to_str());
+    }
+}

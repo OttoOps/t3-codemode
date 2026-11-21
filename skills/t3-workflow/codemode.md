@@ -37,9 +37,15 @@ transcript into context:
 
 ```js
 async () => {
-  const th = await t3.thread_read({ threadId: "<id>", limit: 3 });
-  const tail = (th.items ?? []).slice(-3).map(m => `${m.role ?? m.kind}: ${(m.text ?? "").slice(0, 300)}`);
-  return { status: th.status, link: th.link, tail };
+  const { thread } = await t3.thread_read({ threadId: "<id>", limit: 1, maxCharsPerItem: 1 });
+  const { items } = await t3.thread_read({
+    threadId: "<id>",
+    limit: 3,
+    maxCharsPerItem: 300,
+    beforePosition: Math.max(thread.itemCount ?? 0, 1) + 1,
+  });
+  const tail = (items ?? []).map(m => `${m.role ?? m.type ?? "item"}: ${(m.text ?? "").slice(0, 300)}`);
+  return { title: thread.title, status: thread.status, link: thread.link, tail };
 }
 ```
 
