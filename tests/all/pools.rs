@@ -18,7 +18,7 @@ fn config(strategy: &str, members: Value, board_pool: bool) -> Config {
     let mut c = json!({"pools": {"opus": {"driver": "claudeAgent", "model": OPUS, "effort": "high",
                                           "strategy": strategy, "members": members}}});
     if board_pool {
-        c["board"] = json!({"pool": "opus"});
+        c["board"] = json!({"pool": "opus", "askPool": "opus"});
     }
     Config::from_value(c).unwrap()
 }
@@ -395,10 +395,17 @@ fn config_load_rejects_bad_pools_by_name() {
     assert!(e.starts_with("pool opus: unknown field `wieght`"), "{e}");
     let e = Config::from_value(json!({"board": {"pool": "missing"}})).unwrap_err();
     assert!(format!("{e:#}").contains("board.pool names \"missing\""));
-    let ok = Config::from_value(json!({"pools": {"opus": base()}, "board": {"pool": "opus"}})).unwrap();
+    let e = Config::from_value(json!({"board": {"askPool": "missing"}})).unwrap_err();
+    assert!(format!("{e:#}").contains("board.askPool names \"missing\""));
+    let ok =
+        Config::from_value(json!({"pools": {"opus": base()}, "board": {"pool": "opus", "askPool": "opus"}})).unwrap();
     assert_eq!(ok.pools["opus"].strategy, "weighted");
     assert_eq!(ok.pools["opus"].members[0].weight, 1);
-    assert!(Config::default().pools.is_empty() && Config::default().board.pool.is_none());
+    assert!(
+        Config::default().pools.is_empty()
+            && Config::default().board.pool.is_none()
+            && Config::default().board.ask_pool.is_none()
+    );
 }
 
 const RESET: &str = "2026-11-17T15:00:00Z";

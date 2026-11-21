@@ -137,7 +137,7 @@ impl Wf {
         *self.slot_folders.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
     }
 
-    fn base_folders(&self) -> Result<Folders> {
+    pub(crate) fn base_folders(&self) -> Result<Folders> {
         if let Some(f) = self.slot_folders.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             return Ok(f);
         }

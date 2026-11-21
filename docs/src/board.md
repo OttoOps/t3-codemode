@@ -61,10 +61,20 @@ and the threads running. Only the lists scroll.
   `#65`. When a launch picks from a pool in `models.ticket` or `board.pool`,
   each launch adds an entry that names the instance it went to and why.
 - **Launch and Ask,** pinned above Activity. Launch takes GitHub issue URLs and
-  makes each one a ticket thread. A question in Ask starts a short-lived Haiku
-  thread that reads the board, writes its answer under Ask, and then gets
-  archived. With `board.pool` set, the thread runs on a pool member with the
-  pool's model, or in a mixed pool the member's own.
+  makes each one a ticket thread. Before you launch, the board shows which model
+  and source (`.t3-workflow.json`, `AGENTS.md`, `user config`, `board setting`,
+  or `default`) the launch will use; when an issue's repository overrides
+  `models.ticket` in its `.t3-workflow.json` or `AGENTS.md`, the board says so. The **Models** control
+  in the header (and the **Change** links beside Launch and Ask) offers two
+  modes for both ticket launches and the ask box: a **specific model** (provider
+  instance, model and effort from T3's `orchestrator_capabilities`) or a **pool**
+  (only pools configured in t3cm). Saving the ticket model writes the user-config
+  layer of `models.ticket` (`~/.config/t3-workflow/config.json`); saving the ask
+  model writes `board.askInstanceId`, `board.askModel`, `board.askEffort` or
+  `board.askPool` in t3cm's `config.json`. Both persist and take effect on the
+  next launch or question with no restart. A question in Ask starts a short-lived
+  scratch thread that reads the board, writes its answer under Ask, and then
+  gets archived.
 
 Times show as ages (`36m`, `1h 32m`); hover one for the local time.
 
@@ -417,7 +427,10 @@ hand.
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it |
 | `POST /api/cards/{id}/dismiss` | Resolve without messaging |
 | `POST /api/launch` `{issues: [...]}` | `wf.launchTicket` for each (at most 20) |
-| `POST /api/ask` `{question}` | Ask a scratch thread about the board |
+| `POST /api/ask` `{question}` | Ask a scratch thread about the board using `board.askPool` or `board.askInstanceId`/`askModel`/`askEffort`; returns the ask view with `instanceId`, `model`, `effort`, `modelSource` (and `pool`, `reason` for pools) |
+| `GET /api/models` | Current ticket and ask model resolution (`ticket`, `ask`), enabled providers/models/efforts from `orchestrator_capabilities` (`providers`), configured pools (`pools`), and per-project repo overrides (`repoOverrides`) |
+| `PUT /api/models/ticket` `{mode, ...}` | Persist `models.ticket` to the user workflow config (`mode: "model"` with `provider`, `model`, `effort?`, or `mode: "pool"` with `pool`) after validating against live capabilities or configured pools; returns the updated `/api/models` view |
+| `PUT /api/models/ask` `{mode, ...}` | Persist the ask box mode to t3cm's `config.json` (`board.askInstanceId`/`askModel`/`askEffort` or `board.askPool`) and apply it live with no restart; returns the updated `/api/models` view |
 | `POST /api/tickets/{thread}/settle`, `/restore` | Settle a done ticket, or bring a settled one back (400 if open, or not settled) |
 | `POST /api/asks/{id}/settle`, `/restore` | The same for a closed ask; `id` is `q<n>` |
 | `GET /api/new-issues` | `{issues, dismissed}`, newest first; an issue that has a board ticket is in neither |

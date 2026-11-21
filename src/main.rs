@@ -396,11 +396,14 @@ fn not_serving(port: u16) -> String {
 }
 
 fn build(state: &StateArgs) -> Result<(Arc<App>, Arc<HttpT3>)> {
-    let cfg = Config::load(&config::default_path())?;
+    let cfg_path = config::default_path();
+    let cfg = Config::load(&cfg_path)?;
     let store = Arc::new(Store::open(&state_dir(state))?);
     let clock = Arc::new(SystemClock);
     let t3 = Arc::new(HttpT3::new(store.clone(), clock.clone()));
-    Ok((App::new(cfg, store, t3.clone(), clock), t3))
+    let app = App::new(cfg, store, t3.clone(), clock);
+    app.wf.set_config_path(cfg_path);
+    Ok((app, t3))
 }
 
 async fn warm_up(app: Arc<App>, t3: Arc<HttpT3>) {

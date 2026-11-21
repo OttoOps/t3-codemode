@@ -17,7 +17,7 @@ pub const DEFAULT_PORT: u16 = 47731;
 pub const REVIEW_SOURCE: &str = "https://github.com/t3dotgg/tstack";
 pub const RECORD_KEYS: &[&str] = &["writtenBy", "steps"];
 
-const EFFORT_OPTIONS: &[&str] = &["effort", "reasoningEffort", "thinking_level"];
+const EFFORT_OPTIONS: &[&str] = &["effort", "reasoningEffort", "thinking_level", "thought_level"];
 const SUGGESTED: &[(&str, &[&str])] = &[
     ("review", &["sol-loop"]),
     ("passes", &["unslop", "pr"]),

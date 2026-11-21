@@ -48,7 +48,7 @@ fn group<'t>(c: &fancy_regex::Captures<'t>, i: usize) -> &'t str {
     c.get(i).map_or("", |m| m.as_str())
 }
 
-pub const EFFORT_OPTIONS: &[&str] = &["effort", "thinking_level", "reasoningEffort"];
+pub const EFFORT_OPTIONS: &[&str] = &["effort", "thinking_level", "thought_level", "reasoningEffort"];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ReFlags {
@@ -2240,7 +2240,7 @@ impl Caps {
     }
 }
 
-fn disabled(p: &Value) -> bool {
+pub fn provider_disabled(p: &Value) -> bool {
     p["constraints"].as_array().is_some_and(|c| {
         c.iter().any(|x| {
             let s = match x {
@@ -2255,7 +2255,7 @@ fn disabled(p: &Value) -> bool {
 pub fn model_offers(caps: &Value, model: &str, provider: Option<&str>) -> Vec<(String, Value)> {
     let mut offers: Vec<(String, Value)> = Vec::new();
     for p in caps["providers"].as_array().into_iter().flatten() {
-        if disabled(p) {
+        if provider_disabled(p) {
             continue;
         }
         let pid = p["providerInstanceId"].as_str().unwrap_or_default().to_string();
@@ -2305,20 +2305,24 @@ pub fn merge_caps(base: &mut Value, extra: &Value) {
     }
 }
 
-fn effort_values(entry: &Value) -> Option<Vec<String>> {
+pub fn effort_option(entry: &Value) -> Option<(Vec<String>, Option<String>)> {
     for o in entry["options"].as_array().into_iter().flatten() {
         if o["id"].as_str().is_some_and(|i| EFFORT_OPTIONS.contains(&i)) {
-            return Some(
-                o["values"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))
-                    .collect(),
-            );
+            let vals = o["values"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))
+                .collect();
+            let default = o.get("default").and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from);
+            return Some((vals, default));
         }
     }
     None
+}
+
+fn effort_values(entry: &Value) -> Option<Vec<String>> {
+    effort_option(entry).map(|(vals, _)| vals)
 }
 
 pub fn check_model(spec: &Map<String, Value>, caps: &Value) -> Option<String> {
@@ -2331,10 +2335,13 @@ pub fn check_model(spec: &Map<String, Value>, caps: &Value) -> Option<String> {
     }
     if let Some(effort) = spec.get("effort").and_then(Value::as_str).filter(|e| !e.is_empty()) {
         let allowed: Vec<Option<Vec<String>>> = offers.iter().map(|(_, m)| effort_values(m)).collect();
-        if allowed.iter().all(|a| a.as_ref().is_some_and(|a| !a.iter().any(|v| v == effort))) {
-            let first = allowed[0].clone().unwrap_or_default().join(", ");
-            return Some(format!("effort {effort} is not offered for {model}{on} ({first})"));
+        if allowed.iter().any(|a| a.as_ref().is_some_and(|v| v.iter().any(|x| x == effort))) {
+            return None;
         }
+        return match allowed.iter().flatten().next() {
+            Some(first) => Some(format!("effort {effort} is not offered for {model}{on} ({})", first.join(", "))),
+            None => Some(format!("effort {effort} is not offered for {model}{on} (no effort options)")),
+        };
     }
     None
 }

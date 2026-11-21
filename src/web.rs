@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
 use crate::app::App;
-use crate::board::{CardRef, LaunchArgs};
+use crate::board::{CardRef, LaunchArgs, ModelSettingBody};
 use crate::contexts::{ContextBody, ContextError};
 
 pub const CSRF_HEADER: &str = "x-t3cm-csrf";
@@ -421,6 +421,44 @@ async fn delete_context(State(web): State<Web>, headers: HeaderMap, Path(id): Pa
     }
 }
 
+async fn get_models(State(web): State<Web>, headers: HeaderMap) -> Response {
+    if let Some(r) = web.reject(&headers, false) {
+        return r;
+    }
+    match web.app.wf.models_view().await {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, web.app.t3.redact(format!("{e:#}"))),
+    }
+}
+
+async fn put_ticket_model(State(web): State<Web>, headers: HeaderMap, raw: Bytes) -> Response {
+    if let Some(r) = web.reject(&headers, true) {
+        return r;
+    }
+    let b: ModelSettingBody = match body(&raw) {
+        Ok(b) => b,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    match web.app.wf.set_ticket_model(b).await {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
+async fn put_ask_model(State(web): State<Web>, headers: HeaderMap, raw: Bytes) -> Response {
+    if let Some(r) = web.reject(&headers, true) {
+        return r;
+    }
+    let b: ModelSettingBody = match body(&raw) {
+        Ok(b) => b,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    match web.app.wf.set_ask_model(b).await {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
 pub fn routes(app: Arc<App>, port: u16) -> Router {
     Router::new()
         .route("/", get(page))
@@ -431,6 +469,9 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/cards/{id}/dismiss", post(dismiss))
         .route("/api/launch", post(launch))
         .route("/api/ask", post(ask))
+        .route("/api/models", get(get_models))
+        .route("/api/models/ticket", put(put_ticket_model))
+        .route("/api/models/ask", put(put_ask_model))
         .route("/api/tickets/{thread}/settle", post(settle_ticket))
         .route("/api/tickets/{thread}/restore", post(restore_ticket))
         .route("/api/asks/{id}/settle", post(settle_ask))
