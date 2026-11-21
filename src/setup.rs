@@ -8,7 +8,10 @@ use serde_json::{Map, Value, json};
 use crate::platform;
 use crate::skills::{self, Bundle};
 use crate::slots::{self, CONFIG_VERSION, Enabled, Folders, MODEL_ROLES, Resolver, SLOTS};
-use crate::steps::{self, Env, HEADER_STEP, Kind, RETIRE_T3WF_STEP, RULE_STEP, RegState, RetireState, RuleState};
+use crate::steps::{
+    self, ANTIGRAVITY_STEP, AntigravityState, Env, HEADER_STEP, Kind, RETIRE_T3WF_STEP, RULE_STEP, RegState,
+    RetireState, RuleState,
+};
 
 pub const DEFAULT_PORT: u16 = 47731;
 pub const REVIEW_SOURCE: &str = "https://github.com/t3dotgg/tstack";
@@ -380,17 +383,19 @@ pub fn steps_status(env: &Env, bundle: &Bundle) -> Result<Value> {
     };
     let header_missing = steps::registration(env).status == RegState::Stale;
     let retire_missing = steps::inspect_retire(env).status == RetireState::Present;
+    let antigravity_missing = steps::antigravity_targets(env)
+        .iter()
+        .any(|t| matches!(t.status, AntigravityState::Missing | AntigravityState::Stale));
     let mut missing = Vec::new();
     for s in &catalog {
         if s.kind == Kind::Interview && !recorded.contains(&s.id) {
             missing.push(json!({"id": s.id, "kind": "interview", "slot": s.slot}));
         } else if s.kind == Kind::Auto {
-            let is_missing = if s.id == HEADER_STEP {
-                header_missing
-            } else if s.id == RETIRE_T3WF_STEP {
-                retire_missing
-            } else {
-                rule_missing
+            let is_missing = match s.id.as_str() {
+                HEADER_STEP => header_missing,
+                RETIRE_T3WF_STEP => retire_missing,
+                ANTIGRAVITY_STEP => antigravity_missing,
+                _ => rule_missing,
             };
             if is_missing {
                 missing.push(json!({"id": s.id, "kind": "auto"}));

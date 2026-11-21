@@ -171,7 +171,10 @@ running binary is older than these skills. Stop and tell the user once:
 
 `t3cm` is required for the T3 workflow. Install only after the user says
 yes: it adds a per-user service (a systemd user unit, a launchd agent, or a
-Windows logon task) and a user-scope MCP server for Claude Code.
+Windows logon task) and registers the MCP server for Claude Code and any T3
+Antigravity profiles. Adding `t3cm` to an Antigravity profile's
+`config/mcp_config.json` stops T3 Code from using Antigravity as its system
+text-generation model, while Antigravity agent threads continue to work.
 
 1. **Release first.** The installer downloads the latest release, checks it
    against `SHA256SUMS`, installs `t3cm` and its service, and registers the

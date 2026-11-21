@@ -29,9 +29,15 @@ With T3 Code running, on Linux or macOS:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/OttoOps/t3-codemode/main/deploy/install.sh
-bash install.sh   # latest release: binary, user service, Claude Code MCP entry, workflow skills
+bash install.sh   # latest release: binary, user service, MCP entries, workflow skills
 t3cm status       # t3.connected should be true
 ```
+
+The installer registers `t3cm` over HTTP for Claude Code and adds a `t3cm stdio`
+entry to every T3 Code Antigravity profile's `config/mcp_config.json`. A
+non-empty `mcpServers` object in that file stops T3 Code from using Antigravity
+as its system text-generation model. Antigravity agent threads continue to work;
+see [Antigravity registration](https://ottoops.com/t3-codemode/getting-started.html#antigravity).
 
 The installer asks `Use the T3 workflow? [Y/n]`. On yes, the default, it
 installs the workflow skills below. Update it in place with `t3cm update`,

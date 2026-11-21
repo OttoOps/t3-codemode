@@ -8,7 +8,8 @@
 - A running T3 Code server and its `t3` CLI.
 - `curl` and `tar` for `deploy/install.sh`; Windows PowerShell 5.1 or newer for
   `deploy/install.ps1`.
-- Claude Code, if you want the installer to register the MCP server for you.
+- Claude Code or T3 Code Antigravity profiles, if you want the installer to
+  register the MCP server for you.
 - `gh`, signed in, if you want the installer to check build provenance.
 - Rust 1.95 or newer, only to build from source. `oxc` is pinned to
   `=0.146.0` because later releases need a newer compiler.
@@ -19,7 +20,8 @@ The installers fetch the latest release from
 [Releases](https://github.com/OttoOps/t3-codemode/releases), check the archive
 against the release's `SHA256SUMS`, and, when `gh` is signed in, check its
 build provenance with `gh attestation verify`. Then they install the binary and
-a per-user service, start it, and register the MCP server with Claude Code.
+a per-user service, start it, and register the MCP server with Claude Code and
+any T3 Antigravity profiles.
 Last, they ask `Use the T3 workflow? [Y/n]`, and on yes run
 `t3cm skills install`, described [below](#install-the-skills-with-t3cm).
 Nothing needs administrator rights. Release builds came in with
@@ -125,9 +127,12 @@ brings the skills t3cm installed to the new release. To uninstall, run
 the service and the binary, and keeps the store and the skills.
 
 Uninstalling also removes Claude Code's user-scope `t3cm` MCP entry, even one
-you added yourself before installing.
+you added yourself before installing, and removes the `t3cm` entry from each
+T3 Antigravity profile's `mcp_config.json` while keeping other servers intact.
 
 ## Register the MCP server
+
+### Claude Code
 
 The installers run this for you. When `claude` is not on `PATH`, they print it
 for you to run. When Claude Code already has a server named `t3cm`, they leave
@@ -153,6 +158,61 @@ session has installed and enabled. `t3cm skills update` re-registers an
 existing entry that lacks it (setup step `mcp:config-dir-header`); new sessions
 send it.
 
+### Antigravity
+
+The installers also register `t3cm` for every Antigravity profile T3 Code
+creates under `~/.t3/userdata/providers/antigravity/<hash>/config/mcp_config.json`,
+or under `$T3CODE_HOME` when that variable is set. Existing installs receive
+the same entry from `t3cm update` or `t3cm skills update` through setup step
+`mcp:antigravity`. The edit merges into existing JSON, keeps other servers and
+top-level keys, merges the `eager` tool flags into an existing `t3cm stdio`
+entry while keeping its custom path and settings, and leaves any incompatible
+`t3cm` entry alone.
+
+```json
+{
+  "mcpServers": {
+    "t3cm": {
+      "command": "/path/to/t3cm",
+      "args": ["stdio"],
+      "tools": {
+        "search": { "eager": true },
+        "execute": { "eager": true }
+      }
+    }
+  }
+}
+```
+
+Antigravity registers `t3cm stdio` because Antigravity sends environment
+variable expressions verbatim inside HTTP `headers` and stdio `env` blocks. T3
+Code launches one `antigravity acp` process per thread with its own
+`T3CODE_THREAD_ID`, and `t3cm stdio` inherits that variable directly while
+sharing `store.db` in SQLite WAL mode with `t3cm serve`. Setting `eager` to
+`true` on `search` and `execute` loads both tools on turn one without an extra
+schema read.
+
+Edit `<profile>/config/mcp_config.json` directly as JSON. T3 Code starts
+Antigravity with `--gemini-dir <profile>` and `GEMINI_HOME=<profile>`, so
+Antigravity threads ignore `~/.gemini/config/mcp_config.json`, and
+`antigravity mcp add` ignores `GEMINI_HOME` and always writes to
+`~/.gemini/config/mcp_config.json`.
+
+**T3 system text-generation caveat.** When `<profile>/config/mcp_config.json`
+has a non-empty `mcpServers` object, T3 Code stops using that Antigravity
+profile as its system text-generation model for helper tasks such as title
+generation. Antigravity agent threads continue to run as normal. Pick another
+provider as T3's system model if you used Antigravity there, or remove `t3cm`
+from `mcpServers` when no other servers remain in that object to restore
+Antigravity text generation.
+
+Each Antigravity thread spawns its own `t3cm stdio` child against the shared
+`store.db`. Writes commit immediately and appear on the board on its next
+refresh or watcher pass, and any stdio upstreams configured in `t3cm` start
+once per Antigravity thread. See
+[the Antigravity research notes](https://github.com/OttoOps/t3-codemode/blob/main/docs/research/antigravity-mcp-registration.md)
+for the full multi-process details.
+
 ## Check it
 
 ```bash
@@ -161,8 +221,9 @@ t3cm status
 
 `t3cm status` prints the running service's `/healthz`. `t3.connected` is `true`
 once the service holds a T3 session, and `tools` counts the T3 tools in the
-catalog. Claude Code loads MCP servers at session start, so threads that were
-already open keep their old tool list until they restart.
+catalog. Claude Code and Antigravity load MCP servers at session start, so
+threads that were already open keep their old tool list until a new session
+starts.
 
 ## Update
 
@@ -337,13 +398,20 @@ never writes through a skill folder that is a link, such as one into a git
 clone.
 
 `install` and `update` also apply the setup steps that need no answers,
-which this release lists in `setup-t3-workflow/steps.json`: the filed-issue
-rule (`rule:filed-issues`, written to `rules/t3-workflow-filed-issues.md` in
-`$CLAUDE_CONFIG_DIR` or `~/.claude` and as a marked block in Codex's global
-`AGENTS.md`), adding `X-T3-Config-Dir` to Claude Code's `t3cm` MCP entry
-(`mcp:config-dir-header`), and cleaning up retired `t3wf` timers, shims and
-`scripts/__pycache__` (`retire:t3wf`, leaving old registry data alone until
-`t3cm doctor` says it is safe to delete).
+which this release lists in `setup-t3-workflow/steps.json`, skipping any agent
+that is absent:
+
+- `rule:filed-issues` writes the filed-issue rule to
+  `rules/t3-workflow-filed-issues.md` in `$CLAUDE_CONFIG_DIR` or `~/.claude`,
+  and as a marked block in Codex's global `AGENTS.md` under `$CODEX_HOME` or
+  `~/.codex`.
+- `mcp:config-dir-header` adds the `X-T3-Config-Dir` header to an existing
+  Claude Code `t3cm` entry.
+- `retire:t3wf` cleans up retired `t3wf` timers, shims and
+  `scripts/__pycache__`, leaving old registry data alone until `t3cm doctor`
+  says it is safe to delete.
+- `mcp:antigravity` adds the `t3cm stdio` entry to each T3 Antigravity
+  profile's `config/mcp_config.json`.
 When `~/.config/t3-workflow/config.json` exists, t3cm records each step it
 applied there under `steps`, with its release under `writtenBy`. A step that
 needs answers, such as a slot a later release added, prints as

@@ -15,6 +15,9 @@ MCP_NAME=t3cm
 MCP_URL=http://127.0.0.1:47731/mcp
 # shellcheck disable=SC2016
 MCP_ADD=(claude mcp add --transport http --scope user "$MCP_NAME" "$MCP_URL" --header 'X-T3-Thread: ${T3CODE_THREAD_ID}' --header 'X-T3-Config-Dir: ${CLAUDE_CONFIG_DIR:-}')
+T3_HOME="${T3CODE_HOME:-$HOME/.t3}"
+ANTIGRAVITY_DIR="$T3_HOME/userdata/providers/antigravity"
+ANTIGRAVITY_CAVEAT="Note: adding $MCP_NAME to Antigravity's mcp_config.json stops T3 Code from using Antigravity as its system text-generation model (for titles and similar tasks). Antigravity agent threads still work; select another system model in T3 Code if you use Antigravity there."
 
 usage() {
   cat <<EOF
@@ -25,7 +28,7 @@ usage: $0 [--version vX.Y.Z] [--target TRIPLE] [--files-only] [--workflow | --no
 
 Installs t3cm to ~/.local/bin and its user service (a systemd user unit on
 Linux, a launchd agent on macOS), then registers the MCP server with Claude
-Code. By default it downloads the latest release from $REPO and checks
+Code and any T3 Antigravity profiles. By default it downloads the latest release from $REPO and checks
 it against the release's SHA256SUMS, and with gh signed in, its build
 provenance too. Then it asks whether to use the T3 workflow, and on yes runs
 t3cm skills install, which writes the release's workflow skills and applies
@@ -40,7 +43,7 @@ skills t3cm installed to the new release without asking.
   --files-only       install or remove the files without touching systemd or launchd
   --workflow         install, take over or update the workflow skills without asking (the default with no terminal)
   --no-workflow      leave the workflow skills alone
-  --uninstall        stop and remove the service, the binary and the MCP entry; keep the store and the skills
+  --uninstall        stop and remove the service, the binary and the MCP entries; keep the store and the skills
 EOF
 }
 
@@ -178,18 +181,280 @@ launchd_unload() {
   die "launchd still has $LABEL loaded after bootout (tried $i times)"
 }
 
+has_t3cm_antigravity_mcp() {
+  [ -x "$BIN_DIR/t3cm" ] && "$BIN_DIR/t3cm" antigravity-mcp --help >/dev/null 2>&1
+}
+
+json_tool() {
+  if command -v python3 >/dev/null 2>&1; then
+    if [ "$OS" != macos ] || [ "$(command -v python3)" != "/usr/bin/python3" ] || xcode-select -p >/dev/null 2>&1; then
+      echo python3
+      return
+    fi
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    echo jq
+    return
+  fi
+  echo ""
+}
+
+edit_antigravity_json() {
+  local tool="$1" action="$2" path="$3" bin_path="$4"
+  if [ "$tool" = python3 ]; then
+    python3 - "$action" "$path" "$MCP_NAME" "$bin_path" <<'PY'
+import json, os, stat, sys
+
+action, path, name, bin_path = sys.argv[1:5]
+want = {
+    "command": bin_path,
+    "args": ["stdio"],
+    "tools": {
+        "search": {"eager": True},
+        "execute": {"eager": True},
+    },
+}
+
+def is_t3cm_stdio(entry):
+    if not isinstance(entry, dict):
+        return False
+    cmd = entry.get("command")
+    args = entry.get("args")
+    if not isinstance(cmd, str) or not isinstance(args, list) or not args or args[0] != "stdio":
+        return False
+    base = cmd.replace("\\", "/").rsplit("/", 1)[-1]
+    return base == name or base.lower() == "t3cm.exe"
+
+mode = None
+raw = ""
+if os.path.exists(path):
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    with open(path, "r", encoding="utf-8-sig") as f:
+        raw = f.read()
+elif action == "remove":
+    sys.exit(10)
+
+if not raw.strip():
+    if action == "remove":
+        sys.exit(10)
+    doc = {}
+else:
+    try:
+        doc = json.loads(raw)
+    except Exception as e:
+        print(f"not valid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(doc, dict):
+        print("top level must be a JSON object", file=sys.stderr)
+        sys.exit(1)
+
+servers = doc.get("mcpServers")
+if servers is None:
+    if action == "remove":
+        sys.exit(10)
+    servers = {}
+    doc["mcpServers"] = servers
+elif not isinstance(servers, dict):
+    print("mcpServers is not a JSON object", file=sys.stderr)
+    sys.exit(1)
+
+if action == "add":
+    if name in servers:
+        entry = servers[name]
+        if not is_t3cm_stdio(entry):
+            sys.exit(11)
+        tools = entry.get("tools")
+        if tools is None:
+            tools = {}
+            entry["tools"] = tools
+        elif not isinstance(tools, dict):
+            print(f"mcpServers.{name}.tools is not a JSON object", file=sys.stderr)
+            sys.exit(1)
+        changed = False
+        for tname in ("search", "execute"):
+            tcfg = tools.get(tname)
+            if tcfg is None:
+                tools[tname] = {"eager": True}
+                changed = True
+            elif not isinstance(tcfg, dict):
+                print(f"mcpServers.{name}.tools.{tname} is not a JSON object", file=sys.stderr)
+                sys.exit(1)
+            elif tcfg.get("eager") is not True:
+                tcfg["eager"] = True
+                changed = True
+        if not changed:
+            sys.exit(10)
+    else:
+        servers[name] = want
+elif action == "remove":
+    if name not in servers:
+        sys.exit(10)
+    del servers[name]
+else:
+    print(f"unknown action: {action}", file=sys.stderr)
+    sys.exit(1)
+
+real = os.path.realpath(path)
+tmp = real + ".t3cm-tmp"
+text = json.dumps(doc, indent=2) + "\n"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode if mode is not None else 0o644)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    if mode is not None:
+        os.chmod(tmp, mode)
+    os.replace(tmp, real)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+sys.exit(0)
+PY
+    return $?
+  fi
+
+  local src="$path" tmp=""
+  if [ ! -e "$path" ] || [ ! -s "$path" ] || [ -z "$(tr -d '[:space:]' <"$path")" ]; then
+    if [ "$action" = remove ]; then
+      return 10
+    fi
+    src="$WORK/empty.json"
+    printf '{}\n' >"$src"
+  fi
+  if ! jq -se 'length == 1 and (.[0] | type) == "object" and (.[0].mcpServers == null or (.[0].mcpServers | type) == "object")' "$src" >/dev/null 2>&1; then
+    echo "not a single JSON object with an object mcpServers" >&2
+    return 1
+  fi
+  tmp="$path.t3cm-tmp"
+  if [ "$action" = add ]; then
+    if jq -se --arg name "$MCP_NAME" '(.[0].mcpServers | type) == "object" and (.[0].mcpServers | has($name))' "$src" >/dev/null 2>&1; then
+      if ! jq -se --arg name "$MCP_NAME" '
+        .[0].mcpServers[$name] as $e
+        | ($e | type) == "object"
+        and ($e.command | type) == "string"
+        and (($e.command | gsub("\\\\"; "/") | split("/") | last) as $b | ($b == $name or ($b | ascii_downcase) == "t3cm.exe"))
+        and ($e.args | type) == "array" and ($e.args[0] == "stdio")
+      ' "$src" >/dev/null 2>&1; then
+        return 11
+      fi
+      if ! jq -se --arg name "$MCP_NAME" '
+        .[0].mcpServers[$name] as $e
+        | ($e.tools == null or (($e.tools | type) == "object"
+          and ($e.tools.search == null or ($e.tools.search | type) == "object")
+          and ($e.tools.execute == null or ($e.tools.execute | type) == "object")))
+      ' "$src" >/dev/null 2>&1; then
+        echo "mcpServers.$MCP_NAME.tools is not a JSON object" >&2
+        return 1
+      fi
+      if jq -se --arg name "$MCP_NAME" '
+        .[0].mcpServers[$name].tools.search.eager == true
+        and .[0].mcpServers[$name].tools.execute.eager == true
+      ' "$src" >/dev/null 2>&1; then
+        return 10
+      fi
+      jq --arg name "$MCP_NAME" '
+        .mcpServers[$name].tools = ((.mcpServers[$name].tools // {})
+          | .search = ((.search // {}) + {eager: true})
+          | .execute = ((.execute // {}) + {eager: true}))
+      ' "$src" >"$tmp" || { rm -f "$tmp"; return 1; }
+    else
+      jq --arg name "$MCP_NAME" --arg bin "$bin_path" \
+        '.mcpServers = ((.mcpServers // {}) + {($name): {command: $bin, args: ["stdio"], tools: {search: {eager: true}, execute: {eager: true}}}})' \
+        "$src" >"$tmp" || { rm -f "$tmp"; return 1; }
+    fi
+  elif [ "$action" = remove ]; then
+    if ! jq -se --arg name "$MCP_NAME" '(.[0].mcpServers | type) == "object" and (.[0].mcpServers | has($name))' "$src" >/dev/null 2>&1; then
+      return 10
+    fi
+    jq --arg name "$MCP_NAME" 'del(.mcpServers[$name])' "$src" >"$tmp" || { rm -f "$tmp"; return 1; }
+  else
+    return 1
+  fi
+  if [ -e "$path" ]; then
+    chmod --reference="$path" "$tmp" 2>/dev/null || true
+  fi
+  mv -f "$tmp" "$path"
+}
+
+register_antigravity_mcp() {
+  [ -d "$ANTIGRAVITY_DIR" ] || return 0
+  if has_t3cm_antigravity_mcp; then
+    "$BIN_DIR/t3cm" antigravity-mcp --bin "$BIN_DIR/t3cm"
+    return
+  fi
+  local tool profile cfg rc wrote=0
+  tool="$(json_tool)"
+  for profile in "$ANTIGRAVITY_DIR"/*/; do
+    if [ ! -d "$profile" ] || [ ! -d "${profile}config" ]; then
+      continue
+    fi
+    cfg="${profile}config/mcp_config.json"
+    if [ -z "$tool" ]; then
+      echo "Neither python3 nor jq is on PATH; add $MCP_NAME stdio to $cfg yourself (see Getting started)."
+      continue
+    fi
+    rc=0
+    edit_antigravity_json "$tool" add "$cfg" "$BIN_DIR/t3cm" || rc=$?
+    case "$rc" in
+      0)
+        echo "Registered $MCP_NAME for Antigravity in $cfg"
+        wrote=1
+        ;;
+      10) ;;
+      11)
+        echo "Antigravity already has an incompatible MCP server named $MCP_NAME in $cfg; left as is."
+        ;;
+      *)
+        echo "Warning: could not update Antigravity MCP config at $cfg; left as is." >&2
+        ;;
+    esac
+  done
+  if [ "$wrote" = 1 ]; then
+    echo "$ANTIGRAVITY_CAVEAT"
+  fi
+}
+
+unregister_antigravity_mcp() {
+  [ -d "$ANTIGRAVITY_DIR" ] || return 0
+  if has_t3cm_antigravity_mcp; then
+    "$BIN_DIR/t3cm" antigravity-mcp --remove
+    return
+  fi
+  local tool profile cfg rc
+  tool="$(json_tool)"
+  for profile in "$ANTIGRAVITY_DIR"/*/; do
+    if [ ! -d "$profile" ] || [ ! -d "${profile}config" ]; then
+      continue
+    fi
+    cfg="${profile}config/mcp_config.json"
+    [ -e "$cfg" ] || continue
+    if [ -z "$tool" ]; then
+      echo "Neither python3 nor jq is on PATH; remove $MCP_NAME from mcpServers in $cfg yourself."
+      continue
+    fi
+    rc=0
+    edit_antigravity_json "$tool" remove "$cfg" "$BIN_DIR/t3cm" || rc=$?
+    case "$rc" in
+      0) echo "Removed $MCP_NAME for Antigravity from $cfg" ;;
+      10) ;;
+      *) echo "Warning: could not update Antigravity MCP config at $cfg; left as is." >&2 ;;
+    esac
+  done
+}
+
 register_mcp() {
   if ! command -v claude >/dev/null 2>&1; then
     echo "claude is not on PATH; register the MCP server yourself:"
     printf '  %q' "${MCP_ADD[@]}"
     echo
-    return
-  fi
-  if claude mcp get "$MCP_NAME" >/dev/null 2>&1; then
+  elif claude mcp get "$MCP_NAME" >/dev/null 2>&1; then
     echo "Claude Code already has an MCP server named $MCP_NAME; left as is (t3cm skills update adds X-T3-Config-Dir to it)."
   else
     "${MCP_ADD[@]}"
   fi
+  register_antigravity_mcp
 }
 
 skills_state() {
@@ -359,6 +624,7 @@ uninstall_all() {
       store="$HOME/Library/Application Support/t3-codemode (logs: $MAC_LOGS)"
       ;;
   esac
+  unregister_antigravity_mcp
   rm -f "$BIN_DIR/t3cm"
   if command -v claude >/dev/null 2>&1; then
     claude mcp remove --scope user "$MCP_NAME" >/dev/null 2>&1 || true

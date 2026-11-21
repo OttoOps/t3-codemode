@@ -168,6 +168,14 @@ enum Cmd {
         #[arg(long)]
         tools: Option<PathBuf>,
     },
+    /// Register or remove t3cm stdio in T3 Antigravity profiles' mcp_config.json
+    #[command(hide = true)]
+    AntigravityMcp {
+        #[arg(long)]
+        remove: bool,
+        #[arg(long)]
+        bin: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -944,8 +952,67 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             return run_doctor(DoctorArgs { repo, json, no_t3, resolve, port: port.port, state, thread }).await;
         }
         Cmd::Bench { n, tools } => bench::run(n, tools.as_deref()).await?,
+        Cmd::AntigravityMcp { remove, bin } => run_antigravity_mcp(remove, bin)?,
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn run_antigravity_mcp(remove: bool, bin: Option<PathBuf>) -> Result<()> {
+    let mut env = steps::Env::from_env()?;
+    if let Some(b) = bin {
+        env.t3cm_bin = b;
+    }
+    let targets = steps::antigravity_targets(&env);
+    if remove {
+        for t in targets {
+            match steps::remove_antigravity(&t.path) {
+                Ok(true) => println!("Removed {} for Antigravity from {}", steps::MCP_NAME, t.path.display()),
+                Ok(false) => {}
+                Err(e) => eprintln!(
+                    "Warning: could not update Antigravity MCP config at {} ({e:#}); left as is.",
+                    t.path.display()
+                ),
+            }
+        }
+        return Ok(());
+    }
+    let mut wrote = false;
+    for t in targets {
+        match t.status {
+            steps::AntigravityState::Missing | steps::AntigravityState::Stale => {
+                match steps::write_antigravity(&t.path, &env.t3cm_bin) {
+                    Ok(true) => {
+                        println!("Registered {} for Antigravity in {}", steps::MCP_NAME, t.path.display());
+                        wrote = true;
+                    }
+                    Ok(false) => {}
+                    Err(e) => eprintln!(
+                        "Warning: could not update Antigravity MCP config at {} ({e:#}); left as is.",
+                        t.path.display()
+                    ),
+                }
+            }
+            steps::AntigravityState::Conflict => {
+                println!(
+                    "Antigravity already has an incompatible MCP server named {} in {}; left as is.",
+                    steps::MCP_NAME,
+                    t.path.display()
+                );
+            }
+            steps::AntigravityState::Problem => {
+                let why = t.problem.as_deref().unwrap_or("invalid JSON");
+                eprintln!(
+                    "Warning: could not update Antigravity MCP config at {} ({why}); left as is.",
+                    t.path.display()
+                );
+            }
+            steps::AntigravityState::Current => {}
+        }
+    }
+    if wrote {
+        println!("Note: {}", steps::ANTIGRAVITY_CAVEAT);
+    }
+    Ok(())
 }
 
 #[tokio::main]

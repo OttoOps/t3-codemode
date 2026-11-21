@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Installs t3cm on Windows: the binary, a per-user logon task that runs it, and the Claude Code MCP entry.
+Installs t3cm on Windows: the binary, a per-user logon task that runs it, and the Claude Code and Antigravity MCP entries.
 
 .DESCRIPTION
 By default it downloads the latest release from OttoOps/t3-codemode, checks it against the
@@ -58,6 +58,9 @@ $Log = Join-Path $StoreDir 'logs\t3cm.log'
 $McpName = 't3cm'
 $McpAdd = @('mcp', 'add', '--transport', 'http', '--scope', 'user', $McpName, 'http://127.0.0.1:47731/mcp',
     '--header', 'X-T3-Thread: ${T3CODE_THREAD_ID}', '--header', 'X-T3-Config-Dir: ${CLAUDE_CONFIG_DIR:-}')
+$T3Home = if ($env:T3CODE_HOME) { $env:T3CODE_HOME } else { Join-Path $env:USERPROFILE '.t3' }
+$AntigravityDir = Join-Path $T3Home 'userdata\providers\antigravity'
+$AntigravityCaveat = "Note: adding $McpName to Antigravity's mcp_config.json stops T3 Code from using Antigravity as its system text-generation model (for titles and similar tasks). Antigravity agent threads still work; select another system model in T3 Code if you use Antigravity there."
 
 function Fail([string]$Message) {
     throw "install.ps1: $Message"
@@ -159,20 +162,286 @@ function Register-T3cm {
         -Description 't3-codemode: Code Mode MCP server for T3 Code (t3cm serve)' -Force | Out-Null
 }
 
+function Write-Utf8NoBom([string]$Path, [string]$Content) {
+    $tmp = "$Path.t3cm-tmp"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    try {
+        [IO.File]::WriteAllText($tmp, $Content, $utf8NoBom)
+        Move-Item -LiteralPath $tmp -Destination $Path -Force
+    } catch {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
+function New-JsonDict {
+    return (New-Object 'System.Collections.Generic.Dictionary[string, object]')
+}
+
+function ConvertFrom-CaseSensitiveJsonObject([string]$Raw) {
+    $text = $Raw
+    if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) {
+        $text = $text.Substring(1)
+    }
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return (New-JsonDict)
+    }
+    if ($PSVersionTable.PSVersion.Major -lt 6) {
+        Add-Type -AssemblyName System.Web.Extensions
+        $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $ser.MaxJsonLength = [int]::MaxValue
+        $parsed = $ser.DeserializeObject($text)
+        if (-not (Test-JsonDict $parsed)) {
+            throw 'top level must be a JSON object'
+        }
+        return $parsed
+    }
+    $jdoc = [System.Text.Json.JsonDocument]::Parse($text)
+    try {
+        if ($jdoc.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {
+            throw 'top level must be a JSON object'
+        }
+        function Convert-JsonElement([System.Text.Json.JsonElement]$El) {
+            switch ($El.ValueKind) {
+                'Object' {
+                    $d = New-JsonDict
+                    foreach ($p in $El.EnumerateObject()) {
+                        $d[$p.Name] = Convert-JsonElement $p.Value
+                    }
+                    return $d
+                }
+                'Array' {
+                    $list = New-Object System.Collections.ArrayList
+                    foreach ($item in $El.EnumerateArray()) {
+                        [void]$list.Add((Convert-JsonElement $item))
+                    }
+                    return ,($list.ToArray())
+                }
+                'String' { return $El.GetString() }
+                'Number' {
+                    $l = [int64]0
+                    if ($El.TryGetInt64([ref]$l)) { return $l }
+                    return $El.GetDouble()
+                }
+                'True' { return $true }
+                'False' { return $false }
+                default { return $null }
+            }
+        }
+        return (Convert-JsonElement $jdoc.RootElement)
+    } finally {
+        $jdoc.Dispose()
+    }
+}
+
+function Get-JsonDepth([object]$Node, [int]$Current) {
+    if ($Current -gt 100) {
+        return $Current
+    }
+    $max = $Current
+    if (Test-JsonDict $Node) {
+        foreach ($v in $Node.Values) {
+            $d = Get-JsonDepth $v ($Current + 1)
+            if ($d -gt $max) { $max = $d }
+            if ($max -gt 100) { return $max }
+        }
+    } elseif ($Node -is [System.Array]) {
+        foreach ($v in $Node) {
+            $d = Get-JsonDepth $v ($Current + 1)
+            if ($d -gt $max) { $max = $d }
+            if ($max -gt 100) { return $max }
+        }
+    }
+    return $max
+}
+
+function ConvertTo-LosslessJson([object]$Doc) {
+    if ((Get-JsonDepth $Doc 0) -gt 99) {
+        throw 'JSON nesting depth exceeds 99 levels'
+    }
+    return (($Doc | ConvertTo-Json -Depth 100) + "`n")
+}
+
+function Test-JsonDict([object]$Obj) {
+    return ($null -ne $Obj -and $Obj -is [System.Collections.Generic.IDictionary[string, object]])
+}
+
+function Test-T3cmStdioEntry([object]$Entry) {
+    if (-not (Test-JsonDict $Entry)) {
+        return $false
+    }
+    if (-not $Entry.ContainsKey('command') -or -not $Entry.ContainsKey('args')) {
+        return $false
+    }
+    $cmd = $Entry['command']
+    $argsVal = $Entry['args']
+    if ($cmd -isnot [string] -or $argsVal -isnot [System.Array] -or $argsVal.Count -lt 1 -or $argsVal[0] -cne 'stdio') {
+        return $false
+    }
+    $base = ($cmd -replace '\\', '/').Split('/')[-1]
+    return ($base -ceq $McpName -or $base -ieq 't3cm.exe')
+}
+
+function Test-T3cmAntigravityHelper {
+    return ((Test-Path -LiteralPath $Exe -PathType Leaf) -and (Invoke-Native $Exe @('antigravity-mcp', '--help')) -eq 0)
+}
+
+function Get-AntigravityConfigs {
+    if (-not (Test-Path -LiteralPath $AntigravityDir -PathType Container)) {
+        return @()
+    }
+    $configs = @()
+    foreach ($profile in @(Get-ChildItem -LiteralPath $AntigravityDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        $configDir = Join-Path $profile.FullName 'config'
+        if (Test-Path -LiteralPath $configDir -PathType Container) {
+            $configs += Join-Path $configDir 'mcp_config.json'
+        }
+    }
+    return $configs
+}
+
+function Register-AntigravityMcp {
+    if (-not (Test-Path -LiteralPath $AntigravityDir -PathType Container)) {
+        return
+    }
+    if (Test-T3cmAntigravityHelper) {
+        & $Exe antigravity-mcp --bin $Exe | Out-Host
+        return
+    }
+    $wrote = $false
+    foreach ($cfg in @(Get-AntigravityConfigs)) {
+        try {
+            if (Test-Path -LiteralPath $cfg -PathType Container) {
+                Write-Warning "could not update Antigravity MCP config at $cfg (path is a directory); left as is."
+                continue
+            }
+            $doc = $null
+            if (Test-Path -LiteralPath $cfg -PathType Leaf) {
+                $raw = [IO.File]::ReadAllText($cfg)
+                $doc = ConvertFrom-CaseSensitiveJsonObject $raw
+            } else {
+                $doc = New-JsonDict
+            }
+            if (-not (Test-JsonDict $doc)) {
+                Write-Warning "could not update Antigravity MCP config at $cfg (top level must be a JSON object); left as is."
+                continue
+            }
+            if (-not $doc.ContainsKey('mcpServers')) {
+                $doc['mcpServers'] = New-JsonDict
+            } elseif (-not (Test-JsonDict $doc['mcpServers'])) {
+                Write-Warning "could not update Antigravity MCP config at $cfg (mcpServers is not a JSON object); left as is."
+                continue
+            }
+            $servers = $doc['mcpServers']
+            $changed = $false
+            if ($servers.ContainsKey($McpName)) {
+                $existing = $servers[$McpName]
+                if (-not (Test-T3cmStdioEntry $existing)) {
+                    Write-Host "Antigravity already has an incompatible MCP server named $McpName in $cfg; left as is."
+                    continue
+                }
+                if (-not $existing.ContainsKey('tools')) {
+                    $existing['tools'] = New-JsonDict
+                } elseif (-not (Test-JsonDict $existing['tools'])) {
+                    Write-Warning "could not update Antigravity MCP config at $cfg (mcpServers.$McpName.tools is not a JSON object); left as is."
+                    continue
+                }
+                $tools = $existing['tools']
+                $badTool = $false
+                foreach ($toolName in @('search', 'execute')) {
+                    if (-not $tools.ContainsKey($toolName)) {
+                        $tcfg = New-JsonDict
+                        $tcfg['eager'] = $true
+                        $tools[$toolName] = $tcfg
+                        $changed = $true
+                    } elseif (-not (Test-JsonDict $tools[$toolName])) {
+                        Write-Warning "could not update Antigravity MCP config at $cfg (mcpServers.$McpName.tools.$toolName is not a JSON object); left as is."
+                        $badTool = $true
+                        break
+                    } elseif (-not $tools[$toolName].ContainsKey('eager') -or $tools[$toolName]['eager'] -isnot [bool] -or -not $tools[$toolName]['eager']) {
+                        $tools[$toolName]['eager'] = $true
+                        $changed = $true
+                    }
+                }
+                if ($badTool -or -not $changed) {
+                    continue
+                }
+            } else {
+                $searchCfg = New-JsonDict
+                $searchCfg['eager'] = $true
+                $execCfg = New-JsonDict
+                $execCfg['eager'] = $true
+                $toolsCfg = New-JsonDict
+                $toolsCfg['search'] = $searchCfg
+                $toolsCfg['execute'] = $execCfg
+                $entry = New-JsonDict
+                $entry['command'] = $Exe
+                $entry['args'] = [object[]]@('stdio')
+                $entry['tools'] = $toolsCfg
+                $servers[$McpName] = $entry
+                $changed = $true
+            }
+            if ($changed) {
+                Write-Utf8NoBom $cfg (ConvertTo-LosslessJson $doc)
+                Write-Host "Registered $McpName for Antigravity in $cfg"
+                $wrote = $true
+            }
+        } catch {
+            Write-Warning "could not update Antigravity MCP config at ${cfg}: $($_.Exception.Message); left as is."
+        }
+    }
+    if ($wrote) {
+        Write-Host $AntigravityCaveat
+    }
+}
+
+function Unregister-AntigravityMcp {
+    if (-not (Test-Path -LiteralPath $AntigravityDir -PathType Container)) {
+        return
+    }
+    if (Test-T3cmAntigravityHelper) {
+        & $Exe antigravity-mcp --remove | Out-Host
+        return
+    }
+    foreach ($cfg in @(Get-AntigravityConfigs)) {
+        if (-not (Test-Path -LiteralPath $cfg -PathType Leaf)) {
+            continue
+        }
+        try {
+            $raw = [IO.File]::ReadAllText($cfg)
+            if ([string]::IsNullOrWhiteSpace($raw)) {
+                continue
+            }
+            $doc = ConvertFrom-CaseSensitiveJsonObject $raw
+            if (-not $doc.ContainsKey('mcpServers') -or -not (Test-JsonDict $doc['mcpServers'])) {
+                continue
+            }
+            $servers = $doc['mcpServers']
+            if (-not $servers.ContainsKey($McpName)) {
+                continue
+            }
+            [void]$servers.Remove($McpName)
+            Write-Utf8NoBom $cfg (ConvertTo-LosslessJson $doc)
+            Write-Host "Removed $McpName for Antigravity from $cfg"
+        } catch {
+            Write-Warning "could not update Antigravity MCP config at ${cfg}: $($_.Exception.Message); left as is."
+        }
+    }
+}
+
 function Register-Mcp {
     if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
         Write-Host 'claude is not on PATH; register the MCP server yourself:'
         Write-Host "  claude $(($McpAdd | ForEach-Object { if ($_ -match ' ') { "'$_'" } else { $_ } }) -join ' ')"
-        return
-    }
-    if ((Invoke-Native claude @('mcp', 'get', $McpName)) -eq 0) {
+    } elseif ((Invoke-Native claude @('mcp', 'get', $McpName)) -eq 0) {
         Write-Host "Claude Code already has an MCP server named $McpName; left as is (t3cm skills update adds X-T3-Config-Dir to it)."
-        return
+    } else {
+        & claude @McpAdd
+        if ($LASTEXITCODE -ne 0) {
+            Fail 'claude mcp add failed'
+        }
     }
-    & claude @McpAdd
-    if ($LASTEXITCODE -ne 0) {
-        Fail 'claude mcp add failed'
-    }
+    Register-AntigravityMcp
 }
 
 function Get-SkillsState {
@@ -322,6 +591,7 @@ function Uninstall-T3cm {
             Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         }
     }
+    Unregister-AntigravityMcp
     if (Test-Path -LiteralPath $InstallDir) {
         try {
             Remove-Item -LiteralPath $InstallDir -Recurse -Force
