@@ -8,6 +8,13 @@ one; this skill fills them for this user. What each slot means, the config
 shape and how settings layer:
 [slots.md](../t3-workflow/slots.md).
 
+Before step 1, make sure `t3cm` is installed and has `setup` (`t3cm setup --help`,
+or `~/.local/bin/t3cm setup --help` when `~/.local/bin` is not on `PATH`):
+
+- **No `t3cm` binary:** install it first:
+  [Installing t3cm](../t3-workflow/codemode.md#installing-t3cm).
+- **Older `t3cm` without `setup`:** run `t3cm update` first, then continue.
+
 ## 1. Detect
 
 ```bash

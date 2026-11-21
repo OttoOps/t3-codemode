@@ -98,8 +98,8 @@ the reviewer, ask whether to change the reviewer or keep the pair.
 
 **T3 did not answer** (`providers.error`): ask for the provider id, the model
 id and the effort, and record what the user gives, leaving out `effort` when
-they give none. Say `t3wf slots` shows them as unverified until T3 is
-reachable.
+they give none. Say the summary from `t3cm setup detect` shows them as
+unverified until T3 is reachable.
 
 **A pool chosen:** record `pool` alone; the pool's model and effort come from
 the t3cm config. Tell the user a pool needs t3cm at launch: a role without
