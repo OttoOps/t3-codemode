@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS slot_resolutions (
 CREATE TABLE IF NOT EXISTS pr_events (
   repo TEXT NOT NULL, pr INTEGER NOT NULL, event TEXT NOT NULL, ticket TEXT NOT NULL, at TEXT NOT NULL,
   PRIMARY KEY (repo, pr, event, ticket));
+CREATE TABLE IF NOT EXISTS pairing_tokens (
+  token_hash TEXT PRIMARY KEY, label TEXT, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT);
+CREATE INDEX IF NOT EXISTS pairing_tokens_expires ON pairing_tokens (expires_at);
+CREATE TABLE IF NOT EXISTS board_sessions (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT NOT NULL UNIQUE, label TEXT,
+  created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS board_sessions_expires ON board_sessions (expires_at);
 "#;
 
 const KEEP_MESSAGES: i64 = 5000;
@@ -329,6 +336,33 @@ pub struct InstanceFolder {
     pub driver: String,
     pub folder: String,
     pub at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoardSession {
+    #[serde(skip)]
+    pub seq: i64,
+    pub id: String,
+    pub label: Option<String>,
+    pub created_at: String,
+    pub last_seen_at: String,
+    pub expires_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RedeemResult {
+    Redeemed(BoardSession),
+    NotFound,
+    AlreadyUsed,
+    Expired,
+}
+
+fn is_unexpired(now_iso: &str, expires_at: &str) -> bool {
+    matches!(
+        (crate::clock::parse_ts(now_iso), crate::clock::parse_ts(expires_at)),
+        (Some(now), Some(exp)) if now < exp
+    )
 }
 
 fn handle_seq(handle: &str) -> Option<i64> {
@@ -1217,5 +1251,158 @@ impl Store {
 
     pub fn new_issue_remove(&self, key: &str) -> Result<bool> {
         Ok(self.with(|c| c.execute("DELETE FROM new_issues WHERE key = ?1", [key]))? > 0)
+    }
+
+    pub fn pairing_token_insert(
+        &self,
+        token_hash: &str,
+        label: Option<&str>,
+        created_at: &str,
+        expires_at: &str,
+        prune_before: &str,
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM pairing_tokens WHERE expires_at <= ?1", [prune_before])?;
+        tx.execute(
+            "INSERT INTO pairing_tokens (token_hash, label, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
+            params![token_hash, label, created_at, expires_at],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn pairing_token_redeem(
+        &self,
+        token_hash: &str,
+        session_hash: &str,
+        fallback_label: Option<&str>,
+        now_iso: &str,
+        session_expires_at: &str,
+    ) -> Result<RedeemResult> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row: Option<(Option<String>, String, Option<String>)> = tx
+            .query_row(
+                "SELECT label, expires_at, used_at FROM pairing_tokens WHERE token_hash = ?1",
+                [token_hash],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((token_label, expires_at, used_at)) = row else {
+            return Ok(RedeemResult::NotFound);
+        };
+        if used_at.is_some() {
+            return Ok(RedeemResult::AlreadyUsed);
+        }
+        if !is_unexpired(now_iso, &expires_at) {
+            return Ok(RedeemResult::Expired);
+        }
+        let updated = tx.execute(
+            "UPDATE pairing_tokens SET used_at = ?2 WHERE token_hash = ?1 AND used_at IS NULL",
+            params![token_hash, now_iso],
+        )?;
+        if updated != 1 {
+            return Ok(RedeemResult::AlreadyUsed);
+        }
+        let label = token_label.or_else(|| fallback_label.map(str::to_string));
+        tx.execute(
+            "INSERT INTO board_sessions (token_hash, label, created_at, last_seen_at, expires_at)
+             VALUES (?1, ?2, ?3, ?3, ?4)",
+            params![session_hash, label, now_iso, session_expires_at],
+        )?;
+        let seq = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(RedeemResult::Redeemed(BoardSession {
+            seq,
+            id: crate::pairing::format_session_id(seq),
+            label,
+            created_at: now_iso.to_string(),
+            last_seen_at: now_iso.to_string(),
+            expires_at: session_expires_at.to_string(),
+        }))
+    }
+
+    pub fn board_session_verify(&self, token_hash: &str, now_iso: &str) -> Result<Option<BoardSession>> {
+        self.with(|c| {
+            let row: Option<BoardSession> = c
+                .query_row(
+                    "SELECT seq, label, created_at, last_seen_at, expires_at FROM board_sessions WHERE token_hash = ?1",
+                    [token_hash],
+                    |r| {
+                        let seq: i64 = r.get(0)?;
+                        Ok(BoardSession {
+                            seq,
+                            id: crate::pairing::format_session_id(seq),
+                            label: r.get(1)?,
+                            created_at: r.get(2)?,
+                            last_seen_at: r.get(3)?,
+                            expires_at: r.get(4)?,
+                        })
+                    },
+                )
+                .optional()?;
+            let Some(mut session) = row else {
+                return Ok(None);
+            };
+            if !is_unexpired(now_iso, &session.expires_at) {
+                return Ok(None);
+            }
+            if session.last_seen_at != now_iso {
+                c.execute("UPDATE board_sessions SET last_seen_at = ?2 WHERE seq = ?1", params![session.seq, now_iso])?;
+                session.last_seen_at = now_iso.to_string();
+            }
+            Ok(Some(session))
+        })
+    }
+
+    pub fn board_session_is_active(&self, seq: i64, now_iso: &str) -> Result<bool> {
+        let exp: Option<String> = self.with(|c| {
+            c.query_row("SELECT expires_at FROM board_sessions WHERE seq = ?1", [seq], |r| r.get(0)).optional()
+        })?;
+        Ok(exp.is_some_and(|e| is_unexpired(now_iso, &e)))
+    }
+
+    pub fn board_sessions_active(&self, now_iso: &str) -> Result<Vec<BoardSession>> {
+        let rows: Vec<BoardSession> = self.with(|c| {
+            let mut st =
+                c.prepare("SELECT seq, label, created_at, last_seen_at, expires_at FROM board_sessions ORDER BY seq")?;
+            st.query_map([], |r| {
+                let seq: i64 = r.get(0)?;
+                Ok(BoardSession {
+                    seq,
+                    id: crate::pairing::format_session_id(seq),
+                    label: r.get(1)?,
+                    created_at: r.get(2)?,
+                    last_seen_at: r.get(3)?,
+                    expires_at: r.get(4)?,
+                })
+            })?
+            .collect()
+        })?;
+        Ok(rows.into_iter().filter(|s| is_unexpired(now_iso, &s.expires_at)).collect())
+    }
+
+    pub fn board_session_revoke(&self, seq: i64, now_iso: &str) -> Result<bool> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let exp: Option<String> =
+            tx.query_row("SELECT expires_at FROM board_sessions WHERE seq = ?1", [seq], |r| r.get(0)).optional()?;
+        tx.execute("DELETE FROM board_sessions WHERE seq = ?1", [seq])?;
+        tx.commit()?;
+        Ok(exp.is_some_and(|e| is_unexpired(now_iso, &e)))
+    }
+
+    pub fn board_session_revoke_all(&self, now_iso: &str) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let exps: Vec<String> = {
+            let mut st = tx.prepare("SELECT expires_at FROM board_sessions")?;
+            st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
+        let active = exps.iter().filter(|e| is_unexpired(now_iso, e)).count();
+        tx.execute("DELETE FROM board_sessions", [])?;
+        tx.commit()?;
+        Ok(active)
     }
 }

@@ -8,8 +8,9 @@ use serde_json::{Value, json};
 
 use t3_codemode::app::App;
 use t3_codemode::catalog::Catalog;
-use t3_codemode::clock::{SystemClock, local_datetime, parse_ts};
-use t3_codemode::config::{self, Config};
+use t3_codemode::clock::{Clock, SystemClock, iso, local_datetime, parse_ts};
+use t3_codemode::config::{self, Config, RemoteMode};
+use t3_codemode::pairing;
 use t3_codemode::release::{self, Version};
 use t3_codemode::slots::{self, Caps, Enabled, Folders, Inputs, Resolved};
 use t3_codemode::store::Store;
@@ -161,6 +162,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SetupCmd,
     },
+    /// Manage remote board pairing links and browser sessions
+    Board {
+        #[command(subcommand)]
+        cmd: BoardCmd,
+    },
     #[command(hide = true)]
     Bench {
         #[arg(short, default_value_t = 1000)]
@@ -261,6 +267,161 @@ enum SetupCmd {
     },
     /// Install the always-loaded filed-issue rule for Claude Code and Codex
     Rule,
+}
+
+#[derive(Subcommand)]
+enum BoardCmd {
+    /// Mint a single-use 5-minute pairing URL and print a QR code for a remote browser
+    Pair {
+        /// Optional label for the paired browser (e.g. "Phone", "Laptop")
+        #[arg(long)]
+        label: Option<String>,
+        /// Output JSON instead of text and QR code
+        #[arg(long)]
+        json: bool,
+        /// Skip printing the terminal QR code
+        #[arg(long)]
+        no_qr: bool,
+        #[command(flatten)]
+        state: StateArgs,
+    },
+    /// List active remote board browser sessions
+    Sessions {
+        /// Output JSON instead of a table
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        state: StateArgs,
+    },
+    /// Revoke one remote board session by id, or all sessions with --all
+    Revoke {
+        /// Session id from `t3cm board sessions` (e.g. s1)
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        id: Option<String>,
+        /// Revoke every remote board session
+        #[arg(long)]
+        all: bool,
+        /// Output JSON instead of text
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        state: StateArgs,
+    },
+}
+
+fn fmt_session_ts(raw: &str) -> String {
+    parse_ts(raw).map(local_datetime).unwrap_or_else(|| raw.to_string())
+}
+
+fn run_board(cmd: BoardCmd) -> Result<ExitCode> {
+    let now = SystemClock.now();
+    let now_iso = iso(now);
+    match cmd {
+        BoardCmd::Pair { label, json, no_qr, state } => {
+            let cfg_path = config::default_path();
+            let cfg = Config::load(&cfg_path)?;
+            let origin = match cfg.board.active_remote() {
+                Some((RemoteMode::Pairing, origin)) => origin,
+                Some((RemoteMode::Tailscale, _)) => {
+                    bail!(
+                        "board.remote.mode is \"tailscale\", which does not use pairing tokens yet; \
+                         set board.remote.mode to \"pairing\" in {}",
+                        cfg_path.display()
+                    );
+                }
+                None | Some((RemoteMode::Off, _)) => {
+                    bail!(
+                        "remote board access is disabled; configure board.remote with mode \"pairing\" \
+                         and an https:// origin in {}",
+                        cfg_path.display()
+                    );
+                }
+            };
+            let store = Store::open(&state_dir(&state))?;
+            let minted = pairing::mint_pairing_token(&store, &origin, label.as_deref(), now)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&minted)?);
+            } else {
+                if !no_qr {
+                    println!("{}", pairing::render_qr(&minted.url)?);
+                }
+                println!("Pairing URL (single-use, expires {}):", fmt_session_ts(&minted.expires_at));
+                println!("{}", minted.url);
+                if let Some(l) = &minted.label {
+                    println!("Label: {l}");
+                }
+            }
+        }
+        BoardCmd::Sessions { json, state } => {
+            let store = Store::open(&state_dir(&state))?;
+            let sessions = store.board_sessions_active(&now_iso)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&json!({"sessions": sessions}))?);
+            } else if sessions.is_empty() {
+                println!("No active remote board sessions.");
+            } else {
+                let rows: Vec<[String; 5]> = sessions
+                    .iter()
+                    .map(|s| {
+                        [
+                            s.id.clone(),
+                            s.label.clone().unwrap_or_else(|| "-".into()),
+                            fmt_session_ts(&s.created_at),
+                            fmt_session_ts(&s.last_seen_at),
+                            fmt_session_ts(&s.expires_at),
+                        ]
+                    })
+                    .collect();
+                let headers = ["ID", "LABEL", "CREATED", "LAST SEEN", "EXPIRES"];
+                let mut widths = headers.map(str::len);
+                for r in &rows {
+                    for (w, cell) in widths.iter_mut().zip(r.iter()) {
+                        *w = (*w).max(cell.chars().count());
+                    }
+                }
+                let fmt_row = |cols: [&str; 5]| -> String {
+                    cols.iter()
+                        .zip(widths.iter())
+                        .enumerate()
+                        .map(|(i, (c, w))| if i + 1 == cols.len() { (*c).to_string() } else { format!("{c:<w$}") })
+                        .collect::<Vec<_>>()
+                        .join("  ")
+                };
+                println!("{}", fmt_row(headers));
+                for r in &rows {
+                    println!("{}", fmt_row([&r[0], &r[1], &r[2], &r[3], &r[4]]));
+                }
+            }
+        }
+        BoardCmd::Revoke { id, all, json, state } => {
+            let store = Store::open(&state_dir(&state))?;
+            if all {
+                let n = store.board_session_revoke_all(&now_iso)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&json!({"revoked": n, "all": true}))?);
+                } else if n == 0 {
+                    println!("No active remote board sessions to revoke.");
+                } else if n == 1 {
+                    println!("Revoked 1 remote board session.");
+                } else {
+                    println!("Revoked {n} remote board sessions.");
+                }
+            } else if let Some(id) = id {
+                let Some(seq) = pairing::parse_session_id(&id) else {
+                    bail!("invalid session id {id:?}; run `t3cm board sessions` to list active sessions");
+                };
+                if !store.board_session_revoke(seq, &now_iso)? {
+                    bail!("no active remote board session {id:?}");
+                }
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&json!({"revoked": 1, "id": id}))?);
+                } else {
+                    println!("Revoked remote board session {id}.");
+                }
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_skills(cmd: SkillsCmd) -> Result<ExitCode> {
@@ -951,6 +1112,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Cmd::Skills { cmd } => return run_skills(cmd),
         Cmd::Setup { cmd } => return run_setup(cmd).await,
+        Cmd::Board { cmd } => return run_board(cmd),
         Cmd::Slots { repo, json, no_t3, port, thread } => return run_slots(repo, json, no_t3, port.port, thread).await,
         Cmd::Doctor { repo, json, no_t3, resolve, port, state, thread } => {
             return run_doctor(DoctorArgs { repo, json, no_t3, resolve, port: port.port, state, thread }).await;

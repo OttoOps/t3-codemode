@@ -56,11 +56,19 @@ for the split trust boundary and reverse-proxy trust assumptions.
     If `X-Forwarded-Host` is present alongside a non-loopback `Host`, both must
     match the configured `origin`.
   - `Origin`, when present, must match the configured `https://` `origin`.
-  - Remote authentication must succeed. Until the pairing-cookie and Tailscale
-    Serve auth modes are implemented, every remote board request is refused
-    with 401.
-  - Every mutating method (`POST`, `PUT`, `DELETE`) still requires the
-    per-process `X-T3CM-CSRF` header.
+  - Remote authentication must succeed. In `pairing` mode, the request must
+    carry a valid `__Host-t3cm_session` cookie (`HttpOnly; Secure;
+    SameSite=Strict; Path=/`) backed by a SHA-256-hashed 30-day session in
+    `store.db`, minted from a single-use 5-minute `/pair#<token>` token via
+    `t3cm board pair` and `POST /api/pair` (`GET /pair` and `POST /api/pair`
+    enforce the same remote `Host`, `X-Forwarded-Proto`, and `Origin` checks
+    before session auth; `/pair` never embeds the board CSRF token, and
+    `POST /api/pair` requires `Content-Type: application/json`). Revoking or
+    expiring a session cuts off API calls with 401 and closes open `/api/events`
+    streams. Until Tailscale Serve auth is implemented, `tailscale` mode still
+    refuses remote board requests with 401.
+  - Every mutating method (`POST`, `PUT`, `DELETE`) on authenticated board
+    routes still requires the per-process `X-T3CM-CSRF` header.
 - **Reverse-proxy trust assumption.** Because `t3cm` listens on `127.0.0.1`,
   any forwarder that sends a loopback `Host` with no forwarding headers looks
   identical on the wire to a direct loopback client. Any proxy fronting the
@@ -72,11 +80,12 @@ for the split trust boundary and reverse-proxy trust assumptions.
   reject or overwrite any client `Host` that does not match the configured
   public name. nginx's default `proxy_pass` rewrites `Host` to the upstream and
   adds no `X-Forwarded-*` header, so nginx requires explicit `proxy_set_header`
-  lines (`Host $host`, `X-Forwarded-For $proxy_add_x_forwarded_for`,
-  `X-Forwarded-Proto $scheme`). Raw TCP forwarders such as `ssh -L`, `socat`,
-  and `tailscale serve --tcp` are indistinguishable from direct loopback and
-  hand out zero-auth board access, so they must never front the board. See
-  [The board](board.md#http-routes).
+  lines (`Host $http_host` or an explicit public `host:port` when non-443,
+  `X-Forwarded-For $remote_addr` at the edge so client-supplied headers are
+  overwritten rather than appended, and `X-Forwarded-Proto https`). Raw TCP
+  forwarders such as `ssh -L`, `socat`, and `tailscale serve --tcp` are
+  indistinguishable from direct loopback and hand out zero-auth board access,
+  so they must never front the board. See [Remote access](board.md#remote-access).
 
 ## The sandbox
 

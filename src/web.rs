@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, Method, StatusCode, header};
+use axum::extract::{Extension, Path, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -17,17 +17,26 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
 use crate::app::App;
 use crate::board::{CardRef, LaunchArgs, ModelSettingBody};
+use crate::clock::iso;
 use crate::config::{RemoteMode, RemoteOrigin};
 use crate::contexts::{ContextBody, ContextError};
+use crate::pairing::{self, CookieExtract};
 use crate::server::{RequestKind, SingleHeader, classify_request, is_own_loopback_host_str, single_header};
 
 pub const CSRF_HEADER: &str = "x-t3cm-csrf";
 const PAGE: &str = include_str!("board.html");
+const PAIR_PAGE: &str = include_str!("pair.html");
 const MAX_LAUNCH: usize = 20;
 const KEEPALIVE: Duration = Duration::from_secs(25);
 const SETTLE: Duration = Duration::from_millis(150);
+const SESSION_CHECK: Duration = Duration::from_secs(1);
 const CSP: &str = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; \
 img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+#[derive(Clone, Copy, Debug)]
+struct AuthSession {
+    seq: i64,
+}
 
 #[derive(Clone)]
 struct Web {
@@ -69,22 +78,26 @@ impl Web {
         None
     }
 
-    fn check_remote_host_and_origin(&self, headers: &HeaderMap, origin: &RemoteOrigin) -> Option<Response> {
+    fn check_remote_host_and_origin(
+        &self,
+        headers: &HeaderMap,
+        origin: &RemoteOrigin,
+    ) -> Result<(), (StatusCode, &'static str)> {
         match single_header(headers, "x-forwarded-proto") {
             SingleHeader::Missing => {}
             SingleHeader::Present(proto) if proto.eq_ignore_ascii_case("https") => {}
             SingleHeader::Present(_) | SingleHeader::Invalid => {
-                return Some(error(StatusCode::FORBIDDEN, "remote board requests must arrive over https"));
+                return Err((StatusCode::FORBIDDEN, "remote board requests must arrive over https"));
             }
         }
         let SingleHeader::Present(host) = single_header(headers, header::HOST.as_str()) else {
-            return Some(error(StatusCode::FORBIDDEN, "remote request Host does not match board.remote.origin"));
+            return Err((StatusCode::FORBIDDEN, "remote request Host does not match board.remote.origin"));
         };
         let xfh = match single_header(headers, "x-forwarded-host") {
             SingleHeader::Missing => None,
             SingleHeader::Present(v) => Some(v),
             SingleHeader::Invalid => {
-                return Some(error(StatusCode::FORBIDDEN, "remote request Host does not match board.remote.origin"));
+                return Err((StatusCode::FORBIDDEN, "remote request Host does not match board.remote.origin"));
             }
         };
         let host_ok = match xfh {
@@ -95,33 +108,66 @@ impl Web {
             None => origin.matches_host(host),
         };
         if !host_ok {
-            return Some(error(StatusCode::FORBIDDEN, "remote request Host does not match board.remote.origin"));
+            return Err((StatusCode::FORBIDDEN, "remote request Host does not match board.remote.origin"));
         }
         match single_header(headers, header::ORIGIN.as_str()) {
             SingleHeader::Missing => {}
             SingleHeader::Present(req_origin) if origin.matches_origin(req_origin) => {}
             SingleHeader::Present(_) | SingleHeader::Invalid => {
-                return Some(error(StatusCode::FORBIDDEN, "cross-origin requests are refused"));
+                return Err((StatusCode::FORBIDDEN, "cross-origin requests are refused"));
             }
         }
-        None
+        Ok(())
     }
 
-    /// Authenticate a remote board request. Pairing-cookie and Tailscale Serve
-    /// auth modes slot in here; until an auth mode is implemented, every
-    /// remote request is refused.
-    fn authenticate_remote(&self, mode: RemoteMode, _headers: &HeaderMap) -> Option<Response> {
-        let _ = mode;
-        Some(error(StatusCode::UNAUTHORIZED, "remote board authentication is required"))
+    fn pairing_enabled(&self) -> bool {
+        matches!(self.remote, Some((RemoteMode::Pairing, _)))
     }
 
-    fn check_remote(&self, headers: &HeaderMap) -> Option<Response> {
-        let Some((mode, origin)) = &self.remote else {
-            return Some(error(StatusCode::FORBIDDEN, "remote board access is disabled"));
+    fn authenticate_pairing_cookie(&self, headers: &HeaderMap) -> Result<AuthSession, (StatusCode, &'static str)> {
+        let raw = match pairing::extract_session_cookie(headers) {
+            CookieExtract::Present(v) => v,
+            CookieExtract::Missing => {
+                return Err((StatusCode::UNAUTHORIZED, "remote board authentication is required"));
+            }
+            CookieExtract::Invalid => {
+                return Err((StatusCode::UNAUTHORIZED, "remote board session is invalid or expired"));
+            }
         };
-        if let Some(r) = self.check_remote_host_and_origin(headers, origin) {
-            return Some(r);
+        let hash = pairing::hash_token(raw);
+        let now = iso(self.app.clock.now());
+        match self.app.store.board_session_verify(&hash, &now) {
+            Ok(Some(session)) => Ok(AuthSession { seq: session.seq }),
+            Ok(None) => Err((StatusCode::UNAUTHORIZED, "remote board session is invalid or expired")),
+            Err(e) => {
+                tracing::warn!("board session lookup failed: {e:#}");
+                Err((StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed"))
+            }
         }
+    }
+
+    /// Authenticate a remote board request. Pairing-cookie auth verifies a
+    /// hashed session cookie from `store.db`; Tailscale Serve auth slots in
+    /// alongside it (and can layer `authenticate_pairing_cookie` when
+    /// `requirePairing` is enabled).
+    fn authenticate_remote(
+        &self,
+        mode: RemoteMode,
+        headers: &HeaderMap,
+    ) -> Result<Option<AuthSession>, (StatusCode, &'static str)> {
+        match mode {
+            RemoteMode::Pairing => self.authenticate_pairing_cookie(headers).map(Some),
+            RemoteMode::Off | RemoteMode::Tailscale => {
+                Err((StatusCode::UNAUTHORIZED, "remote board authentication is required"))
+            }
+        }
+    }
+
+    fn check_remote(&self, headers: &HeaderMap) -> Result<Option<AuthSession>, (StatusCode, &'static str)> {
+        let Some((mode, origin)) = &self.remote else {
+            return Err((StatusCode::FORBIDDEN, "remote board access is disabled"));
+        };
+        self.check_remote_host_and_origin(headers, origin)?;
         self.authenticate_remote(*mode, headers)
     }
 
@@ -137,9 +183,36 @@ impl Web {
     }
 }
 
-async fn board_guard(State(web): State<Web>, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+async fn board_guard(
+    State(web): State<Web>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
     let headers = req.headers();
     let mutating = is_mutating(req.method());
+    let session = match classify_request(headers, web.port) {
+        RequestKind::Local => {
+            if let Some(r) = web.check_local_origin(headers) {
+                return r;
+            }
+            None
+        }
+        RequestKind::Remote => match web.check_remote(headers) {
+            Ok(session) => session,
+            Err((status, msg)) => return error(status, msg),
+        },
+    };
+    if mutating && let Some(r) = web.check_csrf(headers) {
+        return r;
+    }
+    if let Some(session) = session {
+        req.extensions_mut().insert(session);
+    }
+    next.run(req).await
+}
+
+async fn pair_guard(State(web): State<Web>, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let headers = req.headers();
     match classify_request(headers, web.port) {
         RequestKind::Local => {
             if let Some(r) = web.check_local_origin(headers) {
@@ -147,13 +220,16 @@ async fn board_guard(State(web): State<Web>, req: axum::extract::Request, next: 
             }
         }
         RequestKind::Remote => {
-            if let Some(r) = web.check_remote(headers) {
-                return r;
+            let Some((_, origin)) = &web.remote else {
+                return error(StatusCode::FORBIDDEN, "remote board access is disabled");
+            };
+            if let Err((status, msg)) = web.check_remote_host_and_origin(headers, origin) {
+                return error(status, msg);
             }
         }
     }
-    if mutating && let Some(r) = web.check_csrf(headers) {
-        return r;
+    if !web.pairing_enabled() {
+        return error(StatusCode::FORBIDDEN, "remote pairing is not enabled");
     }
     next.run(req).await
 }
@@ -206,40 +282,137 @@ async fn message(State(web): State<Web>, Path(handle): Path<String>) -> Response
     }
 }
 
-async fn events(State(web): State<Web>) -> Response {
+async fn pair_page() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::CONTENT_SECURITY_POLICY, CSP),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+        ],
+        PAIR_PAGE,
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct PairBody {
+    token: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+fn is_json_content_type(headers: &HeaderMap) -> bool {
+    let SingleHeader::Present(ct) = single_header(headers, header::CONTENT_TYPE.as_str()) else {
+        return false;
+    };
+    ct.split(';').next().is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json"))
+}
+
+async fn post_pair(State(web): State<Web>, headers: HeaderMap, raw: Bytes) -> Response {
+    if !is_json_content_type(&headers) {
+        return error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Content-Type must be application/json");
+    }
+    let b: PairBody = match body(&raw) {
+        Ok(b) => b,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    let label = match pairing::clean_label(b.label.as_deref()) {
+        Ok(l) => l,
+        Err(e) => return error(StatusCode::BAD_REQUEST, format!("{e:#}")),
+    };
+    match pairing::redeem_pairing_token(&web.app.store, &b.token, label.as_deref(), web.app.clock.now()) {
+        Ok(Some((raw_session, session))) => {
+            let mut resp = json_ok(StatusCode::OK, json!({"ok": true, "session": session}));
+            let cookie = pairing::session_cookie_header(&raw_session);
+            if let Ok(v) = HeaderValue::from_str(&cookie) {
+                resp.headers_mut().insert(header::SET_COOKIE, v);
+            }
+            resp
+        }
+        Ok(None) => error(StatusCode::UNAUTHORIZED, "pairing token is invalid, expired, or already used"),
+        Err(e) => {
+            tracing::warn!("pairing redemption failed: {e:#}");
+            error(StatusCode::INTERNAL_SERVER_ERROR, "pairing redemption failed")
+        }
+    }
+}
+
+fn session_valid(app: &App, session_seq: Option<i64>) -> bool {
+    let Some(seq) = session_seq else {
+        return true;
+    };
+    let now = iso(app.clock.now());
+    match app.store.board_session_is_active(seq, &now) {
+        Ok(active) => active,
+        Err(e) => {
+            tracing::warn!("board session check failed: {e:#}");
+            false
+        }
+    }
+}
+
+async fn events(State(web): State<Web>, session: Option<Extension<AuthSession>>) -> Response {
     let rx = web.app.wf.subscribe();
     let stop = web.app.stopping.subscribe();
-    let s = stream::unfold((web.app.clone(), rx, stop, None::<String>), |(app, mut rx, mut stop, last)| async move {
-        let mut wait = last.is_some();
-        loop {
-            if *stop.borrow() {
-                return None;
-            }
-            if wait {
-                tokio::select! {
-                    r = rx.recv() => match r {
-                        Ok(()) | Err(RecvError::Lagged(_)) => {}
-                        Err(RecvError::Closed) => return None,
-                    },
-                    _ = stop.wait_for(|s| *s) => return None,
+    let session_seq = session.map(|Extension(s)| s.seq);
+    let s = stream::unfold(
+        (web.app.clone(), rx, stop, session_seq, None::<String>),
+        |(app, mut rx, mut stop, session_seq, last)| async move {
+            let mut wait = last.is_some();
+            loop {
+                if *stop.borrow() || !session_valid(&app, session_seq) {
+                    return None;
                 }
-                tokio::time::sleep(SETTLE).await;
-                while matches!(rx.try_recv(), Ok(()) | Err(TryRecvError::Lagged(_))) {}
-            }
-            wait = true;
-            let snap = match app.wf.snapshot() {
-                Ok(v) => v.to_string(),
-                Err(e) => {
-                    tracing::warn!("board snapshot failed: {e:#}");
-                    continue;
+                if wait {
+                    let mut got_event = false;
+                    while !got_event {
+                        if let Some(seq) = session_seq {
+                            tokio::select! {
+                                r = rx.recv() => match r {
+                                    Ok(()) | Err(RecvError::Lagged(_)) => got_event = true,
+                                    Err(RecvError::Closed) => return None,
+                                },
+                                _ = stop.wait_for(|s| *s) => return None,
+                                _ = tokio::time::sleep(SESSION_CHECK) => {
+                                    if !session_valid(&app, Some(seq)) {
+                                        return None;
+                                    }
+                                }
+                            }
+                        } else {
+                            tokio::select! {
+                                r = rx.recv() => match r {
+                                    Ok(()) | Err(RecvError::Lagged(_)) => got_event = true,
+                                    Err(RecvError::Closed) => return None,
+                                },
+                                _ = stop.wait_for(|s| *s) => return None,
+                            }
+                        }
+                    }
+                    tokio::time::sleep(SETTLE).await;
+                    while matches!(rx.try_recv(), Ok(()) | Err(TryRecvError::Lagged(_))) {}
+                    if *stop.borrow() || !session_valid(&app, session_seq) {
+                        return None;
+                    }
                 }
-            };
-            if last.as_deref() != Some(snap.as_str()) {
-                let ev = Event::default().event("state").data(snap.clone());
-                return Some((Ok::<_, Infallible>(ev), (app, rx, stop, Some(snap))));
+                wait = true;
+                let snap = match app.wf.snapshot() {
+                    Ok(v) => v.to_string(),
+                    Err(e) => {
+                        tracing::warn!("board snapshot failed: {e:#}");
+                        continue;
+                    }
+                };
+                if last.as_deref() != Some(snap.as_str()) {
+                    let ev = Event::default().event("state").data(snap.clone());
+                    return Some((Ok::<_, Infallible>(ev), (app, rx, stop, session_seq, Some(snap))));
+                }
             }
-        }
-    });
+        },
+    );
     Sse::new(s).keep_alive(KeepAlive::new().interval(KEEPALIVE).text("keepalive")).into_response()
 }
 
@@ -478,7 +651,7 @@ async fn put_ask_model(State(web): State<Web>, raw: Bytes) -> Response {
 pub fn routes(app: Arc<App>, port: u16) -> Router {
     let remote = app.config.board.active_remote();
     let web = Web { app, port, remote };
-    Router::new()
+    let board = Router::new()
         .route("/", get(page))
         .route("/api/state", get(state))
         .route("/api/events", get(events))
@@ -503,5 +676,11 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/contexts", get(list_contexts))
         .route("/api/contexts/{id}", put(put_context).delete(delete_context))
         .route_layer(axum::middleware::from_fn_with_state(web.clone(), board_guard))
-        .with_state(web)
+        .with_state(web.clone());
+    let pair = Router::new()
+        .route("/pair", get(pair_page))
+        .route("/api/pair", post(post_pair))
+        .route_layer(axum::middleware::from_fn_with_state(web.clone(), pair_guard))
+        .with_state(web);
+    board.merge(pair)
 }

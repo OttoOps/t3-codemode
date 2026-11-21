@@ -416,13 +416,167 @@ The **Settled** tab keeps them, with a filter and a
 restarts its settle clock. **Settle** on a row and **Settle all done** do it by
 hand.
 
+## Remote access
+
+The board is loopback-only by default. To open it from another device over
+HTTPS, put a reverse proxy in front of `127.0.0.1:47731`, configure
+[`board.remote`](config.md#remote-board) in `config.json`, restart `t3cm`, and
+pair each remote browser from the CLI. `/mcp` and `/healthz` stay loopback-only.
+
+### Pairing a browser
+
+1. Enable pairing mode with your public HTTPS origin in `config.json` and
+   restart the service:
+
+   ```json
+   {
+     "board": {
+       "remote": {
+         "mode": "pairing",
+         "origin": "https://board.example.com"
+       }
+     }
+   }
+   ```
+
+2. Mint a single-use 5-minute pairing URL and QR code on the host:
+
+   ```sh
+   t3cm board pair --label "Phone"
+   ```
+
+   Pass `--no-qr` to print only the URL, or `--json` for machine-readable output.
+
+3. Scan the QR code or open the `https://board.example.com/pair#<token>` link
+   in the remote browser. The `/pair` page reads the token from the URL
+   fragment, clears the fragment from browser history, and posts it to
+   `POST /api/pair` so the raw token never appears in proxy logs or `Referer`
+   headers. On success the service sets a 30-day
+   `HttpOnly; Secure; SameSite=Strict; Path=/` session cookie and redirects to
+   `/`.
+
+4. List or revoke sessions from the host CLI:
+
+   ```sh
+   t3cm board sessions
+   t3cm board revoke s1
+   t3cm board revoke --all
+   ```
+
+   Revoking a session cuts off its API calls immediately with 401 and closes any
+   open `/api/events` stream. Both pairing tokens and session tokens are stored
+   only as SHA-256 hashes in `store.db`.
+
+### Reverse-proxy examples
+
+Any proxy fronting the board must follow the rules in
+[Security model](security.md#network): terminate TLS, refuse `/mcp` and
+`/healthz`, strip client-supplied forwarding and identity headers, always inject
+a trusted forwarding header, and reject or overwrite any `Host` that does not
+match `board.remote.origin`. Never front the board with a raw TCP forwarder such
+as `ssh -L`, `socat`, or `tailscale serve --tcp`.
+
+#### Caddy
+
+Caddy terminates TLS automatically, rejects requests whose `Host` does not match
+the site address, preserves `Host`, and injects `X-Forwarded-For`,
+`X-Forwarded-Proto`, and `X-Forwarded-Host` (replacing untrusted client values
+by default). Strip `Tailscale-User-Login`, `Forwarded`, and `X-Forwarded-Port`,
+block `/mcp` and `/healthz`, and set `flush_interval -1` for SSE:
+
+```caddyfile
+board.example.com {
+    @blocked path /mcp /mcp/* /healthz /healthz/*
+    respond @blocked 403
+
+    reverse_proxy 127.0.0.1:47731 {
+        flush_interval -1
+        header_up -Tailscale-User-Login
+        header_up -Forwarded
+        header_up -X-Forwarded-Port
+    }
+}
+```
+
+#### Cloudflare Tunnel (`cloudflared`)
+
+Place the `/mcp` and `/healthz` deny rule ahead of the board rule in your
+tunnel's `config.yml`:
+
+```yaml
+ingress:
+  - hostname: board.example.com
+    path: ^/(mcp|healthz)(/.*)?$
+    service: http_status:403
+  - hostname: board.example.com
+    service: http://127.0.0.1:47731
+  - service: http_status:404
+```
+
+Cloudflare terminates TLS, enforces `hostname`, preserves `Host`, and sets
+`X-Forwarded-For` and `X-Forwarded-Proto: https`. To satisfy the proxy rules in
+[Security model](security.md#network), also add a Cloudflare Request Header
+Transform Rule on `board.example.com` that removes client-supplied
+`Tailscale-User-Login`, `Forwarded`, `X-Forwarded-Host`, and `X-Forwarded-Port`
+headers before requests reach `cloudflared`.
+
+#### nginx
+
+nginx's default `proxy_pass` rewrites `Host` to the upstream and sends no
+forwarding header, so configure both a catch-all `default_server` that drops
+unknown `Host` values and explicit `proxy_set_header` directives. At the edge,
+set `X-Forwarded-For $remote_addr` so client-supplied headers are overwritten
+rather than appended, and pass `Host $http_host` (or an explicit `host:port`
+such as `board.example.com:47732` when serving on a non-443 port, since `$host`
+drops the port):
+
+```nginx
+server {
+    listen 443 ssl default_server;
+    ssl_certificate     /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/privkey.pem;
+    return 444;
+}
+
+server {
+    listen 443 ssl;
+    server_name board.example.com;
+
+    ssl_certificate     /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/privkey.pem;
+
+    location = /mcp { return 403; }
+    location ^~ /mcp/ { return 403; }
+    location = /healthz { return 403; }
+    location ^~ /healthz/ { return 403; }
+
+    location / {
+        proxy_pass http://127.0.0.1:47731;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host "";
+        proxy_set_header X-Forwarded-Port "";
+        proxy_set_header Forwarded "";
+        proxy_set_header Tailscale-User-Login "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+    }
+}
+```
+
 ## HTTP routes
 
 | Route | Does |
 |---|---|
 | `GET /` | The page, with a per-process CSRF token embedded |
+| `GET /pair` | Remote browser pairing page (enabled when `board.remote.mode` is `"pairing"`); reads the token from `#<token>`, clears the fragment, and posts to `POST /api/pair` |
+| `POST /api/pair` `{token, label?}` | Redeem a single-use 5-minute pairing token (`Content-Type: application/json`) and set a 30-day `HttpOnly; Secure; SameSite=Strict; Path=/` session cookie |
 | `GET /api/state` | `{cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, counts, service}`, with `counts.newIssues`; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
-| `GET /api/events` | SSE: a `state` event on every change |
+| `GET /api/events` | SSE: a `state` event on every change (closes when a remote pairing session is revoked or expires) |
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it |
 | `POST /api/cards/{id}/dismiss` | Resolve without messaging |
@@ -442,6 +596,11 @@ hand.
 | `DELETE /api/contexts/{id}` | Delete the context (404 if there is none) |
 | `POST /api/open` `{link}` | Open a T3 thread link in the running Windows desktop app (on Windows, or from WSL); returns `{opened}`, and the page opens a new tab when it is `false` (400 for a link that is not a T3 thread) |
 
-Every board route requires `Host` to be `127.0.0.1:<port>` or
-`localhost:<port>` and refuses any other `Origin`. POST, PUT and DELETE also
-need the `X-T3CM-CSRF` header, which the page reads from its embedded token.
+Direct loopback requests require `Host` to be `127.0.0.1:<port>`,
+`localhost:<port>`, or `[::1]:<port>` with no proxy headers and refuse any other
+`Origin`. When `board.remote` is enabled, remote requests must match the
+configured `https://` `origin` and pass remote authentication (except `GET /pair`
+and `POST /api/pair` in pairing mode, which sit before session auth). Every
+mutating board route (except `POST /api/pair`, which requires
+`Content-Type: application/json`) also requires the `X-T3CM-CSRF` header, which
+the page reads from its embedded token. See [Security model](security.md#network).

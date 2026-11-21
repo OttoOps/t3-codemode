@@ -5861,3 +5861,423 @@ async fn board_validates_configured_remote_origin_and_refuses_without_auth() {
         );
     }
 }
+
+fn pairing_config() -> Config {
+    Config::from_value(json!({
+        "board": {
+            "remote": {
+                "mode": "pairing",
+                "origin": "https://board.acme.example:47732"
+            }
+        }
+    }))
+    .unwrap()
+}
+
+fn cookie_pair_from_set_cookie(header_val: &str) -> String {
+    header_val.split(';').next().unwrap().trim().to_string()
+}
+
+#[test]
+fn pairing_tokens_and_sessions_are_stored_hashed_and_enforce_ttls() {
+    use t3_codemode::clock::{Clock, FakeClock, iso};
+    use t3_codemode::config::RemoteOrigin;
+    use t3_codemode::pairing;
+    use t3_codemode::store::Store;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let clock = FakeClock::at(T0);
+    let origin = RemoteOrigin::parse("https://board.acme.example:47732").unwrap();
+
+    // Mint a pairing token with a label; verify URL uses fragment and only the SHA-256 digest is stored.
+    let minted = pairing::mint_pairing_token(&store, &origin, Some("Phone"), clock.now()).unwrap();
+    assert_eq!(minted.url, format!("https://board.acme.example:47732/pair#{}", minted.token));
+    assert_eq!(minted.label.as_deref(), Some("Phone"));
+    assert_eq!(minted.ttl_seconds, 300);
+    let conn = rusqlite::Connection::open(store.path()).unwrap();
+    let stored_tok: String = conn.query_row("SELECT token_hash FROM pairing_tokens", [], |r| r.get(0)).unwrap();
+    assert_eq!(stored_tok, pairing::hash_token(&minted.token));
+    assert_ne!(stored_tok, minted.token);
+
+    // Redeem once succeeds and produces a 30-day session storing only the SHA-256 digest.
+    let (raw_session, session) =
+        pairing::redeem_pairing_token(&store, &minted.token, Some("Ignored"), clock.now()).unwrap().unwrap();
+    assert_eq!(session.id, "s1");
+    assert_eq!(session.label.as_deref(), Some("Phone"));
+    let stored_sess: String = conn.query_row("SELECT token_hash FROM board_sessions", [], |r| r.get(0)).unwrap();
+    assert_eq!(stored_sess, pairing::hash_token(&raw_session));
+    assert_ne!(stored_sess, raw_session);
+
+    // Redeeming the same pairing token a second time fails.
+    assert!(pairing::redeem_pairing_token(&store, &minted.token, None, clock.now()).unwrap().is_none());
+
+    // Expired pairing token (at exact 5-minute TTL) fails.
+    let exp_tok = pairing::mint_pairing_token(&store, &origin, None, clock.now()).unwrap();
+    clock.advance_minutes(5);
+    assert!(pairing::redeem_pairing_token(&store, &exp_tok.token, None, clock.now()).unwrap().is_none());
+
+    // Session verifies and updates last_seen_at before 30 days, then expires at exact 30-day boundary.
+    let sess_hash = pairing::hash_token(&raw_session);
+    let verified = store.board_session_verify(&sess_hash, &iso(clock.now())).unwrap().unwrap();
+    assert_eq!(verified.id, "s1");
+    assert_eq!(verified.last_seen_at, iso(clock.now()));
+    assert_eq!(store.board_sessions_active(&iso(clock.now())).unwrap().len(), 1);
+
+    clock.set("2026-12-17T11:59:59Z");
+    assert!(store.board_session_verify(&sess_hash, &iso(clock.now())).unwrap().is_some());
+    clock.set("2026-12-17T12:00:00Z");
+    assert!(store.board_session_verify(&sess_hash, &iso(clock.now())).unwrap().is_none());
+    assert!(store.board_sessions_active(&iso(clock.now())).unwrap().is_empty());
+
+    // QR rendering produces a non-empty Unicode matrix.
+    let qr = pairing::render_qr(&minted.url).unwrap();
+    assert!(qr.lines().count() > 10 && qr.contains('\u{2588}') || qr.contains('\u{2580}') || qr.contains('\u{2584}'));
+}
+
+#[tokio::test]
+async fn pairing_flow_sets_secure_cookie_and_authenticates_remote_board() {
+    use t3_codemode::clock::Clock;
+    use t3_codemode::config::RemoteOrigin;
+    use t3_codemode::pairing;
+
+    // 1. When board.remote is off, /pair and /api/pair are refused with 403.
+    let off = start(H::new()).await;
+    let r = off.http.get(format!("{}/pair", off.base)).header("Host", "board.acme.example:47732").send().await.unwrap();
+    assert_eq!(r.status(), 403);
+    let r = off
+        .http
+        .post(format!("{}/api/pair", off.base))
+        .header("Host", "board.acme.example:47732")
+        .json(&json!({"token": "anything"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    let r = off.http.get(format!("{}/pair", off.base)).send().await.unwrap();
+    assert_eq!(r.status(), 403);
+
+    // 2. In pairing mode, /pair and /api/pair still enforce Host, X-Forwarded-Proto, and Origin.
+    let s = start(H::build(Vec::new(), pairing_config())).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    let sent = s.h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": GATE})).await;
+    let handle = sent["handle"].as_str().unwrap().to_string();
+    let csrf = s.csrf();
+    let origin = RemoteOrigin::parse("https://board.acme.example:47732").unwrap();
+
+    for (label, hdrs) in [
+        ("wrong host on /pair", vec![("Host", "evil.example:47732"), ("X-Forwarded-Proto", "https")]),
+        ("http proto on /pair", vec![("Host", "board.acme.example:47732"), ("X-Forwarded-Proto", "http")]),
+        (
+            "wrong origin on /pair",
+            vec![
+                ("Host", "board.acme.example:47732"),
+                ("X-Forwarded-Proto", "https"),
+                ("Origin", "https://evil.example"),
+            ],
+        ),
+    ] {
+        let mut req = s.http.get(format!("{}/pair", s.base));
+        for (k, v) in &hdrs {
+            req = req.header(*k, *v);
+        }
+        assert_eq!(req.send().await.unwrap().status(), 403, "{label}");
+    }
+
+    // 3. Valid remote Host + https proto can load GET /pair without a session cookie, and /pair never leaks CSRF.
+    let r = s
+        .http
+        .get(format!("{}/pair", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers().get("cache-control").and_then(|v| v.to_str().ok()), Some("no-store"));
+    assert_eq!(r.headers().get("referrer-policy").and_then(|v| v.to_str().ok()), Some("no-referrer"));
+    assert!(r.headers().contains_key("content-security-policy"));
+    let pair_html = r.text().await.unwrap();
+    assert!(pair_html.contains("/api/pair"));
+    assert!(pair_html.contains("history.replaceState"));
+    assert!(!pair_html.contains(&csrf), "/pair must never leak the board CSRF token");
+
+    // 4. POST /api/pair rejects non-JSON Content-Type and bogus tokens.
+    let r = s
+        .http
+        .post(format!("{}/api/pair", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("Origin", "https://board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Content-Type", "text/plain")
+        .body(r#"{"token":"bogus"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 415);
+
+    let r = s
+        .http
+        .post(format!("{}/api/pair", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("Origin", "https://board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .json(&json!({"token": "not-a-real-token"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    assert!(r.headers().get("set-cookie").is_none());
+
+    // 5. Mint a pairing token and redeem it via POST /api/pair.
+    let minted = pairing::mint_pairing_token(&s.h.app.store, &origin, Some("Phone"), s.h.clock.now()).unwrap();
+    let r = s
+        .http
+        .post(format!("{}/api/pair", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("Origin", "https://board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .json(&json!({"token": minted.token}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers().get("cache-control").and_then(|v| v.to_str().ok()), Some("no-store"));
+    let set_cookie = r.headers().get("set-cookie").expect("Set-Cookie header").to_str().unwrap().to_string();
+    assert!(set_cookie.starts_with(&format!("{}=", pairing::SESSION_COOKIE)), "{set_cookie}");
+    assert!(set_cookie.contains("HttpOnly"), "{set_cookie}");
+    assert!(set_cookie.contains("Secure"), "{set_cookie}");
+    assert!(set_cookie.contains("SameSite=Strict"), "{set_cookie}");
+    assert!(set_cookie.contains("Path=/"), "{set_cookie}");
+    assert!(set_cookie.contains("Max-Age=2592000"), "{set_cookie}");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["session"]["id"], "s1");
+    assert_eq!(body["session"]["label"], "Phone");
+    let cookie = cookie_pair_from_set_cookie(&set_cookie);
+
+    // 6. The same pairing token cannot be redeemed a second time.
+    let r = s
+        .http
+        .post(format!("{}/api/pair", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("Origin", "https://board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .json(&json!({"token": minted.token}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+    assert!(r.headers().get("set-cookie").is_none());
+
+    // 7. A pairing token past its 5-minute TTL cannot be redeemed.
+    let expired = pairing::mint_pairing_token(&s.h.app.store, &origin, None, s.h.clock.now()).unwrap();
+    s.h.clock.advance_minutes(5);
+    let r = s
+        .http
+        .post(format!("{}/api/pair", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("Origin", "https://board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .json(&json!({"token": expired.token}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+
+    // 8. With the session cookie, every remote board read route succeeds, and /mcp + /healthz stay 403.
+    for route in ["/", "/api/state", &format!("/api/msg/{handle}"), "/api/contexts", "/api/new-issues"] {
+        let r = s
+            .http
+            .get(format!("{}{route}", s.base))
+            .header("Host", "board.acme.example:47732")
+            .header("X-Forwarded-Proto", "https")
+            .header("Cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "paired GET {route}");
+    }
+    let r = s
+        .http
+        .post(format!("{}/mcp", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Cookie", &cookie)
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403, "/mcp stays strictly loopback-only even with a valid pairing cookie");
+    let r = s
+        .http
+        .get(format!("{}/healthz", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403, "/healthz stays strictly loopback-only even with a valid pairing cookie");
+
+    // 9. Duplicate session cookies fail closed with 401.
+    let r = s
+        .http
+        .get(format!("{}/api/state", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Cookie", format!("{cookie}; {}=bogus", pairing::SESSION_COOKIE))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+
+    // 10. Mutating routes still require X-T3CM-CSRF even with a valid session cookie.
+    let r = s
+        .http
+        .post(format!("{}/api/cards/a1/answer", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("Origin", "https://board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Cookie", &cookie)
+        .json(&json!({"text": "merge"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    let r = s
+        .http
+        .post(format!("{}/api/cards/a1/answer", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("Origin", "https://board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Cookie", &cookie)
+        .header("X-T3CM-CSRF", &csrf)
+        .json(&json!({"text": "merge"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(s.h.sent().len(), 1);
+
+    // 11. After 30 days the session expires and remote requests return 401.
+    s.h.clock.advance_minutes(30 * 24 * 60);
+    let r = s
+        .http
+        .get(format!("{}/api/state", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+}
+
+#[tokio::test]
+async fn revoking_or_expiring_a_session_closes_its_open_sse_stream_and_cuts_off_api() {
+    use t3_codemode::clock::{Clock, iso};
+    use t3_codemode::config::RemoteOrigin;
+    use t3_codemode::pairing;
+
+    let s = start(H::build(Vec::new(), pairing_config())).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    let origin = RemoteOrigin::parse("https://board.acme.example:47732").unwrap();
+
+    let pair = |label: &'static str| {
+        let minted = pairing::mint_pairing_token(&s.h.app.store, &origin, Some(label), s.h.clock.now()).unwrap();
+        let (raw_session, sess) =
+            pairing::redeem_pairing_token(&s.h.app.store, &minted.token, None, s.h.clock.now()).unwrap().unwrap();
+        (sess, format!("{}={raw_session}", pairing::SESSION_COOKIE))
+    };
+    let (sess1, cookie1) = pair("Phone");
+    let (sess2, cookie2) = pair("Laptop");
+
+    let mut sse1 = s
+        .http
+        .get(format!("{}/api/events", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Cookie", &cookie1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sse1.status(), 200);
+    let first1 = tokio::time::timeout(Duration::from_secs(5), sse1.chunk()).await.unwrap().unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&first1).contains("event: state"));
+
+    let mut sse2 = s
+        .http
+        .get(format!("{}/api/events", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Cookie", &cookie2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sse2.status(), 200);
+    let first2 = tokio::time::timeout(Duration::from_secs(5), sse2.chunk()).await.unwrap().unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&first2).contains("event: state"));
+
+    // Revoke session 1 directly in store.db (as `t3cm board revoke` does from another process).
+    assert!(s.h.app.store.board_session_revoke(sess1.seq, &iso(s.h.clock.now())).unwrap());
+
+    // Session 1's API access fails immediately with 401.
+    let r = s
+        .http
+        .get(format!("{}/api/state", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Cookie", &cookie1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+
+    // Session 1's open SSE stream closes cleanly without sending new state.
+    let closed1 = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = sse1.chunk().await.unwrap() {
+            let text = String::from_utf8_lossy(&chunk);
+            assert!(!text.contains("event: state"), "revoked stream received state: {text}");
+        }
+    })
+    .await;
+    assert!(closed1.is_ok(), "revoked SSE stream stayed open");
+
+    // Session 2 is unaffected and receives new state events.
+    s.h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": GATE})).await;
+    let next2 = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let chunk = sse2.chunk().await.unwrap().expect("active stream closed early");
+            let text = String::from_utf8_lossy(&chunk);
+            if text.contains("event: state") {
+                break text.into_owned();
+            }
+        }
+    })
+    .await;
+    assert!(next2.is_ok(), "active session 2 did not receive state event");
+
+    // Expiring session 2 closes its open SSE stream and cuts off API access.
+    assert_eq!(sess2.id, "s2");
+    s.h.clock.advance_minutes(30 * 24 * 60 + 1);
+    let closed2 = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = sse2.chunk().await.unwrap() {
+            let text = String::from_utf8_lossy(&chunk);
+            assert!(!text.contains("event: state"), "expired stream received state: {text}");
+        }
+    })
+    .await;
+    assert!(closed2.is_ok(), "expired SSE stream stayed open");
+    let r = s
+        .http
+        .get(format!("{}/api/state", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Cookie", &cookie2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401);
+}
