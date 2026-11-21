@@ -91,7 +91,7 @@ no source install; it needs a published release.
   provenance; run `gh attestation verify <archive> -R OttoOps/t3-codemode` for
   that.
 - `deploy/install.sh --from-source`, from a clone, builds with
-  `cargo build --release --locked` instead (Linux and macOS).
+  `cargo build --profile dist --locked --bin t3cm` instead (Linux and macOS).
 - `--files-only` (`-FilesOnly`) installs or removes the files without touching
   systemd, launchd or Task Scheduler, and prints the command that starts the
   service.

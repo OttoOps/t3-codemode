@@ -20,7 +20,7 @@ Run the checks CI runs, from the repository root:
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test --release --locked
+cargo test --locked
 python3 -m unittest discover -s tests/skills -v
 shellcheck deploy/*.sh              # when you change an installer
 actionlint                          # when you change a workflow

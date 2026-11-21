@@ -80,12 +80,12 @@ jobs:
       - name: Install the musl toolchain
         if: endsWith(matrix.target, '-musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --release --locked --target "$TARGET" --bin t3cm
+      - run: cargo build --profile dist --locked --target "$TARGET" --bin t3cm
       - name: Locate the binary
         run: |
           case "$TARGET" in
-            *-windows-*) echo "BIN=target/$TARGET/release/t3cm.exe" >> "$GITHUB_ENV" ;;
-            *) echo "BIN=target/$TARGET/release/t3cm" >> "$GITHUB_ENV" ;;
+            *-windows-*) echo "BIN=target/$TARGET/dist/t3cm.exe" >> "$GITHUB_ENV" ;;
+            *) echo "BIN=target/$TARGET/dist/t3cm" >> "$GITHUB_ENV" ;;
           esac
       - name: The binary runs and reports the version
         if: matrix.target != 'x86_64-apple-darwin'

@@ -164,7 +164,7 @@ Run the checks CI runs, from the repository root:
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test --release --locked
+cargo test --locked
 shellcheck deploy/*.sh              # when you change an installer
 actionlint                          # when you change a workflow
 ```

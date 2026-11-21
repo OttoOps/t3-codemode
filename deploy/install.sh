@@ -331,8 +331,8 @@ install_release() {
 
 install_source() {
   if [ ! -f "$CRATE/Cargo.toml" ] || [ ! -f "$HERE/$UNIT" ]; then die "--from-source runs from a t3-codemode checkout"; fi
-  (cd "$CRATE" && CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}" cargo build --release --locked)
-  install_files "$CRATE/target/release/t3cm" "$HERE"
+  (cd "$CRATE" && CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}" cargo build --profile dist --locked --bin t3cm)
+  install_files "$CRATE/target/dist/t3cm" "$HERE"
 }
 
 uninstall_all() {
