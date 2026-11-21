@@ -153,10 +153,12 @@ At load, a pool must have at least one member, no member twice, weights of 1
 or more, reserves from 0 to 100 and costs of 0 or more, and `board.pool` must name a configured
 pool. A pool that is not mixed must not set `model` or `effort` on a member.
 A bad pool fails config load with a message that names it. Only T3 knows
-whether each member is an instance of the pool's `driver`. Every pick checks
-that against T3's live `orchestrator_capabilities`, and a pick from a pool with
-an unknown instance or a member of another driver fails and names the pool and
-the member. When T3 answers at start, the service also logs a bad pool then.
+whether each member is a real instance and, in a pool that is not mixed,
+whether it is an instance of the pool's `driver`. Every pick checks that
+against T3's live `orchestrator_capabilities`. A pick from a pool with an
+unknown instance fails, and so does a pick from a pool that is not mixed with
+a member of another driver. Either failure names the pool and the member. When
+T3 answers at start, the service also logs a bad pool then.
 
 The pick's reason starts with the driver, model and effort it chose, such as
 `claudeAgent claude-opus-5-5, effort high; weighted: weight 1 of 4`, and
@@ -257,8 +259,10 @@ records why t3cm reads limits this way.
 
 `board.pool` covers `wf.launchTicket`, the launch box and the ask box. With it
 set, launches use the pool's model and effort (in a mixed pool, the picked
-member's), a `wf.launchTicket` call that asks for another model or effort
-fails, and the ask box runs that model in place of `askModel`. Skills pick from a pool with [`wf.pick`](globals.md#wf).
+member's), and the ask box runs that model in place of `askModel`. A
+`wf.launchTicket` call that asks for another model or effort fails. With a
+mixed pool, a call that names any model or effort fails, even one that matches
+a member's. Skills pick from a pool with [`wf.pick`](globals.md#wf).
 The workflow skills do that for each launch when their `model worker` or
 `model ticket` slot names a pool, as `"worker": {"pool": "opus"}`; see
 [A pool on a model line](https://github.com/OttoOps/t3-codemode/blob/main/skills/t3-workflow/slots.md#a-pool-on-a-model-line).
