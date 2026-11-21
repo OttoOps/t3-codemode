@@ -462,21 +462,38 @@ async fn detect_queries_t3_directly_when_t3cm_service_is_stopped() {
     let fake_t3_bin = env!("CARGO_BIN_EXE_t3cm-fake-mcp").to_string();
     let t3_home_str = t3_home.to_string_lossy().into_owned();
     let t3_log = s.dir.path().join("t3.log").to_string_lossy().into_owned();
-    let out = tokio::task::spawn_blocking(move || {
-        s.setup_raw(
+    let (out_runtime, out_origin) = tokio::task::spawn_blocking(move || {
+        let r1 = s.setup_raw(
             "detect",
             &[],
             None,
             &[("T3CODE_HOME", &t3_home_str), ("T3CM_T3_BIN", &fake_t3_bin), ("FAKE_T3_LOG", &t3_log)],
-        )
+        );
+        // Also verify explicit T3CM_T3_ORIGIN without any server-runtime.json.
+        let empty_home = s.dir.path().join("no-runtime").to_string_lossy().into_owned();
+        let origin = format!("http://{t3_addr}");
+        let r2 = s.setup_raw(
+            "detect",
+            &[],
+            None,
+            &[
+                ("T3CODE_HOME", &empty_home),
+                ("T3CM_T3_ORIGIN", &origin),
+                ("T3CM_T3_BIN", &fake_t3_bin),
+                ("FAKE_T3_LOG", &t3_log),
+            ],
+        );
+        (r1, r2)
     })
     .await
     .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let d: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(d["t3cm"]["running"], false, "t3cm service is stopped");
-    assert_eq!(d["providers"]["enabled"][0]["provider"], "codex", "{d}");
-    assert_eq!(d["providers"]["enabled"][0]["models"], json!(["gpt-6.2-sol (effort low|high)"]));
+    for out in [out_runtime, out_origin] {
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let d: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(d["t3cm"]["running"], false, "t3cm service is stopped");
+        assert_eq!(d["providers"]["enabled"][0]["provider"], "codex", "{d}");
+        assert_eq!(d["providers"]["enabled"][0]["models"], json!(["gpt-6.2-sol (effort low|high)"]));
+    }
 }
 
 #[test]
