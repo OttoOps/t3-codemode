@@ -155,7 +155,7 @@ impl AuthError {
                 (
                     "Access denied",
                     lead,
-                    "Switch Tailscale accounts on this device, or add this login to board.remote.allowUsers in t3cm's config.json on the host and restart t3cm.",
+                    "Switch Tailscale accounts on this device, or set board.remote.allowUsers in t3cm's config.json on the host (include the host's own Tailscale login too, since a non-empty list replaces the default) and restart t3cm.",
                     "",
                     false,
                 )

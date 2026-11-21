@@ -7657,7 +7657,12 @@ async fn remote_html_navigation_without_auth_returns_signin_or_denied_screen() {
     assert!(!body.contains("<script>"), "{body}");
     assert!(!body.contains("alice@acme.example"), "must never leak host login: {body}");
     assert!(!body.contains(r#"href="/pair""#), "tailscale-only denial must not link /pair: {body}");
-    assert!(body.contains("board.remote.allowUsers") && body.contains("restart t3cm"), "{body}");
+    assert!(
+        body.contains("board.remote.allowUsers")
+            && body.contains("host&#39;s own Tailscale login")
+            && body.contains("restart t3cm"),
+        "{body}"
+    );
     assert!(!body.contains("t3cm board expose --tailscale --allow-user"), "{body}");
     assert!(!body.contains(&ts_csrf));
 
