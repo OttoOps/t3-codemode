@@ -552,3 +552,17 @@ fn retire_t3wf_surfaces_systemctl_failure_and_leaves_unit_detectable_for_retry()
         "retire:t3wf must remain missing after systemctl failure"
     );
 }
+
+#[test]
+fn pending_retire_nudges_keep_step_missing_until_cleared() {
+    let home = tempfile::tempdir().unwrap();
+    let env = Env::under(home.path(), None);
+    steps::save_pending_nudges(&env, &["t-open-1".into()]).unwrap();
+    let st = steps::check(&env, &Bundle::embedded()).unwrap();
+    assert!(st.missing.iter().any(|m| m.id == steps::RETIRE_T3WF_STEP));
+    assert!(steps::describe_steps(&st).contains("1 pending thread nudge(s)"));
+
+    steps::save_pending_nudges(&env, &[]).unwrap();
+    assert!(!steps::retire_pending_path(&env).exists());
+    assert!(!steps::check(&env, &Bundle::embedded()).unwrap().missing.iter().any(|m| m.id == steps::RETIRE_T3WF_STEP));
+}
