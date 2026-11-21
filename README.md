@@ -46,7 +46,7 @@ every OS, the config, and the `t3cm` commands.
 The T3 workflow runs on five agent skills in [`skills/`](skills). They need
 T3 Code, whose `t3_thread_launch` tool starts the ticket and worker threads,
 and the `t3cm` service, which runs the link protocol and resolves the slots.
-They load in T3 Code's Claude Code and Codex threads.
+They load in T3 Code's Claude Code, Codex and Antigravity threads.
 
 | Skill | Say | What it does |
 |---|---|---|
@@ -68,7 +68,8 @@ t3cm skills install
 
 Each t3cm binary carries the skills of its own release. `t3cm skills install`
 writes all five to `~/.agents/skills`, where Codex reads them, and links each
-into Claude Code's `~/.claude/skills` when that folder exists. It also applies
+into Claude Code's `~/.claude/skills` and Antigravity's
+`~/.gemini/config/skills` when those agents are installed. It also applies
 the setup steps that need no answers, such as the filed-issue rule. Rerunning
 the installer or running `t3cm update` brings them to the next release, and
 keeps any file you edited. `t3cm skills status` says whether they are current.

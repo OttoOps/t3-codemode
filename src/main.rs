@@ -15,7 +15,7 @@ use t3_codemode::slots::{self, Caps, Enabled, Folders, Inputs, Resolved};
 use t3_codemode::store::Store;
 use t3_codemode::t3_http::HttpT3;
 use t3_codemode::wf_slots::Reported;
-use t3_codemode::{bench, claude_link, doctor, platform, server, setup, skills, steps, upgrade, watcher};
+use t3_codemode::{agent_link, bench, doctor, platform, server, setup, skills, steps, upgrade, watcher};
 
 #[derive(Parser)]
 #[command(
@@ -172,7 +172,7 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum SkillsCmd {
-    /// Write the skills to ~/.agents/skills, link them into Claude Code's skills folder, record them in ~/.config/t3-workflow/installed.json, and apply new setup steps
+    /// Write the skills to ~/.agents/skills, link them into Claude Code's and Antigravity's skills folders, record them in ~/.config/t3-workflow/installed.json, and apply new setup steps
     Install {
         /// Replace skills another tool (npx skills, a copy) installed, and drop them from its lock file
         #[arg(long)]
@@ -261,23 +261,25 @@ fn run_skills(cmd: SkillsCmd) -> Result<ExitCode> {
             let st = skills::status(&paths, &bundle)?;
             let setup = steps::check(&env, &bundle)?;
             let ok = t3_codemode::drift::current(&st, &setup);
-            let links = match st.installed {
-                Some(_) => claude_link::check(&env.claude, &paths.dir, &bundle.skills()),
-                None => Vec::new(),
-            };
+            let agents = agent_link::Agent::all(&env);
+            let links: Vec<Vec<agent_link::Link>> = agents
+                .iter()
+                .map(|a| match st.installed {
+                    Some(_) => agent_link::check(a, &paths.dir, &bundle.skills()),
+                    None => Vec::new(),
+                })
+                .collect();
             if json {
                 let mut v = serde_json::to_value(&st)?;
                 v["current"] = Value::Bool(ok);
                 v["steps"] = serde_json::to_value(&setup)?;
-                v["claudeLinks"] = serde_json::to_value(&links)?;
+                for (a, l) in agents.iter().zip(&links) {
+                    v[a.key] = serde_json::to_value(l)?;
+                }
                 println!("{}", serde_json::to_string_pretty(&v)?);
             } else {
-                print!(
-                    "{}{}{}",
-                    skills::describe_status(&st),
-                    steps::describe_steps(&setup),
-                    claude_link::describe_check(&links)
-                );
+                let notes: String = agents.iter().zip(&links).map(|(a, l)| agent_link::describe_check(a, l)).collect();
+                print!("{}{}{notes}", skills::describe_status(&st), steps::describe_steps(&setup));
             }
             return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE });
         }
@@ -311,19 +313,19 @@ fn run_skills(cmd: SkillsCmd) -> Result<ExitCode> {
             applied.notes.extend(nudge_notes);
         }
     }
-    let linked = claude_link::link(&env.claude, &paths.dir, &bundle.skills());
+    let agents = agent_link::Agent::all(&env);
+    let linked: Vec<agent_link::Linked> =
+        agents.iter().map(|a| agent_link::link(a, &paths.dir, &bundle.skills())).collect();
     if json {
         let mut v = serde_json::to_value(&report)?;
         v["steps"] = serde_json::to_value(&applied)?;
-        v["claudeLinks"] = serde_json::to_value(&linked)?;
+        for (a, l) in agents.iter().zip(&linked) {
+            v[a.key] = serde_json::to_value(l)?;
+        }
         println!("{}", serde_json::to_string_pretty(&v)?);
     } else {
-        print!(
-            "{}{}{}",
-            skills::describe_report(&report),
-            steps::describe_applied(&applied),
-            claude_link::describe(&linked)
-        );
+        let notes: String = agents.iter().zip(&linked).map(|(a, l)| agent_link::describe(a, l)).collect();
+        print!("{}{}{notes}", skills::describe_report(&report), steps::describe_applied(&applied));
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -583,7 +585,8 @@ fn repo_root(repo: Option<&Path>) -> Result<PathBuf> {
 
 fn local_slots(folders: &Folders, root: &Path) -> Resolved {
     let enabled = Enabled::load(&folders.claude, root);
-    Resolved::build(&Inputs { folders, root, listed: &[], enabled: &enabled })
+    let r = Resolved::build(&Inputs { folders, root, listed: &[], enabled: &enabled });
+    if slots::in_skill_tool_harness() { r } else { r.without_skill_tool() }
 }
 
 fn local_view(r: &Resolved, caps: &Caps) -> Value {

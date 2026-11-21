@@ -261,7 +261,9 @@ the description with it, through the Publishing section of the procedure.
 
 ## Procedure
 Invoke the t3-worker skill and follow the t3-worker procedure
-inline, in this thread, from step 1.
+inline, in this thread, from step 1. In a harness with no Skill tool,
+such as Antigravity, read `~/.agents/skills/t3-worker/SKILL.md` and the
+`procedure.md` beside it, and follow them.
 ```
 
 ## 4. Between workers

@@ -260,13 +260,14 @@ impl Wf {
     }
 
     pub async fn resolve_slots(&self, ctx: &Ctx, listed: &[String]) -> Result<Resolved> {
+        let skill_tool = slots::has_skill_tool(ctx.driver.as_deref());
         let folders = ctx.folders.clone();
         let root = ctx.root.clone();
         let listed = listed.to_vec();
         let key = format!("{}|{}", ctx.key, ctx.instance.as_deref().unwrap_or("-"));
         let store = self.store.clone();
         let at = self.now();
-        tokio::task::spawn_blocking(move || -> Result<Resolved> {
+        let r = tokio::task::spawn_blocking(move || -> Result<Resolved> {
             let snap = slots::Snapshot::capture(&folders, &root, &listed);
             if !listed.is_empty() {
                 return Ok(snap.build());
@@ -281,7 +282,8 @@ impl Wf {
             store.slot_resolution_set(&key, &snap.fingerprint, &serde_json::to_value(&r)?, &at)?;
             Ok(r)
         })
-        .await?
+        .await??;
+        Ok(if skill_tool { r } else { r.without_skill_tool() })
     }
 
     async fn caps_for(&self, r: &Resolved) -> Caps {

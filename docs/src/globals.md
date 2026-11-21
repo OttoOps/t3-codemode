@@ -148,8 +148,9 @@ parent and a child, and the service keeps every link and message in its store.
   `credentials`, resolved for the caller's T3 instance and project: its
   `source` layer, each skill with `how` to run it (`Skill tool`, or
   `inline: read <path> and apply it`, or why it is skipped), a one-line `line`,
-  and `warnings`. For `models`, each role carries a `modelSelection` for
-  `t3_thread_launch`, or the pool to pass to `wf.pick`. `repo` overrides the
+  and `warnings`. For an Antigravity thread, which has no Skill tool, every
+  skill found on disk is `inline`. For `models`, each role carries a
+  `modelSelection` for `t3_thread_launch`, or the pool to pass to `wf.pick`. `repo` overrides the
   project's workspace root, for example with a worktree.
 - `wf.renewal({ output, repo? })` matches a failed command's output against
   the `credentials` patterns and returns `{ match, skill, how, skipped }`, or

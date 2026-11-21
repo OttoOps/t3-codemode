@@ -12,6 +12,7 @@ fn t3cm(home: &Path, args: &[&str]) -> Output {
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
+        .env_remove("GEMINI_HOME")
         .env_remove("T3WF_CONFIG")
         .output()
         .unwrap()
@@ -500,4 +501,66 @@ fn takeover_refuses_to_delete_retired_files_through_a_symlinked_parent() {
     assert!(!removed.contains(&"t3-workflow/scripts/t3wf.py"), "{removed:?}");
     assert!(kept.contains(&"t3-workflow/scripts/t3wf.py"), "{kept:?}");
     assert_eq!(std::fs::read_to_string(outside.join("t3wf.py")).unwrap(), "outside\n");
+}
+
+#[cfg(unix)]
+fn antigravity_skill(home: &Path, name: &str) -> PathBuf {
+    home.join(".gemini").join("config").join("skills").join(name)
+}
+
+#[cfg(unix)]
+#[test]
+fn install_links_every_skill_into_antigravitys_folder() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".gemini").join("antigravity")).unwrap();
+    let out = t3cm(home.path(), &["skills", "install"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("for Antigravity"), "{}", text(&out));
+    for name in SKILLS {
+        assert_eq!(
+            std::fs::canonicalize(antigravity_skill(home.path(), name)).unwrap(),
+            std::fs::canonicalize(skills_dir(home.path()).join(name)).unwrap()
+        );
+    }
+    let (ok, st) = status_json(home.path());
+    assert!(ok);
+    assert!(st["antigravityLinks"].as_array().unwrap().iter().all(|l| l["state"] == "linked"), "{st}");
+    std::fs::remove_file(antigravity_skill(home.path(), "t3-worker")).unwrap();
+    let out = t3cm(home.path(), &["skills", "status"]);
+    assert!(text(&out).contains("Antigravity does not see t3-worker"), "{}", text(&out));
+    let again = t3cm(home.path(), &["skills", "update", "--json"]);
+    let v: Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(v["antigravityLinks"]["made"], json!(["t3-worker"]));
+}
+
+#[test]
+fn a_gemini_folder_without_antigravity_gets_no_links() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".gemini")).unwrap();
+    let out = t3cm(home.path(), &["skills", "install"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!home.path().join(".gemini").join("config").exists());
+    assert!(!text(&t3cm(home.path(), &["skills", "status"])).contains("Antigravity"));
+}
+
+#[cfg(unix)]
+#[test]
+fn gemini_home_picks_the_antigravity_folder_to_link_into() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = home.path().join("profile");
+    std::fs::create_dir_all(profile.join("config")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_t3cm"))
+        .args(["skills", "install"])
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("GEMINI_HOME", &profile)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .env_remove("T3WF_CONFIG")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(std::fs::symlink_metadata(profile.join("config").join("skills").join("t3-workflow")).is_ok());
+    assert!(!home.path().join(".gemini").exists());
 }

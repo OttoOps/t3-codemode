@@ -73,6 +73,7 @@ pub struct Env {
     pub config: PathBuf,
     pub claude: PathBuf,
     pub codex: PathBuf,
+    pub gemini: PathBuf,
     pub claude_json: PathBuf,
     pub claude_config_dir: Option<PathBuf>,
     pub claude_cmd: PathBuf,
@@ -104,6 +105,9 @@ impl Env {
             env.t3wf_state = p.join("t3-workflow");
         }
         env.systemctl_cmd = var("T3WF_SYSTEMCTL").or_else(|| Some(PathBuf::from("systemctl")));
+        if let Some(p) = var("GEMINI_HOME") {
+            env.gemini = p;
+        }
         Ok(env)
     }
 
@@ -113,6 +117,7 @@ impl Env {
             config: config.join("t3-workflow").join("config.json"),
             claude: home.join(".claude"),
             codex: home.join(".codex"),
+            gemini: home.join(".gemini"),
             claude_json: home.join(".claude.json"),
             claude_config_dir: None,
             claude_cmd: PathBuf::from("claude"),
