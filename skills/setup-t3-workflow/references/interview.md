@@ -102,10 +102,8 @@ they give none. Say the summary from `t3cm setup detect` shows them as
 unverified until T3 is reachable.
 
 **A pool chosen:** record `pool` alone; the pool's model and effort come from
-the t3cm config. Tell the user a pool needs t3cm at launch: a role without
-t3cm skips the pool and launches on the provider default. For the ticket
-model, also tell the user that tickets the board launches use the t3cm
-config's `board.pool`, not this slot.
+the t3cm config. For the ticket model, also tell the user that tickets the
+board launches use the t3cm config's `board.pool`, not this slot.
 
 **Records**
 `"models": {"ticket": {"provider": "<id>", "model": "<id>", "effort": "<value>"}}`

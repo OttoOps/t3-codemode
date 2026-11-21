@@ -30,11 +30,11 @@ gets its own sandbox under `--out` (a temporary folder by default):
 
 - its own `HOME`, XDG config and state, and T3 home, so it reads and writes
   its own copies of `~/.claude`, `~/.agents`, `~/.codex` and T3 Code;
-- `PATH` set to the sandbox's `bin` (a fake `gh`, `python3` and `claude`)
+- `PATH` set to the sandbox's `bin` (a fake `gh`, stub `t3cm`, `python3` and `claude`)
   then `/usr/bin:/bin`;
-- a stub `t3-code` MCP server that logs each call, `t3wf` on its file-backed
-  fake T3, and a T3 Code runtime note in the sandbox's `CLAUDE.md`, so a
-  prompt runs as it would in a T3 Code thread (`env: "plain"` drops all three);
+- a stub `t3-code` MCP server that logs each call and a T3 Code runtime note
+  in the sandbox's `CLAUDE.md`, so a prompt runs as it would in a T3 Code
+  thread (`env: "plain"` drops both);
 - with a `t3cm` list in the eval's `setup`, a stub t3cm server whose
   `execute` runs no code: each call gets the `result` (or `error`) of the
   first rule whose `match` regular expression finds the submitted code, and a

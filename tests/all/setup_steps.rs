@@ -381,3 +381,135 @@ fn null_header_value_is_stale_and_recovery_commands_quote_for_unix_and_powershel
         "{ps_add_only}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn retire_t3wf_removes_timers_shim_and_pycache_and_keeps_registry_data() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let log = bin.path().join("systemctl.log");
+    let fake_sysctl = bin.path().join("systemctl");
+    std::fs::write(&fake_sysctl, format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display())).unwrap();
+    std::fs::set_permissions(&fake_sysctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut env = Env::under(home.path(), None);
+    env.systemctl_cmd = Some(fake_sysctl);
+    write_config(home.path(), &json!({"version": 1, "passes": ["pr"]}));
+
+    std::fs::create_dir_all(&env.systemd_user).unwrap();
+    for name in ["t3wf-tick.timer", "t3wf-tick.service", "cbrip-t3wf-tick.timer", "cbrip-t3wf-tick.service"] {
+        std::fs::write(env.systemd_user.join(name), "[Unit]\n").unwrap();
+    }
+    let shim = env.t3wf_state.join("v2").join("bin").join("t3wf-tick");
+    std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+    std::fs::write(&shim, "#!/bin/sh\n").unwrap();
+    let links = env.t3wf_state.join("v2").join("links.json");
+    std::fs::write(&links, r#"{"links":{},"outbox":[]}"#).unwrap();
+    let pycache = env.skills_dir.join("t3-workflow").join("scripts").join("__pycache__");
+    std::fs::create_dir_all(&pycache).unwrap();
+    std::fs::write(pycache.join("t3wf.cpython-312.pyc"), b"pyc").unwrap();
+
+    let before = steps::check(&env, &Bundle::embedded()).unwrap();
+    assert!(before.needs_update());
+    assert!(before.missing.iter().any(|m| m.id == steps::RETIRE_T3WF_STEP));
+    assert!(steps::describe_steps(&before).contains("t3wf leftovers remain"));
+
+    let applied = steps::apply(&env, &Bundle::embedded()).unwrap();
+    assert_eq!(applied.removed.len(), 6, "{:?}", applied.removed);
+    assert!(applied.newly_recorded.contains(&steps::RETIRE_T3WF_STEP.to_string()));
+    assert!(!env.systemd_user.join("t3wf-tick.timer").exists());
+    assert!(!env.systemd_user.join("cbrip-t3wf-tick.service").exists());
+    assert!(!shim.exists());
+    assert!(!shim.parent().unwrap().exists(), "empty bin/ folder should be removed");
+    assert!(!pycache.exists());
+    assert!(!pycache.parent().unwrap().exists(), "empty scripts/ folder should be removed");
+    assert!(links.is_file(), "registry data must be left alone");
+    let sysctl_log = std::fs::read_to_string(&log).unwrap();
+    assert!(sysctl_log.contains("--user disable --now t3wf-tick.timer"), "{sysctl_log}");
+    assert!(sysctl_log.contains("--user disable --now cbrip-t3wf-tick.timer"), "{sysctl_log}");
+    assert!(sysctl_log.contains("--user daemon-reload"), "{sysctl_log}");
+    assert!(!steps::check(&env, &Bundle::embedded()).unwrap().missing.iter().any(|m| m.id == steps::RETIRE_T3WF_STEP));
+}
+
+#[cfg(unix)]
+#[test]
+fn retire_t3wf_warns_and_nudges_open_links_without_blocking() {
+    use std::os::unix::fs::PermissionsExt;
+    use t3_codemode::config::LinkParams;
+    use t3_codemode::store::{Link, Store};
+
+    let home = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let env = Env::under(home.path(), None);
+
+    let links = env.t3wf_state.join("v2").join("links.json");
+    std::fs::create_dir_all(links.parent().unwrap()).unwrap();
+    std::fs::write(
+        &links,
+        json!({
+            "links": {
+                "t-worker-1": {"child": "t-worker-1", "parent": "t-ticket-1", "label": "#42 PR 1/1", "closed": false},
+                "t-closed": {"child": "t-closed", "parent": "t-ticket-1", "label": "#41", "closed": true}
+            },
+            "outbox": [{"to": "t-ticket-1", "body": "pending"}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let store = Store::open(state.path()).unwrap();
+    store
+        .link_save(&Link {
+            child: "mcp:worker-2".into(),
+            parent: "mcp:ticket-2".into(),
+            label: "#43 PR 1/1".into(),
+            role: "worker".into(),
+            parent_role: Some("ticket".into()),
+            params: LinkParams { down: 45, miss: 2, stall: 240 },
+            link: None,
+            opened: "2026-11-20T00:00:00Z".into(),
+            last_up: "2026-11-20T00:00:00Z".into(),
+            last_seen: None,
+            last_nudge: None,
+            nudges: 0,
+            escalated: false,
+            reported: Vec::new(),
+            gate: None,
+            gate_since: None,
+            closed: false,
+            closed_at: None,
+            closed_how: None,
+            unread: Vec::new(),
+            bad_run: None,
+            settled_at: None,
+            restored_at: None,
+            project: None,
+        })
+        .unwrap();
+
+    let report = steps::check_open_links(&env, state.path());
+    assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
+    assert!(report.warnings[0].contains("1 open link(s) and 1 undelivered message(s)"), "{:?}", report.warnings);
+    assert!(report.warnings[1].contains("1 open workflow link(s)"), "{:?}", report.warnings);
+    assert_eq!(report.t3wf_threads, vec!["t-ticket-1", "t-worker-1"]);
+    assert_eq!(report.t3cm_threads, vec!["mcp:ticket-2", "mcp:worker-2"]);
+
+    let log = bin.path().join("t3.log");
+    let fake_t3 = bin.path().join("t3");
+    std::fs::write(&fake_t3, format!("#!/bin/sh\nmsg=$(cat)\necho \"$1 $2 $3|$msg\" >> '{}'\n", log.display()))
+        .unwrap();
+    std::fs::set_permissions(&fake_t3, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let (nudged, notes) = steps::nudge_threads(Some(&fake_t3), &report.t3wf_threads);
+    assert_eq!(nudged, vec!["t-ticket-1", "t-worker-1"]);
+    assert!(notes.is_empty(), "{notes:?}");
+    let sent = std::fs::read_to_string(&log).unwrap();
+    assert!(sent.contains(&format!("thread send t-ticket-1|{}", steps::SKILLS_CHANGED_NOTE)), "{sent}");
+    assert!(sent.contains(&format!("thread send t-worker-1|{}", steps::SKILLS_CHANGED_NOTE)), "{sent}");
+
+    let (nudged_none, notes_none) = steps::nudge_threads(None, &report.t3cm_threads);
+    assert!(nudged_none.is_empty());
+    assert!(notes_none[0].contains("`t3` CLI was not found"), "{notes_none:?}");
+}

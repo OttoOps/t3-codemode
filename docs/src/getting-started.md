@@ -331,11 +331,13 @@ never writes through a skill folder that is a link, such as one into a git
 clone.
 
 `install` and `update` also apply the setup steps that need no answers,
-which this release lists in `setup-t3-workflow/steps.json`. The first is the
-filed-issue rule: t3cm writes it for Claude Code
-(`rules/t3-workflow-filed-issues.md` in `$CLAUDE_CONFIG_DIR`, else
-`~/.claude`) and as a marked block in Codex's global `AGENTS.md`
-(`$CODEX_HOME`, else `~/.codex`), skipping an agent with no config folder.
+which this release lists in `setup-t3-workflow/steps.json`: the filed-issue
+rule (`rule:filed-issues`, written to `rules/t3-workflow-filed-issues.md` in
+`$CLAUDE_CONFIG_DIR` or `~/.claude` and as a marked block in Codex's global
+`AGENTS.md`), adding `X-T3-Config-Dir` to Claude Code's `t3cm` MCP entry
+(`mcp:config-dir-header`), and cleaning up retired `t3wf` timers, shims and
+`scripts/__pycache__` (`retire:t3wf`, leaving old registry data alone until
+`t3cm doctor` says it is safe to delete).
 When `~/.config/t3-workflow/config.json` exists, t3cm records each step it
 applied there under `steps`, with its release under `writtenBy`. A step that
 needs answers, such as a slot a later release added, prints as

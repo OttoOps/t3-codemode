@@ -60,7 +60,8 @@ fn install_then_status_reports_every_skill_current_from_an_empty_home() {
     .unwrap();
     assert_eq!(manifest["release"], release);
     let files = manifest["files"].as_object().unwrap();
-    assert!(files.contains_key("t3-workflow/scripts/t3wf.py"));
+    assert!(files.keys().all(|k| !k.ends_with(".py")), "manifest must carry no .py files: {files:?}");
+    assert!(files.contains_key("t3-workflow/codemode.md"));
     assert!(files.values().all(|h| h.as_str().is_some_and(|h| h.len() == 64)));
 }
 

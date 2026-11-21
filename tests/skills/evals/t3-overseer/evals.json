@@ -17,7 +17,8 @@
       ],
       "checks": [
         {
-          "bash": "t3wf\\.py.*init.*--role overseer"
+          "tool": "*",
+          "input": "wf\\.init\\([^)]*overseer"
         },
         {
           "gh": "issue view 43"

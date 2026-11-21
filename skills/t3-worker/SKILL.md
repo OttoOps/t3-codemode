@@ -4,7 +4,7 @@ description: Worker side of t3-ticket - build one PR in this T3 thread's worktre
 ---
 
 This role runs on the `t3-workflow` link protocol, as a child of the
-orchestrator. Invoke that skill first. This skill's `t3-role.json` says a
+orchestrator. Invoke that skill first. t3cm's `roles` config says a
 worker opens no links of its own.
 
 The worker procedure lives in one place: [procedure.md](procedure.md), next

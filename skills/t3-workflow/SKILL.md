@@ -1,6 +1,6 @@
 ---
 name: t3-workflow
-description: The T3 workflow for T3 Code, and the router to its skills - the link protocol under every workflow thread (links, notes, wakes, gates, nudges, code mode, the t3wf script), setting up its slots (reviewer, passes, delivery, models), installing t3cm, and the overseer, ticket and worker roles. Use when a role says to, when a message opens with a [t3wf2 header, when a launch brief carries a "t3-workflow link" block, or when the user asks how the T3 workflow works, to set it up or change its reviewer, passes, delivery or models, what those are set to, or about installing t3cm.
+description: The T3 workflow for T3 Code, and the router to its skills - the link protocol under every workflow thread (links, notes, wakes, gates, nudges, code mode), setting up its slots (reviewer, passes, delivery, models), installing t3cm, and the overseer, ticket and worker roles. Use when a role says to, when a message opens with a [t3cm header, when a launch brief carries a "t3-codemode link" or "t3-workflow link" block, or when the user asks how the T3 workflow works, to set it up or change its reviewer, passes, delivery or models, what those are set to, or about installing t3cm.
 ---
 
 ## Which skill
@@ -8,7 +8,7 @@ description: The T3 workflow for T3 Code, and the router to its skills - the lin
 | The user or brief wants | Go to |
 |---|---|
 | to set up the workflow, or change its reviewer, passes, credential renewal, delivery or models | the `setup-t3-workflow` skill |
-| what the slots are set to now | `t3wf slots` ([Slots](#slots)) |
+| what the slots are set to now | `wf.slots()` or `t3cm slots` ([Slots](#slots)) |
 | several issues worked in parallel | the `t3-overseer` skill |
 | one issue, or issues one after another | the `t3-ticket` skill |
 | a launch brief for one PR's worker | the `t3-worker` skill |
@@ -19,10 +19,10 @@ description: The T3 workflow for T3 Code, and the router to its skills - the lin
 ## The protocol
 
 Every thread in the T3 workflow is a **node** with at most one parent
-and any number of children. A parent and child pair is a **link**. One
-registry per machine holds every link and every message body, and a
-**watcher** (`t3wf tick`, every 2 minutes) reads each child's live state from
-T3 and does all the timekeeping. Threads keep no timers and never check in.
+and any number of children. A parent and child pair is a **link**. The
+`t3cm` service holds every link and every message body, and its
+**watcher** reads each child's live state from T3 and does all the
+timekeeping. Threads keep no timers and never check in.
 
 The protocol keeps bulk out of context. A thread's context is re-read on
 every model call, so each wake and each pasted payload costs again on every
@@ -30,88 +30,94 @@ later call:
 
 - Routine progress is a **note**: stored, never a wake. It reaches the parent
   as one digest line at the parent's next wake.
-- A wake carries a capped body and a **handle** (`m42`); `t3wf show m42`
-  prints the rest only when it is needed.
+- A wake carries a capped body and a **handle** (`m42`); `wf.show("m42")`
+  returns the rest only when it is needed.
 - Wakes to a parent that is mid-turn **coalesce** into one message at its
   turn end.
-- Questions about threads go through `t3wf board`, `t3wf peek` or
-  `t3wf exec`, which answer in a few lines, in place of `t3_thread_read` or
-  `t3_thread_list`, which paste whole threads into context.
+- Questions about threads go through `wf.board()`, `wf.inbox()` or a short
+  `t3.thread_read` snippet in `execute`, which answer in a few lines, in
+  place of pasting whole threads into context.
 
 Only the **root**, the node with no parent, speaks to the user. T3 settles a
 thread at every turn end, so a settled thread is not a finished one: only a
 `handoff` or `closed` message closes a link.
 
-## t3wf
+## Reaching t3cm
 
-When the `t3cm` MCP server is connected (`mcp__t3cm__execute` is listed),
-run this protocol through it instead of `t3wf`: [codemode.md](codemode.md).
-When it is not, `t3wf` below is the full protocol. If the user asks how the
-T3 workflow works, how to make it cheaper or faster, or about t3cm itself,
-mention t3cm once and offer to install it:
-[codemode.md, Installing t3cm](codemode.md#installing-t3cm).
+`t3cm` is the single engine for the T3 workflow. Reach it in this order:
 
-`t3wf` means `python3 <this skill's base directory>/scripts/t3wf.py`. `--self`
-defaults to `$T3CODE_THREAD_ID`, which T3 sets in each thread's shell; `t3wf
-whoami` prints it. Each command prints its outcome in a line or two. A
-command that fails says why on stderr: fix what it names and run it again.
+1. **`mcp__t3cm__execute` is listed:** call it with an async arrow function.
+2. **It is not listed** (Codex, any other non-Claude agent, or a session
+   that started before t3cm connected): pipe the same async arrow function
+   to `t3cm exec -`, using `~/.local/bin/t3cm` when `t3cm` is not on `PATH`.
+   It talks to the same service, uses the same store, and reads this
+   thread's id from `$T3CODE_THREAD_ID`.
+3. **The service cannot be reached:** send the start-the-service action line
+   in [codemode.md, When the service is down](codemode.md#when-the-service-is-down)
+   and stop. There is no fallback.
 
-| Moment | Command |
+The full code-mode guide, the board, and installing t3cm:
+[codemode.md](codemode.md).
+
+## The link calls
+
+Run every call below inside `mcp__t3cm__execute`, or pipe the same
+`async () => ...` function to `t3cm exec -`:
+
+| Moment | Call |
 |---|---|
-| This thread starts with no parent | `t3wf init --role <role>` |
-| This thread starts with a "t3-workflow link" block in its brief | the block's `t3wf join` line |
-| Before you launch a child | `t3wf open-child --role <child role> --label '<label>'`; put its block at the end of the brief. The child binds the link when it joins. |
-| Progress worth knowing, nothing for the parent to do | `t3wf send --kind note --body '<one line>'` |
-| The parent must act or decide | `t3wf send --kind event` (or `blocker`, `report`) `--body -` |
-| A message to a child | `t3wf reply --to <child id or label> --body -` |
-| You start waiting on a person | `t3wf send --kind gate --gate <name> --body '<action line>'`; later `t3wf gate --clear` |
-| You wait on something else for a long spell, with nothing to send | `t3wf gate --open <what>`; `t3wf gate --clear` when it ends |
-| The work is done | `t3wf send --kind handoff --body -` (closes the link) |
-| The work stopped without finishing | `t3wf send --kind closed --body -` (closes the link) |
-| A child's work ends without its handoff | `t3wf close --link <child id>` |
-| Where do my children stand? | `t3wf board` (one line each, live status) |
-| One thread in a few lines | `t3wf peek <label or thread id>` |
-| Notes not yet seen | `t3wf inbox` |
-| A body cut short with `t3wf show mN` | `t3wf show mN` |
-| This thread takes over a retiring thread's children | `t3wf init --role <same role>`, then `t3wf adopt --from <old id>` |
-| This thread is about to finish | `t3wf sweep` |
+| Root thread starts | `await wf.init({ role: "overseer" })` |
+| Ticket starts with no brief link | `await wf.init({ role: "ticket" })` joins the board under the thread's T3 title, or under `label` when you pass one; `root: true` keeps it off the board |
+| This thread starts with a link block in its brief | the block's `wf.join(...)` call |
+| Before you launch a child | `const { brief } = await wf.openChild({ role: "<child role>", label: "<label>" })`; put `brief` at the end of the launch message. The child binds the link when it joins |
+| Progress worth knowing, nothing for the parent to do | `await wf.send({ kind: "note", body: "<one line>" })` |
+| The parent must act or decide | `await wf.send({ kind: "event", body })` (or `blocker`, `report`) |
+| A message to a child | `await wf.reply({ to: "<child id or label>", body })` |
+| You start waiting on a person | `await wf.send({ kind: "gate", gate: "<name>", body: actionLine })`; later `await wf.gate({ clear: true })` |
+| You wait on something else for a long spell, with nothing to send | `await wf.gate({ open: "<what>" })`; `await wf.gate({ clear: true })` when it ends |
+| Merging a PR on the user's word | `await wf.merge({ repo: "<owner>/<name>", pr: <n>, head: "<sha>", method: "<method>" })` |
+| The work is done | `await wf.send({ kind: "handoff", body })` (closes the link) |
+| The work stopped without finishing | `await wf.send({ kind: "closed", body })` (closes the link) |
+| A child's work ends without its handoff | `await wf.close({ link: "<child id>" })` |
+| Where do my children stand? | `(await wf.board()).children` (live status, gate, link) |
+| Notes not yet seen | `await wf.inbox()` |
+| A body cut short with `wf.show("mN")` | `(await wf.show("mN")).body` |
+| This thread takes over a retiring thread's children | `await wf.init({ role: "<same role>" })`, then `await wf.adopt({ from: "<old id>" })` |
+| This thread is about to finish | `await wf.sweep()` |
 
-Bodies with quotes or several lines go through a quoted heredoc:
-
-```bash
-t3wf send --kind event --body - <<'MSG'
-PR 1/2 opened: https://github.com/o/r/pull/42 (head d4db97c)
-MSG
-```
-
-Which kinds wake the parent is set per link by the parent role's
-`t3-role.json` (`wake`, `bodyCap`) over `defaults.json`: a ticket's events
-reach an overseer as notes. `--wake` or `--no-wake` overrides one message.
+Which kinds wake the parent is set per link by t3cm's `roles` config
+(`wake`, `bodyCap`): a ticket's events reach an overseer as notes. Pass
+`wake: true` or `wake: false` on `wf.send` to override one message.
 
 ## Messages that arrive
 
-A protocol message opens with `[t3wf2 <kind> from=<label> id=<thread>
-msg=<handle>]`. Act on its body as your role says; nothing needs
-acknowledging. Lines under "Notes since your last wake" are the digest.
+A protocol message opens with `[t3cm <kind> from=<label> msg=<handle>]`.
+Act on its body as your role says; nothing needs acknowledging. Lines under
+"Notes since your last wake" are the digest.
 
 - **nudge** (from the watcher): this thread sat idle with its parent link
   open and no gate. Run your role's resume step, then say what changed
-  (`--kind note` when nothing needs the parent), open a gate for a wait, or
+  (`kind: "note"` when nothing needs the parent), open a gate for a wait, or
   send the handoff. After `miss` unanswered nudges the watcher escalates to
   the parent.
-- **escalate** or **report** (about a child): `t3wf peek` it, then reply,
-  relaunch, or close the link. At the root, show it to the user as an action
-  line.
+- **escalate** or **report** (about a child): peek the child thread in
+  `execute` ([codemode.md, Peek a thread](codemode.md#peek-a-thread)), then
+  reply, relaunch, or close the link. At the root, show it to the user as an
+  action line.
 
 ## Slots
 
 The roles' review, passes, credential renewal, delivery and models are
-**slots**, set per user and per repository. A model slot can name a t3cm
-pool, which spreads launches across several accounts. `t3wf slots` prints the
-effective settings and how to run each skill; `t3wf doctor` checks them.
-To set or change them, run the `setup-t3-workflow` skill.
-How a role acts on each line, including a skill that no longer resolves:
-[slots.md, Reading slots in a role](slots.md#reading-slots-in-a-role).
+**slots**, set per user and per repository and resolved by the `t3cm`
+service. Each step looks up only the slot it needs at the point of use with
+`wf.slot(name)` (or `wf.renewal({ output })` when a command fails). A model
+slot can name a t3cm pool, which spreads launches across several accounts.
+From a shell, `t3cm slots` prints the effective settings and `t3cm doctor`
+checks the whole install. To set or change slots, run the
+`setup-t3-workflow` skill.
+
+How a role acts on each slot result, including a skill that no longer
+resolves: [slots.md, Looking up slots in a role](slots.md#looking-up-slots-in-a-role).
 Config file, `AGENTS.md` keys and skill search: [slots.md](slots.md).
 
 ## Filed issues
@@ -121,55 +127,22 @@ Every thread that files a GitHub issue reports it to the t3cm board with
 [rules/report-filed-issues.md](rules/report-filed-issues.md); follow it.
 
 Most issues are filed from threads that run no T3 role skill and load no
-part of this one, so the rule cannot live here alone. `setup-t3-workflow`
-installs it where each agent loads instructions in every session: Claude
-Code's user rules folder, and a marked block in Codex's global `AGENTS.md`.
-Edit the rule file, then run setup again to reinstall it.
+part of this one, so the rule cannot live here alone. `t3cm skills install`,
+`t3cm skills update` and `setup-t3-workflow` install it where each agent
+loads instructions in every session: Claude Code's user rules folder, and a
+marked block in Codex's global `AGENTS.md`.
 
 ## What each role supplies
 
 - **Resume step:** what to re-check when nudged.
-- **Link numbers:** the role's `t3-role.json` sets, per child role, `down`
-  (idle minutes before a nudge), `miss`, `stall` (busy minutes with nothing
-  sent before the parent hears of it), and optionally `wake` and `bodyCap`.
-  `t3wf check-config` validates them.
+- **Link numbers:** t3cm's `roles` config sets, per child role, `down` (idle
+  minutes before a nudge), `miss`, `stall` (busy minutes with nothing sent
+  before the parent hears of it), and optionally `wake` and `bodyCap`.
+  `t3cm doctor` validates the config.
 
 A child the watcher sees running, holding background tasks, or blocked on a
 thread wait is busy and never nudged. A child waiting on an approval or a
 question in its own thread is reported to the parent once.
-
-## The watcher
-
-`t3wf daemon status` says whether it runs. `t3wf daemon install` sets up a
-systemd user timer (`t3wf-tick.timer`) that survives sessions. Without it,
-every t3wf command runs a pass when the last one is over 10 minutes old, so
-links stay watched while threads are active.
-
-The registry lives in `$XDG_STATE_HOME/t3-workflow/v2/` (by default
-`~/.local/state/t3-workflow/v2/`); `T3WF_STATE_DIR` overrides the
-`t3-workflow` folder. The first t3wf command on a machine that still has the
-registry under `~/.claude/cbrip/t3-workflow/v2/` moves it here, leaves a
-symlink at the old path, and swaps a `cbrip-t3wf-tick.timer` for
-`t3wf-tick.timer`, so links already open stay open.
-
-## Code mode
-
-`t3wf exec` runs a Python snippet outside the model with these names bound:
-`t3` (every T3 tool, as `t3.t3_thread_list(allProjects=True)` or
-`t3.call(name, **args)`), `vars` (a dict kept per thread between runs),
-`registry()` (the link registry), and `show(obj)`. Only what it prints comes
-back, capped at 6000 characters. Use it for any question that would
-otherwise pull a large T3 payload into context: filter and count in the
-script, keep the bulk in `vars`, print the answer.
-
-```bash
-t3wf exec - <<'PY'
-bad = [t for t in t3.t3_thread_list(allProjects=True, limit=200)["threads"]
-       if t["status"] in ("failed", "interrupted")]
-vars["failed"] = [t["threadId"] for t in bad]
-show([(t["title"], t["link"]) for t in bad])
-PY
-```
 
 ## Action lines
 
@@ -198,14 +171,14 @@ For example:
 - Context, timings, and evidence come after the action lines.
 - A message that needs nothing from the user carries no marker at all.
 
-Through t3cm, a gate sent to the board can set its card's buttons with
+A gate sent to the board can set its card's buttons with
 `wf.send({ kind: "gate", gate, body, options: ["merge", "hold"] })`. A
 thread parent gets only the body, so there the action line carries the
 answers. See
 [codemode.md](codemode.md#the-board-is-the-overseer).
 
 Only the root shows action lines to the user. A thread with a parent sends
-each one up with `--kind gate`, and may also show it in its own thread.
+each one up with `kind: "gate"`, and may also show it in its own thread.
 
 **Thread links.** Name a thread to the user by the `link` field T3 returns
-for it, verbatim; `t3wf board` prints each child's.
+for it, verbatim; `wf.board()` returns each child's.

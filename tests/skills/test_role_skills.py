@@ -8,7 +8,7 @@ ROLE_FILES = [SKILLS / "t3-overseer" / "SKILL.md", SKILLS / "t3-ticket" / "SKILL
               SKILLS / "t3-worker" / "SKILL.md", SKILLS / "t3-worker" / "procedure.md"]
 TEAM_SKILLS = ["sol-loop", "unslop", "aws-sso-login", "veracity", "narration-author", "audio-pipeline",
                "scene-sync", "paul-voice", "cbrip:"]
-SLOTS_LINK = "../t3-workflow/slots.md#reading-slots-in-a-role"
+SLOTS_LINK = "../t3-workflow/slots.md#looking-up-slots-in-a-role"
 
 
 def frontmatter(text):
@@ -31,15 +31,46 @@ class RoleSkillTests(unittest.TestCase):
         fm = frontmatter((SKILLS / "t3-worker" / "procedure.md").read_text())
         self.assertNotIn("model", fm)
         self.assertNotIn("effort", fm)
-        self.assertIn("`model worker` line", (SKILLS / "t3-ticket" / "SKILL.md").read_text())
-        self.assertIn("`model ticket`", (SKILLS / "t3-overseer" / "SKILL.md").read_text())
+        self.assertIn('wf.slot("models")', (SKILLS / "t3-ticket" / "SKILL.md").read_text())
+        self.assertIn('wf.slot("models"', (SKILLS / "t3-overseer" / "SKILL.md").read_text())
 
-    def test_each_role_reads_the_slots(self):
-        for path in (SKILLS / "t3-overseer" / "SKILL.md", SKILLS / "t3-ticket" / "SKILL.md",
-                     SKILLS / "t3-worker" / "procedure.md"):
+    def test_each_role_looks_up_its_slots_at_point_of_use(self):
+        overseer = (SKILLS / "t3-overseer" / "SKILL.md").read_text()
+        self.assertIn('wf.slot("models"', overseer)
+        self.assertIn(SLOTS_LINK, overseer)
+
+        ticket = (SKILLS / "t3-ticket" / "SKILL.md").read_text()
+        self.assertIn('wf.slot("delivery")', ticket)
+        self.assertIn('wf.slot("models")', ticket)
+        self.assertIn("wf.renewal(", ticket)
+        self.assertIn(SLOTS_LINK, ticket)
+
+        worker = (SKILLS / "t3-worker" / "procedure.md").read_text()
+        self.assertIn('wf.slot("review")', worker)
+        self.assertIn('wf.slot("passes")', worker)
+        self.assertIn("wf.renewal(", worker)
+        self.assertIn(SLOTS_LINK, worker)
+
+    def test_no_skill_file_is_python_or_mentions_t3wf_or_skills_flag(self):
+        for path in sorted(SKILLS.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(ROOT)
+            self.assertNotEqual(path.suffix, ".py", f"Python file remains under skills/: {rel}")
+            self.assertNotEqual(path.name, "t3-role.json", f"retired role config remains: {rel}")
+            self.assertNotEqual(path.name, "defaults.json", f"retired defaults.json remains: {rel}")
             text = path.read_text()
-            self.assertIn("t3wf slots", text, path)
-            self.assertIn(SLOTS_LINK, text, path)
+            if path.name != "steps.json":
+                self.assertNotIn("t3wf", text, f"{rel} still mentions t3wf")
+            self.assertNotIn("python3", text, f"{rel} still invokes python3")
+            self.assertNotIn("--skills", text, f"{rel} still passes --skills")
+
+    def test_every_wf_board_example_uses_children(self):
+        codemode = (SKILLS / "t3-workflow" / "codemode.md").read_text()
+        self.assertIn("(await wf.board()).children.map(", codemode)
+        for path in [ROOT / "README.md", *(SKILLS / "t3-workflow").glob("*.md"), *(ROOT / "docs" / "src").glob("*.md")]:
+            text = path.read_text()
+            self.assertNotIn("(await wf.board()).map(", text, f"{path.relative_to(ROOT)} maps over wf.board() directly")
 
     def test_relative_links_resolve(self):
         for path in [*ROLE_FILES, *(SKILLS / "t3-workflow").glob("*.md"),
@@ -68,7 +99,6 @@ class RoleSkillTests(unittest.TestCase):
             self.assertNotIn("disable-model-invocation", frontmatter(path.read_text()), path)
 
 
-
 def section(text, heading):
     start = text.index(heading)
     level = heading.split(" ", 1)[0]
@@ -82,23 +112,22 @@ class MergeRouteTests(unittest.TestCase):
 
     def test_the_ticket_merges_through_wf_merge_and_reports_each_outcome(self):
         word = section(self.ticket, "### On the user's word")
-        self.assertIn("**Through t3cm**", word)
         self.assertIn("wf.merge({ repo:", word)
         self.assertIn("head:", word)
         for status in ("merged", "queued", "waiting", "refused"):
             self.assertIn(f"- `{status}`:", word, status)
         self.assertIn("A pending check is waited out", word)
+        self.assertNotIn("**Without t3cm**", word)
+        self.assertNotIn("--match-head-commit", word)
 
-    def test_the_t3wf_path_keeps_gh_pr_merge_and_its_merge_watch(self):
+    def test_the_merge_watch_stays_for_root_and_reconcile_off_cases(self):
         word = section(self.ticket, "### On the user's word")
-        self.assertIn("**Without t3cm**", word)
-        self.assertIn("--match-head-commit <sha>", word)
         self.assertIn("#### The merge watch", word)
         self.assertIn("Each merge-watch run", word)
 
     def test_no_skill_merges_through_t3s_merge_button_or_pr_action(self):
         rules = section(self.ticket, "## Hard rules")
-        self.assertIn("Never merge through T3's own merge button or its PR action", rules)
+        self.assertIn("Never merge through `gh pr merge` or T3's own merge button or its PR", rules)
         self.assertIn("merge queue", rules)
         codemode = (SKILLS / "t3-workflow" / "codemode.md").read_text()
         self.assertIn("never with `gh pr merge` or T3's\nown merge button or PR action", codemode)

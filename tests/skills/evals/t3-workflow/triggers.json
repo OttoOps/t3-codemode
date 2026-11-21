@@ -15,7 +15,7 @@
     "form": "plain"
   },
   {
-    "query": "[t3wf2 nudge from=watcher id=thread-eval msg=m12]\nThis thread has sat idle for 45 minutes with its parent link open and no gate. Run your resume step, then send a note, open a gate, or hand off.",
+    "query": "[t3cm nudge from=watcher msg=m12]\nThis thread has sat idle for 45 minutes with its parent link open and no gate. Run your resume step, then send a note, open a gate, or hand off.",
     "should_trigger": true,
     "form": "plain"
   },
@@ -25,7 +25,7 @@
     "form": "plain"
   },
   {
-    "query": "Check the docs folder for broken links and report them.\n\n## t3-workflow link\nThis thread is a child on a t3-workflow link. Before anything else, invoke the t3-workflow skill and run:\nt3wf join --parent thread-ticket --label '#42 PR 1/2' --role worker --down 45 --miss 2 --stall 240 --protocol 2\n",
+    "query": "Check the docs folder for broken links and report them.\n\n## t3-codemode link\nThis thread is a child on a t3-codemode link. Before anything else, call the t3cm `execute` tool with:\nasync () => wf.join({ parent: \"thread-ticket\", label: \"#42 PR 1/2\", role: \"worker\", down: 45, miss: 2, stall: 240 })\n",
     "should_trigger": true,
     "form": "brief"
   },

@@ -11,24 +11,23 @@ merges, and deploys.
 
 This role runs on the `t3-workflow` link protocol. Invoke that skill
 before step 1 and keep its table at hand: each worker is this thread's
-child, and a `t3-overseer` thread, when one launched this thread, is
-its parent. Every message between threads and every escalation goes through
-`t3wf`, and the link watcher does the timekeeping. With no parent, this
-thread is the root and talks to the user itself. When t3cm is connected,
-run each `t3wf` command in this skill as its `wf` call from t3-workflow's
-`codemode.md`, the handoff included, because `t3wf` cannot see the board
-link that `wf.init` opens.
+child, and the board or a `t3-overseer` thread is its parent. Every message
+between threads, every slot lookup and every escalation goes through `wf.*`
+calls in `mcp__t3cm__execute` (or piped to `t3cm exec -` when `execute` is
+not listed; see [Reaching t3cm](../t3-workflow/SKILL.md#reaching-t3cm)), and
+the service's watcher does the timekeeping. With no parent, this thread is
+the root and talks to the user itself.
 
 ## Hard rules
 
 - This thread edits no code and makes no commits. All repo changes happen in
   a worker's worktree. Merging a PR and pushing a deploy tag are this
   thread's, and only on the user's word (Gates).
-- Never merge through T3's own merge button or its PR action. On a repo
-  with a merge queue, T3 turns on auto-merge, and a PR whose checks have
-  already passed then never joins the queue. This thread does not need to
-  know which repos have a queue: it merges every PR as "On the user's word"
-  says, and `wf.merge` finds out per PR.
+- Never merge through `gh pr merge` or T3's own merge button or its PR
+  action. On a repo with a merge queue, T3 turns on auto-merge, and a PR
+  whose checks have already passed then never joins the queue. This thread
+  does not need to know which repos have a queue: it merges every PR with
+  `wf.merge`, which finds out per PR.
 - Invoking this skill, or a repo rule that routes issue work to it, is the
   user's request to launch one new thread per PR with `t3_thread_launch`.
   Do not stop to ask for a new thread at step 3.
@@ -47,16 +46,15 @@ link that `wf.init` opens.
 - This thread stays pinned and active while any worker is open. It settles
   only after the last worker has settled.
 - Every human gate surfaces here, as an action line (below). With a
-  parent, this thread also sends each one up (`t3wf send --kind gate
-  --gate <phase>`).
+  parent, this thread also sends each one up with
+  `wf.send({ kind: "gate", gate, body, options })`.
 - Text published under the user's name (the split comment, issue comments)
   follows the Publishing section of the `t3-worker` procedure, at
   `../t3-worker/procedure.md` relative to this skill's base directory.
 - Check a worker's claims on GitHub before acting on them.
 - Never `sleep` or poll in the shell. Waiting is ending the turn; a
   worker's message, the link watcher, or a scheduled run wakes this thread.
-- Every message to a worker goes through `t3wf reply --to <worker id or
-  label> --body -`.
+- Every message to a worker goes through `wf.reply({ to: "<worker id or label>", body })`.
 
 ## Action lines
 
@@ -83,55 +81,44 @@ For example:
 
 `t3-workflow` asks each role for one thing. This role's is:
 
-- **Resume step:** read the slots again (step 1), `t3wf board` for this
-  work's worker threads, and
+- **Resume step:** check `wf.board()` for this work's worker threads, and
   re-show any action line the user has not acted on. While a deploy runs,
   check `list_scheduled_tasks` for its deploy watch; when it is missing,
   create it again as "The deploy watch" says, with the original
   `Started` time.
 
-Progress to a parent that needs no action goes up as `--kind note`. With a
-parent (an overseer), three more rules hold:
+Progress to a parent that needs no action goes up as
+`wf.send({ kind: "note", body })`. With a parent (the board or an overseer),
+three more rules hold:
 
-- While an action line waits on the user, send it up with `t3wf send --kind
-  gate --gate <phase> --body '<action line>'`, which opens the gate on the
-  parent link, and `t3wf gate --clear` once the user acts. Through t3cm,
-  send it with `wf.send({ kind: "gate", gate, body, options })` and clear
-  it with `wf.gate({ clear: true })`, which reach the board link that
-  `wf.init` opens. `options` lists the answers the user can click, such as
-  `["merge and deploy", "merge"]`. Without it, the board makes a button of
-  each quoted answer after `reply` on the action line. When the send comes
-  back with a `warning`, the card has no buttons: send it again with
+- While an action line waits on the user, send it up with
+  `wf.send({ kind: "gate", gate: "<phase>", body: "<action line>", options })`,
+  which opens the gate on the parent link, and `wf.gate({ clear: true })`
+  once the user acts. `options` lists the answers the user can click, such
+  as `["merge and deploy", "merge"]`. Without it, the board makes a button
+  of each quoted answer after `reply` on the action line. When the send
+  comes back with a `warning`, the card has no buttons: send it again with
   `options`.
 - Send each action line up as one line, with no steps, commands or logs.
   The detail stays in this thread, where the user opens it from the
   overseer's waiting list.
-- The user may answer here or through the overseer. A `reply` from the
-  parent that relays the user's answer is the user's word, "merge" and
-  "merge and deploy" included.
+- The user may answer here, on the board, or through the overseer. A
+  `reply` from the parent that relays the user's answer is the user's word,
+  "merge" and "merge and deploy" included.
 
 ## 1. Start
 
-1. Join the link protocol. When t3cm is connected, run the brief's
-   `wf.join(...)` call when the message that started this thread has a link
-   block, or `wf.init({ role: "ticket" })` when it has none. With the default
-   roles config that puts this thread on the board as a ticket, and the
-   result's `parent` is `"board"`; when it is missing, this thread is a root
-   and talks to the user itself. Add `root: true` only to keep it off the
-   board. Without t3cm, run the `t3wf join` line from the "t3-workflow link"
-   block, or `t3wf init --role ticket` when there is none. `t3wf whoami`
-   prints this thread's id.
+1. Join the link protocol. Run the brief's `wf.join(...)` call when the
+   message that started this thread has a link block, or
+   `wf.init({ role: "ticket" })` when it has none. With the default roles
+   config that puts this thread on the board as a ticket, and the result's
+   `parent` is `"board"`; when it is missing, this thread is a root and
+   talks to the user itself. Add `root: true` only to keep it off the board.
 2. `t3_thread_organize` with action `pin`.
 3. `t3_worktree_status`: note the main workspace root and the repo
    (`gh repo view --json nameWithOwner,url`). Worktree removal and branch
    cleanup run there.
-4. Read the slots with `t3wf slots` from the main workspace root, as
-   [Reading slots in a role](../t3-workflow/slots.md#reading-slots-in-a-role)
-   says, and send the skip and no-config lines it calls for. The `delivery`
-   line is the delivery (`merge`, or `tag-deploy` via a deploy skill) and
-   the `model worker` line the worker's model (step 3). A `tag-deploy`
-   whose deploy skill is skipped delivers by `merge`.
-5. Read the repo's `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `README.md`
+4. Read the repo's `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `README.md`
    (contributing and versioning), and `docs/agents/`. Settle the
    conventions below, from the repo's `## Agent workflow` section when it
    has one, else by inference. Show every inferred value under the split
@@ -140,7 +127,7 @@ parent (an overseer), three more rules hold:
    | Setting | Values | Inferred when the repo does not say |
    |---|---|---|
    | Tracker | `github-issues`, `none` | `github-issues` when the user named an issue, else `none` |
-   | Merge method | `merge`, `squash`, `rebase` | what the repo documents (`gh pr merge --merge`, or "Rebase and merge"), else the method its recent merged PRs show |
+   | Merge method | `merge`, `squash`, `rebase` | what the repo documents ("Rebase and merge", squash, or merge), else the method its recent merged PRs show |
    | PR format | a skill or template | the `pr` skill when it is available, else `.github/pull_request_template.md`, else none |
    | Checks | commands | the test commands the repo documents |
    | In-progress label | a label | the label the repo documents for work under way, else none |
@@ -154,6 +141,11 @@ parent (an overseer), three more rules hold:
 With tracker `github-issues`, read the issue:
 `gh issue view <n> -R <repo> --json number,title,body,labels,assignees,milestone,comments,url`.
 With `none`, the user's request is the work.
+
+Look up the delivery slot with `await wf.slot("delivery")` as
+[Looking up slots in a role](../t3-workflow/slots.md#looking-up-slots-in-a-role)
+says, and send any skip or no-config note it calls for. A `tag-deploy`
+whose deploy skill is skipped delivers by `merge`.
 
 Write the split: a numbered list of N PRs, in merge order. Each entry
 carries a title (Conventional Commits), the scope, one acceptance line (a
@@ -212,25 +204,22 @@ For PR n:
    other work can take the name between the split and the launch. When it
    is taken now, give it the next free suffix and tell the user. Then fill
    in the launch brief below with the final name.
-2. Read the slots again (step 1). The `model worker` line is the
-   worker's model: `<model> effort <effort> on <provider>`, each part
-   present only when set, `provider default`, or `pool <name>`. A
-   `PROBLEM:` on it is a skip, and the worker gets the provider default.
-   For `pool <name>`, pick the instance now with `wf.pick`, as
-   [A pool on a model line](../t3-workflow/slots.md#a-pool-on-a-model-line)
-   says; without t3cm, the worker gets the provider default.
-3. `t3wf open-child --role worker --label '<#n or slug> PR n/N'`. It prints
-   the "t3-workflow link" block for the brief. The worker binds the link
-   when it joins.
+2. Look up the worker model with `await wf.slot("models")` as
+   [Looking up slots in a role](../t3-workflow/slots.md#looking-up-slots-in-a-role)
+   says. Its `worker` entry carries `modelSelection` (or `null` for
+   provider default, or `{ pool: "<name>" }` for a pool). A `problem` on it
+   is a skip, and the worker gets the provider default. For a pool, pick
+   the instance now with `await wf.pick({ pool: "<name>" })`, as
+   [A pool on a model slot](../t3-workflow/slots.md#a-pool-on-a-model-slot)
+   says.
+3. `const { brief } = await wf.openChild({ role: "worker", label: "<#n or slug> PR n/N" })`.
+   Put `brief` verbatim in the launch brief. The worker binds the link when
+   it joins.
 4. Call `t3_thread_launch` with:
    - `title`: `<#n or slug> PR n/N: <PR title>`
    - `modelSelection`: for a pool, the pick's `modelSelection`, as it
-     is. Otherwise `instanceId` the line's provider (`claudeAgent` when
-     it names none), its `model`, and, when it names an effort, `options`
-     carrying it in the shape `orchestrator_capabilities` reports for that
-     model (today `[{"id": "effort", "value": "<effort>"}]`). Leave
-     `modelSelection` out for `provider default` and for a pool skipped
-     without t3cm.
+     is; otherwise `worker.modelSelection` when non-null; leave
+     `modelSelection` out for provider default.
    - `workspaceStrategy`: `{type: "worktree", baseRef: "main", branch:
      "<branch>", startFromOrigin: true}`
    - `message`: the filled brief.
@@ -258,7 +247,7 @@ Passes: <the PR's `Passes:` line from the split, in order, or "none">
 ## Previous handoff
 <the previous worker's handoff block, verbatim, or "none">
 
-<the "t3-workflow link" block from t3wf open-child, verbatim>
+<the `brief` block from wf.openChild, verbatim>
 
 ## Repo rules
 Follow AGENTS.md, CLAUDE.md, CONTRIBUTING.md, README.md and docs/agents/ in
@@ -277,7 +266,7 @@ inline, in this thread, from step 1.
 
 ## 4. Between workers
 
-Every worker message opens with a `[t3wf2` header and needs no command
+Every worker message opens with a `[t3cm` header and needs no command
 before you act. A message about a closed link no longer arrives. The body
 says which part below handles it: a blocker or gate is the next two
 paragraphs, "PR opened", "ready to merge" and "updated" are their sections,
@@ -328,7 +317,8 @@ afterwards (`git -C <main workspace root> worktree add --detach <tmp path>
 <head sha>`, run, `git -C <main workspace root> worktree remove <tmp
 path>`), and name the result.
 
-Then send the gate:
+Look up `await wf.slot("delivery")` to confirm the gate wording, then send
+the gate:
 
 - Delivery `merge`: "reply \"merge\" to merge #<number> at head <sha>, or
   review it first, here: <PR URL>".
@@ -340,9 +330,9 @@ Then send the gate:
   deploy time.
 
 The action line names the head the user approves as `head <sha>`, with
-the SHA at least 7 characters long. Through t3cm, the board holds the
-approval to that head: when the PR moves to another head first, the board
-drops the approval and opens a new merge gate for the new head.
+the SHA at least 7 characters long. The board holds the approval to that
+head: when the PR moves to another head first, the board drops the approval
+and opens a new merge gate for the new head.
 
 End the turn.
 
@@ -350,87 +340,71 @@ End the turn.
 
 **"merge"** (or "merge and deploy"):
 
-1. Check the PR against the head the answered gate names. Through t3cm,
-   check that it is open, not a draft, and at that head, that every check
-   has finished and none failed, and take the full SHA from its
-   `headRefOid`. A pending check is waited out (end the turn; the worker
-   reports again). A failing check goes back to the worker, even when
-   GitHub would merge the PR anyway (`UNSTABLE`). `wf.merge` handles the
-   merge state. Without t3cm, run the "Ready to merge" checks again. A
-   head that moved since that gate gets a new gate, not a merge.
-2. Merge at that head. Never use T3's merge button or PR action (Hard
-   rules).
-   - **Through t3cm** (`mcp__t3cm__execute` is listed): call
-     `wf.merge({ repo: "<owner>/<name>", pr: <number>, head: "<sha>",
-     method: "<merge method>" })`. It reads per PR whether the repo has a
-     merge queue. It queues the PR where there is one, merges it directly
-     where there is none, and never turns on auto-merge. Tell the user the
-     outcome in one line with the PR URL, and send it to the parent as a
-     note. Then act on its `status`:
-     - `merged`: go on to item 4 with its `commit`.
-     - `queued`: name its `position`. End the turn and wait as "The merge
-       wait" says.
-     - `waiting`: GitHub does not show the PR mergeable yet; name its
-       `mergeState`. The board queues it once GitHub shows it mergeable at
-       this head. End the turn and wait as "The merge wait" says.
-     - `refused`: name its `reason`. A moved head goes through "Ready to
-       merge" again for a new gate. A draft, or a PR that is not mergeable
-       yet, goes back to the worker. A closed PR gets item 3's `CLOSED`
-       gate. End the turn.
-     - The call throws: the service's `gh` cannot reach GitHub. Tell the
-       user what it says and end the turn. Their next "merge" runs this
-       step again.
-   - **Without t3cm** (`t3wf`): `gh pr merge <number> -R <repo> --<merge
-     method> --match-head-commit <sha>`. Never pass `--delete-branch`: it
-     checks out the default branch wherever it runs. On a branch with a
-     merge queue this queues the PR, or sets it to auto-merge, and the PR
-     merges later. Go on to item 3.
-3. Without t3cm, read where the PR stands, in one query so a merge cannot
-   land between two reads: `gh api graphql -f query='query{repository(owner:"<owner>",
-   name:"<name>"){pullRequest(number:<number>){state mergeCommit{oid}
-   isInMergeQueue autoMergeRequest{enabledAt}}}}'`.
-   - `MERGED`: go on to item 4.
-   - `OPEN`, and in the queue or with an `autoMergeRequest`: start the
-     merge watch (below) and end the turn.
-   - `OPEN` with neither: nothing will merge it. Tell the user what
-     `gh pr merge` printed, and end the turn.
-   - `CLOSED`: send the gate "reopen #<number>, then reply \"merge\" to
-     queue it again at head <sha>, here: <PR URL>", and end the turn.
-4. Only now that GitHub shows it merged, delete its branch:
+1. Check the PR against the head the answered gate names: it is open, not a
+   draft, and at that head, every check has finished and none failed, and
+   take the full SHA from its `headRefOid`. A pending check is waited out
+   (end the turn; the worker reports again). A failing check goes back to
+   the worker, even when GitHub would merge the PR anyway (`UNSTABLE`).
+   `wf.merge` handles the merge state. A head that moved since that gate
+   gets a new gate, not a merge.
+2. Merge at that head with `wf.merge`. Never use `gh pr merge` or T3's
+   merge button or PR action (Hard rules). Call
+   `wf.merge({ repo: "<owner>/<name>", pr: <number>, head: "<sha>",
+   method: "<merge method>" })`. It reads per PR whether the repo has a
+   merge queue. It queues the PR where there is one, merges it directly
+   where there is none, and never turns on auto-merge. Tell the user the
+   outcome in one line with the PR URL, and send it to the parent as a
+   note. Then act on its `status`:
+   - `merged`: go on to item 3 with its `commit`.
+   - `queued`: name its `position`. End the turn and wait as "The merge
+     wait" says.
+   - `waiting`: GitHub does not show the PR mergeable yet; name its
+     `mergeState`. The board queues it once GitHub shows it mergeable at
+     this head. End the turn and wait as "The merge wait" says.
+   - `refused`: name its `reason`. A moved head goes through "Ready to
+     merge" again for a new gate. A draft, or a PR that is not mergeable
+     yet, goes back to the worker. A closed PR gets the gate "reopen
+     #<number>, then reply \"merge\" to queue it again at head <sha>, here:
+     <PR URL>". End the turn.
+   - The call throws: the service's `gh` cannot reach GitHub. Tell the
+     user what it says and end the turn. Their next "merge" runs this
+     step again.
+3. Only now that GitHub shows it merged, delete its branch:
    `git -C <main workspace root> push origin --delete <branch>`. Deleting
    the head branch of an open PR closes the PR. The worker's worktree still
    has the branch checked out, so the local branch waits for The handoff.
-5. Delivery `merge`: send the worker "Merged #<number> at <merge commit
+4. Delivery `merge`: send the worker "Merged #<number> at <merge commit
    sha>. Hand off." and end the turn.
-6. Delivery `tag-deploy` with "merge and deploy": go to Deploy. With
+5. Delivery `tag-deploy` with "merge and deploy": go to Deploy. With
    "merge" alone: send the gate "reply \"deploy\" to push
    <family>/v<version> from main at <sha>, or \"skip deploy\", here: <PR
    URL>", and end the turn. "skip deploy" makes this PR's delivery `merge`:
-   send the worker the item 5 message, and say in the issue comment that
+   send the worker the item 4 message, and say in the issue comment that
    it is merged but not deployed.
 
-A user who merged the PR on GitHub themselves counts as "merge": verify
-the merged state and continue from item 4. Through t3cm, the board's
-merged event (below) tells this thread.
+A user who merged the PR on GitHub themselves counts as "merge": the
+board's merged event (below) tells this thread; verify the merged state and
+continue from item 3.
 
 #### The merge wait
 
-Through t3cm, the board's GitHub reconcile follows the PR after
-`wf.merge`. It reads every PR of an open worker link, every PR `wf.merge`
-queued or holds waiting, and every PR an open gate card names: by default
-every 2 minutes while one is queued or waiting, every 10 minutes
-otherwise. It wakes this thread once per event, so this thread starts no merge watch
-and does not poll GitHub. Hold `wf.gate({ open: "merge" })` while it
-waits, so the watcher does not nudge it, and clear it
-(`wf.gate({ clear: true })`) when the merged or closed event or the user's
-answer arrives. What reaches this thread:
+The board's GitHub reconcile follows the PR after `wf.merge`. It reads
+every PR of an open worker link, every PR `wf.merge` queued or holds
+waiting, and every PR an open gate card names: by default every 2 minutes
+while one is queued or waiting, every 10 minutes otherwise. It wakes this
+thread once per event, so this thread starts no merge watch and does not
+poll GitHub. Hold `wf.gate({ open: "merge" })` while it waits, so the
+watcher does not nudge it, and clear it (`wf.gate({ clear: true })`) when
+the merged or closed event or the user's answer arrives. What reaches this
+thread:
 
 - **Merged:** an `event` from `github`, "<repo>#<number> merged on GitHub
   at <sha>, <time> (merge commit <sha>). Run your post-merge steps.". The
   board has resolved the merge card. Confirm on GitHub (`gh pr view
-  <number> -R <repo> --json state,mergeCommit`), then go on from item 4.
+  <number> -R <repo> --json state,mergeCommit`), then go on from item 3.
 - **Closed without merging:** an `event` from `github`, "<repo>#<number>
-  was closed on GitHub without merging". Send item 3's `CLOSED` gate.
+  was closed on GitHub without merging". Send the gate "reopen #<number>,
+  then reply \"merge\" to queue it again at head <sha>, here: <PR URL>".
 - **Dropped from the queue, moved to a new head, or refused by GitHub 3
   checks in a row:** the board opens a card for this thread itself, with
   the reason and the answers the user can give. The answer arrives as a
@@ -462,20 +436,22 @@ the merge watch after `queued` or `waiting` instead when:
 
 #### The merge watch
 
-The merge watch serves the `t3wf` path, and the t3cm cases "The merge
-wait" names.
+The merge watch serves only the root-ticket and reconcile-off cases "The
+merge wait" names.
 Create it as items 1 and 2 of "The deploy watch" say, with `title` `<#n or
 slug> PR n/N merge watch`, and a prompt that names the task id, the PR
 number and URL, its head SHA and branch, the main workspace root, the
-user's reply ("merge" or "merge and deploy"), the `wf.merge` outcome when
-there was one, and the flag "Seen queued: no". End it with "Follow 'Each
-merge-watch run' in the t3-ticket skill."
+user's reply ("merge" or "merge and deploy"), the `wf.merge` outcome, and
+the flag "Seen queued: no". End it with "Follow 'Each merge-watch run' in
+the t3-ticket skill."
 
-Each merge-watch run reads the item 3 fields, plus `headRefOid` and
-`mergeStateStatus`:
+Each merge-watch run reads the PR state in one query (`gh api graphql -f
+query='query{repository(owner:"<owner>",name:"<name>"){pullRequest(number:<number>){state
+mergeCommit{oid} headRefOid mergeStateStatus isInMergeQueue
+autoMergeRequest{enabledAt}}}}'`):
 
 - **`MERGED`:** delete the task with `delete_scheduled_task`, then go on
-  from item 4.
+  from item 3.
 - **Still queued, or waiting on auto-merge:** when the flag says "Seen
   queued: no", update it to "yes". End the turn quietly.
 - **`OPEN` and out of the queue, after a `waiting` outcome, at the
@@ -495,13 +471,14 @@ Each merge-watch run reads the item 3 fields, plus `headRefOid` and
   case:** delete the task and send the gate "reply \"merge\" to queue
   #<number> again at head <sha>, or check why it left the queue, here: <PR
   URL>". End the turn.
-- **`CLOSED`:** delete the task and send item 3's `CLOSED` gate. End the
+- **`CLOSED`:** delete the task and send the gate "reopen #<number>, then
+  reply \"merge\" to queue it again at head <sha>, here: <PR URL>". End the
   turn.
 
 ### Deploy
 
-Run the `delivery` slot's deploy skill as its entry says and follow it,
-with these overrides:
+Look up `await wf.slot("delivery")` and run its deploy skill as its entry
+says, with these overrides:
 
 - The user's "deploy" or "merge and deploy" reply in this thread is the
   skill's go-ahead. Show the family, version and SHA it chose; when they
@@ -529,19 +506,18 @@ with these overrides:
 
 #### Each deploy-watch run
 
-- **Status command fails:** read the `credentials` line fresh with `t3wf
-  slots --repo <main workspace root> --skills '<this session's skills>'`,
-  sending a skip note as
-  [Reading slots in a role](../t3-workflow/slots.md#reading-slots-in-a-role)
-  says. When the output matches a pattern on it and the prompt says "Auth
-  gate sent: no",
-  run that renewal skill as its entry says, then run the status command
-  again, once. When the renewal needs the user, the retry fails too, or
-  the failure is credentials or the network with no pattern (or a skipped
-  skill) to renew it, send the action line with the sign-in the renewal
-  skill or the repo documents, and update the flag to the UTC time. Once
-  the flag is set, renew and send nothing more while the failure lasts.
-  End the turn.
+- **Status command fails:** call
+  `await wf.renewal({ output, repo: "<main workspace root>" })` with the
+  failing command's output (sending any skip note as
+  [Looking up slots in a role](../t3-workflow/slots.md#looking-up-slots-in-a-role)
+  says). When it returns a renewal skill that is not skipped and the prompt
+  says "Auth gate sent: no", run that renewal skill as its `how` says, then
+  run the status command again, once. When the renewal needs the user, the
+  retry fails too, or the failure is credentials or the network with no
+  matching renewal (or a skipped skill), send the action line with the
+  sign-in the renewal skill or the repo documents, and update the flag to
+  the UTC time. Once the flag is set, renew and send nothing more while the
+  failure lasts. End the turn.
 - **Still running:** end the turn quietly, after setting "Auth gate sent"
   back to "no" when it holds a time. When it has run 2 hours since
   "Started" and the prompt says "Slowed: no", tell the user once, set
@@ -601,13 +577,13 @@ the worker's link.
 
 After the last PR is delivered:
 
-1. Check `t3wf board`: every worker thread for this work is settled. A
-   message to a worker after its handoff wakes it and leaves it unsettled.
-   Settle each such worker with `t3_thread_organize`, action `settle`, once
-   its turn has ended (`t3_thread_wait`).
+1. Check `(await wf.board()).children`: every worker thread for this work is
+   settled. A message to a worker after its handoff wakes it and leaves it
+   unsettled. Settle each such worker with `t3_thread_organize`, action
+   `settle`, once its turn has ended (`t3_thread_wait`).
 2. `list_scheduled_tasks`: none of this work's deploy watches remain.
-   Delete any that do. Then `t3wf sweep`: it names any worker link still
-   open.
+   Delete any that do. Then `await wf.sweep()`: it names any worker link
+   still open.
 3. Run `git -C <main workspace root> worktree list` and look for a
    worktree on any of this work's branches, or bound to any worker's
    subagent child thread (found as "The handoff" item 4 says). A message to
@@ -617,6 +593,6 @@ After the last PR is delivered:
 4. With an issue: remove the in-progress label, then close it with the
    outcome as the comment, through Publishing: `gh issue close <n> -R
    <repo> --comment "<text>"`.
-5. With a parent link: `t3wf send --kind handoff --body -` with the
+5. With a parent link: `await wf.send({ kind: "handoff", body })` with the
    outcome and the PR URLs.
 6. Unpin this thread and settle it.

@@ -33,7 +33,6 @@ sys.path.insert(0, str(HERE))
 import guard_hook  # noqa: E402
 ROOT = HERE.parents[2]
 SKILLS = ROOT / "skills"
-T3WF = SKILLS / "t3-workflow" / "scripts" / "t3wf.py"
 DEFAULT_MODEL = "claude-opus-5-5"
 AUTH_VARS = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
 REPO_URL = "https://github.com/acme/widgets.git"
@@ -45,7 +44,8 @@ RUNTIME_NOTE = ("<runtime_info>You are running in T3 Code through the Claude Cod
 ALLOW = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "ToolSearch", "mcp__t3-code"]
 DENY = ["WebFetch", "WebSearch", "AskUserQuestion"]
 CHECK_KINDS = ("tool", "bash", "text", "file", "gh", "t3", "repo")
-LINK_HEADING = "## t3-workflow link"
+LINK_HEADING = "## t3-codemode link"
+LINK_HEADINGS = ("## t3-codemode link", "## t3-workflow link")
 BRIEF_TOOLS = 8
 T3CM_DEFAULTS = [
     {"match": r"wf\.openChild", "result": {
@@ -56,9 +56,13 @@ T3CM_DEFAULTS = [
     {"match": r"wf\.(init|join)\(", "result": {"thread": SELF, "role": "ticket", "root": False,
                                                "parent": "board", "label": "widgets#42", "watcher": "running"}},
     {"match": r"wf\.send\(", "result": {"handle": "m1", "delivery": "noted"}},
+    {"match": r"wf\.gate\(", "result": {"ok": True}},
+    {"match": r"wf\.sweep\(", "result": {"open": []}},
+    {"match": r"wf\.board\(", "result": {"children": []}},
     {"match": r"wf\.launchTicket\(", "result": {"ok": True, "label": "widgets#42", "thread": "thread-launched",
                                                 "link": "t3://thread-launched", "projectId": "proj-widgets",
                                                 "title": "widgets#42"}},
+    {"match": r"wf\.renewal\(", "result": None},
 ]
 REAL_HOME = os.path.expanduser("~")
 
@@ -96,7 +100,6 @@ class Sandbox:
             d.mkdir(parents=True, exist_ok=True)
         self._settings()
         self._bin()
-        self._repo()
         self._t3()
         for name in skills:
             shutil.copytree(SKILLS / name, self.home / ".claude" / "skills" / name)
@@ -106,7 +109,49 @@ class Sandbox:
             path = self.root / "config" / "t3-workflow" / "config.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(self.setup["config"]))
+        self._write_t3cm_fixture()
+        self._repo()
         self.link_block = self._link() if self.setup.get("link") else ""
+
+    def _slot_defaults(self):
+        cfg = self.setup.get("config", {})
+        home_skills = self.setup.get("home_skills", {})
+
+        def skill_entry(name):
+            spec = home_skills.get(name)
+            if spec is None:
+                return {"name": name, "status": "ok", "inline": False, "how": "Skill tool"}
+            path = str(self.home / ".claude" / "skills" / name / "SKILL.md")
+            inline = bool(spec.get("inline"))
+            how = f"inline: read {path} and apply it" if inline else "Skill tool"
+            return {"name": name, "status": "ok", "path": path, "inline": inline, "how": how}
+
+        review_name = cfg.get("review")
+        review = {"source": "config" if "review" in cfg else "default",
+                  "skill": skill_entry(review_name) if review_name else None, "warnings": []}
+        passes = {"source": "config" if "passes" in cfg else "default",
+                  "skills": [skill_entry(n) for n in cfg.get("passes", [])], "warnings": []}
+        delivery_cfg = cfg.get("delivery", {"mode": "merge"})
+        delivery = {"source": "config" if "delivery" in cfg else "default", **delivery_cfg, "warnings": []}
+        models_cfg = cfg.get("models", {})
+        models = {"slot": "models", "warnings": []}
+        for role in ("ticket", "worker"):
+            spec = models_cfg.get(role)
+            if isinstance(spec, dict) and "pool" in spec:
+                models[role] = {"spec": spec, "modelSelection": {"pool": spec["pool"]}}
+            else:
+                models[role] = {"spec": spec, "modelSelection": None}
+        return [
+            {"match": r"""wf\.slot\(\s*['"]review['"]""", "result": review},
+            {"match": r"""wf\.slot\(\s*['"]passes['"]""", "result": passes},
+            {"match": r"""wf\.slot\(\s*['"]delivery['"]""", "result": delivery},
+            {"match": r"""wf\.slot\(\s*['"]models['"]""", "result": models},
+        ]
+
+    def _write_t3cm_fixture(self):
+        rules = list(self.setup.get("t3cm", [])) + self._slot_defaults() + T3CM_DEFAULTS
+        text = json.dumps(rules).replace("{repo}", str(self.repo)).replace("{home}", str(self.home))
+        (self.root / "t3cm.json").write_text(text)
 
     def _settings(self):
         guard = f"{shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'guard_hook.py'))} {shlex.quote(REAL_HOME)}"
@@ -123,9 +168,15 @@ class Sandbox:
             (self.bin / "claude").symlink_to(shutil.which("claude"))
         gh = self.bin / "gh"
         gh.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'fake_gh.py'))} \"$@\"\n")
+        t3cm = self.bin / "t3cm"
+        t3cm.write_text(
+            f"#!/bin/sh\nT3CM_STUB_LOG={shlex.quote(str(self.t3cm_log))} "
+            f"T3CM_STUB_FIXTURE={shlex.quote(str(self.root / 't3cm.json'))} "
+            f"exec {shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'stub_t3cm_mcp.py'))} --cli \"$@\"\n"
+        )
         sysctl = self.bin / "systemctl"
         sysctl.write_text("#!/bin/sh\nexit 1\n")
-        for p in (gh, sysctl):
+        for p in (gh, t3cm, sysctl):
             p.chmod(0o755)
         fixtures = {"issues": self.setup.get("issues", {})}
         (self.root / "gh.json").write_text(json.dumps(fixtures))
@@ -161,7 +212,6 @@ class Sandbox:
                                    "env": {"T3_STUB_LOG": str(self.t3_log),
                                            "T3_STUB_FIXTURE": str(self.root / "t3.json")}}}
             if "t3cm" in self.setup:
-                (self.root / "t3cm.json").write_text(json.dumps(self.setup["t3cm"] + T3CM_DEFAULTS))
                 servers["t3cm"] = {"command": sys.executable, "args": [str(HERE / "stub_t3cm_mcp.py")],
                                    "env": {"T3CM_STUB_LOG": str(self.t3cm_log),
                                            "T3CM_STUB_FIXTURE": str(self.root / "t3cm.json")}}
@@ -190,20 +240,20 @@ class Sandbox:
                                     f"{spec['body']}\n")
 
     def _link(self):
-        env = self.environ()
-        run = lambda *a: subprocess.run([sys.executable, str(T3WF), *a, "--self", PARENT], env=env,
-                                        cwd=self.root, check=True, capture_output=True, text=True).stdout
-        run("init", "--role", "ticket")
-        printed = run("open-child", "--role", "worker", "--label", self.setup["link"])
-        return printed[printed.index(LINK_HEADING):].split("\n\n", 1)[0].strip()
+        label = json.dumps(self.setup["link"])
+        parent = json.dumps(PARENT)
+        return (
+            f"{LINK_HEADING}\n"
+            "This thread is a child on a t3-codemode link. Before anything else, call the t3cm `execute` tool with:\n"
+            f'async () => wf.join({{ parent: {parent}, label: {label}, role: "worker", down: 45, miss: 2, stall: 240 }})'
+        )
 
     def environ(self):
         keep = {k: os.environ[k] for k in ("LANG", "LC_ALL", "TERM", *AUTH_VARS) if k in os.environ}
         return {**keep, "HOME": str(self.home), "PATH": f"{self.bin}:/usr/bin:/bin",
                 "XDG_CONFIG_HOME": str(self.root / "config"), "XDG_STATE_HOME": str(self.root / "state"),
                 "T3CODE_HOME": str(self.root / "t3home"), "T3CODE_THREAD_ID": SELF,
-                "T3WF_FAKE_T3": str(self.fake_t3), "T3WF_NO_LAZY": "1",
-                "T3WF_SYSTEMCTL": str(self.bin / "systemctl"), "T3CM_PORT": str(free_port()),
+                "T3CM_PORT": str(free_port()),
                 "GH_FAKE_DIR": str(self.root), "GIT_TERMINAL_PROMPT": "0", "GIT_ALLOW_PROTOCOL": "file"}
 
     def prompt(self, text):
@@ -285,7 +335,7 @@ def one_trigger(job):
     os.dup2(fd, 0)
     os.environ.clear()
     os.environ.update(job["env"])
-    detect = run_until_skill if LINK_HEADING in job["query"] else run_single_query
+    detect = run_until_skill if any(h in job["query"] for h in LINK_HEADINGS) else run_single_query
     start = time.time()
     try:
         fired = detect(job["query"], job["name"], job["description"], job["timeout"], job["project"], job["model"])
