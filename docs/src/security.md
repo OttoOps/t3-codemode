@@ -79,8 +79,9 @@ for the split trust boundary and reverse-proxy trust assumptions.
       `"off"` or `"pairing"`.
   - Every mutating method (`POST`, `PUT`, `DELETE`) on authenticated board
     routes still requires the per-process `X-T3CM-CSRF` header.
-  - `POST /api/open` is strictly loopback-only and refuses every remote request
-    with 403 even when authenticated, so remote clients cannot trigger desktop
+  - `POST /api/open` is strictly loopback-only: authenticated remote requests
+    receive 403, while unauthenticated or disallowed remote requests receive
+    the usual 401/403 guard refusal, so remote clients cannot trigger desktop
     app launches on the host.
   - Unauthenticated remote `GET /` requests that send `Accept: text/html`
     receive a 401/403 HTML sign-in or access-denied screen with no CSRF token,

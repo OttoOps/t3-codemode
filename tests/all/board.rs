@@ -7657,6 +7657,8 @@ async fn remote_html_navigation_without_auth_returns_signin_or_denied_screen() {
     assert!(!body.contains("<script>"), "{body}");
     assert!(!body.contains("alice@acme.example"), "must never leak host login: {body}");
     assert!(!body.contains(r#"href="/pair""#), "tailscale-only denial must not link /pair: {body}");
+    assert!(body.contains("board.remote.allowUsers") && body.contains("restart t3cm"), "{body}");
+    assert!(!body.contains("t3cm board expose --tailscale --allow-user"), "{body}");
     assert!(!body.contains(&ts_csrf));
 
     // 3. Remote off stays 403 JSON even when Accept: text/html is sent.
@@ -7976,4 +7978,79 @@ globalThis.__location = { hostname: "127.0.0.1", hash: "", pathname: "/", origin
     assert_eq!(r["screenHidden"], true, "{r}");
     assert_eq!(r["probed"], 0, "loopback SSE error must not probe auth: {r}");
     assert_eq!(r["esCount"], 2, "loopback SSE must reconnect on backoff: {r}");
+
+    // 5. S3: Remote /api/state probe sets a timeout signal and does not reset SSE backoff when SSE keeps failing.
+    let backoff_prelude = r#"
+globalThis.__location = { hostname: "board.acme.example", hash: "", pathname: "/", origin: "https://board.acme.example:47732", reload() {} };
+globalThis.__probeSignals = [];
+globalThis.AbortSignal = { timeout: (ms) => ({ timeoutMs: ms }) };
+globalThis.__fetchReply = (url, opts) => {
+  if (url === "/api/state") {
+    if (opts && opts.signal) globalThis.__probeSignals.push(opts.signal.timeoutMs);
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(globalThis.__snap) });
+  }
+  return new Promise(() => {});
+};
+"#;
+    let r = run_page_async_with(
+        &html,
+        backoff_prelude,
+        &format!(
+            r#"async () => {{
+  globalThis.__snap = {st};
+  emitState({st});
+  eventSource.onerror();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  advance(1000);
+  const afterFirst = eventSources.length;
+  // Second SSE failure without delivering a state event must back off to 2000ms (not reset to 1000ms).
+  eventSource.onerror();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  advance(1500);
+  const beforeBackoff = eventSources.length;
+  advance(600);
+  const afterBackoff = eventSources.length;
+  return {{
+    probeSignals: globalThis.__probeSignals,
+    afterFirst,
+    beforeBackoff,
+    afterBackoff,
+  }};
+}}"#
+        ),
+    );
+    assert_eq!(r["probeSignals"], json!([5000, 5000]), "{r}");
+    assert_eq!(r["afterFirst"], 2, "{r}");
+    assert_eq!(r["beforeBackoff"], 2, "200 /api/state probe must not reset SSE backoff: {r}");
+    assert_eq!(r["afterBackoff"], 3, "{r}");
+
+    // 6. S1: Browsers where `new Notification()` throws TypeError (e.g. Chrome on Android) mark notifications unavailable.
+    let notify_prelude = r#"
+globalThis.Notification = class {
+  constructor() { throw new TypeError("Illegal constructor"); }
+};
+Notification.permission = "granted";
+"#;
+    let r = run_page_async_with(
+        &html,
+        notify_prelude,
+        &format!(
+            r#"async () => {{
+  emitState({st});
+  document.hidden = true;
+  const fresh = {{ ...{st}, cards: [...{st}.cards, {{ ...{st}.cards[0], id: "a9", at: "2099-01-01T00:00:00Z" }}] }};
+  emitState(fresh);
+  return {{
+    label: document.getElementById("notify-text").textContent,
+    disabled: document.getElementById("notify").getAttribute("aria-disabled"),
+  }};
+}}"#
+        ),
+    );
+    assert_eq!(r["label"], "Notifications unavailable", "{r}");
+    assert_eq!(r["disabled"], "true", "{r}");
 }
