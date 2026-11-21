@@ -888,6 +888,31 @@ async fn legacy_delivery_configs_normalize_with_full_parity_to_steps() {
 }
 
 #[tokio::test]
+async fn an_invalid_agents_md_delivery_mode_keeps_the_user_pipeline() {
+    let s = S::new("claudeAgent");
+    let claude = s.home.join(".claude");
+    skill(&claude.join("skills"), "deploy", false);
+    s.config(json!({
+        "delivery": {
+            "steps": [
+                {"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"},
+                {"id": "deploy", "skill": "deploy", "gate": "chain", "scope": "pr", "watch": true}
+            ]
+        }
+    }));
+    std::fs::write(s.repo.join("AGENTS.md"), "## Agent workflow\n\n- Delivery: tag-deply\n").unwrap();
+
+    let d = s.call("async () => wf.slot(\"delivery\")", own(&claude)).await;
+    assert_eq!(d["source"], "user");
+    let ids: Vec<&str> = d["steps"].as_array().unwrap().iter().map(|st| st["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["merge", "deploy"]);
+
+    let v = s.call("async () => wf.slots()", own(&claude)).await;
+    let problems: Vec<&str> = v["problems"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(problems.iter().any(|p| p.contains("delivery.mode") && p.contains("tag-deply")), "{problems:?}");
+}
+
+#[tokio::test]
 async fn lms_three_stage_config_resolves_filters_paths_and_respects_layer_precedence() {
     let s = S::new("claudeAgent");
     let claude = s.home.join(".claude");
