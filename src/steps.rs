@@ -17,6 +17,7 @@ pub const RULE_START: &str = "<!-- t3-workflow:filed-issues:start -->";
 pub const RULE_END: &str = "<!-- t3-workflow:filed-issues:end -->";
 pub const HEADER_STEP: &str = "mcp:config-dir-header";
 pub const RETIRE_T3WF_STEP: &str = "retire:t3wf";
+pub const RETIRE_PENDING_FILE: &str = "retire-t3wf-pending.json";
 pub const T3WF_UNITS: [&str; 2] = ["t3wf-tick", "cbrip-t3wf-tick"];
 pub const SKILLS_CHANGED_NOTE: &str =
     "The workflow skills changed. Invoke the t3-workflow skill again before your next step.";
@@ -429,6 +430,32 @@ pub struct T3wfRetire {
     pub shim: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pycache: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_nudges: Vec<String>,
+}
+
+pub fn retire_pending_path(env: &Env) -> PathBuf {
+    env.config.parent().map_or_else(|| PathBuf::from(RETIRE_PENDING_FILE), |d| d.join(RETIRE_PENDING_FILE))
+}
+
+pub fn load_pending_nudges(env: &Env) -> Vec<String> {
+    let path = retire_pending_path(env);
+    std::fs::read(&path).ok().and_then(|raw| serde_json::from_slice::<Vec<String>>(&raw).ok()).unwrap_or_default()
+}
+
+pub fn save_pending_nudges(env: &Env, threads: &[String]) -> Result<()> {
+    let path = retire_pending_path(env);
+    if threads.is_empty() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
+        }
+        return Ok(());
+    }
+    let mut text = serde_json::to_string_pretty(threads)?;
+    text.push('\n');
+    write_atomic(&path, text.as_bytes())
 }
 
 pub fn inspect_retire(env: &Env) -> T3wfRetire {
@@ -450,12 +477,13 @@ pub fn inspect_retire(env: &Env) -> T3wfRetire {
     let shim = (shim_path.exists() || std::fs::symlink_metadata(&shim_path).is_ok()).then_some(shim_path);
     let pycache_path = env.skills_dir.join("t3-workflow").join("scripts").join("__pycache__");
     let pycache = pycache_path.is_dir().then_some(pycache_path);
-    let status = if !units.is_empty() || shim.is_some() || pycache.is_some() {
+    let pending_nudges = load_pending_nudges(env);
+    let status = if !units.is_empty() || shim.is_some() || pycache.is_some() || !pending_nudges.is_empty() {
         RetireState::Present
     } else {
         RetireState::Clean
     };
-    T3wfRetire { status, units, shim, pycache }
+    T3wfRetire { status, units, shim, pycache, pending_nudges }
 }
 
 fn retire_state(r: &T3wfRetire) -> AutoState {
@@ -975,6 +1003,9 @@ pub fn describe_steps(s: &Steps) -> String {
             items.extend(s.retire_t3wf.units.iter().map(|p| p.display().to_string()));
             items.extend(s.retire_t3wf.shim.iter().map(|p| p.display().to_string()));
             items.extend(s.retire_t3wf.pycache.iter().map(|p| p.display().to_string()));
+            if !s.retire_t3wf.pending_nudges.is_empty() {
+                items.push(format!("{} pending thread nudge(s)", s.retire_t3wf.pending_nudges.len()));
+            }
             out.push_str(&format!("setup step {RETIRE_T3WF_STEP}: t3wf leftovers remain ({})\n", items.join(", ")));
         }
         out.push_str("fix: t3cm skills update\n");
