@@ -436,7 +436,10 @@ impl Wf {
         }
         let out = self.dispatch_inner(method, caller, args).await;
         if out.is_ok()
-            && !matches!(method, "show" | "inbox" | "board" | "cards" | "feed" | "waiting.list" | "pools" | "status")
+            && !matches!(
+                method,
+                "show" | "inbox" | "board" | "cards" | "feed" | "waiting.list" | "pools" | "status" | "flow"
+            )
         {
             self.changed();
         }
@@ -468,6 +471,10 @@ impl Wf {
             "pools" => {
                 parse::<Empty>(method, args)?;
                 return self.pools().await;
+            }
+            "flow" => {
+                parse::<Empty>(method, args)?;
+                return self.flow().await;
             }
             "status" => {
                 parse::<Empty>(method, args)?;

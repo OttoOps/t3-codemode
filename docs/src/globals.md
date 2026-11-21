@@ -167,6 +167,8 @@ parent and a child, and the service keeps every link and message in its store.
   `t3cm slots --json` prints it, with the caller `context` and `warnings`.
 - `wf.waiting.add`, `wf.waiting.resolve` and `wf.waiting.list` keep an overseer
   thread's waiting list.
+- `wf.flow()` returns the [flow](config.md#flow)'s ready queue, the flow
+  tickets running, and the free slots. See [wf.flow](#wfflow).
 - `wf.merge({repo, pr, head, method?})` merges a GitHub pull request at the
   approved head commit. `repo` is `owner/name`, `head` the full 40-character
   SHA the user approved, and `method` one of `merge`, `squash` or `rebase`.
@@ -247,6 +249,38 @@ reaches `gh` or the network itself; see [Security](security.md#github).
 
 ```js
 async () => wf.merge({ repo: "acme/widgets", pr: 81, head: "d4db97c0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70" })
+```
+
+### wf.flow
+
+`wf.flow()` reads each covered repo's open issues that carry the opt-in label
+through `gh api graphql`, then applies the [ready rules](config.md#flow). It
+needs no caller and changes nothing. It returns:
+
+| Field | Holds |
+|---|---|
+| `enabled` | `false` when the config has no `flow` block. Then every list is empty and `wf.flow()` reads nothing from GitHub. |
+| `launch`, `maxTickets` | The config's values, or `null` and `0` when the flow is off. |
+| `free` | `maxTickets` minus the flow tickets running, never below zero. |
+| `running` | The flow tickets: `label`, `repo`, `number`, `url`, and the ticket's `thread` and `link`. `thread` is `null` for a launch that hasn't joined yet. |
+| `queue` | The ready issues in launch order. |
+| `blocked` | The opt-in issues held back by an open blocker or by `blocked: external`, in the same order. |
+
+Each issue in `queue` and `blocked` has `repo`, `number`, `label`, `url`,
+`title`, `priority`, `milestone`, `createdAt`, `parent` and `unblockedBy`.
+`priority` is `high`, `medium`, `low` or `null`, `milestone` has `title` and
+`dueOn` or is `null`, and `unblockedBy` lists the closed issues that used to
+block it. A `blocked` issue adds `blockers`, the open
+issues that block it, and `external`, which is `true` when it carries
+`blocked: external`. An issue with more blockers than GitHub returned in one
+read stays in `blocked` with `moreBlockers: true`. When `gh` can't read a
+covered repo, the call throws and names the repo.
+
+```js
+async () => {
+  const f = await wf.flow();
+  return { free: f.free, next: f.queue.slice(0, 3).map(i => `${i.label} ${i.priority ?? "-"}`) };
+}
 ```
 
 ## console
