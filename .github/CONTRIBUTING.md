@@ -134,11 +134,13 @@ running T3 Code server.
 
 **Installer changes.** The release workflow's `install` job installs this run's
 own archives on Linux and macOS, starts the service, checks
-`t3cm status`, and uninstalls. It runs on pull requests that touch `deploy/`,
-the workflow or the Cargo files. To try `install.sh` locally without replacing
-your own install, run it in a clean environment with a scratch `HOME`, so it
-touches neither your binary, your unit or agent, your running service, nor
-your Claude Code config:
+`t3cm status`, and uninstalls. It runs on pull requests that touch what is
+built into the binary, which is `src/`, `skills/`, `build.rs` and the Cargo
+files, and on pull requests that touch `deploy/`, the workflow or its fake
+release host. To try `install.sh` locally without replacing your own install,
+run it in a clean environment with a scratch `HOME`, so it touches neither
+your binary, your unit or agent, your running service, nor your Claude Code
+config:
 
 ```sh
 scratch=$(mktemp -d)
