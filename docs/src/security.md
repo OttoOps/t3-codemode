@@ -14,9 +14,9 @@ The HTTP server splits `/mcp` and `/healthz` from the web board (`/`,
 `/api/*`) into separate middleware boundaries:
 
 - `/mcp` and `/healthz` are strictly loopback-only. When fronted by a proxy
-  that preserves the public `Host` or sends standard forwarding headers, they
-  refuse remote hosts, remote origins, and proxied requests even when remote
-  board access is enabled.
+  that adds trusted forwarding headers and rejects or overwrites non-public
+  `Host` values, they refuse remote hosts, remote origins, and proxied requests
+  even when remote board access is enabled.
 - The board stays loopback-only by default (`board.remote` is off). When
   explicitly enabled behind an HTTPS reverse proxy such as Tailscale Serve,
   Caddy, nginx, or `cloudflared`, only the board routes accept requests for the
@@ -61,14 +61,21 @@ for the split trust boundary and reverse-proxy trust assumptions.
     with 401.
   - Every mutating method (`POST`, `PUT`, `DELETE`) still requires the
     per-process `X-T3CM-CSRF` header.
-- **Reverse-proxy trust assumption.** Because `t3cm` listens on `127.0.0.1`, a
-  proxy that rewrites `Host` to `127.0.0.1:<port>` and strips all forwarding
-  headers looks identical on the wire to a direct loopback client. Any proxy
-  fronting the board must terminate TLS, forward only board routes (never
-  `/mcp` or `/healthz`), preserve the public `Host` or set a trusted
-  forwarding header (`X-Forwarded-Host`, `X-Forwarded-For`,
-  `X-Forwarded-Proto`, `Forwarded`, or `Tailscale-User-Login`), and strip any
-  client-supplied forwarding or identity headers before forwarding. See
+- **Reverse-proxy trust assumption.** Because `t3cm` listens on `127.0.0.1`,
+  any forwarder that sends a loopback `Host` with no forwarding headers looks
+  identical on the wire to a direct loopback client. Any proxy fronting the
+  board must terminate TLS, forward only board routes (never `/mcp` or
+  `/healthz`), strip client-supplied forwarding and identity headers
+  (`X-Forwarded-*`, `Forwarded`, `Tailscale-User-Login`), always add a trusted
+  forwarding header (`X-Forwarded-For`, `X-Forwarded-Host`,
+  `X-Forwarded-Proto`, or `Forwarded`; Tailscale Serve adds its own), and
+  reject or overwrite any client `Host` that does not match the configured
+  public name. nginx's default `proxy_pass` rewrites `Host` to the upstream and
+  adds no `X-Forwarded-*` header, so nginx requires explicit `proxy_set_header`
+  lines (`Host $host`, `X-Forwarded-For $proxy_add_x_forwarded_for`,
+  `X-Forwarded-Proto $scheme`). Raw TCP forwarders such as `ssh -L`, `socat`,
+  and `tailscale serve --tcp` are indistinguishable from direct loopback and
+  hand out zero-auth board access, so they must never front the board. See
   [The board](board.md#http-routes).
 
 ## The sandbox
