@@ -397,16 +397,18 @@ function Register-AntigravityMcp {
 
 function Unregister-AntigravityMcp {
     if (-not (Test-Path -LiteralPath $AntigravityDir -PathType Container)) {
-        return
+        return $true
     }
     if (Test-T3cmAntigravityHelper) {
         & $Exe antigravity-mcp --remove | Out-Host
-        return
+        return ($LASTEXITCODE -eq 0)
     }
+    $ok = $true
     foreach ($cfg in @(Get-AntigravityConfigs)) {
         if (-not (Test-Path -LiteralPath $cfg -PathType Leaf)) {
             continue
         }
+        $owned = $false
         try {
             $raw = [IO.File]::ReadAllText($cfg)
             if ([string]::IsNullOrWhiteSpace($raw)) {
@@ -417,16 +419,21 @@ function Unregister-AntigravityMcp {
                 continue
             }
             $servers = $doc['mcpServers']
-            if (-not $servers.ContainsKey($McpName)) {
+            if (-not $servers.ContainsKey($McpName) -or -not (Test-T3cmStdioEntry $servers[$McpName])) {
                 continue
             }
+            $owned = $true
             [void]$servers.Remove($McpName)
             Write-Utf8NoBom $cfg (ConvertTo-LosslessJson $doc)
             Write-Host "Removed $McpName for Antigravity from $cfg"
         } catch {
             Write-Warning "could not update Antigravity MCP config at ${cfg}: $($_.Exception.Message); left as is."
+            if ($owned) {
+                $ok = $false
+            }
         }
     }
+    return $ok
 }
 
 function Register-Mcp {
@@ -591,13 +598,17 @@ function Uninstall-T3cm {
             Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         }
     }
-    Unregister-AntigravityMcp
-    if (Test-Path -LiteralPath $InstallDir) {
-        try {
-            Remove-Item -LiteralPath $InstallDir -Recurse -Force
-        } catch {
-            Fail "could not remove ${InstallDir}: $($_.Exception.Message). Stop t3cm.exe and run -Uninstall again."
+    $agyOk = Unregister-AntigravityMcp
+    if ($agyOk) {
+        if (Test-Path -LiteralPath $InstallDir) {
+            try {
+                Remove-Item -LiteralPath $InstallDir -Recurse -Force
+            } catch {
+                Fail "could not remove ${InstallDir}: $($_.Exception.Message). Stop t3cm.exe and run -Uninstall again."
+            }
         }
+    } else {
+        Write-Warning "Kept $Exe because Antigravity MCP cleanup failed; fix permissions and run -Uninstall again."
     }
     if (Get-Command claude -ErrorAction SilentlyContinue) {
         if ((Invoke-Native claude @('mcp', 'get', $McpName)) -eq 0 -and
@@ -606,6 +617,9 @@ function Uninstall-T3cm {
         }
     } else {
         Write-Host "claude is not on PATH; remove the MCP entry with: claude mcp remove --scope user $McpName"
+    }
+    if (-not $agyOk) {
+        Fail 'Antigravity MCP cleanup did not complete; fix permissions and run -Uninstall again.'
     }
     Write-Host "t3-codemode removed. Its store and logs stay in $StoreDir; delete it to drop memory and links."
 }
