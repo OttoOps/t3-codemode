@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 use t3_codemode::release::Version;
 use t3_codemode::upgrade::{TARGET, archive_name, archive_stem};
 
+use crate::skills_install::{copy_tree, npx_install, repo_skills, skills_dir};
+
 const NEW: &str = "9.9.9";
 
 #[derive(Clone)]
@@ -536,4 +538,59 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
 "#;
+}
+
+async fn up_to_date_update(prepare: fn(&Path)) -> Output {
+    let env = setup(NEW, false).await;
+    let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+    tokio::task::spawn_blocking(move || {
+        prepare(env.dir.path());
+        env.t3cm(&["update", "--no-restart", "--version", &current])
+    })
+    .await
+    .unwrap()
+}
+
+fn assert_take_over_hint_follows_up_to_date(out: &Output) {
+    let t = text(out);
+    assert!(out.status.success(), "{t}");
+    let up = t.find("is up to date").unwrap_or_else(|| panic!("no up-to-date line: {t}"));
+    let hint = t.find("t3cm skills install --take-over").unwrap_or_else(|| panic!("no take-over hint: {t}"));
+    assert!(up < hint, "the hint follows the up-to-date line: {t}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_up_to_date_update_offers_to_take_over_npx_skills() {
+    let out = up_to_date_update(|home| {
+        npx_install(home, false);
+    })
+    .await;
+    assert_take_over_hint_follows_up_to_date(&out);
+    assert!(text(&out).contains("came from npx skills"), "{}", text(&out));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_up_to_date_update_offers_to_take_over_hand_copied_skills() {
+    let out = up_to_date_update(|home| copy_tree(&repo_skills(), &skills_dir(home))).await;
+    assert_take_over_hint_follows_up_to_date(&out);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_up_to_date_update_without_skills_offers_no_take_over() {
+    let out = up_to_date_update(|_| {}).await;
+    let t = text(&out);
+    assert!(out.status.success(), "{t}");
+    assert!(t.contains("is up to date") && !t.contains("--take-over"), "{t}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_up_to_date_update_survives_an_unreadable_skill_lock() {
+    let out = up_to_date_update(|home| {
+        std::fs::create_dir_all(home.join(".agents")).unwrap();
+        std::fs::write(home.join(".agents").join(".skill-lock.json"), "{").unwrap();
+    })
+    .await;
+    let t = text(&out);
+    assert!(out.status.success(), "{t}");
+    assert!(t.contains("is up to date") && t.contains(".skill-lock.json is not valid JSON"), "{t}");
 }
