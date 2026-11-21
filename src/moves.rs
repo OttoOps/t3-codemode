@@ -162,9 +162,17 @@ impl Wf {
         })?;
         self.note_live(&new, f);
         let summary = format!("moved {} from {} to {new} {}", o.title, o.instance_id, picked.summary());
-        let handle = self.store.msg_new(BOARD, BOARD, "note", &summary, &self.now())?;
-        self.store.pick_bind(picked.seq, Some(&handle), &new, Some(old))?;
         let mut warnings = Vec::new();
+        let handle = self
+            .store
+            .msg_new(BOARD, BOARD, "note", &summary, &self.now())
+            .map_err(|e| warnings.push(format!("adding the move to the feed failed: {e:#}")))
+            .ok();
+        if let Err(e) = self.store.pick_bind(picked.seq, handle.as_deref(), &new, Some(old)) {
+            warnings.push(format!(
+                "recording the fork in the pick history failed, so a later usage limit on it gets no offer: {e:#}"
+            ));
+        }
         let resume = format!(
             "This thread is a fork of {}, which stopped on a usage limit on {}. It now runs on {}{}. \
              The last run may have stopped partway: check where the work stands, then carry on from there.",
