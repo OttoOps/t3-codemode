@@ -23,6 +23,7 @@ isMergeQueueEnabled isInMergeQueue mergeQueueEntry { position } mergeCommit { oi
 timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) { nodes { ... on RemovedFromMergeQueueEvent { \
 reason createdAt } } } ...Checks }";
 const HELD: &str = "has a failing check at its approved head";
+const NO_REASON: &str = "no reason recorded";
 const NO_TICKET: &str =
     "no ticket tracks it to take a reply, so act on it on GitHub or with wf.merge and then dismiss this card";
 
@@ -192,6 +193,10 @@ struct Ask {
     context: String,
 }
 
+fn exit_ask(what: String, context: String) -> Ask {
+    Ask { what, reply: "reply \"requeue\" to queue it again, or \"hold\" to leave it out", context }
+}
+
 #[derive(Default)]
 struct Pass {
     actions: Vec<String>,
@@ -271,6 +276,7 @@ impl Wf {
         let list: Vec<&Tracked> = tracked.values().collect();
         for chunk in list.chunks(BATCH) {
             let (query, vars) = batch_query(chunk);
+            let read_at = self.now();
             let resp = self.github.graphql(&query, vars).await?;
             if !resp["data"].is_object() {
                 bail!("GitHub reconcile query failed: {}", errors(&resp).unwrap_or_else(|| "no data".into()));
@@ -287,7 +293,7 @@ impl Wf {
                 let why = errs.iter().filter_map(|e| e["message"].as_str()).collect::<Vec<_>>().join("; ");
                 let found = repo["pullRequest"].is_object();
                 let done = if found && errs.is_empty() {
-                    self.fix(t, repo, &mut pass).await
+                    self.fix(t, repo, &read_at, &mut pass).await
                 } else if !found && errs.iter().any(|e| e["type"] == "NOT_FOUND") {
                     self.missing(t, &why, &mut pass).await
                 } else {
@@ -364,8 +370,7 @@ impl Wf {
             t.approval = Some(w.approval);
         }
         for row in self.store.pr_seen_all()? {
-            let leaving = row.left.as_deref().is_some_and(|l| self.mins(Some(l)).is_some_and(|m| m < EXIT_WINDOW_MINS));
-            let live = (row.queued || leaving) && row.state == "OPEN";
+            let live = (row.queued || row.left.is_some()) && row.state == "OPEN";
             if !live && !map.contains_key(&(row.repo.clone(), row.pr)) {
                 continue;
             }
@@ -386,25 +391,40 @@ impl Wf {
         Ok(map)
     }
 
-    async fn fix(&self, t: &Tracked, repo: &Value, pass: &mut Pass) -> Result<()> {
+    async fn fix(&self, t: &Tracked, repo: &Value, read_at: &str, pass: &mut Pass) -> Result<()> {
         let o = Obs::read(repo);
         let advance = {
             let _g = self.lock.lock().await;
             let cards: Vec<Card> = self.cards()?.into_iter().filter(|c| t.cards.contains(&c.seq)).collect();
             let wait = self.wait(t)?;
+            let waited = wait.is_some();
+            let prev = self.store.pr_seen_get(&t.repo, t.number)?;
+            let after = match prev.as_ref().and_then(|p| p.queued_at.as_deref()) {
+                Some(q) if later(q, &t.since) => q,
+                _ => t.since.as_str(),
+            };
             let advance = match o.state.as_str() {
                 "MERGED" | "CLOSED" => {
                     self.finished(t, &o, &cards, wait.as_ref(), pass)?;
                     None
                 }
-                "OPEN" => self.open(t, &o, &cards, wait, pass)?,
+                "OPEN" => self.open(t, &o, &cards, wait, after, pass)?,
                 _ => None,
             };
-            let prev = self.store.pr_seen_get(&t.repo, t.number)?;
+            let out = o.state == "OPEN" && !o.queued && !waited;
             let left = match &prev {
-                Some(p) if o.state == "OPEN" && !o.queued && p.queued => Some(self.now()),
-                Some(p) if o.state == "OPEN" && !o.queued => p.left.clone(),
+                Some(p) if out && p.queued => Some(self.now()),
+                Some(p) if out => p.left.clone(),
                 _ => None,
+            };
+            let queued_at = match &prev {
+                _ if o.state == "OPEN" && o.queued => Some(read_at.to_string()),
+                Some(p) => p.queued_at.clone(),
+                None => None,
+            };
+            let left = match left {
+                Some(l) => self.exited(t, &o, &l, after, pass)?,
+                None => None,
             };
             if prev.as_ref().map(|p| (p.state.as_str(), p.queued)) != Some((o.state.as_str(), o.queued)) {
                 self.changed();
@@ -419,11 +439,12 @@ impl Wf {
                 tickets: t.tickets.clone(),
                 at: self.now(),
                 left,
+                queued_at,
             })?;
             advance
         };
         match advance {
-            Some(w) => self.advance(t, &o, w, pass).await,
+            Some(w) => self.advance(t, &o, w, read_at, pass).await,
             None => Ok(()),
         }
     }
@@ -520,9 +541,10 @@ impl Wf {
         o: &Obs,
         cards: &[Card],
         mut wait: Option<MergeWait>,
+        after: &str,
         pass: &mut Pass,
     ) -> Result<Option<MergeWait>> {
-        if self.dropped(t, o, wait.as_ref(), pass)?
+        if self.dropped(t, o, wait.as_ref(), after, pass)?
             && let Some(w) = wait.take()
         {
             self.store.merge_wait_retire(&w)?;
@@ -530,7 +552,8 @@ impl Wf {
         if o.queued || o.ready == Ready::Yes {
             let this_pr = |c: &Card| c.pr.as_ref().is_some_and(|p| p.repo == t.repo && p.number == t.number);
             let note = if o.queued { "it is in the merge queue" } else { "it is ready to merge" };
-            self.resolve_cards(|c| c.kind == "report" && this_pr(c) && c.text.contains(HELD), note)?;
+            let stale = |c: &Card| c.text.contains(HELD) || (o.queued && c.text.contains(NO_REASON));
+            self.resolve_cards(|c| c.kind == "report" && this_pr(c) && stale(c), note)?;
         }
         let mut moved: Vec<(Option<String>, String, Vec<i64>)> = Vec::new();
         for c in cards.iter().filter(|c| c.kind == "gate") {
@@ -635,37 +658,66 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         Ok(())
     }
 
-    fn dropped(&self, t: &Tracked, o: &Obs, wait: Option<&MergeWait>, pass: &mut Pass) -> Result<bool> {
+    fn dropped(&self, t: &Tracked, o: &Obs, wait: Option<&MergeWait>, after: &str, pass: &mut Pass) -> Result<bool> {
         let Some((reason, at)) = o.removal.as_ref().filter(|(r, _)| !o.queued && r != "merged") else {
             return Ok(false);
         };
         let newest = self.store.merge_wait_get(&t.repo, t.number)?;
-        if !later(at, &t.since) || newest.is_some_and(|w| parse_ts(&w.at).zip(parse_ts(at)).is_some_and(|(w, r)| w > r))
-        {
+        if !later(at, after) || newest.is_some_and(|w| parse_ts(&w.at).zip(parse_ts(at)).is_some_and(|(w, r)| w > r)) {
             return Ok(false);
         }
-        let event = format!("removed:{at}");
         let why = why_dropped(reason);
-        let ask = Ask {
-            what: format!("{} was dropped from the merge queue ({why}) at {}", t.label(), local_clock(at)),
-            reply: "reply \"requeue\" to queue it again, or \"hold\" to leave it out",
-            context: String::new(),
-        };
+        let what = format!("{} was dropped from the merge queue ({why}) at {}", t.label(), local_clock(at));
+        if self.report_exit(t, o, wait, at, &format!("removed:{at}"), exit_ask(what, String::new()), &why, pass)? {
+            let this_pr = |c: &Card| c.pr.as_ref().is_some_and(|p| p.repo == t.repo && p.number == t.number);
+            let note = format!("GitHub recorded the reason: {why}");
+            self.resolve_cards(|c| c.kind == "report" && this_pr(c) && c.text.contains(NO_REASON), &note)?;
+        }
+        Ok(true)
+    }
+
+    fn exited(&self, t: &Tracked, o: &Obs, left: &str, after: &str, pass: &mut Pass) -> Result<Option<String>> {
+        if o.removal.as_ref().is_some_and(|(_, at)| later(at, after)) {
+            return Ok(None);
+        }
+        if self.mins(Some(left)).is_some_and(|m| m < EXIT_WINDOW_MINS) {
+            return Ok(Some(left.into()));
+        }
+        let what = format!("{} left the merge queue at {}, {NO_REASON}", t.label(), local_clock(left));
+        let context = format!("GitHub still showed no removal reason {EXIT_WINDOW_MINS} minutes after the exit.");
+        self.report_exit(t, o, None, left, &format!("left:{left}"), exit_ask(what, context), NO_REASON, pass)?;
+        Ok(None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn report_exit(
+        &self,
+        t: &Tracked,
+        o: &Obs,
+        wait: Option<&MergeWait>,
+        at: &str,
+        event: &str,
+        ask: Ask,
+        why: &str,
+        pass: &mut Pass,
+    ) -> Result<bool> {
+        let mut raised = false;
         let mut to: Vec<Option<&str>> =
             t.tickets.iter().filter(|(_, s)| later(at, s)).map(|(x, _)| Some(x.as_str())).collect();
         if to.is_empty() {
             to.push(None);
         }
         for ticket in to {
-            if self.store.pr_event_seen(&t.repo, t.number, &event, ticket.unwrap_or(BOARD))? {
+            if self.store.pr_event_seen(&t.repo, t.number, event, ticket.unwrap_or(BOARD))? {
                 continue;
             }
             let approval = wait.filter(|w| w.thread.as_deref() == ticket).map(|w| w.approval.as_str());
-            self.raise(t, ticket, "report", &ask, &o.head, Some(&event), approval, pass)?;
+            self.raise(t, ticket, "report", &ask, &o.head, Some(event), approval, pass)?;
             self.feed_note(ticket, &format!("{} was dropped from the merge queue: {why}", t.label()))?;
             pass.actions.push(format!("{} dropped from the merge queue: {why}", t.label()));
+            raised = true;
         }
-        Ok(true)
+        Ok(raised)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -713,7 +765,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         Ok(())
     }
 
-    async fn advance(&self, t: &Tracked, o: &Obs, w: MergeWait, pass: &mut Pass) -> Result<()> {
+    async fn advance(&self, t: &Tracked, o: &Obs, w: MergeWait, read_at: &str, pass: &mut Pass) -> Result<()> {
         let (query, vars) = match o.queue {
             true => (ENQUEUE_PR, json!({"id": o.id, "head": w.head})),
             false => {
@@ -741,6 +793,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
             && let Some(mut seen) = self.store.pr_seen_get(&t.repo, t.number)?
         {
             seen.queued = true;
+            seen.queued_at = Some(read_at.into());
             self.store.pr_seen_put(&seen)?;
             self.changed();
         }

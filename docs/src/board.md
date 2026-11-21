@@ -352,8 +352,9 @@ and its ticket. It tracks:
   exactly one,
 - each pull request `wf.merge` saved as waiting to be queued, or sent to
   GitHub,
-- each pull request it last saw in a merge queue, until 30 minutes after it
-  leaves, so a removal that GitHub records late still gets its report.
+- each pull request it last saw in a merge queue, until GitHub records why it
+  left or until the first check 30 minutes after it left, so that a removal
+  GitHub records late, or never records, still gets a report.
 
 It reads them with `gh` as the user the service runs as, in one GraphQL query
 for every 100 pull requests it tracks, and makes no GitHub call when it tracks
@@ -371,6 +372,7 @@ makes them agree:
 | Merged | Resolves the pull request's cards opened before the merge, with the note "merged on GitHub at `<sha>`, `<time>`". Clears the ticket's `merge` gate when no other gate card stays open for it (later delivery stages use `gate: "delivery:<id>"`, so reconcile leaves those untouched). Sends each ticket tracking the pull request one `event` to run its post-merge steps |
 | Closed without merging | Resolves its cards opened before the close and sends each ticket one `event`. Reopening and closing it again sends another |
 | Dropped from the merge queue for `merge_conflict`, `failed_checks` or `manual` removal | Opens a `report` card per ticket that gives the reason, with `requeue` and `hold` buttons, or one card with no buttons and the steps to take by hand when no ticket tracks it. An approval older than the removal is dropped, so the board never queues the pull request again on its own |
+| Out of the merge queue for 30 minutes with no removal recorded and no saved approval | Opens a `report` card per ticket that says no reason was recorded, with `requeue` and `hold` buttons, or one card with no buttons and the steps to take by hand when no ticket tracks it. If GitHub records the removal while that card is open, a card with the reason replaces it. If a check sees the pull request back in the queue first, it resolves the card |
 | Waiting to be queued, now mergeable at the approved head | Sends `enqueuePullRequest` with the approved head as `expectedHeadOid`. If the repository has turned its merge queue off since, sends `mergePullRequest` the same way, with the approval's method or else the repository's default |
 | Waiting to be queued, with a check at the approved head that failed | Holds the approval and opens one `report` card per approval that names the failed checks, with a `fix` button. Queues the pull request and resolves the card once the check is re-run and passes |
 | Approved at one head, now at another | Opens one new card per ticket: a `merge` gate for the new head, or a `report` when GitHub already has the new head in its queue. Resolves the old gate and drops the old approval |
@@ -384,7 +386,8 @@ merge commit, the close time or the removal time, so a later check never
 repeats it. It saves a wake and its delivery in one transaction, so a T3 outage
 delays a wake but never loses it. An event from before the board started tracking the pull
 request, or from before this version of the service first started, stays
-quiet.
+quiet. So does a removal dated before the last check that saw the pull request
+in the queue, because it belongs to an earlier stay there.
 
 When GitHub refuses the enqueue or the merge, or cannot find the pull request,
 the approval stays for the next check. After 3 failures in a row the board

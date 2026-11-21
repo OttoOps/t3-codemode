@@ -636,6 +636,145 @@ async fn a_queue_exit_with_no_timeline_stays_tracked_until_the_removal_shows() {
     assert!(open[0]["text"].as_str().unwrap().contains("removed by hand"), "{open:?}");
 }
 
+fn dismiss_all(h: &H) {
+    for c in cards(h, false) {
+        h.app.store.waiting_resolve(BOARD, c["id"].as_str().unwrap(), Some("dismissed"), &at(0)).unwrap();
+    }
+}
+
+async fn queued_then_left_with_no_reason(h: &H) {
+    ticket_with_worker(h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+    check(h, 0).await;
+    h.github.update_pr(REPO, 7, json!({"isInMergeQueue": true, "mergeQueueEntry": {"position": 1}}));
+    check(h, 2).await;
+    h.wf(WORKER, "send", json!({"kind": "handoff", "body": "queued"})).await;
+    h.github.update_pr(REPO, 7, json!({"isInMergeQueue": false, "mergeQueueEntry": null}));
+    check(h, 4).await;
+}
+
+#[tokio::test]
+async fn a_queue_removal_recorded_late_in_the_window_reports_its_reason() {
+    let h = H::new();
+    queued_then_left_with_no_reason(&h).await;
+    check(&h, 14).await;
+    check(&h, 24).await;
+    assert!(cards(&h, false).is_empty());
+    h.github.drop_from_queue(REPO, 7, "manual", &at(3));
+
+    check(&h, 34).await;
+
+    let open = cards(&h, false);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0]["ticket"], TICKET);
+    assert!(open[0]["text"].as_str().unwrap().contains("dropped from the merge queue (removed by hand)"), "{open:?}");
+    assert!(h.app.store.pr_seen_get(REPO, 7).unwrap().unwrap().left.is_none());
+}
+
+#[tokio::test]
+async fn a_queue_exit_with_no_reason_by_the_window_close_gets_a_card() {
+    let h = H::new();
+    queued_then_left_with_no_reason(&h).await;
+    check(&h, 14).await;
+    check(&h, 24).await;
+
+    check(&h, 34).await;
+
+    let open = cards(&h, false);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0]["kind"], "report");
+    assert_eq!(open[0]["ticket"], TICKET);
+    let text = open[0]["text"].as_str().unwrap();
+    assert!(text.contains("left the merge queue at") && text.contains("no reason recorded"), "{text}");
+    assert_eq!(open[0]["options"], json!(["requeue", "hold"]));
+    check(&h, 44).await;
+    assert_eq!(cards(&h, false).len(), 1);
+}
+
+#[tokio::test]
+async fn a_reason_recorded_after_the_window_replaces_the_no_reason_card() {
+    let h = H::new();
+    queued_then_left_with_no_reason(&h).await;
+    check(&h, 34).await;
+    h.github.drop_from_queue(REPO, 7, "failed_checks", &at(3));
+
+    check(&h, 44).await;
+
+    let open = cards(&h, false);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert!(open[0]["text"].as_str().unwrap().contains("dropped from the merge queue (failed checks)"), "{open:?}");
+    dismiss_all(&h);
+    check(&h, 54).await;
+    assert!(h.app.store.pr_seen_get(REPO, 7).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_requeue_resolves_the_no_reason_card_before_the_next_exit_is_reported() {
+    let h = H::new();
+    queued_then_left_with_no_reason(&h).await;
+    check(&h, 34).await;
+    h.github.update_pr(REPO, 7, json!({"isInMergeQueue": true, "mergeQueueEntry": {"position": 1}}));
+
+    check(&h, 36).await;
+
+    assert!(cards(&h, false).is_empty(), "{:?}", cards(&h, false));
+    h.github.drop_from_queue(REPO, 7, "failed_checks", &at(37));
+    check(&h, 38).await;
+    let open = cards(&h, false);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert!(open[0]["text"].as_str().unwrap().contains("dropped from the merge queue (failed checks)"), "{open:?}");
+}
+
+#[tokio::test]
+async fn an_older_removal_does_not_count_for_a_later_queue_exit() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+    h.github.update_pr(REPO, 7, json!({"isInMergeQueue": true, "mergeQueueEntry": {"position": 1}}));
+    check(&h, 0).await;
+    h.github.drop_from_queue(REPO, 7, "merge_conflict", &at(1));
+    check(&h, 2).await;
+    assert_eq!(cards(&h, false).len(), 1);
+    dismiss_all(&h);
+    h.github.update_pr(REPO, 7, json!({"isInMergeQueue": true, "mergeQueueEntry": {"position": 1}}));
+    check(&h, 4).await;
+    h.wf(WORKER, "send", json!({"kind": "handoff", "body": "queued"})).await;
+    h.github.update_pr(REPO, 7, json!({"isInMergeQueue": false, "mergeQueueEntry": null}));
+    check(&h, 6).await;
+
+    check(&h, 36).await;
+
+    let open = cards(&h, false);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert!(open[0]["text"].as_str().unwrap().contains("no reason recorded"), "{open:?}");
+}
+
+#[tokio::test]
+async fn a_removal_from_an_earlier_queue_stay_that_shows_late_is_not_reported_for_the_next_exit() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+    h.github.update_pr(REPO, 7, json!({"isInMergeQueue": true, "mergeQueueEntry": {"position": 1}}));
+    check(&h, 2).await;
+    h.github.update_pr(REPO, 7, json!({"isInMergeQueue": false, "mergeQueueEntry": null}));
+    check(&h, 4).await;
+    check(&h, 34).await;
+    dismiss_all(&h);
+    h.github.update_pr(REPO, 7, json!({"isInMergeQueue": true, "mergeQueueEntry": {"position": 1}}));
+    check(&h, 36).await;
+    h.github.update_pr(REPO, 7, json!({"isInMergeQueue": false, "mergeQueueEntry": null}));
+    check(&h, 38).await;
+    h.github.drop_from_queue(REPO, 7, "manual", &at(3));
+
+    check(&h, 40).await;
+    assert!(cards(&h, false).is_empty(), "{:?}", cards(&h, false));
+    check(&h, 68).await;
+
+    let open = cards(&h, false);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert!(open[0]["text"].as_str().unwrap().contains("no reason recorded"), "{open:?}");
+}
+
 #[tokio::test]
 async fn a_pr_queued_at_another_head_gets_one_mismatch_report_even_with_a_gate_open() {
     let h = H::new();
