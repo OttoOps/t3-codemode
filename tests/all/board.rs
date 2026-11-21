@@ -7376,3 +7376,604 @@ fn expose_and_unexpose_drive_tailscale_serve_and_config() {
         &calls_after[calls_before..]
     );
 }
+
+#[tokio::test]
+async fn remote_open_endpoint_is_refused_server_side_in_both_pairing_and_tailscale_modes() {
+    use t3_codemode::clock::Clock;
+    use t3_codemode::config::RemoteOrigin;
+    use t3_codemode::pairing;
+
+    // 1. Pairing mode: authenticated remote POST /api/open is refused with 403, while direct loopback works.
+    let s = start(H::build(Vec::new(), pairing_config())).await;
+    s.h.desktop.running.store(true, std::sync::atomic::Ordering::SeqCst);
+    let origin = RemoteOrigin::parse("https://board.acme.example:47732").unwrap();
+    let minted = pairing::mint_pairing_token(&s.h.app.store, &origin, Some("Phone"), s.h.clock.now()).unwrap();
+    let (raw_session, _) =
+        pairing::redeem_pairing_token(&s.h.app.store, &minted.token, None, s.h.clock.now()).unwrap().unwrap();
+    let cookie = format!("{}={raw_session}", pairing::SESSION_COOKIE);
+    let csrf = s.csrf();
+
+    let r = s
+        .http
+        .post(format!("{}/api/open", s.base))
+        .header("Host", "board.acme.example:47732")
+        .header("Origin", "https://board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Cookie", &cookie)
+        .header("X-T3CM-CSRF", &csrf)
+        .json(&json!({"link": THREAD_LINK}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    assert!(s.h.desktop.opened.lock().unwrap().is_empty(), "remote /api/open must never open desktop app");
+
+    // Direct loopback still opens the desktop app.
+    let local = s.post("/api/open", json!({"link": THREAD_LINK}), Some(&csrf), Some(&s.base)).await;
+    assert_eq!(local.status(), 200);
+    assert_eq!(local.json::<Value>().await.unwrap(), json!({"opened": true}));
+    assert_eq!(*s.h.desktop.opened.lock().unwrap(), [APP_LINK]);
+
+    // 2. Tailscale mode: authenticated remote POST /api/open is refused with 403.
+    let h = H::build(Vec::new(), tailscale_config(None, false));
+    h.tailscale.set_host_login("alice@acme.example");
+    h.desktop.running.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ts = start(h).await;
+    let ts_csrf = ts.csrf();
+
+    let r = ts
+        .http
+        .post(format!("{}/api/open", ts.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("Origin", "https://box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .header("X-T3CM-CSRF", &ts_csrf)
+        .json(&json!({"link": THREAD_LINK}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    assert!(ts.h.desktop.opened.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn remote_board_manifest_and_icons_respect_guards_and_csp() {
+    use t3_codemode::clock::Clock;
+    use t3_codemode::config::RemoteOrigin;
+    use t3_codemode::pairing;
+
+    let assets = ["/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png"];
+
+    // 1. Loopback serves manifest and icons within zero-external-request CSP, and remote mode off refuses them.
+    let off = start(H::new()).await;
+    let page = off.http.get(format!("{}/", off.base)).send().await.unwrap();
+    assert_eq!(page.status(), 200);
+    let csp = page.headers()["content-security-policy"].to_str().unwrap().to_string();
+    assert!(csp.contains("default-src 'none'"), "{csp}");
+    assert!(csp.contains("manifest-src 'self'"), "{csp}");
+    assert!(csp.contains("img-src 'self' data:"), "{csp}");
+    let html = page.text().await.unwrap();
+    assert!(html.contains(r#"<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">"#));
+    assert!(html.contains(r#"<link rel="icon" href="/icon.svg" type="image/svg+xml">"#));
+    assert!(html.contains(r#"<link rel="apple-touch-icon" href="/icon-192.png">"#));
+
+    let mf = off.http.get(format!("{}/manifest.webmanifest", off.base)).send().await.unwrap();
+    assert_eq!(mf.status(), 200);
+    assert!(mf.headers()["content-type"].to_str().unwrap().starts_with("application/manifest+json"));
+    assert_eq!(mf.headers()["cache-control"], "no-store");
+    assert_eq!(mf.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(mf.headers()["content-security-policy"], "default-src 'none'; frame-ancestors 'none'");
+    let mf_json: Value = mf.json().await.unwrap();
+    assert_eq!(mf_json["name"], "t3 board");
+    assert_eq!(mf_json["start_url"], "/");
+    assert_eq!(mf_json["display"], "standalone");
+    let icon_srcs: Vec<&str> =
+        mf_json["icons"].as_array().unwrap().iter().map(|i| i["src"].as_str().unwrap()).collect();
+    assert_eq!(icon_srcs, vec!["/icon.svg", "/icon-192.png", "/icon-512.png"]);
+
+    let svg = off.http.get(format!("{}/icon.svg", off.base)).send().await.unwrap();
+    assert_eq!(svg.status(), 200);
+    assert!(svg.headers()["content-type"].to_str().unwrap().starts_with("image/svg+xml"));
+    assert_eq!(svg.headers()["content-security-policy"], "default-src 'none'; frame-ancestors 'none'");
+    let svg_body = svg.text().await.unwrap();
+    let svg_no_ns = svg_body.replace(r#"xmlns="http://www.w3.org/2000/svg""#, "");
+    assert!(
+        svg_body.starts_with("<svg ")
+            && !svg_no_ns.contains("http://")
+            && !svg_no_ns.contains("https://")
+            && !svg_body.to_lowercase().contains("<script")
+    );
+
+    for png_route in ["/icon-192.png", "/icon-512.png"] {
+        let r = off.http.get(format!("{}{png_route}", off.base)).send().await.unwrap();
+        assert_eq!(r.status(), 200, "{png_route}");
+        assert_eq!(r.headers()["content-type"], "image/png");
+        let bytes = r.bytes().await.unwrap();
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{png_route} must be a valid PNG");
+    }
+
+    for route in assets {
+        let r = off
+            .http
+            .get(format!("{}{route}", off.base))
+            .header("Host", "board.acme.example:47732")
+            .header("X-Forwarded-Proto", "https")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "remote off GET {route}");
+    }
+
+    // 2. Pairing mode requires a valid session cookie for manifest and icons.
+    let sp = start(H::build(Vec::new(), pairing_config())).await;
+    let origin = RemoteOrigin::parse("https://board.acme.example:47732").unwrap();
+    let minted = pairing::mint_pairing_token(&sp.h.app.store, &origin, Some("Phone"), sp.h.clock.now()).unwrap();
+    let (raw_session, _) =
+        pairing::redeem_pairing_token(&sp.h.app.store, &minted.token, None, sp.h.clock.now()).unwrap().unwrap();
+    let cookie = format!("{}={raw_session}", pairing::SESSION_COOKIE);
+    for route in assets {
+        let unauth = sp
+            .http
+            .get(format!("{}{route}", sp.base))
+            .header("Host", "board.acme.example:47732")
+            .header("X-Forwarded-Proto", "https")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), 401, "pairing unauth GET {route}");
+
+        let auth = sp
+            .http
+            .get(format!("{}{route}", sp.base))
+            .header("Host", "board.acme.example:47732")
+            .header("X-Forwarded-Proto", "https")
+            .header("Cookie", &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(auth.status(), 200, "pairing auth GET {route}");
+    }
+
+    // 3. Tailscale mode enforces Tailscale-User-Login for manifest and icons.
+    let ht = H::build(Vec::new(), tailscale_config(None, false));
+    ht.tailscale.set_host_login("alice@acme.example");
+    let st = start(ht).await;
+    for route in assets {
+        let missing = st
+            .http
+            .get(format!("{}{route}", st.base))
+            .header("Host", "box.acme.ts.net:47732")
+            .header("X-Forwarded-Proto", "https")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), 401, "tailscale missing GET {route}");
+
+        let denied = st
+            .http
+            .get(format!("{}{route}", st.base))
+            .header("Host", "box.acme.ts.net:47732")
+            .header("X-Forwarded-Proto", "https")
+            .header("Tailscale-User-Login", "bob@acme.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), 403, "tailscale denied GET {route}");
+
+        let ok = st
+            .http
+            .get(format!("{}{route}", st.base))
+            .header("Host", "box.acme.ts.net:47732")
+            .header("X-Forwarded-Proto", "https")
+            .header("Tailscale-User-Login", "alice@acme.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), 200, "tailscale allowed GET {route}");
+    }
+}
+
+#[tokio::test]
+async fn remote_html_navigation_without_auth_returns_signin_or_denied_screen() {
+    // 1. Pairing mode: browser Accept: text/html gets 401 HTML sign-in screen with no CSRF leak.
+    let sp = start(H::build(Vec::new(), pairing_config())).await;
+    join_board(&sp.h, TICKET, "widgets#41").await;
+    let csrf = sp.csrf();
+
+    let missing_html = sp
+        .http
+        .get(format!("{}/", sp.base))
+        .header("Host", "board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_html.status(), 401);
+    assert!(missing_html.headers()["content-type"].to_str().unwrap().starts_with("text/html"));
+    assert_eq!(missing_html.headers()["cache-control"], "no-store");
+    assert!(missing_html.headers()["content-security-policy"].to_str().unwrap().contains("default-src 'none'"));
+    let body = missing_html.text().await.unwrap();
+    assert!(body.contains("t3cm board pair"), "{body}");
+    assert!(body.contains(r#"href="/pair""#), "{body}");
+    assert!(!body.contains(&csrf), "auth page must never leak CSRF");
+    assert!(!body.contains("widgets#41"), "auth page must never leak board data");
+
+    // Revoked/invalid cookie gets expired/revoked copy.
+    let expired_html = sp
+        .http
+        .get(format!("{}/", sp.base))
+        .header("Host", "board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Accept", "text/html")
+        .header("Cookie", format!("{}=stale-token", t3_codemode::pairing::SESSION_COOKIE))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(expired_html.status(), 401);
+    let body = expired_html.text().await.unwrap();
+    assert!(body.contains("Session expired or revoked"), "{body}");
+    assert!(body.contains(r#"href="/pair""#), "{body}");
+    assert!(!body.contains(&csrf));
+
+    // Non-HTML Accept (or q=0) still returns JSON with structured auth metadata.
+    let json_resp = sp
+        .http
+        .get(format!("{}/", sp.base))
+        .header("Host", "board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Accept", "text/html;q=0, application/json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(json_resp.status(), 401);
+    assert!(json_resp.headers()["content-type"].to_str().unwrap().starts_with("application/json"));
+    let j: Value = json_resp.json().await.unwrap();
+    assert_eq!(j["auth"]["kind"], "pairing");
+    assert_eq!(j["auth"]["pairingUrl"], "/pair");
+
+    // 2. Tailscale mode: disallowed login gets 403 HTML screen naming escaped caller login, never host login or /pair.
+    let ht = H::build(Vec::new(), tailscale_config(None, false));
+    ht.tailscale.set_host_login("alice@acme.example");
+    let st = start(ht).await;
+    let ts_csrf = st.csrf();
+
+    let denied = st
+        .http
+        .get(format!("{}/", st.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Accept", "text/html")
+        .header("Tailscale-User-Login", "bob<script>@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+    assert!(denied.headers()["content-type"].to_str().unwrap().starts_with("text/html"));
+    let body = denied.text().await.unwrap();
+    assert!(body.contains("Access denied"), "{body}");
+    assert!(body.contains("bob&lt;script&gt;@acme.example"), "caller login must be HTML-escaped: {body}");
+    assert!(!body.contains("<script>"), "{body}");
+    assert!(!body.contains("alice@acme.example"), "must never leak host login: {body}");
+    assert!(!body.contains(r#"href="/pair""#), "tailscale-only denial must not link /pair: {body}");
+    assert!(!body.contains(&ts_csrf));
+
+    // 3. Remote off stays 403 JSON even when Accept: text/html is sent.
+    let off = start(H::new()).await;
+    let r = off
+        .http
+        .get(format!("{}/", off.base))
+        .header("Host", "board.acme.example:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Accept", "text/html")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    assert!(r.headers()["content-type"].to_str().unwrap().starts_with("application/json"));
+}
+
+#[tokio::test]
+async fn tailscale_live_auth_expiry_closes_sse_and_api_state_reports_tailscale_denied() {
+    let h = H::build(Vec::new(), tailscale_config(None, false));
+    h.tailscale.set_host_login("alice@acme.example");
+    let s = start(h).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+
+    let mut sse = s
+        .http
+        .get(format!("{}/api/events", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sse.status(), 200);
+    let first = tokio::time::timeout(Duration::from_secs(5), sse.chunk()).await.unwrap().unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&first).contains("event: state"));
+
+    // Host login changes while alice's stream is open.
+    s.h.tailscale.set_host_login("bob@acme.example");
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = sse.chunk().await.unwrap() {
+            let text = String::from_utf8_lossy(&chunk);
+            assert!(!text.contains("event: state"), "unexpected state after auth revocation: {text}");
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "SSE stream did not close after host login changed");
+
+    // The board's /api/state probe then gets 403 with structured tailscale_denied auth metadata.
+    let probe = s
+        .http
+        .get(format!("{}/api/state", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(probe.status(), 403);
+    let body: Value = probe.json().await.unwrap();
+    assert_eq!(body["auth"]["kind"], "tailscale_denied");
+    assert_eq!(body["auth"]["login"], "alice@acme.example");
+}
+
+#[tokio::test]
+async fn thread_links_skip_api_open_on_remote_hosts_and_keep_loopback_behavior() {
+    let (html, st) = two_gate_page().await;
+
+    // 1. Loopback hosts (127.0.0.1, localhost, [::1]) intercept click and POST /api/open.
+    for host in ["127.0.0.1", "localhost", "[::1]"] {
+        let prelude = format!(
+            r#"
+globalThis.__location = {{ hostname: "{host}", hash: "", pathname: "/", origin: "http://{host}:47731", reload() {{}} }};
+globalThis.__fetchReply = (url) => url === "/api/open"
+  ? Promise.resolve({{ ok: true, status: 200, json: () => Promise.resolve({{ opened: true }}) }})
+  : new Promise(() => {{}});
+"#
+        );
+        let r = run_page_async_with(
+            &html,
+            &prelude,
+            &format!(
+                r#"async () => {{
+  emitState({st});
+  const a = threadLink("{THREAD_LINK}", "thread", "Open thread");
+  const ev = a.dispatch("click", {{ button: 0, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false }});
+  await Promise.resolve();
+  const opens = fetches.filter((f) => f.url === "/api/open");
+  return {{ prevented: ev.defaultPrevented, openCount: opens.length, openBody: opens[0] ? JSON.parse(opens[0].body) : null }};
+}}"#
+            ),
+        );
+        assert_eq!(r["prevented"], true, "host={host}: {r}");
+        assert_eq!(r["openCount"], 1, "host={host}: {r}");
+        assert_eq!(r["openBody"]["link"], THREAD_LINK, "host={host}: {r}");
+    }
+
+    // 2. Remote hosts never call /api/open and leave the native <a href="https://app.t3.codes/threads/..."> click unprevented.
+    for host in ["box.acme.ts.net", "board.acme.example"] {
+        let prelude = format!(
+            r#"
+globalThis.__location = {{ hostname: "{host}", hash: "", pathname: "/", origin: "https://{host}:47732", reload() {{}} }};
+globalThis.__openedTabs = [];
+globalThis.open = (u, target, features) => {{ globalThis.__openedTabs.push({{ u, target, features }}); }};
+"#
+        );
+        let r = run_page_async_with(
+            &html,
+            &prelude,
+            &format!(
+                r#"async () => {{
+  emitState({st});
+  const a = threadLink("{THREAD_LINK}", "thread", "Open thread");
+  const ev = a.dispatch("click", {{ button: 0, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false }});
+  await openThread("{THREAD_LINK}");
+  const opens = fetches.filter((f) => f.url === "/api/open");
+  return {{
+    href: a.href,
+    target: a.getAttribute("target"),
+    prevented: ev.defaultPrevented,
+    openCount: opens.length,
+    directTabs: globalThis.__openedTabs,
+  }};
+}}"#
+            ),
+        );
+        assert_eq!(r["href"], THREAD_LINK, "host={host}: {r}");
+        assert_eq!(r["target"], "_blank", "host={host}: {r}");
+        assert_eq!(r["prevented"], false, "host={host}: {r}");
+        assert_eq!(r["openCount"], 0, "host={host}: {r}");
+        assert_eq!(r["directTabs"][0]["u"], THREAD_LINK, "host={host}: {r}");
+    }
+}
+
+#[tokio::test]
+async fn remote_auth_loss_shows_signin_screen_and_stops_sse_retries() {
+    let (html, st) = two_gate_page().await;
+
+    // 1. Revoked/expired pairing session closes SSE -> probes /api/state -> 401 -> sign-in screen, no retry loop.
+    let pairing_prelude = r#"
+globalThis.__location = { hostname: "board.acme.example", hash: "", pathname: "/", origin: "https://board.acme.example:47732", reload() { globalThis.__reloaded = true; } };
+globalThis.__stateReply = null;
+globalThis.__fetchReply = (url) => {
+  if (url === "/api/state" && globalThis.__stateReply) {
+    const r = globalThis.__stateReply;
+    return Promise.resolve({ ok: r.status >= 200 && r.status < 300, status: r.status, json: () => Promise.resolve(r.body) });
+  }
+  return new Promise(() => {});
+};
+"#;
+    let r = run_page_async_with(
+        &html,
+        pairing_prelude,
+        &format!(
+            r#"async () => {{
+  emitState({st});
+  const beforeEs = eventSources.length;
+  globalThis.__stateReply = {{
+    status: 401,
+    body: {{ error: "remote board session is invalid or expired", auth: {{ kind: "pairing", reason: "expired", pairingUrl: "/pair" }} }},
+  }};
+  eventSource.onerror();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  advance(120000);
+  return {{
+    screenHidden: document.getElementById("auth-screen").hidden,
+    appHidden: document.getElementById("app").hidden,
+    title: document.getElementById("auth-title").textContent,
+    cmd: document.getElementById("auth-cmd").textContent,
+    pairHidden: document.getElementById("auth-pair").hidden,
+    pairHref: document.getElementById("auth-pair").getAttribute("href"),
+    esCountBefore: beforeEs,
+    esCountAfter: eventSources.length,
+    esClosed: eventSources[0].closed,
+  }};
+}}"#
+        ),
+    );
+    assert_eq!(r["screenHidden"], false, "{r}");
+    assert_eq!(r["appHidden"], true, "{r}");
+    assert_eq!(r["title"], "Session expired or revoked", "{r}");
+    assert_eq!(r["cmd"], "t3cm board pair", "{r}");
+    assert_eq!(r["pairHidden"], false, "{r}");
+    assert_eq!(r["pairHref"], "/pair", "{r}");
+    assert_eq!(r["esCountBefore"], 1, "{r}");
+    assert_eq!(r["esCountAfter"], 1, "SSE must not reconnect after 401: {r}");
+    assert_eq!(r["esClosed"], true, "{r}");
+
+    // 2. Tailscale live auth recheck closes SSE -> probes /api/state -> 403 tailscale_denied -> access denied screen, no retry loop.
+    let ts_prelude = r#"
+globalThis.__location = { hostname: "box.acme.ts.net", hash: "", pathname: "/", origin: "https://box.acme.ts.net:47732", reload() {} };
+globalThis.__stateReply = null;
+globalThis.__fetchReply = (url) => {
+  if (url === "/api/state" && globalThis.__stateReply) {
+    const r = globalThis.__stateReply;
+    return Promise.resolve({ ok: r.status >= 200 && r.status < 300, status: r.status, json: () => Promise.resolve(r.body) });
+  }
+  return new Promise(() => {});
+};
+"#;
+    let r = run_page_async_with(
+        &html,
+        ts_prelude,
+        &format!(
+            r#"async () => {{
+  emitState({st});
+  globalThis.__stateReply = {{
+    status: 403,
+    body: {{ error: "Tailscale user is not allowed to access this board", auth: {{ kind: "tailscale_denied", login: "bob@acme.example" }} }},
+  }};
+  eventSource.onerror();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  advance(120000);
+  return {{
+    screenHidden: document.getElementById("auth-screen").hidden,
+    appHidden: document.getElementById("app").hidden,
+    title: document.getElementById("auth-title").textContent,
+    desc: document.getElementById("auth-desc").textContent,
+    pairHidden: document.getElementById("auth-pair").hidden,
+    esCount: eventSources.length,
+  }};
+}}"#
+        ),
+    );
+    assert_eq!(r["screenHidden"], false, "{r}");
+    assert_eq!(r["appHidden"], true, "{r}");
+    assert_eq!(r["title"], "Access denied", "{r}");
+    assert!(r["desc"].as_str().unwrap().contains("bob@acme.example"), "{r}");
+    assert_eq!(r["pairHidden"], true, "{r}");
+    assert_eq!(r["esCount"], 1, "SSE must not reconnect after Tailscale 403: {r}");
+
+    // 3. Initial /api/state 401 on a remote host lands on the sign-in screen and closes SSE immediately.
+    let init_401_prelude = r#"
+globalThis.__location = { hostname: "board.acme.example", hash: "", pathname: "/", origin: "https://board.acme.example:47732", reload() {} };
+globalThis.__fetchReply = (url) => url === "/api/state"
+  ? Promise.resolve({
+      ok: false,
+      status: 401,
+      json: () => Promise.resolve({ error: "remote board authentication is required", auth: { kind: "pairing", reason: "missing", pairingUrl: "/pair" } }),
+    })
+  : new Promise(() => {});
+"#;
+    let r = run_page_async_with(
+        &html,
+        init_401_prelude,
+        r#"async () => {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  advance(120000);
+  return {
+    screenHidden: document.getElementById("auth-screen").hidden,
+    title: document.getElementById("auth-title").textContent,
+    esCount: eventSources.length,
+    esClosed: eventSources[0].closed,
+  };
+}"#,
+    );
+    assert_eq!(r["screenHidden"], false, "{r}");
+    assert_eq!(r["title"], "Sign in to t3 board", "{r}");
+    assert_eq!(r["esCount"], 1, "{r}");
+    assert_eq!(r["esClosed"], true, "{r}");
+
+    // 4. Transient 503 on remote host keeps reconnecting; loopback SSE error reconnects without auth screen.
+    let transient_prelude = r#"
+globalThis.__location = { hostname: "board.acme.example", hash: "", pathname: "/", origin: "https://board.acme.example:47732", reload() {} };
+globalThis.__fetchReply = (url) => url === "/api/state"
+  ? Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({ error: "restarting" }) })
+  : new Promise(() => {});
+"#;
+    let r = run_page_async_with(
+        &html,
+        transient_prelude,
+        &format!(
+            r#"async () => {{
+  emitState({st});
+  eventSource.onerror();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  advance(2000);
+  return {{
+    screenHidden: document.getElementById("auth-screen").hidden,
+    esCount: eventSources.length,
+  }};
+}}"#
+        ),
+    );
+    assert_eq!(r["screenHidden"], true, "{r}");
+    assert_eq!(r["esCount"], 2, "transient 503 must still reconnect: {r}");
+
+    let loopback_prelude = r#"
+globalThis.__location = { hostname: "127.0.0.1", hash: "", pathname: "/", origin: "http://127.0.0.1:47731", reload() {} };
+"#;
+    let r = run_page_async_with(
+        &html,
+        loopback_prelude,
+        &format!(
+            r#"async () => {{
+  emitState({st});
+  const stateFetchesBefore = fetches.filter((f) => f.url === "/api/state").length;
+  eventSource.onerror();
+  advance(1500);
+  const stateFetchesAfter = fetches.filter((f) => f.url === "/api/state").length;
+  return {{
+    screenHidden: document.getElementById("auth-screen").hidden,
+    probed: stateFetchesAfter - stateFetchesBefore,
+    esCount: eventSources.length,
+  }};
+}}"#
+        ),
+    );
+    assert_eq!(r["screenHidden"], true, "{r}");
+    assert_eq!(r["probed"], 0, "loopback SSE error must not probe auth: {r}");
+    assert_eq!(r["esCount"], 2, "loopback SSE must reconnect on backoff: {r}");
+}

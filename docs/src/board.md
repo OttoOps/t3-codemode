@@ -532,6 +532,37 @@ of Tailscale Serve with `requirePairing: true`:
    open `/api/events` stream. Both pairing tokens and session tokens are stored
    only as SHA-256 hashes in `store.db`.
 
+### Using the board from a phone or laptop
+
+Once remote access is enabled over HTTPS, the board adapts to remote devices
+without changing direct loopback behavior:
+
+- **Thread links open on the device you clicked from.** On direct loopback
+  (`127.0.0.1`, `localhost`, or `[::1]`), clicking a T3 thread link still calls
+  `POST /api/open` to focus the desktop app on the host (unless
+  `board.openLinks` is `"tab"`). On any remote host, the browser opens the
+  `https://app.t3.codes/threads/...` URL directly on that device and never calls
+  `POST /api/open`; the server also refuses remote `POST /api/open` requests
+  with 403.
+- **Add to Home Screen.** The board serves an embedded `/manifest.webmanifest`
+  and icons (`/icon.svg`, `/icon-192.png`, `/icon-512.png`) behind the same
+  authentication guards and zero-external-request CSP. On iOS Safari, open the
+  HTTPS board URL and tap **Share** -> **Add to Home Screen**. On Android Chrome
+  or desktop Chromium, use the browser's **Install app** or **Add to Home
+  screen** menu.
+- **Phone layout and notifications.** Narrow viewports (under 900 px) switch to
+  a single-column view with bottom tabs (**Needs you**, **Tickets**,
+  **Activity**), touch-sized controls, and a collapsible Launch/Ask dock.
+  Because the remote board runs over HTTPS, browser notifications (**Notify
+  me**) work on remote browsers that support the Notifications API.
+- **Sign-in and expired sessions.** Opening `/` in a remote browser without an
+  active session, or losing access while the tab is open (for example after
+  `t3cm board revoke`, 30-day session expiry, or a Tailscale login change that
+  causes the `/api/events` live auth recheck to close the stream), stops
+  background reconnect retries and displays a sign-in or access-denied screen
+  explaining whether to pair again with `t3cm board pair` or check Tailscale
+  access.
+
 ### Reverse-proxy examples
 
 Any proxy fronting the board must follow the rules in
@@ -639,11 +670,13 @@ server {
 
 | Route | Does |
 |---|---|
-| `GET /` | The page, with a per-process CSRF token embedded |
+| `GET /` | The page, with a per-process CSRF token embedded (unauthenticated remote browser navigations with `Accept: text/html` receive a 401/403 sign-in or access-denied page with no CSRF token) |
+| `GET /manifest.webmanifest` | Embedded web app manifest for Add to Home Screen (same board auth guards, zero external requests) |
+| `GET /icon.svg`, `/icon-192.png`, `/icon-512.png` | Embedded board icons for browser tabs, notifications, and Add to Home Screen (same board auth guards) |
 | `GET /pair` | Remote browser pairing page (enabled when `board.remote.mode` is `"pairing"`, or `"tailscale"` with `requirePairing: true`); reads the token from `#<token>`, clears the fragment, and posts to `POST /api/pair` |
 | `POST /api/pair` `{token, label?}` | Redeem a single-use 5-minute pairing token (`Content-Type: application/json`) over the remote HTTPS origin and set a 30-day `HttpOnly; Secure; SameSite=Strict; Path=/` session cookie |
 | `GET /api/state` | `{rev, cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, counts, service}`, with `counts.newIssues`. `rev` is the board revision: it goes up with every change, keeps going up across a restart, and a state whose `rev` is at least a write's `rev` already holds that write; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
-| `GET /api/events` | SSE: a `state` event on every change, carrying the same `rev` (closes when a remote pairing session is revoked or expires) |
+| `GET /api/events` | SSE: a `state` event on every change, carrying the same `rev` (closes when a remote pairing session is revoked or expires, or when a Tailscale login is no longer allowed) |
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it |
 | `POST /api/cards/{id}/dismiss` | Resolve without messaging |
@@ -661,7 +694,7 @@ server {
 | `GET /api/contexts` | `{contexts: [...]}`, sorted by name; each is `{id, name, spec, createdAt, updatedAt}`, and `spec` is `{projects, statuses, kinds, q?}`. Each project is a T3 project id, or, for an item with no project id, its lowercased `owner/repo` or title. A context saved before project ids holds an `owner/repo` or a project title instead, and an item matches it ignoring case |
 | `PUT /api/contexts/{id}` `{name, spec}` | Create the context (201) or replace its name and filter (200), answering `{context, rev}`. Leave out `spec` to rename an existing context, or `name` to change only its filter; either form needs the context to exist (404 if it does not). `id` is 1 to 64 letters, digits, `-` or `_`. Names are unique ignoring case (409), at most 60 characters, and never "All". Statuses are `running`, `waiting`, `blocked` and `done`, and kinds are the card kinds. The board keeps at most 100 contexts |
 | `DELETE /api/contexts/{id}` | Delete the context (404 if there is none), answering `{deleted, rev}` |
-| `POST /api/open` `{link}` | Open a T3 thread link in the running Windows desktop app (on Windows, or from WSL); returns `{opened}`, and the page opens a new tab when it is `false` (400 for a link that is not a T3 thread) |
+| `POST /api/open` `{link}` | Loopback-only: open a T3 thread link in the running Windows desktop app (on Windows, or from WSL); returns `{opened}`, and the page opens a new tab when it is `false` (400 for a link that is not a T3 thread; 403 for all remote requests) |
 
 Direct loopback requests require `Host` to be `127.0.0.1:<port>`,
 `localhost:<port>`, or `[::1]:<port>` with no proxy headers and refuse any other

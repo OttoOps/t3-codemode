@@ -2,8 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#181b1f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="t3 board">
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <title>t3 board</title>
 <style>
 :root {
@@ -477,6 +486,33 @@ select:disabled { opacity: 0.55; cursor: default; }
 .err-strip[hidden] { display: none; }
 .err-strip span { flex: 1 1 auto; }
 .mid-only, .phone-only, .short { display: none !important; }
+.auth-screen {
+  position: fixed; inset: 0; z-index: 100; overflow-y: auto;
+  display: grid; place-items: center;
+  padding: 24px 16px max(24px, env(safe-area-inset-bottom, 0px));
+  background: var(--canvas); color: var(--ink);
+}
+.auth-card {
+  width: 100%; max-width: 460px; padding: 24px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--panel);
+  display: grid; gap: 12px;
+}
+.auth-card h1 { font-size: 19px; line-height: 24px; font-weight: 600; }
+.auth-desc { color: var(--ink-2); font-size: 14px; line-height: 20px; }
+.auth-desc code { font-family: var(--mono); font-size: 13px; color: var(--ink); }
+.auth-cmd {
+  display: block; padding: 8px 10px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--panel-2);
+  font-family: var(--mono); font-size: 13px; line-height: 18px;
+  overflow-wrap: anywhere; user-select: all;
+}
+.auth-detail {
+  padding: 8px 10px; border-radius: 6px; font-size: 13px; line-height: 18px;
+  background: var(--fail-soft); color: var(--fail); border: 1px solid var(--fail);
+}
+.auth-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.auth-acts .btn { height: auto; min-height: 36px; padding: 0 14px; font-size: 14px; text-decoration: none; }
+.auth-acts .btn:hover { text-decoration: none; }
 
 dialog { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); padding: 16px; max-width: 420px; }
 dialog::backdrop { background: rgb(0 0 0 / 0.4); }
@@ -612,9 +648,10 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .top { gap: 8px; padding: 0 12px; }
   .counts .runc, #keys-btn, .conn .facts, .needc .w, .tools .btn .w { display: none !important; }
   .short { display: inline !important; }
+  #svc-short { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .panes {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) 56px 56px;
+    grid-template-rows: minmax(0, 1fr) 56px auto;
     grid-template-areas: "main" "cmd" "nav";
   }
   .mid-only { display: none !important; }
@@ -629,6 +666,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   #p-tix .tabs { margin-left: 0; }
   .mtabs {
     grid-area: nav; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    min-height: 56px; padding-bottom: env(safe-area-inset-bottom, 0px);
     border-top: 1px solid var(--line); background: var(--panel);
   }
   .mtab {
@@ -665,7 +703,11 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .nrow .n2 a { display: inline-flex; align-items: center; min-height: 44px; }
   .nrow .tl a { display: inline; }
   .srow.ask { grid-template-columns: minmax(0, 1fr) auto auto; }
-  input[type=text], input[type=search], textarea { font-size: 16px; }
+  input[type=text], input[type=search], textarea, select { font-size: 16px; }
+  select { min-height: 44px; }
+  .auth-card { padding: 20px; }
+  .auth-acts { flex-direction: column; }
+  .auth-acts .btn { min-height: 44px; width: 100%; }
   #ask input[type=text] { height: 44px; }
   #issues { height: 44px; padding-top: 8px; }
   .forms { padding: 4px 12px; align-items: center; }
@@ -853,6 +895,19 @@ kbd { font-family: var(--mono); font-size: 12px; }
   </nav>
 </main>
 </div>
+<section class="auth-screen" id="auth-screen" aria-labelledby="auth-title" hidden>
+  <div class="auth-card">
+    <h1 id="auth-title" tabindex="-1">Sign in to t3 board</h1>
+    <p id="auth-desc" class="auth-desc"></p>
+    <p id="auth-hint" class="meta" hidden></p>
+    <code id="auth-cmd" class="auth-cmd" hidden></code>
+    <p id="auth-detail" class="auth-detail" role="alert" hidden></p>
+    <div class="auth-acts">
+      <a class="btn go" id="auth-pair" href="/pair" hidden>Open pairing page</a>
+      <button class="btn" type="button" id="auth-retry">Try again</button>
+    </div>
+  </div>
+</section>
 <div class="sr" id="live" aria-live="polite" aria-atomic="true"></div>
 <div class="sr" id="alert" role="alert" aria-atomic="true"></div>
 <dialog id="keys" aria-labelledby="keys-h">
@@ -1027,6 +1082,15 @@ function safeUrl(u) {
   return typeof u === "string" && /^https?:\/\//.test(u) ? u : null;
 }
 
+function isLoopbackHost() {
+  try {
+    const host = typeof location === "object" && location ? String(location.hostname || "").toLowerCase() : "";
+    return host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
+  } catch (_) {
+    return false;
+  }
+}
+
 function threadLink(href, text, name) {
   const u = safeUrl(href);
   if (!u) return null;
@@ -1034,6 +1098,7 @@ function threadLink(href, text, name) {
   a.addEventListener("click", (e) => {
     if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
     if (!/^https:\/\/app\.t3\.codes\/threads\/[A-Za-z0-9._~%-]+\/[A-Za-z0-9._~%-]+$/.test(a.href)) return;
+    if (!isLoopbackHost()) return;
     if (state && state.service && state.service.openLinks === "tab") return;
     e.preventDefault();
     openThread(a.href);
@@ -1060,10 +1125,15 @@ function setLink(slot, href, text, name) {
 }
 
 async function openThread(href) {
+  if (!isLoopbackHost()) {
+    window.open(href, "_blank", "noopener,noreferrer");
+    return;
+  }
   let opened = false;
   try {
     const r = await fetch("/api/open", {
       method: "POST",
+      credentials: "same-origin",
       headers: { "Content-Type": "application/json", "X-T3CM-CSRF": CSRF },
       body: JSON.stringify({ link: href }),
       signal: AbortSignal.timeout(3000),
@@ -1183,12 +1253,14 @@ async function post(path, body) {
 async function send(method, path, body) {
   const r = await fetch(path, {
     method,
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json", "X-T3CM-CSRF": CSRF },
     body: JSON.stringify(body || {}),
   });
   let data = null;
   try { data = await r.json(); } catch (_) { data = null; }
   if (!r.ok) {
+    handleAuthFailure(r.status, data, true);
     const err = new Error((data && data.error) || ("HTTP " + r.status));
     err.status = r.status;
     throw err;
@@ -1703,8 +1775,13 @@ function toggleFull(card) {
   card._loaded = hd;
   const pre = box.firstChild;
   pre.textContent = "Loading...";
-  fetch("/api/msg/" + encodeURIComponent(hd))
-    .then(async (r) => { const m = await r.json(); if (card._loaded === hd) pre.textContent = r.ok ? m.body : (m.error || "not found"); })
+  fetch("/api/msg/" + encodeURIComponent(hd), { credentials: "same-origin" })
+    .then(async (r) => {
+      let m = null;
+      try { m = await r.json(); } catch (_) { m = null; }
+      if (handleAuthFailure(r.status, m, false)) return;
+      if (card._loaded === hd) pre.textContent = r.ok && m ? m.body : ((m && m.error) || "not found");
+    })
     .catch((e) => { if (card._loaded !== hd) return; pre.textContent = String(e.message || e); card._loaded = null; });
 }
 
@@ -3096,7 +3173,7 @@ function notifyNew(s) {
   const where = only && filterCtx(s);
   for (const c of fresh) {
     if (only && !matches(cardDesc(c, where), only)) continue;
-    try { new Notification((c.label ? c.label + " " : "") + c.kind + " (" + c.id + ")", { body: plain(c.text), tag: "t3cm-" + c.id }); } catch (_) {}
+    try { new Notification((c.label ? c.label + " " : "") + c.kind + " (" + c.id + ")", { body: plain(c.text), tag: "t3cm-" + c.id, icon: "/icon-192.png" }); } catch (_) {}
   }
 }
 
@@ -3390,21 +3467,165 @@ function setConnected(on) {
   if (!on) announce("Disconnected from the board. Reconnecting.", true);
 }
 
-let es = null, backoff = 1000;
+let es = null, backoff = 1000, reconnectTimer = null, authBlocked = false, authProbeInFlight = false;
+
+function isAuthRefusal(status, data, isMutation) {
+  if (isLoopbackHost()) return false;
+  if (status === 401) return true;
+  if (status !== 403) return false;
+  if (data && data.auth && typeof data.auth === "object") return true;
+  return !isMutation;
+}
+
+function showAuthScreen(status, data) {
+  authBlocked = true;
+  if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (es) { es.close(); es = null; }
+  for (const p of pending.values()) { if (!p.sent) clearTimeout(p.timer); }
+  pending.clear();
+  for (const id of ["keys", "models-dlg"]) {
+    const dlg = $(id);
+    if (dlg && dlg.open) { if (dlg.close) dlg.close(); else dlg.open = false; }
+  }
+  const auth = data && data.auth && typeof data.auth === "object" ? data.auth : null;
+  const kind = (auth && auth.kind) || (status === 403 ? "forbidden" : "pairing");
+  const titleEl = $("auth-title");
+  const descEl = $("auth-desc");
+  const hintEl = $("auth-hint");
+  const cmdEl = $("auth-cmd");
+  const detailEl = $("auth-detail");
+  const pairEl = $("auth-pair");
+  const retryEl = $("auth-retry");
+  const errMsg = data && typeof data.error === "string" ? data.error : "";
+
+  let title = "Sign in to t3 board";
+  let hint = "";
+  let cmd = "";
+  let showPair = false;
+  let pairHref = "/pair";
+
+  if (kind === "pairing") {
+    const expired = (auth && auth.reason === "expired") || everConnected;
+    title = expired ? "Session expired or revoked" : "Sign in to t3 board";
+    setText(descEl, expired
+      ? "This browser's remote session is no longer valid. Pair this device again to continue."
+      : "This browser needs a remote pairing session to open the board.");
+    hint = "Run on the host, then scan the QR code or open the pairing link:";
+    cmd = "t3cm board pair";
+    showPair = true;
+    if (auth && typeof auth.pairingUrl === "string" && auth.pairingUrl.startsWith("/")) pairHref = auth.pairingUrl;
+  } else if (kind === "tailscale_denied") {
+    title = "Access denied";
+    const login = auth && typeof auth.login === "string" ? auth.login : "";
+    if (login) {
+      descEl.replaceChildren("Signed in via Tailscale as ", h("code", {}, login), ", which is not allowed to access this board.");
+    } else {
+      setText(descEl, "Your Tailscale account is not allowed to access this board.");
+    }
+    hint = "Switch Tailscale accounts on this device, or allow this login on the host:";
+    cmd = "t3cm board expose --tailscale --allow-user <login>";
+  } else if (kind === "tailscale_unavailable") {
+    title = "Tailscale sign-in required";
+    setText(descEl, "The host could not verify its Tailscale login to authorize this request.");
+    hint = "Check Tailscale status and remote board health on the host:";
+    cmd = "t3cm doctor";
+  } else if (kind === "tailscale_missing") {
+    title = "Tailscale sign-in required";
+    setText(descEl, "This request did not carry a Tailscale user identity header.");
+    hint = "Open the board through its Tailscale Serve HTTPS URL, or check the host:";
+    cmd = "t3cm doctor";
+  } else if (kind === "remote_disabled") {
+    title = "Remote access is off";
+    setText(descEl, "Remote board access is disabled on the host.");
+    hint = "Enable remote access on the host and restart t3cm:";
+    cmd = "t3cm board expose --tailscale";
+  } else {
+    title = "Access denied";
+    setText(descEl, errMsg || "This browser is not allowed to access the remote board.");
+    hint = "Check your remote access configuration on the host:";
+    cmd = "t3cm doctor";
+  }
+
+  setText(titleEl, title);
+  setText(hintEl, hint);
+  hintEl.hidden = !hint;
+  setText(cmdEl, cmd);
+  cmdEl.hidden = !cmd;
+  const showDetail = !!errMsg && errMsg !== descEl.textContent;
+  setText(detailEl, showDetail ? errMsg : "");
+  detailEl.hidden = !showDetail;
+  setAttr(pairEl, "href", pairHref);
+  pairEl.hidden = !showPair;
+  retryEl.className = showPair ? "btn" : "btn go";
+
+  const skip = document.querySelector(".skip");
+  if (skip) skip.hidden = true;
+  $("app").hidden = true;
+  const screen = $("auth-screen");
+  screen.hidden = false;
+  document.title = title + " - t3 board";
+  announce(title + ". " + descEl.textContent, true);
+  if (titleEl.focus) titleEl.focus();
+}
+
+function handleAuthFailure(status, data, isMutation) {
+  if (!isAuthRefusal(status, data, isMutation)) return false;
+  showAuthScreen(status, data);
+  return true;
+}
+
+function scheduleReconnect() {
+  if (authBlocked || reconnectTimer !== null) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (!authBlocked) connect();
+  }, backoff);
+  backoff = Math.min(backoff * 2, 30000);
+}
+
+async function probeRemoteAuth() {
+  if (authBlocked || authProbeInFlight) return;
+  authProbeInFlight = true;
+  try {
+    const r = await fetch("/api/state", { credentials: "same-origin", cache: "no-store" });
+    if (authBlocked) return;
+    let data = null;
+    try { data = await r.json(); } catch (_) { data = null; }
+    if (handleAuthFailure(r.status, data, false)) return;
+    if (r.ok && data) {
+      try { render(data); } catch (err) { console.error(err); }
+      backoff = 1000;
+    }
+  } catch (_) {} finally {
+    authProbeInFlight = false;
+  }
+  if (!authBlocked) scheduleReconnect();
+}
+
 function connect() {
-  es = new EventSource("/api/events");
-  es.addEventListener("state", (e) => {
+  if (authBlocked) return;
+  if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (es) { es.close(); es = null; }
+  const cur = new EventSource("/api/events");
+  es = cur;
+  cur.addEventListener("state", (e) => {
+    if (authBlocked || es !== cur) return;
     backoff = 1000;
     everConnected = true;
     setConnected(true);
     lastStateClock = new Date().toTimeString().slice(0, 5);
     try { render(JSON.parse(e.data)); } catch (err) { console.error(err); }
   });
-  es.onerror = () => {
-    es.close();
+  cur.onerror = () => {
+    if (es === cur) es = null;
+    cur.close();
     setConnected(false);
-    setTimeout(connect, backoff);
-    backoff = Math.min(backoff * 2, 30000);
+    if (authBlocked) return;
+    if (!isLoopbackHost()) {
+      probeRemoteAuth();
+      return;
+    }
+    scheduleReconnect();
   };
 }
 
@@ -3575,7 +3796,7 @@ function listOf(el) {
 
 let gPending = false;
 document.addEventListener("keydown", (e) => {
-  if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+  if (authBlocked || e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
   const t = e.target || document.activeElement;
   const field = t && t.closest && t.closest("input, textarea, select, [contenteditable]");
   if (e.key === "Escape") {
@@ -4204,6 +4425,8 @@ function wire() {
   });
   $("launch").addEventListener("submit", onLaunch);
   $("ask").addEventListener("submit", onAsk);
+  $("auth-screen").hidden = true;
+  $("auth-retry").addEventListener("click", () => { try { location.reload(); } catch (_) {} });
   const n = $("notify");
   if ("Notification" in window) {
     const paint = () => {
@@ -4622,16 +4845,19 @@ function applyModelsSnapshot(d, seq, forceForm) {
 }
 
 async function refreshModels(forceForm) {
+  if (authBlocked) return false;
   const seq = ++modelsState.reqSeq;
   modelsState.activeGetSeq = seq;
   try {
-    const r = await fetch("/api/models");
+    const r = await fetch("/api/models", { credentials: "same-origin" });
     if (!r.ok) {
+      let errBody = null;
       let detail = "HTTP " + r.status;
       try {
-        const errBody = await r.json();
+        errBody = await r.json();
         if (errBody && errBody.error) detail = errBody.error;
       } catch (_) {}
+      if (handleAuthFailure(r.status, errBody, false)) return false;
       if (seq >= modelsState.appliedSeq) {
         modelsState.refreshErr = "Could not refresh models: " + detail;
         paintModels(false);
@@ -4823,12 +5049,20 @@ document.addEventListener("focusin", (e) => {
 });
 
 setInterval(() => {
+  if (authBlocked) return;
   for (const el of document.querySelectorAll("[data-at]")) if (el.dataset.at) el.textContent = age(el.dataset.at);
   if (state) paintService(state);
 }, 30000);
 
 wire();
-fetch("/api/state").then((r) => r.ok ? r.json() : null).then((s) => { if (s && !state) render(s); }).catch(() => {});
+fetch("/api/state", { credentials: "same-origin", cache: "no-store" })
+  .then(async (r) => {
+    let data = null;
+    try { data = await r.json(); } catch (_) { data = null; }
+    if (handleAuthFailure(r.status, data, false)) return;
+    if (r.ok && data && !state) render(data);
+  })
+  .catch(() => {});
 refreshModels(true);
 connect();
 </script>

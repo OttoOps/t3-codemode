@@ -48,6 +48,7 @@ class Element extends Node {
     return d;
   }
   get id() { return this.attrs.get("id") || ""; }
+  get href() { return this.attrs.get("href") || ""; }
   setAttribute(k, v) { this.attrs.set(k, String(v)); }
   getAttribute(k) { return this.attrs.has(k) ? this.attrs.get(k) : null; }
   hasAttribute(k) { return this.attrs.has(k); }
@@ -89,11 +90,12 @@ class Element extends Node {
   remove() { if (this.parentNode) this.parentNode.detach(this); }
   addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
   dispatch(type, extra) {
-    const ev = Object.assign({ type, target: this, preventDefault() {} }, extra);
+    const ev = Object.assign({ type, target: this, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } }, extra);
     for (let n = this; n; n = n.parentNode) {
       for (const f of n.listeners[type] || []) f(Object.assign(ev, { currentTarget: n }));
       if (typeof n["on" + type] === "function") n["on" + type](Object.assign(ev, { currentTarget: n }));
     }
+    return ev;
   }
   focus() { if (this.isConnected && !this.disabled) document.activeElement = this; }
   matches(sel) { return sel.split(",").some((s) => matchChain(this, s.trim().split(/\s+/))); }
@@ -160,6 +162,8 @@ const localStorage = {
 
 const window = globalThis;
 window.addEventListener = () => {};
+const location = globalThis.__location || { hostname: "127.0.0.1", hash: "", pathname: "/", origin: "http://127.0.0.1:47731", reload() {} };
+const AbortSignal = globalThis.AbortSignal || { timeout: () => ({}) };
 const console = { error: (e) => { throw e; }, log: () => {}, warn: () => {} };
 const CSS = { escape: (s) => String(s).replace(/["\\]/g, "\\$&") };
 const intervals = [];
@@ -185,10 +189,11 @@ const fetches = [];
 let fetchReply = globalThis.__fetchReply || null;
 const fetch = (url, opts) => { fetches.push({ url, method: (opts && opts.method) || "GET", body: opts && opts.body }); return fetchReply ? fetchReply(url, opts) : new Promise(() => {}); };
 let eventSource = null;
+const eventSources = [];
 class EventSource {
-  constructor(url) { this.url = url; this.listeners = {}; eventSource = this; }
+  constructor(url) { this.url = url; this.listeners = {}; this.closed = false; eventSource = this; eventSources.push(this); }
   addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
-  close() {}
+  close() { this.closed = true; }
 }
 
 function emitState(s) {
