@@ -50,6 +50,14 @@ fn invalid(msg: impl Into<String>) -> ContextError {
     ContextError::Invalid(msg.into())
 }
 
+pub fn same_name(a: &str, b: &str) -> bool {
+    unicase::eq(a, b)
+}
+
+pub fn name_order(a: &str, b: &str) -> std::cmp::Ordering {
+    unicase::UniCase::new(a).cmp(&unicase::UniCase::new(b))
+}
+
 fn check_id(id: &str) -> Result<(), ContextError> {
     let ok =
         !id.is_empty() && id.len() <= MAX_ID && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
