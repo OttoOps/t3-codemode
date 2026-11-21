@@ -225,7 +225,10 @@ filters** and the "N hidden" button. The same menu edits contexts:
 
 Each browser remembers its own context and comes back to it after a reload. If
 that context was deleted, the page falls back to All. A context changed in
-another browser applies here too.
+another browser applies here too. A change that arrives while this browser is
+saving a context applies when the save finishes, so the newer of the two edits
+wins. A context you just saved stays on until the board sends a state that
+includes the save, however long that takes.
 
 While a context is on, a browser notification goes out only for a new card
 inside it. A card outside it still counts toward "N hidden".
@@ -575,8 +578,8 @@ server {
 | `GET /` | The page, with a per-process CSRF token embedded |
 | `GET /pair` | Remote browser pairing page (enabled when `board.remote.mode` is `"pairing"`); reads the token from `#<token>`, clears the fragment, and posts to `POST /api/pair` |
 | `POST /api/pair` `{token, label?}` | Redeem a single-use 5-minute pairing token (`Content-Type: application/json`) and set a 30-day `HttpOnly; Secure; SameSite=Strict; Path=/` session cookie |
-| `GET /api/state` | `{cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, counts, service}`, with `counts.newIssues`; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
-| `GET /api/events` | SSE: a `state` event on every change (closes when a remote pairing session is revoked or expires) |
+| `GET /api/state` | `{rev, cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, counts, service}`, with `counts.newIssues`. `rev` is the board revision: it goes up with every change, keeps going up across a restart, and a state whose `rev` is at least a write's `rev` already holds that write; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
+| `GET /api/events` | SSE: a `state` event on every change, carrying the same `rev` (closes when a remote pairing session is revoked or expires) |
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it |
 | `POST /api/cards/{id}/dismiss` | Resolve without messaging |
@@ -592,8 +595,8 @@ server {
 | `POST /api/new-issues/{id}/dismiss`, `/restore` | Dismiss the entry, or bring a dismissed one back (400 if already dismissed, or not dismissed) |
 | `POST /api/settle-done` | Settle every done ticket and closed ask; returns `{tickets, asks}` counts |
 | `GET /api/contexts` | `{contexts: [...]}`, sorted by name; each is `{id, name, spec, createdAt, updatedAt}`, and `spec` is `{projects, statuses, kinds, q?}`. Each project is a T3 project id, or, for an item with no project id, its lowercased `owner/repo` or title. A context saved before project ids holds an `owner/repo` or a project title instead, and an item matches it ignoring case |
-| `PUT /api/contexts/{id}` `{name, spec}` | Create the context (201) or replace its name and filter (200). Leave out `spec` to rename an existing context, or `name` to change only its filter; either form needs the context to exist (404 if it does not). `id` is 1 to 64 letters, digits, `-` or `_`. Names are unique ignoring case (409), at most 60 characters, and never "All". Statuses are `running`, `waiting`, `blocked` and `done`, and kinds are the card kinds. The board keeps at most 100 contexts |
-| `DELETE /api/contexts/{id}` | Delete the context (404 if there is none) |
+| `PUT /api/contexts/{id}` `{name, spec}` | Create the context (201) or replace its name and filter (200), answering `{context, rev}`. Leave out `spec` to rename an existing context, or `name` to change only its filter; either form needs the context to exist (404 if it does not). `id` is 1 to 64 letters, digits, `-` or `_`. Names are unique ignoring case (409), at most 60 characters, and never "All". Statuses are `running`, `waiting`, `blocked` and `done`, and kinds are the card kinds. The board keeps at most 100 contexts |
+| `DELETE /api/contexts/{id}` | Delete the context (404 if there is none), answering `{deleted, rev}` |
 | `POST /api/open` `{link}` | Open a T3 thread link in the running Windows desktop app (on Windows, or from WSL); returns `{opened}`, and the page opens a new tab when it is `false` (400 for a link that is not a T3 thread) |
 
 Direct loopback requests require `Host` to be `127.0.0.1:<port>`,

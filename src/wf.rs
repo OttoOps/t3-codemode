@@ -248,6 +248,8 @@ pub struct Wf {
     pub(crate) config_lock: tokio::sync::Mutex<()>,
     pub(crate) models_rev: AtomicU64,
     pub(crate) models_session: String,
+    pub(crate) state_rev: AtomicU64,
+    pub(crate) context_writes: Mutex<()>,
 }
 
 const MAX_PR_PAGES: usize = 20;
@@ -278,6 +280,7 @@ impl Wf {
             let _ = store.meta_set(crate::reconcile::SINCE, &iso(clock.now()));
         }
         let ask_config = crate::board::AskConfig::from_board(&config.board);
+        let rev = crate::board::clock_rev(&*clock);
         Wf {
             store,
             t3,
@@ -303,6 +306,8 @@ impl Wf {
             config_lock: tokio::sync::Mutex::new(()),
             models_rev: AtomicU64::new(0),
             models_session: crate::board::random_id(),
+            state_rev: AtomicU64::new(rev),
+            context_writes: Mutex::new(()),
         }
     }
 

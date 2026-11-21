@@ -607,14 +607,16 @@ async fn put_context(State(web): State<Web>, Path(id): Path<String>, raw: Bytes)
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
     match web.app.wf.put_context(&id, b) {
-        Ok((created, c)) => json_ok(if created { StatusCode::CREATED } else { StatusCode::OK }, json!({"context": c})),
+        Ok((created, c, rev)) => {
+            json_ok(if created { StatusCode::CREATED } else { StatusCode::OK }, json!({"context": c, "rev": rev}))
+        }
         Err(e) => context_failed(&web.app, e),
     }
 }
 
 async fn delete_context(State(web): State<Web>, Path(id): Path<String>) -> Response {
     match web.app.wf.delete_context(&id) {
-        Ok(()) => json_ok(StatusCode::OK, json!({"deleted": id})),
+        Ok(rev) => json_ok(StatusCode::OK, json!({"deleted": id, "rev": rev})),
         Err(e) => context_failed(&web.app, e),
     }
 }

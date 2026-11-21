@@ -414,6 +414,11 @@ pub(crate) fn random_id() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+// A restarted service starts above the revisions an open page already holds.
+pub(crate) fn clock_rev(clock: &dyn crate::clock::Clock) -> u64 {
+    u64::try_from(clock.now().as_millisecond()).unwrap_or(0)
+}
+
 fn nonempty(s: Option<String>) -> Option<String> {
     s.map(|x| x.trim().to_string()).filter(|x| !x.is_empty())
 }
@@ -497,8 +502,15 @@ pub fn identity_repo(project: &Value) -> Option<String> {
 }
 
 impl Wf {
-    pub fn changed(&self) {
+    pub fn changed(&self) -> u64 {
+        self.state_rev.fetch_max(clock_rev(&*self.clock).saturating_sub(1), Ordering::AcqRel);
+        let rev = self.state_rev.fetch_add(1, Ordering::AcqRel) + 1;
         let _ = self.changes.send(());
+        rev
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.state_rev.load(Ordering::Acquire)
     }
 
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {
@@ -1840,6 +1852,7 @@ impl Wf {
     }
 
     pub fn snapshot(&self) -> Result<Value> {
+        let rev = self.revision();
         let cards: Vec<Value> = self.cards()?.iter().map(|c| self.placed(json!(c), c.ticket.as_deref())).collect();
         let tree = self.tree()?;
         let feed = self.feed(self.config.board.feed)?;
@@ -1850,6 +1863,7 @@ impl Wf {
         let open = tree.iter().filter(|t| t["done"] == false).count();
         let running = tree.iter().filter(|t| t["status"] == "running").count();
         Ok(json!({
+            "rev": rev,
             "cards": cards,
             "tree": tree,
             "feed": feed,
