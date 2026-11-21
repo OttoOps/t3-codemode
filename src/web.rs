@@ -155,8 +155,8 @@ impl AuthError {
                 (
                     "Access denied",
                     lead,
-                    "Switch Tailscale accounts on this device, or allow this login on the host:",
-                    "t3cm board expose --tailscale --allow-user <login>",
+                    "Switch Tailscale accounts on this device, or add this login to board.remote.allowUsers in t3cm's config.json on the host and restart t3cm.",
+                    "",
                     false,
                 )
             }
@@ -180,12 +180,14 @@ impl AuthError {
         };
         let pair_btn = if show_pair { r#"<a class="btn go" href="/pair">Open pairing page</a>"# } else { "" };
         let retry_cls = if show_pair { "btn" } else { "btn go" };
+        let cmd_block =
+            if cmd.is_empty() { String::new() } else { format!(r#"<code class="cmd">{}</code>"#, escape_html(cmd)) };
         let html = format!(
             r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>{title} - t3 board</title>
 <style>
@@ -283,7 +285,7 @@ impl AuthError {
   <h1>{title}</h1>
   <p>{lead}</p>
   <p>{hint}</p>
-  <code class="cmd">{cmd}</code>
+  {cmd_block}
   <div class="acts">{pair_btn}<a class="{retry_cls}" href="/">Try again</a></div>
 </main>
 </body>
@@ -291,7 +293,7 @@ impl AuthError {
             title = escape_html(title),
             lead = lead,
             hint = escape_html(hint),
-            cmd = escape_html(cmd),
+            cmd_block = cmd_block,
             pair_btn = pair_btn,
             retry_cls = retry_cls,
         );

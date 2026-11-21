@@ -554,7 +554,10 @@ without changing direct loopback behavior:
   a single-column view with bottom tabs (**Needs you**, **Tickets**,
   **Activity**), touch-sized controls, and a collapsible Launch/Ask dock.
   Because the remote board runs over HTTPS, browser notifications (**Notify
-  me**) work on remote browsers that support the Notifications API.
+  me**) work on browsers that support direct page notifications (`new
+  Notification()`, such as desktop browsers). Mobile browsers that require a
+  service worker for notifications (such as Chrome on Android) mark
+  notifications unavailable instead of failing silently.
 - **Sign-in and expired sessions.** Opening `/` in a remote browser without an
   active session, or losing access while the tab is open (for example after
   `t3cm board revoke`, 30-day session expiry, or a Tailscale login change that

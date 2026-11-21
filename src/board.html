@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
 <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#181b1f">
@@ -3167,13 +3167,20 @@ function notifyNew(s) {
   if (firstState || !fresh.length) return;
   const urgent = fresh.filter((c) => FAIL_KINDS.has(c.kind)).length;
   announce(fresh.length + (fresh.length > 1 ? " new decisions" : " new decision") + (urgent ? ", " + urgent + (urgent > 1 ? " blockers" : " blocker") : ""));
-  if (!document.hidden || !("Notification" in window) || Notification.permission !== "granted") return;
+  if (!document.hidden || !("Notification" in window) || Notification.permission !== "granted" || notifyUnsupported) return;
   const ctx = activeContext();
   const only = ctx && specFilter(ctx.spec);
   const where = only && filterCtx(s);
   for (const c of fresh) {
     if (only && !matches(cardDesc(c, where), only)) continue;
-    try { new Notification((c.label ? c.label + " " : "") + c.kind + " (" + c.id + ")", { body: plain(c.text), tag: "t3cm-" + c.id, icon: "/icon-192.png" }); } catch (_) {}
+    try { new Notification((c.label ? c.label + " " : "") + c.kind + " (" + c.id + ")", { body: plain(c.text), tag: "t3cm-" + c.id, icon: "/icon-192.png" }); }
+    catch (err) {
+      if (err && err.name === "TypeError") {
+        notifyUnsupported = true;
+        paintNotify();
+        break;
+      }
+    }
   }
 }
 
@@ -3467,6 +3474,22 @@ function setConnected(on) {
   if (!on) announce("Disconnected from the board. Reconnecting.", true);
 }
 
+let notifyUnsupported = false;
+function paintNotify() {
+  const n = $("notify");
+  if (!n || !("Notification" in window)) return;
+  const p = Notification.permission;
+  n.hidden = false;
+  const word = notifyUnsupported
+    ? "Notifications unavailable"
+    : p === "granted" ? "Notifications on" : p === "denied" ? "Notifications blocked" : "Notify me";
+  setText($("notify-text"), word);
+  setAttr(n, "aria-label", word);
+  setAttr(n, "aria-disabled", !notifyUnsupported && p === "default" ? null : "true");
+  setAttr(n, "title", notifyUnsupported
+    ? "This browser does not support direct page notifications"
+    : p === "default" ? "Show a browser notification for each new decision while this tab is hidden" : null);
+}
 let es = null, backoff = 1000, reconnectTimer = null, authBlocked = false, authProbeInFlight = false;
 
 function isAuthRefusal(status, data, isMutation) {
@@ -3522,8 +3545,7 @@ function showAuthScreen(status, data) {
     } else {
       setText(descEl, "Your Tailscale account is not allowed to access this board.");
     }
-    hint = "Switch Tailscale accounts on this device, or allow this login on the host:";
-    cmd = "t3cm board expose --tailscale --allow-user <login>";
+    hint = "Switch Tailscale accounts on this device, or add this login to board.remote.allowUsers in t3cm's config.json on the host and restart t3cm.";
   } else if (kind === "tailscale_unavailable") {
     title = "Tailscale sign-in required";
     setText(descEl, "The host could not verify its Tailscale login to authorize this request.");
@@ -3587,14 +3609,17 @@ async function probeRemoteAuth() {
   if (authBlocked || authProbeInFlight) return;
   authProbeInFlight = true;
   try {
-    const r = await fetch("/api/state", { credentials: "same-origin", cache: "no-store" });
+    const opts = { credentials: "same-origin", cache: "no-store" };
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+      opts.signal = AbortSignal.timeout(5000);
+    }
+    const r = await fetch("/api/state", opts);
     if (authBlocked) return;
     let data = null;
     try { data = await r.json(); } catch (_) { data = null; }
     if (handleAuthFailure(r.status, data, false)) return;
     if (r.ok && data) {
       try { render(data); } catch (err) { console.error(err); }
-      backoff = 1000;
     }
   } catch (_) {} finally {
     authProbeInFlight = false;
@@ -4429,19 +4454,10 @@ function wire() {
   $("auth-retry").addEventListener("click", () => { try { location.reload(); } catch (_) {} });
   const n = $("notify");
   if ("Notification" in window) {
-    const paint = () => {
-      const p = Notification.permission;
-      n.hidden = false;
-      const word = p === "granted" ? "Notifications on" : p === "denied" ? "Notifications blocked" : "Notify me";
-      setText($("notify-text"), word);
-      setAttr(n, "aria-label", word);
-      setAttr(n, "aria-disabled", p === "default" ? null : "true");
-      setAttr(n, "title", p === "default" ? "Show a browser notification for each new decision while this tab is hidden" : null);
-    };
-    paint();
+    paintNotify();
     n.addEventListener("click", async () => {
-      if (Notification.permission === "default") { try { await Notification.requestPermission(); } catch (_) {} }
-      paint();
+      if (!notifyUnsupported && Notification.permission === "default") { try { await Notification.requestPermission(); } catch (_) {} }
+      paintNotify();
     });
   }
   if (window.visualViewport) {
