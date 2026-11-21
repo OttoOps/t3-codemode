@@ -212,7 +212,7 @@
                 "name": "renew-token",
                 "status": "ok",
                 "path": "{home}/.claude/skills/renew-token/SKILL.md",
-                "inline": true,
+                "invoke": "inline",
                 "how": "inline: read {home}/.claude/skills/renew-token/SKILL.md and apply it"
               },
               "how": "inline: read {home}/.claude/skills/renew-token/SKILL.md and apply it",

@@ -577,10 +577,13 @@ the worker's link.
 
 After the last PR is delivered:
 
-1. Check `(await wf.board()).children`: every worker thread for this work is
-   settled. A message to a worker after its handoff wakes it and leaves it
-   unsettled. Settle each such worker with `t3_thread_organize`, action
-   `settle`, once its turn has ended (`t3_thread_wait`).
+1. Check `(await wf.board({ all: true })).children` for every worker thread id
+   (handoff closes a worker's link, so without `all: true` closed workers are
+   omitted), then check each worker's live settlement state in T3
+   (`t3.thread_read({ threadId, limit: 1 })`). A message to a worker after its
+   handoff wakes it and leaves it unsettled. Settle each such worker with
+   `t3_thread_organize`, action `settle`, once its turn has ended
+   (`t3_thread_wait`).
 2. `list_scheduled_tasks`: none of this work's deploy watches remain.
    Delete any that do. Then `await wf.sweep()`: it names any worker link
    still open.

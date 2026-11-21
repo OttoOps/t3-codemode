@@ -513,3 +513,42 @@ fn retire_t3wf_warns_and_nudges_open_links_without_blocking() {
     assert!(nudged_none.is_empty());
     assert!(notes_none[0].contains("`t3` CLI was not found"), "{notes_none:?}");
 }
+
+#[cfg(unix)]
+#[test]
+fn retire_t3wf_surfaces_systemctl_failure_and_leaves_unit_detectable_for_retry() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let fake_sysctl = bin.path().join("systemctl");
+    std::fs::write(&fake_sysctl, "#!/bin/sh\necho 'Failed to connect to bus' >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&fake_sysctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut env = Env::under(home.path(), None);
+    env.systemctl_cmd = Some(fake_sysctl);
+    write_config(home.path(), &json!({"version": 1, "passes": ["pr"]}));
+
+    let wants = env.systemd_user.join("timers.target.wants");
+    std::fs::create_dir_all(&wants).unwrap();
+    let timer = env.systemd_user.join("t3wf-tick.timer");
+    std::fs::write(&timer, "[Unit]\n").unwrap();
+    std::os::unix::fs::symlink(&timer, wants.join("t3wf-tick.timer")).unwrap();
+
+    let applied = steps::apply(&env, &Bundle::embedded()).unwrap();
+    assert!(applied.removed.is_empty(), "failed disable must leave unit files in place: {:?}", applied.removed);
+    assert!(
+        applied
+            .notes
+            .iter()
+            .any(|n| n.contains("could not disable t3wf-tick.timer") && n.contains("Failed to connect to bus")),
+        "{:?}",
+        applied.notes
+    );
+    assert!(!applied.newly_recorded.contains(&steps::RETIRE_T3WF_STEP.to_string()));
+    assert!(timer.exists(), "unit file must stay on disk so retry runs");
+    assert!(wants.join("t3wf-tick.timer").exists(), "enabled wants symlink must stay detectable");
+    assert!(
+        steps::check(&env, &Bundle::embedded()).unwrap().missing.iter().any(|m| m.id == steps::RETIRE_T3WF_STEP),
+        "retire:t3wf must remain missing after systemctl failure"
+    );
+}
