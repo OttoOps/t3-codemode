@@ -1357,6 +1357,23 @@ async fn a_move_that_fails_to_record_moves_nothing_and_a_retry_reuses_its_fork()
 }
 
 #[tokio::test]
+async fn a_move_that_cannot_record_its_fork_names_the_fork() {
+    let h = pooled("weighted", two(1, 1));
+    let old = launch(&h, 46).await["thread"].as_str().unwrap().to_string();
+    limit_stop_on(&h, &old);
+    mark(&h).await;
+    let id = move_cards(&h)[0].id.clone();
+    let db = rusqlite::Connection::open(h.app.store.path()).unwrap();
+    db.execute_batch("CREATE TRIGGER no_meta BEFORE INSERT ON meta BEGIN SELECT RAISE(ABORT, 'disk is full'); END;")
+        .unwrap();
+    let e = format!("{:#}", h.app.wf.answer(&id, "move").await.unwrap_err());
+    assert!(e.contains("as fork:1, but recording the fork failed"), "{e}");
+    assert!(e.contains("archive fork:1 before retrying"), "{e}");
+    assert!(h.fake.configured().is_empty());
+    assert_eq!(move_cards(&h).len(), 1);
+}
+
+#[tokio::test]
 async fn a_move_in_a_mixed_pool_keeps_the_thread_on_its_driver() {
     let members = json!([{"instanceId": "codex-a", "model": ASTRA, "effort": "xhigh"},
                          {"instanceId": "claude-a", "model": OPUS, "effort": "high"},

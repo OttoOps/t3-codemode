@@ -145,7 +145,13 @@ impl Wf {
                     .as_str()
                     .ok_or_else(|| anyhow!("t3_thread_transfer returned no fork thread for {}", o.title))?
                     .to_string();
-                self.store.meta_set(&key, &new)?;
+                self.store.meta_set(&key, &new).map_err(|e| {
+                    anyhow!(
+                        "forked {} as {new}, but recording the fork failed, so nothing moved and answering \
+                         \"{MOVE}\" again forks a new thread: archive {new} before retrying: {e:#}",
+                        o.title
+                    )
+                })?;
                 new
             }
         };
