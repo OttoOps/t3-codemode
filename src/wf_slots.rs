@@ -80,6 +80,7 @@ struct SlotArgs {
     repo: Option<String>,
     instance: Option<String>,
     skills: Option<Vec<String>>,
+    files: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -340,12 +341,20 @@ impl Wf {
                 if !slots::SLOTS.contains(&a.name.as_str()) {
                     bail!("wf.slot: no slot {:?}; slots are {}", a.name, slots::SLOTS.join(", "));
                 }
+                if a.files.is_some() && a.name != "delivery" {
+                    bail!("wf.slot: files is only supported for the delivery slot");
+                }
                 let ctx = self.slot_ctx(caller, rep, a.repo.as_deref(), a.instance.as_deref()).await?;
                 let r = self.resolve_slots(&ctx, &a.skills.unwrap_or_default()).await?;
                 let caps = if a.name == "models" { self.caps_for(&r).await } else { Caps::Unchecked };
                 let eff = r.all(&caps);
-                let mut out = slot_view(&a.name, &eff, ctx.instance.as_deref(), &caps);
-                out["line"] = json!(slots::slot_line(&eff, &a.name).join("\n"));
+                let mut out = slot_view(&a.name, &eff, ctx.instance.as_deref(), &caps, a.files.as_deref());
+                let line = if a.name == "delivery" {
+                    slots::delivery_line(&out)
+                } else {
+                    slots::slot_line(&eff, &a.name).join("\n")
+                };
+                out["line"] = json!(line);
                 let mut warnings = ctx.warnings.clone();
                 warnings.extend(r.problems().into_iter().map(|p| format!("config problem (ignored): {p}")));
                 out["warnings"] = json!(warnings);
@@ -407,7 +416,7 @@ fn model_selection(m: &Value, instance: Option<&str>, caps: &Caps) -> Value {
     sel
 }
 
-fn slot_view(name: &str, eff: &Value, instance: Option<&str>, caps: &Caps) -> Value {
+fn slot_view(name: &str, eff: &Value, instance: Option<&str>, caps: &Caps, files: Option<&[String]>) -> Value {
     match name {
         "review" => {
             let mut v = eff["review"].clone();
@@ -432,6 +441,16 @@ fn slot_view(name: &str, eff: &Value, instance: Option<&str>, caps: &Caps) -> Va
         }
         "delivery" => {
             let mut v = eff["delivery"].clone();
+            if let Some(files) = files {
+                slots::filter_delivery_steps(&mut v, files);
+            }
+            if let Some(steps) = v["steps"].as_array_mut() {
+                for step in steps {
+                    if step["skill"].is_object() {
+                        step["skill"] = with_how(&step["skill"]);
+                    }
+                }
+            }
             if v["skill"].is_object() {
                 v["skill"] = with_how(&v["skill"]);
             }

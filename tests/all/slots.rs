@@ -751,3 +751,340 @@ async fn real_shaped_config_with_deploying_repo_overrides_resolves_for_default_a
         assert_eq!(deploying["review"]["skill"]["path"].as_str(), sol_path.to_str());
     }
 }
+
+#[tokio::test]
+async fn legacy_delivery_configs_normalize_with_full_parity_to_steps() {
+    let s = S::new("claudeAgent");
+    let claude = s.home.join(".claude");
+    let deploy_path = skill(&claude.join("skills"), "deploy", false);
+    let ship_path = skill(&claude.join("skills"), "ship", true);
+
+    let canonical_merge = json!({
+        "steps": [{"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"}],
+        "closeAfter": "ticket",
+    });
+    let canonical_tag_deploy = |skill_name: &str, path: &Path, invoke: &str| {
+        let how = if invoke == "inline" {
+            format!("inline: read {} and apply it", path.display())
+        } else {
+            "Skill tool".into()
+        };
+        json!({
+            "steps": [
+                {"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"},
+                {
+                    "id": "deploy",
+                    "kind": "skill",
+                    "skill": {
+                        "ref": skill_name,
+                        "name": skill_name,
+                        "path": path.to_string_lossy(),
+                        "where": "~/.claude/skills",
+                        "invoke": invoke,
+                        "status": "ok",
+                        "how": how,
+                    },
+                    "gate": "chain",
+                    "scope": "pr",
+                    "watch": true,
+                }
+            ],
+            "closeAfter": "ticket",
+        })
+    };
+
+    let shape = |d: &Value| json!({"steps": d["steps"], "closeAfter": d["closeAfter"]});
+
+    // 1. Default (no config)
+    let d = s.call("async () => wf.slot(\"delivery\")", own(&claude)).await;
+    assert_eq!(d["source"], "default");
+    assert_eq!(shape(&d), canonical_merge);
+
+    // 2. User config {"mode": "merge"}
+    s.config(json!({"delivery": {"mode": "merge"}}));
+    let d = s.call("async () => wf.slot(\"delivery\")", own(&claude)).await;
+    assert_eq!(d["source"], "user");
+    assert_eq!(shape(&d), canonical_merge);
+
+    // 3. AGENTS.md `- Delivery: merge`
+    std::fs::write(s.repo.join("AGENTS.md"), "## Agent workflow\n\n- Delivery: merge\n").unwrap();
+    let d = s.call("async () => wf.slot(\"delivery\")", own(&claude)).await;
+    assert_eq!(d["source"], "AGENTS.md");
+    assert_eq!(shape(&d), canonical_merge);
+
+    // 4. Explicit equivalent steps in .t3-workflow.json
+    std::fs::write(
+        s.repo.join(".t3-workflow.json"),
+        json!({"delivery": {"steps": [{"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"}]}})
+            .to_string(),
+    )
+    .unwrap();
+    let d_explicit = s.call("async () => wf.slot(\"delivery\")", own(&claude)).await;
+    assert_eq!(d_explicit["source"], ".t3-workflow.json");
+    assert_eq!(shape(&d_explicit), canonical_merge);
+    std::fs::remove_file(s.repo.join(".t3-workflow.json")).unwrap();
+    std::fs::remove_file(s.repo.join("AGENTS.md")).unwrap();
+
+    // 5. User config {"mode": "tag-deploy", "skill": "deploy"}
+    let want_deploy = canonical_tag_deploy("deploy", &deploy_path, "skill");
+    s.config(json!({"delivery": {"mode": "tag-deploy", "skill": "deploy"}}));
+    let d_user = s.call("async () => wf.slot(\"delivery\")", own(&claude)).await;
+    assert_eq!(d_user["source"], "user");
+    assert_eq!(shape(&d_user), want_deploy);
+
+    // 6. AGENTS.md Delivery: tag-deploy + Deploy skill: deploy
+    s.config(json!({}));
+    std::fs::write(s.repo.join("AGENTS.md"), "## Agent workflow\n\n- Delivery: tag-deploy\n- Deploy skill: `deploy`\n")
+        .unwrap();
+    let d_agents = s.call("async () => wf.slot(\"delivery\")", own(&claude)).await;
+    assert_eq!(d_agents["source"], "AGENTS.md");
+    assert_eq!(shape(&d_agents), want_deploy);
+
+    // 7. Explicit equivalent steps in .t3-workflow.json matches legacy tag-deploy byte-for-byte
+    std::fs::write(
+        s.repo.join(".t3-workflow.json"),
+        json!({
+            "delivery": {
+                "steps": [
+                    {"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"},
+                    {"id": "deploy", "skill": "deploy", "gate": "chain", "scope": "pr", "watch": true}
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let d_steps = s.call("async () => wf.slot(\"delivery\")", own(&claude)).await;
+    assert_eq!(d_steps["source"], ".t3-workflow.json");
+    assert_eq!(shape(&d_steps), want_deploy);
+    assert_eq!(d_steps["mode"], "tag-deploy");
+    std::fs::remove_file(s.repo.join(".t3-workflow.json")).unwrap();
+
+    // 8. Partial AGENTS.md `- Deploy skill: ship` overrides user's tag-deploy skill
+    s.config(json!({"delivery": {"mode": "tag-deploy", "skill": "deploy"}}));
+    std::fs::write(s.repo.join("AGENTS.md"), "## Agent workflow\n\n- Deploy skill: `ship`\n").unwrap();
+    let d_override = s.call("async () => wf.slot(\"delivery\")", own(&claude)).await;
+    assert_eq!(d_override["source"], "AGENTS.md");
+    assert_eq!(shape(&d_override), canonical_tag_deploy("ship", &ship_path, "inline"));
+
+    // 9. AGENTS.md `- Delivery: merge` overrides user's tag-deploy cleanly without leaking deploy skill
+    std::fs::write(s.repo.join("AGENTS.md"), "## Agent workflow\n\n- Delivery: merge\n").unwrap();
+    let d_merge_override = s.call("async () => wf.slot(\"delivery\")", own(&claude)).await;
+    assert_eq!(d_merge_override["source"], "AGENTS.md");
+    assert_eq!(shape(&d_merge_override), canonical_merge);
+    assert_eq!(d_merge_override["mode"], "merge");
+    assert!(d_merge_override.get("skill").is_none());
+}
+
+#[tokio::test]
+async fn lms_three_stage_config_resolves_filters_paths_and_respects_layer_precedence() {
+    let s = S::new("claudeAgent");
+    let claude = s.home.join(".claude");
+    let deploy_path = skill(&claude.join("skills"), "deploy", false);
+    let publish_path = skill(&claude.join("skills"), "lms-publish", true);
+    skill(&claude.join("skills"), "sol-loop", false);
+    skill(&claude.join("skills"), "pr", false);
+
+    // Layer 2 (user)
+    s.config(json!({
+        "review": "sol-loop",
+        "passes": ["pr"],
+        "delivery": {"mode": "merge"}
+    }));
+    // Layer 3 (AGENTS.md)
+    std::fs::write(
+        s.repo.join("AGENTS.md"),
+        "## Agent workflow\n\n- Review: none\n- Delivery: tag-deploy\n- Deploy skill: `deploy`\n",
+    )
+    .unwrap();
+    // Layer 4 (.t3-workflow.json): overrides delivery only; review stays from AGENTS.md, passes from user
+    let lms_cfg = json!({
+        "version": 1,
+        "delivery": {
+            "steps": [
+                {"id": "merge",   "kind": "builtin", "gate": "always", "scope": "pr"},
+                {"id": "deploy",  "skill": "deploy", "gate": "chain",  "scope": "ticket", "watch": true},
+                {"id": "publish", "skill": "lms-publish", "gate": "always", "scope": "post-handoff", "paths": ["training/**"]}
+            ],
+            "closeAfter": "ticket"
+        }
+    });
+    let repo_cfg_path = s.repo.join(".t3-workflow.json");
+    std::fs::write(&repo_cfg_path, lms_cfg.to_string()).unwrap();
+
+    // Slot-by-slot precedence across all 4 layers
+    let all = s.call("async () => wf.slots()", own(&claude)).await;
+    assert_eq!(all["problems"], json!([]));
+    assert_eq!(all["warnings"], json!([]));
+    assert_eq!(all["repoConfig"].as_str(), repo_cfg_path.to_str());
+    assert_eq!(all["passes"]["source"], "user");
+    assert_eq!(all["review"]["source"], "AGENTS.md");
+    assert!(all["review"]["skill"].is_null());
+    assert_eq!(all["delivery"]["source"], ".t3-workflow.json");
+    assert_eq!(all["delivery"]["closeAfter"], "ticket");
+    assert!(all["delivery"].get("mode").is_none());
+
+    // Unfiltered wf.slot("delivery"): all 3 steps present with `how`
+    let d_all = s.call("async () => wf.slot(\"delivery\")", own(&claude)).await;
+    let steps = d_all["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 3);
+    assert_eq!(
+        (steps[0]["id"].as_str(), steps[0]["kind"].as_str(), steps[0]["gate"].as_str(), steps[0]["scope"].as_str()),
+        (Some("merge"), Some("builtin"), Some("always"), Some("pr"))
+    );
+    assert_eq!(
+        (
+            steps[1]["id"].as_str(),
+            steps[1]["kind"].as_str(),
+            steps[1]["gate"].as_str(),
+            steps[1]["scope"].as_str(),
+            steps[1]["watch"].as_bool()
+        ),
+        (Some("deploy"), Some("skill"), Some("chain"), Some("ticket"), Some(true))
+    );
+    assert_eq!(steps[1]["skill"]["path"].as_str(), deploy_path.to_str());
+    assert_eq!(steps[1]["skill"]["how"], "Skill tool");
+    assert_eq!(
+        (steps[2]["id"].as_str(), steps[2]["kind"].as_str(), steps[2]["gate"].as_str(), steps[2]["scope"].as_str()),
+        (Some("publish"), Some("skill"), Some("always"), Some("post-handoff"))
+    );
+    assert_eq!(steps[2]["skill"]["path"].as_str(), publish_path.to_str());
+    assert_eq!(steps[2]["skill"]["how"], format!("inline: read {} and apply it", publish_path.display()));
+    assert_eq!(steps[2]["paths"], json!(["training/**"]));
+    assert!(d_all.get("skipped").is_none());
+
+    // Filtered with non-training files: publish is skipped deterministically
+    let d_code =
+        s.call("async () => wf.slot(\"delivery\", { files: [\"src/app.ts\", \"package.json\"] })", own(&claude)).await;
+    let code_ids: Vec<&str> = d_code["steps"].as_array().unwrap().iter().map(|st| st["id"].as_str().unwrap()).collect();
+    assert_eq!(code_ids, vec!["merge", "deploy"]);
+    assert_eq!(
+        d_code["skipped"],
+        json!([{"id": "publish", "reason": "no files matched paths", "paths": ["training/**"]}])
+    );
+    assert!(d_code["line"].as_str().unwrap().contains("skipped: publish"), "{}", d_code["line"]);
+
+    // Filtered with training files: all 3 steps match, skipped is empty
+    let d_training =
+        s.call("async () => wf.slot(\"delivery\", { files: [\"training/course-1/lesson.md\"] })", own(&claude)).await;
+    let training_ids: Vec<&str> =
+        d_training["steps"].as_array().unwrap().iter().map(|st| st["id"].as_str().unwrap()).collect();
+    assert_eq!(training_ids, vec!["merge", "deploy", "publish"]);
+    assert_eq!(d_training["skipped"], json!([]));
+
+    // Filtered with empty files array: publish skipped
+    let d_empty = s.call("async () => wf.slot(\"delivery\", { files: [] })", own(&claude)).await;
+    assert_eq!(d_empty["steps"].as_array().unwrap().len(), 2);
+    assert_eq!(d_empty["skipped"][0]["id"], "publish");
+
+    // Passing `files` to a non-delivery slot errors cleanly
+    let bad = s.run(Some(ME), "async () => wf.slot(\"review\", { files: [\"a.rs\"] })", own(&claude)).await;
+    assert!(bad.is_error && bad.text.contains("only supported for the delivery slot"), "{}", bad.text);
+
+    // Modifying .t3-workflow.json (same size & mtime) invalidates cache
+    let mtime = std::fs::metadata(&repo_cfg_path).unwrap().modified().unwrap();
+    let updated = json!({
+        "version": 1,
+        "delivery": {
+            "steps": [
+                {"id": "merge",   "kind": "builtin", "gate": "always", "scope": "pr"},
+                {"id": "deploy",  "skill": "deploy", "gate": "chain",  "scope": "ticket", "watch": true},
+                {"id": "publish", "skill": "lms-publish", "gate": "always", "scope": "post-handoff", "paths": ["courses/**"]}
+            ],
+            "closeAfter": "ticket"
+        }
+    });
+    std::fs::write(&repo_cfg_path, updated.to_string()).unwrap();
+    std::fs::File::options().write(true).open(&repo_cfg_path).unwrap().set_modified(mtime).unwrap();
+    let d_updated = s.call("async () => wf.slot(\"delivery\", { files: [\"courses/intro.md\"] })", own(&claude)).await;
+    assert_eq!(d_updated["steps"].as_array().unwrap().len(), 3);
+    assert_eq!(d_updated["steps"][2]["paths"], json!(["courses/**"]));
+
+    // Manual step resolves with prompt and closeAfter: "all"
+    std::fs::write(
+        &repo_cfg_path,
+        json!({
+            "delivery": {
+                "steps": [
+                    {"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"},
+                    {"id": "announce", "kind": "manual", "prompt": "Post notes in #releases", "gate": "always", "scope": "post-handoff"}
+                ],
+                "closeAfter": "all"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let d_manual = s.call("async () => wf.slot(\"delivery\")", own(&claude)).await;
+    assert_eq!(d_manual["closeAfter"], "all");
+    assert_eq!(d_manual["steps"][1]["kind"], "manual");
+    assert_eq!(d_manual["steps"][1]["prompt"], "Post notes in #releases");
+    assert!(d_manual["line"].as_str().unwrap().contains("announce (manual)"), "{}", d_manual["line"]);
+    assert!(d_manual["line"].as_str().unwrap().contains("closeAfter all"), "{}", d_manual["line"]);
+}
+
+#[test]
+fn doctor_validates_repo_workflow_json_and_surfaces_skipped_or_bad_delivery_steps() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = home.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    skill(&home.path().join(".claude/skills"), "deploy", false);
+    skill(&home.path().join(".claude/skills"), "lms-publish", false);
+
+    let lms_cfg = json!({
+        "version": 1,
+        "delivery": {
+            "steps": [
+                {"id": "merge",   "kind": "builtin", "gate": "always", "scope": "pr"},
+                {"id": "deploy",  "skill": "deploy", "gate": "chain",  "scope": "ticket", "watch": true},
+                {"id": "publish", "skill": "lms-publish", "gate": "always", "scope": "post-handoff", "paths": ["training/**"]}
+            ],
+            "closeAfter": "ticket"
+        }
+    });
+    std::fs::write(repo.join(".t3-workflow.json"), lms_cfg.to_string()).unwrap();
+
+    // Valid lms config: no delivery or config problems
+    let out = t3cm(home.path()).args(["doctor", "--no-t3", "--json", "--repo"]).arg(&repo).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let problems: Vec<&str> = v["problems"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(!problems.iter().any(|p| p.contains("delivery") || p.contains(".t3-workflow.json")), "{problems:?}");
+    assert_eq!(v["settings"]["delivery"]["source"], ".t3-workflow.json");
+    assert_eq!(v["settings"]["delivery"]["steps"].as_array().unwrap().len(), 3);
+
+    // Missing skill in a delivery step: doctor reports PROBLEM and surfaces SKIP in summary line
+    std::fs::remove_dir_all(home.path().join(".claude/skills/lms-publish")).unwrap();
+    let out = t3cm(home.path()).args(["doctor", "--no-t3", "--repo"]).arg(&repo).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(text.contains("SKIP lms-publish: no longer resolves"), "{text}");
+    assert!(text.contains("PROBLEM: delivery.publish: skill lms-publish no longer resolves"), "{text}");
+
+    // Bad .t3-workflow.json (merge not first, invalid glob, chain without always, bad closeAfter)
+    std::fs::write(
+        repo.join(".t3-workflow.json"),
+        json!({
+            "delivery": {
+                "steps": [
+                    {"id": "deploy", "skill": "deploy", "gate": "chain", "scope": "ticket", "paths": ["training/[bad"]},
+                    {"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"}
+                ],
+                "closeAfter": "bogus"
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let out = t3cm(home.path()).args(["doctor", "--no-t3", "--json", "--repo"]).arg(&repo).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let problems: Vec<&str> = v["problems"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(problems.iter().any(|p| p.contains("closeAfter")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains("requires a preceding step with gate 'always'")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains("invalid glob")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains("builtin merge step must be first")), "{problems:?}");
+    assert!(problems.iter().any(|p| p.contains("cannot follow a broader scope")), "{problems:?}");
+    // Broken .t3-workflow.json is ignored so delivery falls back to default merge cleanly
+    assert_eq!(v["settings"]["delivery"]["source"], "default");
+    assert_eq!(v["settings"]["delivery"]["steps"].as_array().unwrap().len(), 1);
+}

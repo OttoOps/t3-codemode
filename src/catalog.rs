@@ -245,14 +245,15 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.slot",
             "wf",
-            "One T3 workflow slot, looked up by the step that uses it: review before opening a PR, passes when publishing, delivery for the merge gate, models when launching. The service resolves it for your thread's T3 instance and project, the way your own session would see it: the user config, the repo's AGENTS.md Agent workflow block, and the skills your agent's config folder has installed and enabled. Each skill carries how to run it (the Skill tool, or the inline SKILL.md to read) or why it is skipped. line is the one-line summary; warnings names config problems and a connection that reported no config folder. repo overrides the project's workspace root, for example with your worktree.",
+            "One T3 workflow slot, looked up by the step that uses it: review before opening a PR, passes when publishing, delivery for delivery stages and gates, models when launching. The service resolves it for your thread's T3 instance and project, the way your own session would see it: defaults, the user config, the repo's AGENTS.md Agent workflow block, the repo's .t3-workflow.json, and the skills your agent's config folder has installed and enabled. Each skill carries how to run it (the Skill tool, or the inline SKILL.md to read) or why it is skipped. For delivery, files filters steps with paths globs against changed repo-relative file paths and reports unmatched steps in skipped. line is the one-line summary; warnings names config problems and a connection that reported no config folder. repo overrides the project's workspace root, for example with your worktree.",
             &format!(
-                "wf.slot(name: \"review\" | \"passes\" | \"delivery\" | \"models\" | \"credentials\", input?: {{ repo?: string; instance?: string; skills?: string[] }}): Promise<{}>;",
+                "wf.slot(name: \"review\" | \"passes\" | \"delivery\" | \"models\" | \"credentials\", input?: {{ repo?: string; instance?: string; skills?: string[]; files?: string[] }}): Promise<{}>;",
                 slot_result()
             ),
             obj(
                 json!({"name": {"enum": ["review", "passes", "delivery", "models", "credentials"]}, "repo": {"type": "string"},
-                       "instance": {"type": "string"}, "skills": {"type": "array", "items": {"type": "string"}}}),
+                       "instance": {"type": "string"}, "skills": {"type": "array", "items": {"type": "string"}},
+                       "files": {"type": "array", "items": {"type": "string"}}}),
                 &["name"],
             ),
         ),
@@ -272,7 +273,7 @@ pub fn builtins() -> Vec<Entry> {
             "wf.slots",
             "wf",
             "Every T3 workflow slot at once, as setup and the board need them, in the shape `t3cm slots --json` prints. A role looks up the one slot its step needs with wf.slot instead.",
-            "wf.slots(input?: { repo?: string; instance?: string; skills?: string[] }): Promise<{ repo: string; config: string | null; review: object; passes: object; credentials: object; delivery: object; models: { ticket: object; worker: object }; problems: string[]; warnings: string[]; context: { instance: string | null; driver: string | null; claudeDir: string; codexHome: string; folderFrom: \"reported\" | \"recorded\" | \"default\"; config: string } }>;",
+            "wf.slots(input?: { repo?: string; instance?: string; skills?: string[] }): Promise<{ repo: string; config: string | null; repoConfig?: string | null; review: object; passes: object; credentials: object; delivery: object; models: { ticket: object; worker: object }; problems: string[]; warnings: string[]; context: { instance: string | null; driver: string | null; claudeDir: string; codexHome: string; folderFrom: \"reported\" | \"recorded\" | \"default\"; config: string } }>;",
             obj(
                 json!({"repo": {"type": "string"}, "instance": {"type": "string"}, "skills": {"type": "array", "items": {"type": "string"}}}),
                 &[],
@@ -349,8 +350,11 @@ const SLOT_SKILL: &str = "{ ref: string; status: \"ok\" | \"ambiguous\" | \"miss
 
 const SLOT_MODEL: &str = "{ slot: string; source: string; spec: { model?: string; effort?: string; provider?: string; pool?: string } | null; note?: string | null; problem?: string; modelSelection: { instanceId: string; model: string; options?: { id: string; value: string }[] } | { pool: string; pick: string } | null }";
 
+const DELIVERY_STEP: &str = "{ id: string; kind: \"builtin\" | \"skill\" | \"manual\"; skill?: SlotSkill; prompt?: string; gate: \"always\" | \"chain\" | \"never\"; scope: \"pr\" | \"ticket\" | \"post-handoff\"; paths?: string[]; watch?: boolean }";
+
 fn slot_result() -> String {
-    "{ slot: string; source?: string; line: string; warnings: string[]; skill?: SlotSkill; note?: string; skills?: (SlotSkill)[]; renewals?: { match: string; skill: SlotSkill }[]; mode?: string; problem?: string; ticket?: SlotModel; worker?: SlotModel }"
+    "{ slot: string; source?: string; line: string; warnings: string[]; skill?: SlotSkill; note?: string; skills?: (SlotSkill)[]; renewals?: { match: string; skill: SlotSkill }[]; steps?: DeliveryStep[]; closeAfter?: \"pr\" | \"ticket\" | \"all\"; skipped?: { id: string; reason: string; paths?: string[] }[]; mode?: string; problem?: string; ticket?: SlotModel; worker?: SlotModel }"
+        .replace("DeliveryStep", DELIVERY_STEP)
         .replace("SlotSkill", SLOT_SKILL)
         .replace("SlotModel", SLOT_MODEL)
 }
