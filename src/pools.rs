@@ -11,7 +11,7 @@ use crate::store::{Limit, LimitStop, PickRecord};
 use crate::usage::{Usage, UsageSource};
 use crate::wf::{ACTIVE, Wf};
 
-pub const STRATEGIES: &[&str] = &["weighted", "priority"];
+pub const STRATEGIES: &[&str] = &["weighted", "priority", "cheapest"];
 const EFFORT_IDS: &[&str] = &["effort", "reasoningEffort", "thinking_level"];
 const THREAD_PAGE: u64 = 200;
 const LIMIT_TITLE: &str = "Usage limit reached";
@@ -25,6 +25,10 @@ fn weighted() -> String {
 
 fn one() -> u32 {
     1
+}
+
+fn unit_cost() -> f64 {
+    1.0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -47,6 +51,8 @@ pub struct PoolMember {
     pub weight: u32,
     #[serde(default)]
     pub reserve: f64,
+    #[serde(default = "unit_cost")]
+    pub cost: f64,
 }
 
 impl PoolConfig {
@@ -60,9 +66,12 @@ impl PoolConfig {
         match self.strategy.as_str() {
             s if STRATEGIES.contains(&s) => {}
             "headroom" => {
-                bail!("strategy headroom needs a usage source, which t3cm does not have yet; use weighted or priority")
+                bail!(
+                    "strategy headroom needs a usage source, which t3cm does not have yet; use one of {}",
+                    STRATEGIES.join(", ")
+                )
             }
-            s => bail!("unknown strategy {s:?}; use {}", STRATEGIES.join(" or ")),
+            s => bail!("unknown strategy {s:?}; use one of {}", STRATEGIES.join(", ")),
         }
         if self.members.is_empty() {
             bail!("a pool needs at least one member");
@@ -79,6 +88,9 @@ impl PoolConfig {
             }
             if !(0.0..=100.0).contains(&m.reserve) {
                 bail!("member {}: reserve must be between 0 and 100, got {}", m.instance_id, m.reserve);
+            }
+            if !m.cost.is_finite() || m.cost < 0.0 {
+                bail!("member {}: cost must be a finite number of 0 or more, got {}", m.instance_id, m.cost);
             }
         }
         Ok(())
@@ -303,6 +315,13 @@ pub fn choose(inp: &Inputs) -> Result<Choice> {
     let mut credits = credits.clone();
     let (chosen, base) = match pool.strategy.as_str() {
         "priority" => (candidates[0], "priority: the first member that can run".to_string()),
+        "cheapest" => {
+            let cost = |i: usize| pool.members[i].cost;
+            let low = candidates.iter().map(|&i| cost(i)).reduce(f64::min).expect("candidates is not empty");
+            let group: Vec<usize> = candidates.iter().copied().filter(|&i| cost(i) == low).collect();
+            let (best, total) = by_weight(pool, &group, &mut credits, running);
+            (best, format!("cheapest: cost {low}, weighted: weight {} of {total}", pool.members[best].weight))
+        }
         "headroom" => {
             let left = |i: usize| usage.get(&pool.members[i].instance_id).map(|u| u.left);
             match candidates.iter().filter_map(|&i| left(i)).reduce(f64::max) {
@@ -664,6 +683,7 @@ impl Wf {
                         "instanceId": m.instance_id,
                         "weight": m.weight,
                         "reserve": m.reserve,
+                        "cost": m.cost,
                         "state": state.as_ref().map_or("unknown", State::name),
                         "reason": state.as_ref().and_then(|s| s.why(pool)),
                         "limitedUntil": limit.map(|l| l.until.clone()),

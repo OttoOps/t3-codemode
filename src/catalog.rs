@@ -220,7 +220,7 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.pick",
             "wf",
-            "Pick a provider instance from a configured pool for one launch. Skips members T3 reports disabled or constrained, members that do not list the pool's model or offer its effort, and members marked limited; a member with a reserve is a last resort, picked only when every other member is out. Pass modelSelection to t3_thread_launch. Throws, naming the pool, when no member can run or a member is not an instance of the pool's driver; nothing is launched.",
+            "Pick a provider instance from a configured pool for one launch. Skips members T3 reports disabled or constrained, members that do not list the pool's model or offer its effort, and members marked limited; a member with a reserve is a last resort, picked only when every other member is out. Under strategy cheapest, the lowest-cost members that can run take every launch, by weight among themselves. Pass modelSelection to t3_thread_launch. Throws, naming the pool, when no member can run or a member is not an instance of the pool's driver; nothing is launched.",
             &format!(
                 "wf.pick(input: {{ pool: string }}): Promise<{{ pool: string; instanceId: string; model: string; options: {{ id: string; value: string }}[]; reason: string; skipped: {SKIPPED}[]; modelSelection: {{ instanceId: string; model: string; options?: {{ id: string; value: string }}[] }} }}>;"
             ),
@@ -229,8 +229,8 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.pools",
             "wf",
-            "Each configured pool with its members: state (ready, limited, disabled, constrained, missing-model, missing-effort, or unknown when T3 did not answer), why, the limit's reset time (ISO and local), running threads, and pick count and last pick. error names a member that is not an instance of the pool's driver, or says T3 did not answer.",
-            "wf.pools(): Promise<{ pool: string; driver: string; model: string; effort: string | null; strategy: \"weighted\" | \"priority\"; error: string | null; members: { instanceId: string; weight: number; reserve: number; state: string; reason: string | null; limitedUntil: string | null; limitedUntilLocal: string | null; limitReason: string | null; usageLeft: number | null; running: number | null; picks: number; lastPick: string | null; lastPickLocal: string | null }[] }[]>;",
+            "Each configured pool with its members: weight, reserve, cost, state (ready, limited, disabled, constrained, missing-model, missing-effort, or unknown when T3 did not answer), why, the limit's reset time (ISO and local), running threads, and pick count and last pick. error names a member that is not an instance of the pool's driver, or says T3 did not answer.",
+            "wf.pools(): Promise<{ pool: string; driver: string; model: string; effort: string | null; strategy: \"weighted\" | \"priority\" | \"cheapest\"; error: string | null; members: { instanceId: string; weight: number; reserve: number; cost: number; state: string; reason: string | null; limitedUntil: string | null; limitedUntilLocal: string | null; limitReason: string | null; usageLeft: number | null; running: number | null; picks: number; lastPick: string | null; lastPickLocal: string | null }[] }[]>;",
             obj(json!({}), &[]),
         ),
         builtin(

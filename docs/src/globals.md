@@ -119,11 +119,13 @@ parent and a child, and the service keeps every link and message in its store.
   for one launch and returns `{ pool, instanceId, model, options, reason,
   skipped, modelSelection }`. Pass `modelSelection` to `t3_thread_launch`.
   `reason` says why that member, and `skipped` lists each member left out with
-  its reason, such as `limited until 14:00 MST`. The service records each pick.
+  its reason, such as `limited until 14:00 MST`. Under the `cheapest`
+  strategy, `reason` names the cost, as in
+  `cheapest: cost 0, weighted: weight 1 of 2`. The service records each pick.
   When no member can run, it throws and names the pool.
-- `wf.pools()` lists each pool's members with `state` (`ready`, `limited`,
-  `disabled`, `constrained`, `missing-model`, `missing-effort`, or `unknown`
-  when T3 did not answer), `reason`, `limitedUntil`, `limitedUntilLocal`,
+- `wf.pools()` lists each pool's members with `weight`, `reserve`, `cost`,
+  `state` (`ready`, `limited`, `disabled`, `constrained`, `missing-model`,
+  `missing-effort`, or `unknown` when T3 did not answer), `reason`, `limitedUntil`, `limitedUntilLocal`,
   `limitReason`, `usageLeft`, `running` threads, `picks` and `lastPick`.
   `limitReason` names the thread whose limit stop set the mark and where its
   reset time came from. `usageLeft` stays `null` until t3cm has a usage
