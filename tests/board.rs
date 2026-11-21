@@ -2099,9 +2099,9 @@ find.dispatch("input");
 const found = [...facet("projects").querySelectorAll(".fopt")].filter((o) => !o.hidden).map((o) => o.dataset.val);
 find.value = "";
 find.dispatch("input");
-pick("projects", "acme/widgets");
+pick("projects", "p-widgets");
 const one = { ...view(), btn: facet("projects").querySelector('[data-part="fbtn"]').textContent, clear: !$$("filter-clear").hidden };
-pick("projects", "acme/gadgets");
+pick("projects", "p-gadgets");
 const two = view();
 $$("filter-clear").dispatch("click");
 return { all, opts, found, one, two, after: view(), btn: facet("projects").querySelector('[data-part="fbtn"]').textContent };
@@ -2111,8 +2111,8 @@ return { all, opts, found, one, two, after: view(), btn: facet("projects").query
     let w = json!(WORKER);
     assert_eq!(r["all"]["cards"], json!(["a1", "a2"]), "{r}");
     assert_eq!(r["all"]["n"], json!(["2", "2", "0", "2", "2"]), "{r}");
-    assert_eq!(r["opts"], json!(["acme/gadgets", "acme/widgets"]), "{r}");
-    assert_eq!(r["found"], json!(["acme/gadgets"]), "{r}");
+    assert_eq!(r["opts"], json!(["p-gadgets", "p-widgets"]), "{r}");
+    assert_eq!(r["found"], json!(["p-gadgets"]), "{r}");
     assert_eq!(r["one"]["cards"], json!(["a1"]), "{r}");
     assert_eq!(r["one"]["open"], json!([t]), "{r}");
     assert_eq!(r["one"]["feed"], json!(["m91"]), "{r}");
@@ -2185,7 +2185,7 @@ async fn a_new_card_outside_the_filter_shows_as_hidden() {
         &st,
         r##"
 emitState(s0);
-pick("projects", "acme/widgets");
+pick("projects", "p-widgets");
 const before = { hidden: $$("hidden-new").hidden };
 const a3 = { ...s0.cards[1], id: "a3", at: "2026-11-17T12:30:00Z", kind: "blocker", token: "t-a3" };
 emitState({ ...s0, cards: [...s0.cards, a3] });
@@ -2304,13 +2304,13 @@ async fn a_reply_waiting_on_undo_stays_visible_when_the_filter_changes() {
         r##"
 emitState(s0);
 card("a1").querySelector("[data-opt]").dispatch("click");
-pick("projects", "acme/gadgets");
+pick("projects", "p-gadgets");
 const during = { cards: ids(), undo: !card("a1").querySelector('[data-part="undo"]').hidden };
 advance(6000);
 const sent = answers().map((f) => f.url);
 card("a2").querySelector("[data-opt]").dispatch("click");
-pick("projects", "acme/gadgets");
-pick("projects", "acme/widgets");
+pick("projects", "p-gadgets");
+pick("projects", "p-widgets");
 const held = ids();
 card("a2").querySelector('[data-part="undo"]').dispatch("click");
 document.activeElement = document.body;
@@ -2419,14 +2419,14 @@ async fn contexts_are_created_renamed_edited_and_deleted_and_survive_a_restart()
     use reqwest::Method;
     let s = start(H::new()).await;
     let csrf = s.csrf();
-    let spec = json!({"projects": ["Acme/Widgets", "acme/gadgets", "acme/widgets"], "statuses": ["done", "waiting"], "kinds": [], "q": "  grader "});
+    let spec = json!({"projects": ["p-widgets", " p-gadgets ", "P-Widgets", "p-widgets"], "statuses": ["done", "waiting"], "kinds": [], "q": "  grader "});
     let (code, made) = s.context(Method::PUT, "c1", json!({"name": " Widgets ", "spec": spec}), Some(&csrf)).await;
     assert_eq!(code, 201, "{made}");
     let made = &made["context"];
     assert_eq!((&made["id"], &made["name"]), (&json!("c1"), &json!("Widgets")));
     assert_eq!(
         made["spec"],
-        json!({"projects": ["acme/gadgets", "acme/widgets"], "statuses": ["waiting", "done"], "kinds": [], "q": "grader"})
+        json!({"projects": ["P-Widgets", "p-gadgets", "p-widgets"], "statuses": ["waiting", "done"], "kinds": [], "q": "grader"})
     );
     assert_eq!((&made["createdAt"], &made["updatedAt"]), (&json!(T0), &json!(T0)));
     s.h.clock.advance_minutes(5);
@@ -2557,16 +2557,16 @@ async fn a_saved_context_reaches_every_open_board() {
     let mut r = s.http.get(format!("{}/api/events", s.base)).send().await.unwrap();
     let mut buf = Vec::new();
     assert_eq!(next_state(&mut r, &mut buf).await["contexts"], json!([]));
-    let body = json!({"name": "Widgets", "spec": {"projects": ["acme/widgets"]}});
+    let body = json!({"name": "Widgets", "spec": {"projects": ["p-widgets"]}});
     assert_eq!(s.context(reqwest::Method::PUT, "c1", body, Some(&s.csrf())).await.0, 201);
     let st = next_state(&mut r, &mut buf).await;
     assert_eq!(context_names(&st), [json!("Widgets")], "{st}");
-    assert_eq!(st["contexts"][0]["spec"]["projects"], json!(["acme/widgets"]), "{st}");
+    assert_eq!(st["contexts"][0]["spec"]["projects"], json!(["p-widgets"]), "{st}");
 }
 
 const SAVED_CONTEXTS: &str = r##"[
-  { id: "c1", name: "Widgets", spec: { projects: ["acme/widgets"], statuses: [], kinds: [] }, createdAt: "2026-11-17T12:00:00Z", updatedAt: "2026-11-17T12:00:00Z" },
-  { id: "c2", name: "Gadget gates", spec: { projects: ["acme/gadgets"], statuses: [], kinds: ["gate"], q: "gadget" }, createdAt: "2026-11-17T12:00:00Z", updatedAt: "2026-11-17T12:00:00Z" },
+  { id: "c1", name: "Widgets", spec: { projects: ["p-widgets"], statuses: [], kinds: [] }, createdAt: "2026-11-17T12:00:00Z", updatedAt: "2026-11-17T12:00:00Z" },
+  { id: "c2", name: "Gadget gates", spec: { projects: ["p-gadgets"], statuses: [], kinds: ["gate"], q: "gadget" }, createdAt: "2026-11-17T12:00:00Z", updatedAt: "2026-11-17T12:00:00Z" },
 ]"##;
 
 const CONTEXT_HELPERS: &str = r##"
@@ -2620,7 +2620,7 @@ openCtxMenu();
 const acts = ["new", "update", "rename", "delete"].filter((a) => !ctxAct(a).hidden);
 choose("");
 const all = { ...view(), btn: ctxBtn().textContent, stored: stored(), q: $$("filter-q").value, find: $$("settled-filter").value };
-pick("projects", "acme/widgets");
+pick("projects", "p-widgets");
 const loose = ctxBtn().textContent;
 choose("c1");
 $$("filter-clear").dispatch("click");
@@ -2689,7 +2689,7 @@ async fn a_context_changed_or_deleted_elsewhere_updates_this_page() {
 emitState(s1);
 const first = ids();
 const a3 = { ...s0.cards[0], id: "a3", at: "2026-11-17T12:30:00Z", kind: "blocker", token: "t-a3" };
-emitState({ ...s1, cards: [...s1.cards, a3], contexts: [ctxs[1], { ...ctxs[0], spec: { projects: ["acme/gadgets"], statuses: [], kinds: [] } }] });
+emitState({ ...s1, cards: [...s1.cards, a3], contexts: [ctxs[1], { ...ctxs[0], spec: { projects: ["p-gadgets"], statuses: [], kinds: [] } }] });
 const edited = { cards: ids(), btn: ctxBtn().textContent, hidden: $$("hidden-new").textContent };
 const find = $$("settled-filter");
 find.value = "gadgets";
@@ -2728,7 +2728,7 @@ const echo = (status) => async (url, opts) => {
 const writes = () => fetches.filter((f) => f.method !== "GET").map((f) => [f.method, f.url, f.body ? JSON.parse(f.body) : null]);
 openCtxMenu();
 const idle = ["new", "update", "rename", "delete"].filter((a) => !ctxAct(a).hidden);
-pick("projects", "acme/widgets");
+pick("projects", "p-widgets");
 openCtxMenu();
 ctxAct("new").dispatch("click");
 const name = ctxPop().querySelector('[data-part="cname"]');
@@ -2783,7 +2783,7 @@ return { idle, focused, empty, made, saved, pushed, prefill, renamed, editedActs
     assert_eq!(r["made"][0], "PUT", "{r}");
     assert_eq!(
         r["made"][2],
-        json!({"name": "Widgets", "spec": {"projects": ["acme/widgets"], "statuses": [], "kinds": [], "q": ""}}),
+        json!({"name": "Widgets", "spec": {"projects": ["p-widgets"], "statuses": [], "kinds": [], "q": ""}}),
         "{r}"
     );
     assert_eq!(r["saved"], json!({"btn": "Context: Widgets", "stored": true, "closed": true, "cards": ["a1"]}), "{r}");
@@ -2801,7 +2801,7 @@ return { idle, focused, empty, made, saved, pushed, prefill, renamed, editedActs
         json!({"btn": "Context: All", "stored": null, "cards": ["a1", "a2"], "q": "Project"}),
         "{r}"
     );
-    let waiting = json!({"projects": ["acme/widgets"], "statuses": ["waiting"], "kinds": [], "q": ""});
+    let waiting = json!({"projects": ["p-widgets"], "statuses": ["waiting"], "kinds": [], "q": ""});
     assert_eq!(
         r["writes"],
         json!([
@@ -2812,6 +2812,100 @@ return { idle, focused, empty, made, saved, pushed, prefill, renamed, editedActs
         ]),
         "{r}"
     );
+}
+
+#[tokio::test]
+async fn a_context_saved_before_the_repo_resolves_still_matches_after_it_arrives() {
+    let (html, st) = two_gate_page().await;
+    let r = context_scenario(
+        &html,
+        &st,
+        json!({}),
+        r##"
+const early = (x) => x.thread === T || x.ticket === T ? { ...x, repo: null } : x;
+const s2 = { ...s0, tree: s0.tree.map(early), cards: s0.cards.map(early), feed: s0.feed.map(early), contexts: [] };
+emitState(s2);
+fetchReply = async (url, opts) => ({ ok: true, status: 201, json: async () => ({ context: { id: decodeURIComponent(url.split("/").pop()), ...JSON.parse(opts.body), createdAt: "x", updatedAt: "x" } }) });
+facet("projects").querySelector('[data-part="fbtn"]').dispatch("click");
+const opts = [...facet("projects").querySelectorAll(".fopt")].map((o) => [o.dataset.val, o.textContent]);
+pick("projects", "p-widgets");
+openCtxMenu();
+ctxAct("new").dispatch("click");
+const name = ctxPop().querySelector('[data-part="cname"]');
+name.value = "Widgets";
+name.dispatch("keydown", { key: "Enter" });
+await flush();
+const put = JSON.parse(fetches.filter((f) => f.method === "PUT")[0].body);
+const before = { ...view(), btn: ctxBtn().textContent, proj: facet("projects").querySelector('[data-part="fbtn"]').textContent };
+emitState({ ...s0, contexts: [{ id: stored(), name: "Widgets", spec: put.spec }] });
+const after = { ...view(), btn: ctxBtn().textContent, proj: facet("projects").querySelector('[data-part="fbtn"]').textContent };
+return { opts, spec: put.spec.projects, before, after };
+"##,
+    );
+    let t = json!(TICKET);
+    assert_eq!(r["opts"], json!([["p-gadgets", "acme/gadgets"], ["p-widgets", "widgets"]]), "{r}");
+    assert_eq!(r["spec"], json!(["p-widgets"]), "{r}");
+    assert_eq!(r["before"]["cards"], json!(["a1"]), "{r}");
+    assert_eq!(r["before"]["open"], json!([t]), "{r}");
+    assert_eq!(r["before"]["proj"], "Project: widgets", "{r}");
+    assert_eq!(r["after"]["cards"], json!(["a1"]), "{r}");
+    assert_eq!(r["after"]["open"], json!([t]), "{r}");
+    assert_eq!(r["after"]["feed"], json!(["m91"]), "{r}");
+    assert_eq!(r["after"]["btn"], "Context: Widgets", "{r}");
+    assert_eq!(r["after"]["proj"], "Project: acme/widgets", "{r}");
+}
+
+#[tokio::test]
+async fn contexts_saved_under_a_repo_or_a_title_still_match() {
+    let (html, st) = two_gate_page().await;
+    let r = context_scenario(
+        &html,
+        &st,
+        json!({}),
+        r##"
+const old = [
+  { id: "c-repo", name: "Old repo", spec: { projects: ["acme/gadgets"], statuses: [], kinds: [] } },
+  { id: "c-title", name: "Old title", spec: { projects: ["widgets"], statuses: [], kinds: [] } },
+  { id: "c-gone", name: "Old gizmos", spec: { projects: ["acme/gizmos", "widgets"], statuses: [], kinds: [] } },
+];
+emitState({ ...s0, contexts: old });
+const optsOf = () => {
+  if (facet("projects").querySelector('[data-part="fpop"]').hidden) facet("projects").querySelector('[data-part="fbtn"]').dispatch("click");
+  return [...facet("projects").querySelectorAll(".fopt")].map((o) => [o.dataset.val, o.querySelector("input").checked]);
+};
+choose("c-repo");
+const repo = { ...view(), btn: ctxBtn().textContent, proj: facet("projects").querySelector('[data-part="fbtn"]').textContent, opts: optsOf() };
+choose("c-title");
+const title = { ...view(), btn: ctxBtn().textContent, proj: facet("projects").querySelector('[data-part="fbtn"]').textContent, opts: optsOf() };
+choose("c-gone");
+const gone = { cards: ids(), opts: optsOf() };
+pick("projects", "p-widgets");
+const unpicked = { cards: ids(), opts: optsOf(), btn: ctxBtn().textContent, spec: filterSpec().projects };
+return { repo, title, gone, unpicked };
+"##,
+    );
+    let t = json!(TICKET);
+    let w = json!(WORKER);
+    assert_eq!(r["repo"]["cards"], json!(["a2"]), "{r}");
+    assert_eq!(r["repo"]["open"], json!([w]), "{r}");
+    assert_eq!(r["repo"]["btn"], "Context: Old repo", "{r}");
+    assert_eq!(r["repo"]["proj"], "Project: acme/gadgets", "{r}");
+    assert_eq!(r["repo"]["opts"], json!([["p-gadgets", true], ["p-widgets", false]]), "{r}");
+    assert_eq!(r["title"]["cards"], json!(["a1"]), "{r}");
+    assert_eq!(r["title"]["open"], json!([t]), "{r}");
+    assert_eq!(r["title"]["btn"], "Context: Old title", "{r}");
+    assert_eq!(r["title"]["proj"], "Project: acme/widgets", "{r}");
+    assert_eq!(r["title"]["opts"], json!([["p-gadgets", false], ["p-widgets", true]]), "{r}");
+    assert_eq!(r["gone"]["cards"], json!(["a1"]), "{r}");
+    assert_eq!(r["gone"]["opts"], json!([["p-gadgets", false], ["acme/gizmos", true], ["p-widgets", true]]), "{r}");
+    assert_eq!(r["unpicked"]["cards"], json!([]), "{r}");
+    assert_eq!(
+        r["unpicked"]["opts"],
+        json!([["p-gadgets", false], ["acme/gizmos", true], ["p-widgets", false]]),
+        "{r}"
+    );
+    assert_eq!(r["unpicked"]["btn"], "Context: Old gizmos (edited)", "{r}");
+    assert_eq!(r["unpicked"]["spec"], json!(["acme/gizmos"]), "{r}");
 }
 
 #[tokio::test]
@@ -2860,7 +2954,7 @@ const answer = () => {
   const name = b.name || ctxs.find((c) => c.id === id).name;
   waiting.shift()({ ok: true, status: b.name ? 201 : 200, json: async () => ({ context: { id, name, spec: b.spec, createdAt: "x", updatedAt: "x" } }) });
 };
-pick("projects", "acme/widgets");
+pick("projects", "p-widgets");
 openCtxMenu();
 ctxAct("new").dispatch("click");
 const name = ctxPop().querySelector('[data-part="cname"]');
@@ -2885,7 +2979,7 @@ answer();
 await flush();
 const c1 = contexts.list.find((c) => c.id === "c1");
 const updatedC1 = { name: c1.name, statuses: c1.spec.statuses };
-emitState({ ...s1, contexts: [...ctxs, { id: "mine", name: "Mine", spec: { projects: ["acme/widgets"], statuses: [], kinds: [] } }] });
+emitState({ ...s1, contexts: [...ctxs, { id: "mine", name: "Mine", spec: { projects: ["p-widgets"], statuses: [], kinds: [] } }] });
 const updated = ctxBtn().textContent;
 choose("c1");
 pick("statuses", "running");
@@ -3265,6 +3359,48 @@ const answer = (body) => async () => ({ ok: true, json: async () => body });
 
 fn new_scenario(html: &str, st: &Value, body: &str) -> Value {
     run_page_async(html, &format!("async () => {{\n{PAGE_HELPERS}\n{NEW_HELPERS}\nconst base = {st};\n{body}\n}}"))
+}
+
+#[tokio::test]
+async fn a_project_merges_what_every_item_knows_and_catches_repo_only_issues() {
+    let (html, st) = new_issue_page().await;
+    let r = run_page_async(
+        &html,
+        &format!(
+            r##"async () => {{
+{PAGE_HELPERS}
+{NEW_HELPERS}
+{FILTER_HELPERS}
+const base = {st};
+const proj = {{ id: "p-widgets", title: "widgets" }};
+const s0 = {{
+  ...base,
+  tree: base.tree.map((t) => ({{ ...t, repo: null, project: proj }})),
+  feed: [{{ handle: "m91", at: "10:00 MST", iso: "2026-11-17T17:00:00Z", label: "widgets#41", kind: "note", head: "tests green", ticket: base.tree[0].thread, repo: "acme/widgets", project: proj }}],
+  contexts: [{{ id: "c-old", name: "Old", spec: {{ projects: ["acme/widgets"], statuses: [], kinds: [] }} }}],
+}};
+emitState(s0);
+const all = rows();
+facet("projects").querySelector('[data-part="fbtn"]').dispatch("click");
+const opts = [...facet("projects").querySelectorAll(".fopt")].map((o) => [o.dataset.val, o.textContent]);
+pick("projects", "p-widgets");
+const picked = rows();
+pick("projects", "p-widgets");
+$$("ctx-btn").dispatch("click");
+$$("ctx-pop").querySelector('[data-ctx="c-old"]').dispatch("click");
+facet("projects").querySelector('[data-part="fbtn"]').dispatch("click");
+const legacy = [...facet("projects").querySelectorAll(".fopt")].map((o) => [o.dataset.val, o.querySelector("input").checked]);
+return {{ all, opts, picked, legacy, legacyRows: rows(), tickets: [...keysOf("open"), ...keysOf("done")], feed: keysOf("feed") }};
+}}"##
+        ),
+    );
+    assert_eq!(r["all"].as_array().unwrap().len(), 2, "{r}");
+    assert_eq!(r["opts"], json!([["p-widgets", "acme/widgets"]]), "{r}");
+    assert_eq!(r["picked"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(r["legacy"], json!([["p-widgets", true]]), "{r}");
+    assert_eq!(r["legacyRows"], r["picked"], "{r}");
+    assert_eq!(r["tickets"], json!([TICKET]), "{r}");
+    assert_eq!(r["feed"], json!(["m91"]), "{r}");
 }
 
 #[tokio::test]
