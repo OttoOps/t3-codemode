@@ -2279,6 +2279,91 @@ return { on, off: document.activeElement === document.getElementById("filter-q")
 }
 
 #[tokio::test]
+async fn cards_and_feed_filter_by_a_context_or_projects_as_the_page_does() {
+    let h = H::new();
+    let mut gadgets = project("p-gadgets", "/src/gadgets");
+    gadgets["title"] = json!("Gadgets");
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets"), gadgets]);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    h.remotes.set("/src/gadgets", "git@github.com:acme/gadgets.git");
+    h.fake.update(TICKET, json!({"projectId": "p-widgets"}));
+    h.fake.update(WORKER, json!({"projectId": "p-gadgets"}));
+    h.fake.set_prs(BOSS, vec![pull_request("Acme/Widgets", 90, "open")]);
+    join_board(&h, TICKET, "widgets#41").await;
+    join_board(&h, WORKER, "gadgets#7").await;
+    join_board(&h, BOSS, "widgets#90").await;
+    for who in [TICKET, WORKER, BOSS] {
+        h.wf(who, "send", json!({"kind": "gate", "body": GATE})).await;
+        h.wf(who, "send", json!({"kind": "note", "body": format!("{who} is green")})).await;
+    }
+    h.app.wf.board_tick().await.unwrap();
+    for (id, name, projects) in [
+        ("c-ids", "Widget work", json!(["p-widgets"])),
+        ("c-repo", "Old repo", json!(["ACME/Gadgets"])),
+        ("c-title", "Old title", json!(["gadgets"])),
+        ("c-none", "Waiting", json!([])),
+    ] {
+        let body =
+            serde_json::from_value(json!({"name": name, "spec": {"projects": projects, "statuses": ["waiting"]}}));
+        h.app.wf.put_context(id, body.unwrap()).unwrap();
+    }
+    let r = result(
+        &h.exec(
+            r#"async () => {
+const cards = async (x) => (await wf.cards(x)).map((c) => c.label + " " + (c.project && c.project.id));
+const feed = async (x) => (await wf.feed(x)).map((f) => f.label);
+const err = async (f) => { try { await f(); return null; } catch (e) { return String(e.message || e); } };
+return {
+  all: await cards(),
+  ids: await cards({ context: "c-ids" }),
+  byName: await cards({ context: "widget WORK" }),
+  repo: await cards({ context: "c-repo" }),
+  title: await feed({ context: "c-title" }),
+  none: (await wf.cards({ context: "c-none" })).length,
+  picked: await feed({ projects: [" p-gadgets ", "p-gizmos"] }),
+  limited: await feed({ projects: ["p-widgets"], limit: 1 }),
+  empty: (await wf.feed({ projects: [] })).length,
+  missing: await err(() => wf.cards({ context: "c-gone" })),
+  both: await err(() => wf.feed({ context: "c-ids", projects: ["p-widgets"] })),
+};
+}"#,
+        )
+        .await,
+    );
+    let widgets = json!(["widgets#41 p-widgets", "widgets#90 null"]);
+    assert_eq!(r["all"], json!(["widgets#41 p-widgets", "gadgets#7 p-gadgets", "widgets#90 null"]), "{r}");
+    assert_eq!(r["ids"], widgets, "{r}");
+    assert_eq!(r["byName"], widgets, "{r}");
+    assert_eq!(r["repo"], json!(["gadgets#7 p-gadgets"]), "{r}");
+    assert_eq!(r["title"], json!(["gadgets#7"]), "{r}");
+    assert_eq!(r["none"], 3, "{r}");
+    assert_eq!(r["picked"], json!(["gadgets#7"]), "{r}");
+    assert_eq!(r["limited"], json!(["widgets#90"]), "{r}");
+    assert_eq!(r["empty"], 3, "{r}");
+    assert_eq!(r["missing"], "no saved context with the id or name \"c-gone\"", "{r}");
+    assert_eq!(r["both"], "give a context or projects, not both", "{r}");
+}
+
+#[tokio::test]
+async fn the_filter_learns_a_projects_repo_from_the_items_the_page_sees_first() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.fake.update(TICKET, json!({"projectId": "p-widgets"}));
+    h.fake.update(WORKER, json!({"projectId": "p-widgets"}));
+    h.fake.set_prs(TICKET, vec![pull_request("acme/old-widgets", 1, "merged")]);
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 2, "open")]);
+    h.fake.set_prs(BOSS, vec![pull_request("acme/widgets", 3, "open")]);
+    join_board(&h, TICKET, "old-widgets#1").await;
+    h.wf(TICKET, "send", json!({"kind": "handoff", "body": "done"})).await;
+    join_board(&h, WORKER, "widgets#2").await;
+    join_board(&h, BOSS, "widgets#3").await;
+    h.wf(BOSS, "send", json!({"kind": "gate", "body": GATE})).await;
+    h.app.wf.board_tick().await.unwrap();
+    let r = result(&h.exec("async () => (await wf.cards({ projects: ['p-widgets'] })).map((c) => c.label)").await);
+    assert_eq!(r, json!(["widgets#3"]));
+}
+
+#[tokio::test]
 async fn a_ticket_joined_before_projects_were_stored_gets_its_project_back() {
     let mut h = H::new();
     h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);

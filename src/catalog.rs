@@ -27,7 +27,7 @@ pub struct Catalog {
 
 const WAKE_RESULT: &str = r#"{ handle: string; delivery: "noted" | "sent" | "queued" | "board"; detail?: string; card?: string; options?: string[]; warning?: string; closed?: boolean }"#;
 const MERGE_SIGNATURE: &str = r#"wf.merge(input: { repo: string; pr: number; head: string; method?: "merge" | "squash" | "rebase" }): Promise<{ repo: string; pr: number; head: string } & ({ status: "queued"; position: number | null } | { status: "merged"; commit: string | null; method?: "merge" | "squash" | "rebase" } | { status: "waiting"; mergeState: string } | { status: "refused"; reason: string })>;"#;
-const CARD: &str = r#"{ id: string; kind: string; label: string | null; ticket: string | null; link: string | null; text: string; handle: string | null; options: string[]; at: string; atLocal: string; resolved?: string; resolution?: string | null; token: string }"#;
+const CARD: &str = r#"{ id: string; kind: string; label: string | null; ticket: string | null; link: string | null; text: string; handle: string | null; options: string[]; at: string; atLocal: string; resolved?: string; resolution?: string | null; token: string; repo: string | null; project: { id: string; title: string | null } | null }"#;
 
 const NEW_ISSUE: &str = "{ id: string; url: string; repo: string; number: number; label: string; title: string | null; note: string | null; thread: string; threadLink: string | null; threadTitle: string | null; at: string; atLocal: string; dismissed: boolean; dismissedAt: string | null; dismissedAtLocal: string | null; restoredAt: string | null }";
 const SKIPPED: &str = "{ instanceId: string; reason: string }";
@@ -293,9 +293,14 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.cards",
             "wf",
-            "The board's open decision cards, oldest first: gates, blockers, reports and escalations from ticket threads, with their reply options (the sender's options, else those parsed from their text). all: include resolved cards, each with resolved (local time) and resolution.",
-            &format!("wf.cards(input?: {{ all?: boolean }}): Promise<{CARD}[]>;"),
-            obj(json!({"all": {"type": "boolean"}}), &[]),
+            "The board's open decision cards, oldest first: gates, blockers, reports and escalations from ticket threads, with their reply options (the sender's options, else those parsed from their text) and their ticket's repo and project. all: include resolved cards, each with resolved (local time) and resolution. context (a saved context's id or name) or projects (project ids, or old repo or title values) keeps only the cards of those projects, matched as the board page matches them; an empty list keeps every card.",
+            &format!(
+                "wf.cards(input?: {{ all?: boolean; context?: string; projects?: string[] }}): Promise<{CARD}[]>;"
+            ),
+            obj(
+                json!({"all": {"type": "boolean"}, "context": {"type": "string"}, "projects": {"type": "array", "items": {"type": "string"}}}),
+                &[],
+            ),
         ),
         builtin(
             "wf.answer",
@@ -307,9 +312,12 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.feed",
             "wf",
-            "The board's activity feed: the latest notes and events from ticket and worker threads, newest first.",
-            "wf.feed(input?: { limit?: number }): Promise<{ handle: string; at: string; iso: string; label: string; kind: string; head: string }[]>;",
-            obj(json!({"limit": {"type": "integer"}}), &[]),
+            "The board's activity feed: the latest notes and events from ticket and worker threads, newest first, each with its ticket's repo and project. context (a saved context's id or name) or projects (project ids, or old repo or title values) keeps only the rows of those projects, matched as the board page matches them: up to limit matching rows from the latest 200.",
+            "wf.feed(input?: { limit?: number; context?: string; projects?: string[] }): Promise<{ handle: string; at: string; iso: string; label: string; kind: string; head: string; ticket: string | null; repo: string | null; project: { id: string; title: string | null } | null }[]>;",
+            obj(
+                json!({"limit": {"type": "integer"}, "context": {"type": "string"}, "projects": {"type": "array", "items": {"type": "string"}}}),
+                &[],
+            ),
         ),
         builtin(
             "wf.waiting.add",
