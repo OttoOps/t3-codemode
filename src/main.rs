@@ -952,29 +952,62 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             return run_doctor(DoctorArgs { repo, json, no_t3, resolve, port: port.port, state, thread }).await;
         }
         Cmd::Bench { n, tools } => bench::run(n, tools.as_deref()).await?,
-        Cmd::AntigravityMcp { remove, bin } => run_antigravity_mcp(remove, bin)?,
+        Cmd::AntigravityMcp { remove, bin } => return run_antigravity_mcp(remove, bin),
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn run_antigravity_mcp(remove: bool, bin: Option<PathBuf>) -> Result<()> {
+fn run_antigravity_mcp(remove: bool, bin: Option<PathBuf>) -> Result<ExitCode> {
     let mut env = steps::Env::from_env()?;
     if let Some(b) = bin {
         env.t3cm_bin = b;
     }
     let targets = steps::antigravity_targets(&env);
     if remove {
+        let mut failed = false;
+        let tools_prefix = format!("mcpServers.{}.tools", steps::MCP_NAME);
         for t in targets {
-            match steps::remove_antigravity(&t.path) {
-                Ok(true) => println!("Removed {} for Antigravity from {}", steps::MCP_NAME, t.path.display()),
-                Ok(false) => {}
-                Err(e) => eprintln!(
-                    "Warning: could not update Antigravity MCP config at {} ({e:#}); left as is.",
-                    t.path.display()
-                ),
+            match t.status {
+                steps::AntigravityState::Current | steps::AntigravityState::Stale => {
+                    match steps::remove_antigravity(&t.path) {
+                        Ok(true) => println!("Removed {} for Antigravity from {}", steps::MCP_NAME, t.path.display()),
+                        Ok(false) => {}
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: could not update Antigravity MCP config at {} ({e:#}); left as is.",
+                                t.path.display()
+                            );
+                            failed = true;
+                        }
+                    }
+                }
+                steps::AntigravityState::Missing | steps::AntigravityState::Conflict => {}
+                steps::AntigravityState::Problem => {
+                    if t.problem.as_deref().is_some_and(|p| p.starts_with(&tools_prefix)) {
+                        match steps::remove_antigravity(&t.path) {
+                            Ok(true) => {
+                                println!("Removed {} for Antigravity from {}", steps::MCP_NAME, t.path.display())
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                eprintln!(
+                                    "Warning: could not update Antigravity MCP config at {} ({e:#}); left as is.",
+                                    t.path.display()
+                                );
+                                failed = true;
+                            }
+                        }
+                    } else {
+                        let why = t.problem.as_deref().unwrap_or("invalid JSON");
+                        eprintln!(
+                            "Warning: could not update Antigravity MCP config at {} ({why}); left as is.",
+                            t.path.display()
+                        );
+                    }
+                }
             }
         }
-        return Ok(());
+        return Ok(if failed { ExitCode::from(2) } else { ExitCode::SUCCESS });
     }
     let mut wrote = false;
     for t in targets {
@@ -1012,7 +1045,7 @@ fn run_antigravity_mcp(remove: bool, bin: Option<PathBuf>) -> Result<()> {
     if wrote {
         println!("Note: {}", steps::ANTIGRAVITY_CAVEAT);
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 #[tokio::main]

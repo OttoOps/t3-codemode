@@ -886,4 +886,107 @@ fn install_sh_registers_and_uninstalls_antigravity_in_scratch_home() {
     assert!(in_min.status.success(), "{}", text(&in_min));
     let v1_min_in: Value = serde_json::from_str(&std::fs::read_to_string(&p1).unwrap()).unwrap();
     assert_eq!(v1_min_in["mcpServers"]["t3cm"], expected_entry);
+
+    // 6. Uninstall retains t3cm when a known registration cannot be removed, and succeeds once writable.
+    if unsafe { libc::geteuid() } != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        let p1_dir = p1.parent().unwrap();
+        let bin_path = scratch.path().join(".local/bin/t3cm");
+        std::fs::set_permissions(p1_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let blocked = Command::new("bash")
+            .arg(crate_root.join("deploy/install.sh"))
+            .args(["--uninstall", "--files-only"])
+            .env_clear()
+            .env("HOME", scratch.path())
+            .env("PATH", min_bin.path())
+            .output()
+            .unwrap();
+        std::fs::set_permissions(p1_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!blocked.status.success(), "uninstall must fail when a known registration cannot be removed");
+        assert!(bin_path.is_file(), "t3cm binary must be retained for retry: {}", text(&blocked));
+        // Writable sibling profile was still cleaned up on the same pass.
+        let v2_partial: Value = serde_json::from_str(&std::fs::read_to_string(&p2).unwrap()).unwrap();
+        assert_eq!(v2_partial, json!({"keep": true, "mcpServers": {"other": {"command": "other"}}}));
+
+        let retry = Command::new("bash")
+            .arg(crate_root.join("deploy/install.sh"))
+            .args(["--uninstall", "--files-only"])
+            .env_clear()
+            .env("HOME", scratch.path())
+            .env("PATH", min_bin.path())
+            .output()
+            .unwrap();
+        assert!(retry.status.success(), "{}", text(&retry));
+        assert!(!bin_path.exists(), "t3cm binary should be removed once cleanup succeeds");
+        let v1_cleaned: Value = serde_json::from_str(&std::fs::read_to_string(&p1).unwrap()).unwrap();
+        assert_eq!(v1_cleaned, json!({"mcpServers": {}}));
+    }
+}
+
+#[test]
+fn remove_antigravity_leaves_incompatible_t3cm_entry_alone() {
+    let home = tempfile::tempdir().unwrap();
+    let owned = agy_profile(home.path(), "owned111");
+    let foreign = agy_profile(home.path(), "foreign2");
+    let env = Env::under(home.path(), None);
+    let owned_raw =
+        json!({"mcpServers": {"t3cm": steps::antigravity_entry(&env.t3cm_bin), "keep": {"command": "k"}}}).to_string();
+    let foreign_raw = json!({"mcpServers": {"t3cm": {"url": "http://127.0.0.1:47731/mcp"}}}).to_string();
+    std::fs::write(&owned, &owned_raw).unwrap();
+    std::fs::write(&foreign, &foreign_raw).unwrap();
+
+    assert!(steps::remove_antigravity(&owned).unwrap());
+    assert!(!steps::remove_antigravity(&foreign).unwrap());
+    let owned_after: Value = serde_json::from_str(&std::fs::read_to_string(&owned).unwrap()).unwrap();
+    assert_eq!(owned_after, json!({"mcpServers": {"keep": {"command": "k"}}}));
+    assert_eq!(std::fs::read_to_string(&foreign).unwrap(), foreign_raw);
+}
+
+#[cfg(unix)]
+#[test]
+fn antigravity_targets_reports_unreadable_provider_and_profile_dirs() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let good = agy_profile(home.path(), "good1111");
+    let bad = agy_profile(home.path(), "bad22222");
+    std::fs::write(&good, "").unwrap();
+    std::fs::write(&bad, "").unwrap();
+    let bad_profile = bad.parent().unwrap().parent().unwrap();
+    let root = bad_profile.parent().unwrap();
+
+    // Unreadable individual profile dir reports a Problem alongside the readable sibling.
+    std::fs::set_permissions(bad_profile, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let targets = steps::antigravity_targets(&Env::under(home.path(), None));
+    std::fs::set_permissions(bad_profile, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(targets.iter().any(|t| t.path == good && t.status == steps::AntigravityState::Missing), "{targets:?}");
+    assert!(targets.iter().any(|t| t.status == steps::AntigravityState::Problem), "{targets:?}");
+
+    // Unreadable provider root reports a Problem instead of an empty list.
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let root_targets = steps::antigravity_targets(&Env::under(home.path(), None));
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(root_targets.len(), 1, "{root_targets:?}");
+    assert_eq!(root_targets[0].status, steps::AntigravityState::Problem);
+}
+
+#[test]
+fn write_antigravity_serializes_concurrent_writers() {
+    let home = tempfile::tempdir().unwrap();
+    let cfg = agy_profile(home.path(), "race1111");
+    std::fs::write(&cfg, json!({"mcpServers": {"other": {"command": "other"}}}).to_string()).unwrap();
+    let bin = home.path().join(".local/bin/t3cm");
+
+    std::thread::scope(|s| {
+        for _ in 0..8 {
+            s.spawn(|| {
+                steps::write_antigravity(&cfg, &bin).unwrap();
+            });
+        }
+    });
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+    assert_eq!(saved["mcpServers"]["other"], json!({"command": "other"}));
+    assert_eq!(saved["mcpServers"]["t3cm"], steps::antigravity_entry(&bin));
 }

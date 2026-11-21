@@ -827,11 +827,65 @@ fn inspect_antigravity(path: &Path) -> AntigravityTarget {
 
 pub fn antigravity_targets(env: &Env) -> Vec<AntigravityTarget> {
     let root = env.t3_home.join("userdata").join("providers").join("antigravity");
-    let Ok(rd) = std::fs::read_dir(&root) else { return Vec::new() };
-    let mut profiles: Vec<PathBuf> =
-        rd.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.is_dir() && p.join("config").is_dir()).collect();
+    let rd = match std::fs::read_dir(&root) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            return vec![AntigravityTarget {
+                path: root,
+                status: AntigravityState::Problem,
+                problem: Some(format!("cannot read profiles directory: {e}")),
+            }];
+        }
+    };
+    let mut profiles = Vec::new();
+    let mut problems = Vec::new();
+    for entry in rd {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                problems.push(AntigravityTarget {
+                    path: root.clone(),
+                    status: AntigravityState::Problem,
+                    problem: Some(format!("cannot read profile entry: {e}")),
+                });
+                continue;
+            }
+        };
+        let path = entry.path();
+        match std::fs::metadata(&path) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                problems.push(AntigravityTarget {
+                    path,
+                    status: AntigravityState::Problem,
+                    problem: Some(format!("cannot inspect profile directory: {e}")),
+                });
+                continue;
+            }
+        }
+        let config_dir = path.join("config");
+        match std::fs::metadata(&config_dir) {
+            Ok(m) if m.is_dir() => profiles.push(path),
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                problems.push(AntigravityTarget {
+                    path: config_dir,
+                    status: AntigravityState::Problem,
+                    problem: Some(format!("cannot inspect profile config directory: {e}")),
+                });
+            }
+        }
+    }
     profiles.sort();
-    profiles.into_iter().map(|p| inspect_antigravity(&p.join("config").join("mcp_config.json"))).collect()
+    problems.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut targets: Vec<AntigravityTarget> =
+        profiles.into_iter().map(|p| inspect_antigravity(&p.join("config").join("mcp_config.json"))).collect();
+    targets.extend(problems);
+    targets
 }
 
 fn merge_eager_flags(entry: &mut Map<String, Value>) -> Result<()> {
@@ -857,78 +911,192 @@ fn merge_eager_flags(entry: &mut Map<String, Value>) -> Result<()> {
     Ok(())
 }
 
-pub fn write_antigravity(path: &Path, t3cm_bin: &Path) -> Result<bool> {
-    let raw = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
-    };
-    let trimmed = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&raw);
-    let mut root = if trimmed.iter().all(u8::is_ascii_whitespace) {
-        Map::new()
-    } else {
-        match serde_json::from_slice::<Value>(trimmed)
-            .with_context(|| format!("{} is not valid JSON", path.display()))?
-        {
-            Value::Object(m) => m,
-            _ => bail!("{} top level must be a JSON object", path.display()),
-        }
-    };
-    let servers = match root.get_mut("mcpServers") {
-        Some(Value::Object(m)) => m,
-        Some(_) => bail!("{} mcpServers is not a JSON object", path.display()),
-        None => {
-            root.insert("mcpServers".into(), Value::Object(Map::new()));
-            root.get_mut("mcpServers").and_then(Value::as_object_mut).expect("just inserted")
-        }
-    };
-    match servers.get_mut(MCP_NAME) {
-        None => {
-            servers.insert(MCP_NAME.into(), antigravity_entry(t3cm_bin));
-        }
-        Some(Value::Object(entry)) => match inspect_t3cm_entry(entry) {
-            (AntigravityState::Current, _) => return Ok(false),
-            (AntigravityState::Stale, _) => merge_eager_flags(entry)?,
-            (_, Some(why)) => bail!("{why}"),
-            (_, None) => bail!("mcpServers.{MCP_NAME} cannot be updated"),
-        },
-        Some(_) => bail!("mcpServers.{MCP_NAME} is not a JSON object"),
+static AGY_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
     }
-    let mut text = serde_json::to_string_pretty(&Value::Object(root))?;
-    text.push('\n');
-    write_atomic(&real(path), text.as_bytes())?;
-    Ok(true)
 }
 
-pub fn remove_antigravity(path: &Path) -> Result<bool> {
-    let raw = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
-    };
-    let trimmed = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&raw);
-    if trimmed.iter().all(u8::is_ascii_whitespace) {
+fn open_unique_staging(
+    dir: &Path,
+    name: &str,
+    perms: Option<&std::fs::Permissions>,
+) -> Result<(PathBuf, std::fs::File)> {
+    let pid = std::process::id();
+    for _ in 0..64 {
+        let seq = AGY_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = dir.join(format!(".{name}.t3cm-tmp.{pid}.{seq}"));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            opts.mode(perms.map_or(0o600, PermissionsExt::mode));
+        }
+        #[cfg(not(unix))]
+        let _ = perms;
+        match opts.open(&tmp) {
+            Ok(f) => return Ok((tmp, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("creating {}", tmp.display())),
+        }
+    }
+    bail!("could not allocate staging file in {}", dir.display())
+}
+
+fn edit_antigravity_locked<F>(path: &Path, create_dir: bool, mut edit: F) -> Result<bool>
+where
+    F: FnMut(Option<&[u8]>) -> Result<Option<Vec<u8>>>,
+{
+    let target = real(path);
+    let dir = target.parent().context("a file path has a parent")?;
+    if create_dir {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let name = target.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let lock_path = dir.join(format!(".{name}.t3cm-lock"));
+    let mut lock_opts = std::fs::OpenOptions::new();
+    lock_opts.read(true).write(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut lock_opts, 0o600);
+    let lock_file = lock_opts.open(&lock_path).with_context(|| format!("opening {}", lock_path.display()))?;
+    lock_file.lock().with_context(|| format!("locking {}", lock_path.display()))?;
+
+    for attempt in 0..3 {
+        let before = read_optional_bytes(&target)?;
+        let perms = std::fs::metadata(&target).ok().map(|m| m.permissions());
+        let Some(bytes) = edit(before.as_deref())? else {
+            return Ok(false);
+        };
+        let (tmp, mut file) = open_unique_staging(dir, &name, perms.as_ref())?;
+        let written = std::io::Write::write_all(&mut file, &bytes).and_then(|()| match perms {
+            Some(p) => std::fs::set_permissions(&tmp, p),
+            None => Ok(()),
+        });
+        drop(file);
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e).with_context(|| format!("writing {}", tmp.display()));
+        }
+        let current = match read_optional_bytes(&target) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        };
+        if current != before {
+            let _ = std::fs::remove_file(&tmp);
+            if attempt + 1 < 3 {
+                continue;
+            }
+            bail!("{} changed while updating; retry", path.display());
+        }
+        std::fs::rename(&tmp, &target)
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&tmp);
+            })
+            .with_context(|| format!("replacing {}", target.display()))?;
+        return Ok(true);
+    }
+    bail!("{} changed while updating; retry", path.display())
+}
+
+pub fn write_antigravity(path: &Path, t3cm_bin: &Path) -> Result<bool> {
+    if inspect_antigravity(path).status == AntigravityState::Current {
         return Ok(false);
     }
-    let mut root = match serde_json::from_slice::<Value>(trimmed)
+    edit_antigravity_locked(path, true, |raw| {
+        let raw = raw.unwrap_or(&[]);
+        let trimmed = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(raw);
+        let mut root = if trimmed.iter().all(u8::is_ascii_whitespace) {
+            Map::new()
+        } else {
+            match serde_json::from_slice::<Value>(trimmed)
+                .with_context(|| format!("{} is not valid JSON", path.display()))?
+            {
+                Value::Object(m) => m,
+                _ => bail!("{} top level must be a JSON object", path.display()),
+            }
+        };
+        let servers = match root.get_mut("mcpServers") {
+            Some(Value::Object(m)) => m,
+            Some(_) => bail!("{} mcpServers is not a JSON object", path.display()),
+            None => {
+                root.insert("mcpServers".into(), Value::Object(Map::new()));
+                root.get_mut("mcpServers").and_then(Value::as_object_mut).expect("just inserted")
+            }
+        };
+        match servers.get_mut(MCP_NAME) {
+            None => {
+                servers.insert(MCP_NAME.into(), antigravity_entry(t3cm_bin));
+            }
+            Some(Value::Object(entry)) => match inspect_t3cm_entry(entry) {
+                (AntigravityState::Current, _) => return Ok(None),
+                (AntigravityState::Stale, _) => merge_eager_flags(entry)?,
+                (_, Some(why)) => bail!("{why}"),
+                (_, None) => bail!("mcpServers.{MCP_NAME} cannot be updated"),
+            },
+            Some(_) => bail!("mcpServers.{MCP_NAME} is not a JSON object"),
+        }
+        let mut text = serde_json::to_string_pretty(&Value::Object(root))?;
+        text.push('\n');
+        Ok(Some(text.into_bytes()))
+    })
+}
+
+fn parse_removable_antigravity(path: &Path, raw: &[u8]) -> Result<Option<Map<String, Value>>> {
+    let trimmed = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(raw);
+    if trimmed.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    let root = match serde_json::from_slice::<Value>(trimmed)
         .with_context(|| format!("{} is not valid JSON", path.display()))?
     {
         Value::Object(m) => m,
         _ => bail!("{} top level must be a JSON object", path.display()),
     };
-    let Some(servers_val) = root.get_mut("mcpServers") else {
-        return Ok(false);
+    let Some(servers_val) = root.get("mcpServers") else {
+        return Ok(None);
     };
-    let Some(servers) = servers_val.as_object_mut() else {
+    let Some(servers) = servers_val.as_object() else {
         bail!("{} mcpServers is not a JSON object", path.display());
     };
-    if servers.shift_remove(MCP_NAME).is_none() {
+    let owned = match servers.get(MCP_NAME) {
+        Some(Value::Object(entry)) => is_t3cm_stdio_entry(entry),
+        _ => false,
+    };
+    if !owned {
+        return Ok(None);
+    }
+    Ok(Some(root))
+}
+
+pub fn remove_antigravity(path: &Path) -> Result<bool> {
+    let Some(initial) = read_optional_bytes(path)? else {
+        return Ok(false);
+    };
+    if parse_removable_antigravity(path, &initial)?.is_none() {
         return Ok(false);
     }
-    let mut text = serde_json::to_string_pretty(&Value::Object(root))?;
-    text.push('\n');
-    write_atomic(&real(path), text.as_bytes())?;
-    Ok(true)
+    edit_antigravity_locked(path, false, |raw| {
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let Some(mut root) = parse_removable_antigravity(path, raw)? else {
+            return Ok(None);
+        };
+        if let Some(Value::Object(servers)) = root.get_mut("mcpServers") {
+            servers.shift_remove(MCP_NAME);
+        }
+        let mut text = serde_json::to_string_pretty(&Value::Object(root))?;
+        text.push('\n');
+        Ok(Some(text.into_bytes()))
+    })
 }
 
 fn antigravity_state(targets: &[AntigravityTarget]) -> AutoState {

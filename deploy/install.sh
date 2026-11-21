@@ -287,35 +287,42 @@ if action == "add":
     else:
         servers[name] = want
 elif action == "remove":
-    if name not in servers:
+    if name not in servers or not is_t3cm_stdio(servers[name]):
         sys.exit(10)
     del servers[name]
 else:
     print(f"unknown action: {action}", file=sys.stderr)
     sys.exit(1)
 
+import tempfile
 real = os.path.realpath(path)
-tmp = real + ".t3cm-tmp"
+parent = os.path.dirname(real) or "."
 text = json.dumps(doc, indent=2) + "\n"
-fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode if mode is not None else 0o644)
+tmp = None
 try:
+    fd, tmp = tempfile.mkstemp(prefix=".t3cm-tmp.", dir=parent)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
     if mode is not None:
         os.chmod(tmp, mode)
     os.replace(tmp, real)
-except Exception:
-    try:
-        os.unlink(tmp)
-    except OSError:
-        pass
-    raise
+except Exception as e:
+    if tmp is not None:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    print(f"cannot write {real}: {e}", file=sys.stderr)
+    sys.exit(2 if action == "remove" else 1)
 sys.exit(0)
 PY
     return $?
   fi
 
-  local src="$path" tmp=""
+  local src="$path" tmp="" dir="" write_err=1
+  if [ "$action" = remove ]; then
+    write_err=2
+  fi
   if [ ! -e "$path" ] || [ ! -s "$path" ] || [ -z "$(tr -d '[:space:]' <"$path")" ]; then
     if [ "$action" = remove ]; then
       return 10
@@ -327,7 +334,7 @@ PY
     echo "not a single JSON object with an object mcpServers" >&2
     return 1
   fi
-  tmp="$path.t3cm-tmp"
+  dir="$(dirname "$path")"
   if [ "$action" = add ]; then
     if jq -se --arg name "$MCP_NAME" '(.[0].mcpServers | type) == "object" and (.[0].mcpServers | has($name))' "$src" >/dev/null 2>&1; then
       if ! jq -se --arg name "$MCP_NAME" '
@@ -354,28 +361,47 @@ PY
       ' "$src" >/dev/null 2>&1; then
         return 10
       fi
+      tmp="$(mktemp "$dir/.t3cm-tmp.XXXXXX")" || return "$write_err"
       jq --arg name "$MCP_NAME" '
         .mcpServers[$name].tools = ((.mcpServers[$name].tools // {})
           | .search = ((.search // {}) + {eager: true})
           | .execute = ((.execute // {}) + {eager: true}))
-      ' "$src" >"$tmp" || { rm -f "$tmp"; return 1; }
+      ' "$src" >"$tmp" || { rm -f "$tmp"; return "$write_err"; }
     else
+      tmp="$(mktemp "$dir/.t3cm-tmp.XXXXXX")" || return "$write_err"
       jq --arg name "$MCP_NAME" --arg bin "$bin_path" \
         '.mcpServers = ((.mcpServers // {}) + {($name): {command: $bin, args: ["stdio"], tools: {search: {eager: true}, execute: {eager: true}}}})' \
-        "$src" >"$tmp" || { rm -f "$tmp"; return 1; }
+        "$src" >"$tmp" || { rm -f "$tmp"; return "$write_err"; }
     fi
   elif [ "$action" = remove ]; then
-    if ! jq -se --arg name "$MCP_NAME" '(.[0].mcpServers | type) == "object" and (.[0].mcpServers | has($name))' "$src" >/dev/null 2>&1; then
+    if ! jq -se --arg name "$MCP_NAME" '
+      (.[0].mcpServers | type) == "object"
+      and (.[0].mcpServers | has($name))
+      and (.[0].mcpServers[$name] as $e
+        | ($e | type) == "object"
+        and ($e.command | type) == "string"
+        and (($e.command | gsub("\\\\"; "/") | split("/") | last) as $b | ($b == $name or ($b | ascii_downcase) == "t3cm.exe"))
+        and ($e.args | type) == "array" and ($e.args[0] == "stdio"))
+    ' "$src" >/dev/null 2>&1; then
       return 10
     fi
-    jq --arg name "$MCP_NAME" 'del(.mcpServers[$name])' "$src" >"$tmp" || { rm -f "$tmp"; return 1; }
+    tmp="$(mktemp "$dir/.t3cm-tmp.XXXXXX")" || return "$write_err"
+    jq --arg name "$MCP_NAME" 'del(.mcpServers[$name])' "$src" >"$tmp" || { rm -f "$tmp"; return "$write_err"; }
   else
     return 1
   fi
   if [ -e "$path" ]; then
-    chmod --reference="$path" "$tmp" 2>/dev/null || true
+    local mode=""
+    if mode="$(stat -L -c '%a' "$path" 2>/dev/null)" && [ -n "$mode" ]; then
+      chmod "$mode" "$tmp" || { rm -f "$tmp"; return "$write_err"; }
+    elif mode="$(stat -L -f '%OLp' "$path" 2>/dev/null)" && [ -n "$mode" ]; then
+      chmod "$mode" "$tmp" || { rm -f "$tmp"; return "$write_err"; }
+    else
+      rm -f "$tmp"
+      return "$write_err"
+    fi
   fi
-  mv -f "$tmp" "$path"
+  mv -f "$tmp" "$path" || { rm -f "$tmp"; return "$write_err"; }
 }
 
 register_antigravity_mcp() {
@@ -420,9 +446,9 @@ unregister_antigravity_mcp() {
   [ -d "$ANTIGRAVITY_DIR" ] || return 0
   if has_t3cm_antigravity_mcp; then
     "$BIN_DIR/t3cm" antigravity-mcp --remove
-    return
+    return $?
   fi
-  local tool profile cfg rc
+  local tool profile cfg rc failed=0
   tool="$(json_tool)"
   for profile in "$ANTIGRAVITY_DIR"/*/; do
     if [ ! -d "$profile" ] || [ ! -d "${profile}config" ]; then
@@ -439,9 +465,14 @@ unregister_antigravity_mcp() {
     case "$rc" in
       0) echo "Removed $MCP_NAME for Antigravity from $cfg" ;;
       10) ;;
+      2)
+        echo "Warning: could not update Antigravity MCP config at $cfg; left as is." >&2
+        failed=2
+        ;;
       *) echo "Warning: could not update Antigravity MCP config at $cfg; left as is." >&2 ;;
     esac
   done
+  return "$failed"
 }
 
 register_mcp() {
@@ -624,12 +655,20 @@ uninstall_all() {
       store="$HOME/Library/Application Support/t3-codemode (logs: $MAC_LOGS)"
       ;;
   esac
-  unregister_antigravity_mcp
-  rm -f "$BIN_DIR/t3cm"
+  local agy_rc=0
+  unregister_antigravity_mcp || agy_rc=$?
+  if [ "$agy_rc" -eq 0 ]; then
+    rm -f "$BIN_DIR/t3cm"
+  else
+    echo "Kept $BIN_DIR/t3cm because Antigravity MCP cleanup failed; fix permissions and run --uninstall again." >&2
+  fi
   if command -v claude >/dev/null 2>&1; then
     claude mcp remove --scope user "$MCP_NAME" >/dev/null 2>&1 || true
   else
     echo "claude is not on PATH; remove the MCP entry with: claude mcp remove --scope user $MCP_NAME"
+  fi
+  if [ "$agy_rc" -ne 0 ]; then
+    die "Antigravity MCP cleanup did not complete; fix permissions and run --uninstall again."
   fi
   echo "t3-codemode removed. Its store stays in $store; delete it to drop memory and links."
 }
