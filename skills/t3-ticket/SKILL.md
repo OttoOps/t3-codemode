@@ -347,16 +347,16 @@ or chain the failed stage onto its merge gate.
 Otherwise, collect the PR's changed repo-relative paths from `files` and
 look up `await wf.slot("delivery", { files })` to filter steps with `paths`
 globs. For a follow-up PR fixing a failed `pr`-scoped delivery stage (step
-5), pass the union of the original PR's `files` and the follow-up PR's
-`files` (and retain the failed stage and any remaining `pr`-scoped stages
-from that recovery run) so a fix touching only workflow or config files
-never drops the failed stage. Send a note for any stage in `skipped` (paths
-unmatched) or any `skill` step whose skill is `status: "missing"`, and
-omit those stages from the active list for this PR. On the last PR of the
-ticket (`n === N`), also compute
-`await wf.slot("delivery", { files: combinedFiles })` across all PRs of the
-ticket so `ticket`-scoped stages with `paths` are filtered on the combined
-change.
+5), pass the union of the original PR's `files` and all follow-up PRs'
+`files` in that recovery run (and retain the failed stage and any remaining
+`pr`-scoped stages from the recovery run) so a fix touching only workflow
+or config files never drops the failed stage or earlier follow-up paths.
+Send a note for any stage in `skipped` (paths unmatched) or any `skill`
+step whose skill is `status: "missing"`, and omit those stages from the
+active list for this PR. On the last PR of the ticket (`n === N`), also
+compute `await wf.slot("delivery", { files: combinedFiles })` across all
+PRs of the ticket so `ticket`-scoped stages with `paths` are filtered on
+the combined change.
 
 Build the merge gate from the active steps starting at `merge` (keeping
 `gate: "merge"` so GitHub reconcile tracks the PR and holds approval to
@@ -846,13 +846,14 @@ the first time. The handoff has already closed the worker's link.
    this handoff as its previous handoff. If this was a targeted fix PR for
    a failed `ticket`-scoped or `closeAfter: "all"` `post-handoff` stage,
    refresh `origin/main`, update `combinedFiles` with the fix PR's changed
-   files, and check which earlier completed stages in that scope the new
-   `main` revision invalidates (for example, when `verify` failed after
-   `deploy` and the fix changed code that `deploy` must ship). Repeat any
-   invalidated earlier stages through their required gates and approvals
-   before re-running the failed stage; preserve an earlier completed stage
-   only when its result still holds for the new `main` SHA. Otherwise (this
-   was the last PR of the split):
+   files, and re-resolve `await wf.slot("delivery", { files: combinedFiles })`.
+   Before resuming the failed stage, run any earlier stage in that scope
+   that was previously skipped by `paths` but now matches, and repeat any
+   earlier completed stages invalidated by the new `main` revision (for
+   example, when `verify` failed after `deploy` and the fix changed code
+   that `deploy` must ship), each through its required gates and approvals.
+   Preserve an earlier completed stage only when its result still holds for
+   the new `main` SHA. Otherwise (this was the last PR of the split):
    - When `closeAfter` is `"pr"`, close the issue now (remove the
      in-progress label and run
      `gh issue close <n> -R <repo> --comment "<text>"` through Publishing)

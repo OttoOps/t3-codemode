@@ -235,10 +235,12 @@ class DeliveryStepsTests(unittest.TestCase):
         self.assertIn("done and verify", stages)
         self.assertIn('state === "MERGED"', ready)
         self.assertIn("override delivery to merge-only", ready)
-        self.assertIn("union of the original PR's `files` and the follow-up PR's `files`", ready)
+        self.assertIn("union of the original PR's `files` and all follow-up PRs' `files`", ready)
         handoff = " ".join(section(self.ticket, "### The handoff").split())
-        self.assertIn("Repeat any invalidated earlier stages", handoff)
-        self.assertIn("preserve an earlier completed stage only when its result still holds", handoff)
+        self.assertIn('re-resolve `await wf.slot("delivery", { files: combinedFiles })`', handoff)
+        self.assertIn("previously skipped by `paths` but now matches", handoff)
+        self.assertIn("repeat any earlier completed stages invalidated by the new `main` revision", handoff)
+        self.assertIn("Preserve an earlier completed stage only when its result still holds", handoff)
         self.assertIn('For a `post-handoff` stage (under `closeAfter: "all"`)', stages)
 
     def test_ticket_honors_scope_boundaries_and_close_after(self):
