@@ -6,20 +6,69 @@ that code inside a sandbox and keeps the service off the network.
 
 ## Trust boundary
 
-Any local process that can reach the port acts with the service's T3 session.
-That is the same trust boundary as the `t3` CLI for the same user. The service
-does not authenticate callers beyond that, and it does not try to.
+Any local process that can reach the loopback port directly acts with the
+service's T3 session. That is the same trust boundary as the `t3` CLI for the
+same user. Direct loopback callers are not authenticated beyond that.
+
+The HTTP server splits `/mcp` and `/healthz` from the web board (`/`,
+`/api/*`) into separate middleware boundaries:
+
+- `/mcp` and `/healthz` are strictly loopback-only. When fronted by a proxy
+  that preserves the public `Host` or sends standard forwarding headers, they
+  refuse remote hosts, remote origins, and proxied requests even when remote
+  board access is enabled.
+- The board stays loopback-only by default (`board.remote` is off). When
+  explicitly enabled behind an HTTPS reverse proxy such as Tailscale Serve,
+  Caddy, nginx, or `cloudflared`, only the board routes accept requests for the
+  configured `https://` origin, and every remote read and write route requires
+  remote authentication.
+
+See [ADR 0008](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0008-remote-board-trust-boundary.md)
+for the split trust boundary and reverse-proxy trust assumptions.
 
 ## Network
 
-- It binds `127.0.0.1` only.
-- Every route answers only requests whose `Host` is `127.0.0.1`, `localhost` or
-  `[::1]` (any port), and refuses others with 403, which shuts out DNS
-  rebinding.
-- `POST /mcp` and the board routes also refuse a request whose `Origin` is not
-  a loopback host.
-- Board routes are stricter: `Host` must name the service's own port, and every
-  POST needs the page's per-process CSRF token in `X-T3CM-CSRF`. See
+- The service binds `127.0.0.1` only.
+- `/mcp` and `/healthz` require a single `Host` naming `127.0.0.1`, `localhost`,
+  or `[::1]` (any valid port), refuse any non-loopback `Origin` (including a
+  configured remote board origin), and refuse any request carrying proxy
+  headers (`Tailscale-User-Login`, `X-Forwarded-Host`, `X-Forwarded-For`,
+  `X-Forwarded-Proto`, `X-Forwarded-Port`, `Forwarded`) with 403.
+- Board routes (`/`, `/api/*`) classify each request before running any handler:
+  - A request is **local** only when it carries none of the proxy headers above
+    and has a single `Host` naming `127.0.0.1:<port>`, `localhost:<port>`, or
+    `[::1]:<port>` on the service's own port. Local requests require any
+    `Origin` header to match the service's own `http://` loopback origin and
+    require `X-T3CM-CSRF` on every mutating method (`POST`, `PUT`, `DELETE`).
+  - Any other request (non-loopback `Host`, wrong port, missing or duplicate
+    `Host`, or any proxy header) is **remote**. Because reverse proxies connect
+    over `127.0.0.1`, proxy headers prevent a proxied request from falling into
+    local zero-auth access.
+- With `board.remote` off (the default), every remote request to every board
+  read and write route is refused with 403.
+- With `board.remote` enabled (`mode` and an `https://` `origin`), a remote
+  board request must satisfy all of the following on both read routes (`/`,
+  `/api/state`, `/api/events`, `/api/msg/*`, `/api/contexts`,
+  `/api/new-issues`) and mutating routes:
+  - `X-Forwarded-Proto`, when present, must be `https`.
+  - `Host` must match the configured `origin`, or `Host` must be the service's
+    own loopback host while `X-Forwarded-Host` matches the configured `origin`.
+    If `X-Forwarded-Host` is present alongside a non-loopback `Host`, both must
+    match the configured `origin`.
+  - `Origin`, when present, must match the configured `https://` `origin`.
+  - Remote authentication must succeed. Until the pairing-cookie and Tailscale
+    Serve auth modes are implemented, every remote board request is refused
+    with 401.
+  - Every mutating method (`POST`, `PUT`, `DELETE`) still requires the
+    per-process `X-T3CM-CSRF` header.
+- **Reverse-proxy trust assumption.** Because `t3cm` listens on `127.0.0.1`, a
+  proxy that rewrites `Host` to `127.0.0.1:<port>` and strips all forwarding
+  headers looks identical on the wire to a direct loopback client. Any proxy
+  fronting the board must terminate TLS, forward only board routes (never
+  `/mcp` or `/healthz`), preserve the public `Host` or set a trusted
+  forwarding header (`X-Forwarded-Host`, `X-Forwarded-For`,
+  `X-Forwarded-Proto`, `Forwarded`, or `Tailscale-User-Login`), and strip any
+  client-supplied forwarding or identity headers before forwarding. See
   [The board](board.md#http-routes).
 
 ## The sandbox

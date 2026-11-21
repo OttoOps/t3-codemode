@@ -5478,3 +5478,386 @@ return {
     assert_eq!(r["afterRestartBtn"], "Pool: opus", "{r}");
     assert_eq!(r["afterRestartRev"], 0, "{r}");
 }
+
+#[test]
+fn board_remote_config_defaults_off_and_validates() {
+    use t3_codemode::config::{RemoteMode, RemoteOrigin};
+
+    let def = Config::default();
+    assert!(def.board.remote.is_none());
+    assert!(def.board.active_remote().is_none());
+
+    for off in [
+        json!({"board": {"remote": null}}),
+        json!({"board": {"remote": {}}}),
+        json!({"board": {"remote": {"mode": "off"}}}),
+        json!({"board": {"remote": {"mode": "off", "origin": "https://board.acme.example:47732"}}}),
+    ] {
+        let cfg = Config::from_value(off.clone()).unwrap_or_else(|e| panic!("{off}: {e:#}"));
+        assert!(cfg.board.active_remote().is_none(), "{off}");
+    }
+
+    let pairing = Config::from_value(json!({
+        "board": {"remote": {"mode": "pairing", "origin": "https://board.acme.example:47732"}}
+    }))
+    .unwrap();
+    let (mode, origin) = pairing.board.active_remote().unwrap();
+    assert_eq!(mode, RemoteMode::Pairing);
+    assert_eq!(origin, RemoteOrigin { host: "board.acme.example".into(), port: 47732 });
+    assert_eq!(origin.canonical(), "https://board.acme.example:47732");
+
+    let ts = Config::from_value(json!({
+        "board": {"remote": {"mode": "tailscale", "origin": "https://BOX.ACME.TS.NET"}}
+    }))
+    .unwrap();
+    let (mode, origin) = ts.board.active_remote().unwrap();
+    assert_eq!(mode, RemoteMode::Tailscale);
+    assert_eq!(origin, RemoteOrigin { host: "box.acme.ts.net".into(), port: 443 });
+    assert_eq!(origin.canonical(), "https://box.acme.ts.net");
+    assert!(origin.matches_host("box.acme.ts.net"));
+    assert!(origin.matches_host("BOX.ACME.TS.NET:443"));
+    assert!(!origin.matches_host("box.acme.ts.net:80"));
+    assert!(origin.matches_origin("https://box.acme.ts.net"));
+    assert!(origin.matches_origin("https://box.acme.ts.net:443"));
+    assert!(!origin.matches_origin("http://box.acme.ts.net"));
+
+    let v6 = Config::from_value(json!({
+        "board": {"remote": {"mode": "pairing", "origin": "https://[2001:0db8::1]:47732"}}
+    }))
+    .unwrap();
+    let (_, origin) = v6.board.active_remote().unwrap();
+    assert_eq!(origin.host, "[2001:db8::1]");
+    assert_eq!(origin.port, 47732);
+    assert!(origin.matches_host("[2001:db8::1]:47732"));
+
+    let v4mapped = Config::from_value(json!({
+        "board": {"remote": {"mode": "pairing", "origin": "https://[::ffff:192.0.2.1]:47732"}}
+    }))
+    .unwrap();
+    let (_, origin) = v4mapped.board.active_remote().unwrap();
+    assert!(origin.matches_host("[::ffff:192.0.2.1]:47732"));
+    assert!(origin.matches_origin("https://[::ffff:192.0.2.1]:47732"));
+
+    for bad in [
+        json!({"board": {"remote": {"mode": "pairing"}}}),
+        json!({"board": {"remote": {"mode": "tailscale"}}}),
+        json!({"board": {"remote": {"mode": "pairing", "origin": "http://board.acme.example:47732"}}}),
+        json!({"board": {"remote": {"mode": "pairing", "origin": "https://board.acme.example/"}}}),
+        json!({"board": {"remote": {"mode": "pairing", "origin": "https://board.acme.example/board"}}}),
+        json!({"board": {"remote": {"mode": "pairing", "origin": "https://board.acme.example?x=1"}}}),
+        json!({"board": {"remote": {"mode": "pairing", "origin": "https://board.acme.example#frag"}}}),
+        json!({"board": {"remote": {"mode": "pairing", "origin": "https://user:pass@board.acme.example"}}}),
+        json!({"board": {"remote": {"mode": "pairing", "origin": "https://board.acme.example:0"}}}),
+        json!({"board": {"remote": {"mode": "pairing", "origin": "https://board.acme.example:"}}}),
+        json!({"board": {"remote": {"mode": "pairing", "origin": "https://board.acme.example:0443"}}}),
+        json!({"board": {"remote": {"mode": "pairing", "origin": "https://192.0.513:47732"}}}),
+        json!({"board": {"remote": {"mode": "pairing", "origin": "https://0177.0.0.1:47732"}}}),
+        json!({"board": {"remote": {"mode": "pairing", "origin": " https://board.acme.example "}}}),
+        json!({"board": {"remote": {"mode": "off", "origin": "http://board.acme.example"}}}),
+        json!({"board": {"remote": {"mode": "bogus", "origin": "https://board.acme.example"}}}),
+        json!({"board": {"remote": {"mode": "off", "unknown": true}}}),
+    ] {
+        assert!(Config::from_value(bad.clone()).is_err(), "expected invalid config: {bad}");
+    }
+}
+
+#[test]
+fn request_classifier_marks_only_direct_loopback_as_local() {
+    use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
+    use t3_codemode::server::{RequestKind, classify_request};
+
+    let make = |pairs: &[(&str, &str)]| {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.append(HeaderName::from_bytes(k.as_bytes()).unwrap(), HeaderValue::from_str(v).unwrap());
+        }
+        h
+    };
+
+    for host in ["127.0.0.1:47731", "localhost:47731", "LOCALHOST:47731", "[::1]:47731"] {
+        assert_eq!(classify_request(&make(&[("host", host)]), 47731), RequestKind::Local, "Host={host}");
+    }
+
+    for host in [
+        "127.0.0.1:47732",
+        "localhost",
+        "board.acme.example:47732",
+        "127.0.0.1:0",
+        "[::1]junk",
+        "127.0.0.1@evil.example:47731",
+    ] {
+        assert_eq!(classify_request(&make(&[("host", host)]), 47731), RequestKind::Remote, "Host={host}");
+    }
+
+    // Missing Host or duplicate Host headers are always remote.
+    assert_eq!(classify_request(&HeaderMap::new(), 47731), RequestKind::Remote);
+    let mut dup = HeaderMap::new();
+    dup.append(header::HOST, HeaderValue::from_static("127.0.0.1:47731"));
+    dup.append(header::HOST, HeaderValue::from_static("127.0.0.1:47731"));
+    assert_eq!(classify_request(&dup, 47731), RequestKind::Remote);
+
+    // Any proxy header classifies an otherwise-loopback request as remote.
+    for (k, v) in [
+        ("tailscale-user-login", "alice@acme.example"),
+        ("tailscale-user-login", ""),
+        ("x-forwarded-host", "board.acme.example:47732"),
+        ("x-forwarded-for", "100.64.0.1"),
+        ("x-forwarded-proto", "https"),
+        ("x-forwarded-port", "47732"),
+        ("forwarded", "for=100.64.0.1;proto=https"),
+    ] {
+        let h = make(&[("host", "127.0.0.1:47731"), (k, v)]);
+        assert_eq!(classify_request(&h, 47731), RequestKind::Remote, "{k}={v:?}");
+    }
+}
+
+#[tokio::test]
+async fn board_refuses_remote_and_proxied_requests_when_remote_is_off() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    let sent = s.h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": GATE})).await;
+    let handle = sent["handle"].as_str().unwrap().to_string();
+    let port = s.base.rsplit(':').next().unwrap().to_string();
+    let csrf = s.csrf();
+
+    let read_routes = vec![
+        "/".to_string(),
+        "/api/state".to_string(),
+        "/api/events".to_string(),
+        format!("/api/msg/{handle}"),
+        "/api/models".to_string(),
+        "/api/contexts".to_string(),
+        "/api/new-issues".to_string(),
+    ];
+
+    // Direct loopback on 127.0.0.1, localhost, and [::1] works as today.
+    for host in [format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}")] {
+        let origin = format!("http://{host}");
+        for route in &read_routes {
+            if route == "/api/events" {
+                let r = s
+                    .http
+                    .get(format!("{}{route}", s.base))
+                    .header("Host", &host)
+                    .header("Origin", &origin)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(r.status(), 200, "local {route} Host={host}");
+                drop(r);
+            } else {
+                let r = s
+                    .http
+                    .get(format!("{}{route}", s.base))
+                    .header("Host", &host)
+                    .header("Origin", &origin)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(r.status(), 200, "local {route} Host={host}");
+            }
+        }
+    }
+
+    // With board.remote off, every read route refuses non-loopback hosts and every proxy header with 403 JSON.
+    let remote_cases: Vec<(&str, Vec<(&str, &str)>)> = vec![
+        ("non-loopback host", vec![("Host", "board.acme.example:47732")]),
+        ("wrong loopback port", vec![("Host", "127.0.0.1:1")]),
+        ("Tailscale-User-Login", vec![("Tailscale-User-Login", "alice@acme.example")]),
+        ("X-Forwarded-Host", vec![("X-Forwarded-Host", "board.acme.example:47732")]),
+        ("X-Forwarded-For", vec![("X-Forwarded-For", "100.64.0.1")]),
+        ("X-Forwarded-Proto", vec![("X-Forwarded-Proto", "https")]),
+        ("X-Forwarded-Port", vec![("X-Forwarded-Port", "47732")]),
+        ("Forwarded", vec![("Forwarded", "for=100.64.0.1;proto=https")]),
+    ];
+
+    for (label, hdrs) in &remote_cases {
+        for route in &read_routes {
+            let mut req = s.http.get(format!("{}{route}", s.base));
+            for (k, v) in hdrs {
+                req = req.header(*k, *v);
+            }
+            let r = req.send().await.unwrap();
+            assert_eq!(r.status(), 403, "{label} GET {route}");
+            let body: Value = r.json().await.unwrap();
+            assert!(body["error"].is_string(), "{label} GET {route}: {body}");
+        }
+        // Mutating routes are refused even when carrying a valid X-T3CM-CSRF token.
+        let mut req = s
+            .http
+            .post(format!("{}/api/cards/a1/answer", s.base))
+            .header("X-T3CM-CSRF", &csrf)
+            .json(&json!({"text": "merge"}));
+        for (k, v) in hdrs {
+            req = req.header(*k, *v);
+        }
+        let r = req.send().await.unwrap();
+        assert_eq!(r.status(), 403, "{label} POST /api/cards/a1/answer");
+
+        let mut req = s
+            .http
+            .put(format!("{}/api/contexts/c1", s.base))
+            .header("X-T3CM-CSRF", &csrf)
+            .json(&json!({"name": "Work", "spec": {"projects": [], "statuses": [], "kinds": []}}));
+        for (k, v) in hdrs {
+            req = req.header(*k, *v);
+        }
+        let r = req.send().await.unwrap();
+        assert_eq!(r.status(), 403, "{label} PUT /api/contexts/c1");
+    }
+
+    // Nothing was mutated.
+    assert!(s.h.sent().is_empty());
+    assert_eq!(cards(&s.h).len(), 1);
+    assert!(s.h.app.wf.contexts().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn board_validates_configured_remote_origin_and_refuses_without_auth() {
+    for mode in ["pairing", "tailscale"] {
+        let cfg = Config::from_value(json!({
+            "board": {
+                "remote": {
+                    "mode": mode,
+                    "origin": "https://board.acme.example:47732"
+                }
+            }
+        }))
+        .unwrap();
+        let s = start(H::build(Vec::new(), cfg)).await;
+        join_board(&s.h, TICKET, "widgets#41").await;
+        let sent = s.h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": GATE})).await;
+        let handle = sent["handle"].as_str().unwrap().to_string();
+        let port = s.base.rsplit(':').next().unwrap().to_string();
+        let csrf = s.csrf();
+        let read_routes = vec![
+            "/".to_string(),
+            "/api/state".to_string(),
+            "/api/events".to_string(),
+            format!("/api/msg/{handle}"),
+            "/api/contexts".to_string(),
+            "/api/new-issues".to_string(),
+        ];
+
+        // 1. Mismatched Host, X-Forwarded-Host, X-Forwarded-Proto, or Origin gets 403.
+        let bad_cases: Vec<(&str, Vec<(&str, &str)>)> = vec![
+            ("wrong host", vec![("Host", "evil.example:47732")]),
+            ("wrong port on host", vec![("Host", "board.acme.example:443")]),
+            ("wrong X-Forwarded-Host", vec![("X-Forwarded-Host", "evil.example:47732")]),
+            (
+                "host good but X-Forwarded-Host evil",
+                vec![("Host", "board.acme.example:47732"), ("X-Forwarded-Host", "evil.example:47732")],
+            ),
+            (
+                "host evil but X-Forwarded-Host good",
+                vec![("Host", "evil.example:47732"), ("X-Forwarded-Host", "board.acme.example:47732")],
+            ),
+            ("loopback host + X-Forwarded-For without X-Forwarded-Host", vec![("X-Forwarded-For", "100.64.0.1")]),
+            (
+                "loopback host + Tailscale-User-Login without X-Forwarded-Host",
+                vec![("Tailscale-User-Login", "alice@acme.example")],
+            ),
+            ("X-Forwarded-Proto http", vec![("Host", "board.acme.example:47732"), ("X-Forwarded-Proto", "http")]),
+            (
+                "wrong Origin on remote host",
+                vec![("Host", "board.acme.example:47732"), ("Origin", "https://evil.example")],
+            ),
+            (
+                "plain http Origin on remote host",
+                vec![("Host", "board.acme.example:47732"), ("Origin", "http://board.acme.example:47732")],
+            ),
+            ("null Origin on remote host", vec![("Host", "board.acme.example:47732"), ("Origin", "null")]),
+            ("remote Origin on direct loopback host", vec![("Origin", "https://board.acme.example:47732")]),
+        ];
+        for (label, hdrs) in &bad_cases {
+            let mut req = s.http.get(format!("{}/api/state", s.base));
+            for (k, v) in hdrs {
+                req = req.header(*k, *v);
+            }
+            let r = req.send().await.unwrap();
+            assert_eq!(r.status(), 403, "mode={mode} {label}");
+            let body: Value = r.json().await.unwrap();
+            assert!(body["error"].is_string(), "mode={mode} {label}: {body}");
+        }
+
+        // 2. Valid remote Host + Origin (preserved Host or loopback Host + X-Forwarded-Host) reaches
+        //    the auth check and is refused with 401 JSON on every board read and write route.
+        let good_remote_forms: Vec<(&str, Vec<(&str, &str)>)> = vec![
+            (
+                "preserved Host",
+                vec![
+                    ("Host", "board.acme.example:47732"),
+                    ("Origin", "https://board.acme.example:47732"),
+                    ("X-Forwarded-Proto", "https"),
+                    ("Tailscale-User-Login", "alice@acme.example"),
+                ],
+            ),
+            (
+                "rewritten loopback Host + X-Forwarded-Host",
+                vec![
+                    ("X-Forwarded-Host", "board.acme.example:47732"),
+                    ("Origin", "https://board.acme.example:47732"),
+                    ("X-Forwarded-Proto", "https"),
+                    ("X-Forwarded-For", "100.64.0.1"),
+                    ("Tailscale-User-Login", "alice@acme.example"),
+                ],
+            ),
+        ];
+        for (form, hdrs) in &good_remote_forms {
+            for route in &read_routes {
+                let mut req = s.http.get(format!("{}{route}", s.base));
+                for (k, v) in hdrs {
+                    req = req.header(*k, *v);
+                }
+                let r = req.send().await.unwrap();
+                assert_eq!(r.status(), 401, "mode={mode} {form} GET {route}");
+                let body: Value = r.json().await.unwrap();
+                assert!(body["error"].is_string(), "mode={mode} {form} GET {route}: {body}");
+            }
+            let mut req = s
+                .http
+                .post(format!("{}/api/cards/a1/answer", s.base))
+                .header("X-T3CM-CSRF", &csrf)
+                .json(&json!({"text": "merge"}));
+            for (k, v) in hdrs {
+                req = req.header(*k, *v);
+            }
+            let r = req.send().await.unwrap();
+            assert_eq!(r.status(), 401, "mode={mode} {form} POST /api/cards/a1/answer");
+
+            let mut req = s
+                .http
+                .put(format!("{}/api/contexts/c1", s.base))
+                .header("X-T3CM-CSRF", &csrf)
+                .json(&json!({"name": "Work", "spec": {"projects": [], "statuses": [], "kinds": []}}));
+            for (k, v) in hdrs {
+                req = req.header(*k, *v);
+            }
+            let r = req.send().await.unwrap();
+            assert_eq!(r.status(), 401, "mode={mode} {form} PUT /api/contexts/c1");
+        }
+
+        // 3. Direct loopback still works with board.remote enabled, and CSRF is still required.
+        let r = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap();
+        assert_eq!(r.status(), 200, "mode={mode} direct loopback GET /api/state");
+        let r = s
+            .http
+            .get(format!("{}/api/state", s.base))
+            .header("Host", format!("[::1]:{port}"))
+            .header("Origin", format!("http://[::1]:{port}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "mode={mode} ipv6 loopback GET /api/state");
+        assert_eq!(
+            s.post("/api/cards/a1/answer", json!({"text": "merge"}), None, None).await.status(),
+            403,
+            "mode={mode} local POST without CSRF"
+        );
+        assert_eq!(
+            s.post("/api/cards/a1/answer", json!({"text": "merge"}), Some(&csrf), Some(&s.base)).await.status(),
+            200,
+            "mode={mode} local POST with CSRF"
+        );
+    }
+}

@@ -77,6 +77,8 @@ pub struct BoardConfig {
     pub reconcile_active_minutes: u64,
     pub reconcile_idle_minutes: u64,
     pub open_links: OpenLinks,
+    #[serde(default)]
+    pub remote: Option<BoardRemoteConfig>,
     #[serde(skip)]
     pub legacy_ticket_keys: Vec<String>,
     #[serde(skip)]
@@ -91,6 +93,145 @@ impl BoardConfig {
     pub fn has_legacy_ticket_key(&self, key: &str) -> bool {
         self.legacy_ticket_keys.iter().any(|k| k == key)
     }
+
+    pub fn active_remote(&self) -> Option<(RemoteMode, RemoteOrigin)> {
+        self.remote.as_ref().and_then(BoardRemoteConfig::active)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteMode {
+    #[default]
+    Off,
+    Pairing,
+    Tailscale,
+}
+
+impl RemoteMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RemoteMode::Off => "off",
+            RemoteMode::Pairing => "pairing",
+            RemoteMode::Tailscale => "tailscale",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BoardRemoteConfig {
+    #[serde(default)]
+    pub mode: RemoteMode,
+    #[serde(default)]
+    pub origin: Option<String>,
+}
+
+impl BoardRemoteConfig {
+    pub fn validate(&self) -> Result<()> {
+        if let Some(origin) = &self.origin {
+            RemoteOrigin::parse(origin).context("board.remote.origin")?;
+        }
+        if self.mode != RemoteMode::Off && self.origin.is_none() {
+            bail!("board.remote.origin is required when board.remote.mode is {:?}", self.mode.as_str());
+        }
+        Ok(())
+    }
+
+    pub fn active(&self) -> Option<(RemoteMode, RemoteOrigin)> {
+        if self.mode == RemoteMode::Off {
+            return None;
+        }
+        let origin = self.origin.as_deref().and_then(|o| RemoteOrigin::parse(o).ok())?;
+        Some((self.mode, origin))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteOrigin {
+    pub host: String,
+    pub port: u16,
+}
+
+impl RemoteOrigin {
+    pub fn parse(raw: &str) -> Result<Self> {
+        if raw.is_empty() || raw != raw.trim() {
+            bail!("must be an https:// origin with no surrounding whitespace");
+        }
+        let Some(authority) = raw.strip_prefix("https://") else {
+            bail!("must use https://, got {raw:?}");
+        };
+        if authority.is_empty()
+            || authority.contains(['/', '?', '#', '@'])
+            || authority.bytes().any(|b| b.is_ascii_whitespace())
+        {
+            bail!("must be an https:// origin with no path, query, fragment, or credentials, got {raw:?}");
+        }
+        let Some((host, parsed_port)) = parse_host_header(authority) else {
+            bail!("invalid host or port in {raw:?}");
+        };
+        let url = reqwest::Url::parse(raw).with_context(|| format!("invalid https:// origin {raw:?}"))?;
+        if url.scheme() != "https"
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || url.host_str().is_none()
+        {
+            bail!("must be an https:// origin with no path, query, fragment, or credentials, got {raw:?}");
+        }
+        if !host.starts_with('[') && url.host_str() != Some(host.as_str()) {
+            bail!("host must be a canonical hostname or IP address, got {raw:?}");
+        }
+        let port = parsed_port.unwrap_or(443);
+        Ok(Self { host, port })
+    }
+
+    pub fn canonical(&self) -> String {
+        if self.port == 443 { format!("https://{}", self.host) } else { format!("https://{}:{}", self.host, self.port) }
+    }
+
+    pub fn matches_host(&self, host_header: &str) -> bool {
+        let Some((host, port)) = parse_host_header(host_header) else {
+            return false;
+        };
+        host == self.host && port.unwrap_or(443) == self.port
+    }
+
+    pub fn matches_origin(&self, origin_header: &str) -> bool {
+        Self::parse(origin_header).is_ok_and(|o| o == *self)
+    }
+}
+
+pub fn parse_host_header(raw: &str) -> Option<(String, Option<u16>)> {
+    if raw.is_empty() || raw.bytes().any(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'@' | b'?' | b'#' | b'\\'))
+    {
+        return None;
+    }
+    if let Some(rest) = raw.strip_prefix('[') {
+        let (v6, after) = rest.split_once(']')?;
+        let addr: std::net::Ipv6Addr = v6.parse().ok()?;
+        let port = match after {
+            "" => None,
+            s => Some(parse_port(s.strip_prefix(':')?)?),
+        };
+        return Some((format!("[{addr}]"), port));
+    }
+    let (host, port) = match raw.split_once(':') {
+        Some((h, p)) => (h, Some(parse_port(p)?)),
+        None => (raw, None),
+    };
+    if host.is_empty() || !host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')) {
+        return None;
+    }
+    Some((host.to_ascii_lowercase(), port))
+}
+
+fn parse_port(raw: &str) -> Option<u16> {
+    if raw.is_empty() || raw.starts_with('0') || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    raw.parse().ok()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,7 +309,8 @@ pub fn builtin_defaults() -> Value {
             "settleAfterHours": 24,
             "reconcileActiveMinutes": 2,
             "reconcileIdleMinutes": 10,
-            "openLinks": "desktop"
+            "openLinks": "desktop",
+            "remote": null
         }
     })
 }
@@ -309,6 +451,9 @@ impl Config {
         }
         if self.board.ask_effort.as_deref().is_some_and(|s| s.trim().is_empty()) {
             bail!("board.askEffort must not be empty");
+        }
+        if let Some(remote) = &self.board.remote {
+            remote.validate()?;
         }
         Ok(())
     }

@@ -179,6 +179,79 @@ async fn http_edges() {
 }
 
 #[tokio::test]
+async fn mcp_and_healthz_refuse_remote_hosts_origins_and_proxy_headers() {
+    let cfg = t3_codemode::config::Config::from_value(json!({
+        "board": {
+            "remote": {
+                "mode": "tailscale",
+                "origin": "https://board.acme.example:47732"
+            }
+        }
+    }))
+    .unwrap();
+    let s = start(H::build(Vec::new(), cfg)).await;
+    let port = s.base.rsplit(':').next().unwrap();
+    let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"});
+
+    // Direct loopback (127.0.0.1, localhost, [::1]) behaves as before even with board.remote set.
+    for host in [format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}")] {
+        let r = s.http.post(format!("{}/mcp", s.base)).header("Host", &host).json(&ping).send().await.unwrap();
+        assert_eq!(r.status(), 200, "POST /mcp Host={host}");
+        let r = s.http.get(format!("{}/healthz", s.base)).header("Host", &host).send().await.unwrap();
+        assert_eq!(r.status(), 200, "GET /healthz Host={host}");
+    }
+    let r =
+        s.http.post(format!("{}/mcp", s.base)).header("Origin", "http://[::1]:3000").json(&ping).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+
+    // Non-loopback hosts (including the configured remote board host) are refused on /mcp and /healthz.
+    for host in ["evil.example:47731", "board.acme.example:47732", "127.0.0.1:0", "127.0.0.1@evil.example"] {
+        let r = s.http.post(format!("{}/mcp", s.base)).header("Host", host).json(&ping).send().await.unwrap();
+        assert_eq!(r.status(), 403, "POST /mcp Host={host}");
+        let r = s.http.get(format!("{}/mcp", s.base)).header("Host", host).send().await.unwrap();
+        assert_eq!(r.status(), 403, "GET /mcp Host={host}");
+        let r = s.http.put(format!("{}/mcp", s.base)).header("Host", host).send().await.unwrap();
+        assert_eq!(r.status(), 403, "PUT /mcp Host={host}");
+        let r = s.http.get(format!("{}/healthz", s.base)).header("Host", host).send().await.unwrap();
+        assert_eq!(r.status(), 403, "GET /healthz Host={host}");
+        let r = s.http.post(format!("{}/healthz", s.base)).header("Host", host).send().await.unwrap();
+        assert_eq!(r.status(), 403, "POST /healthz Host={host}");
+    }
+
+    // Non-loopback origins (including the configured remote board origin) are refused on /mcp and /healthz.
+    for origin in [
+        "https://evil.example",
+        "https://board.acme.example:47732",
+        "http://127.0.0.1@evil.example",
+        "http://127.0.0.1:3000/path",
+        "null",
+    ] {
+        let r = s.http.post(format!("{}/mcp", s.base)).header("Origin", origin).json(&ping).send().await.unwrap();
+        assert_eq!(r.status(), 403, "POST /mcp Origin={origin}");
+        let r = s.http.get(format!("{}/healthz", s.base)).header("Origin", origin).send().await.unwrap();
+        assert_eq!(r.status(), 403, "GET /healthz Origin={origin}");
+    }
+
+    // Any proxy header is refused on /mcp and /healthz even when Host is loopback.
+    for (name, value) in [
+        ("Tailscale-User-Login", "alice@acme.example"),
+        ("Tailscale-User-Login", ""),
+        ("X-Forwarded-Host", "board.acme.example:47732"),
+        ("X-Forwarded-For", "100.64.0.1"),
+        ("X-Forwarded-Proto", "https"),
+        ("X-Forwarded-Port", "47732"),
+        ("Forwarded", "for=100.64.0.1;proto=https"),
+    ] {
+        let r = s.http.post(format!("{}/mcp", s.base)).header(name, value).json(&ping).send().await.unwrap();
+        assert_eq!(r.status(), 403, "POST /mcp {name}={value:?}");
+        let r = s.http.get(format!("{}/mcp", s.base)).header(name, value).send().await.unwrap();
+        assert_eq!(r.status(), 403, "GET /mcp {name}={value:?}");
+        let r = s.http.get(format!("{}/healthz", s.base)).header(name, value).send().await.unwrap();
+        assert_eq!(r.status(), 403, "GET /healthz {name}={value:?}");
+    }
+}
+
+#[tokio::test]
 async fn the_deny_list_is_enforced_host_side() {
     let h = H::with_tools();
     h.load_catalog().await;
