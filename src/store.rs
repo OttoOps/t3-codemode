@@ -943,7 +943,7 @@ impl Store {
         let mut st = c.prepare("SELECT data FROM contexts")?;
         let raws: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
         let mut all: Vec<BoardContext> = raws.iter().filter_map(|s| serde_json::from_str(s).ok()).collect();
-        all.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.id.cmp(&b.id)));
+        all.sort_by(|a, b| crate::contexts::name_order(&a.name, &b.name).then_with(|| a.id.cmp(&b.id)));
         Ok(all)
     }
 
@@ -968,8 +968,7 @@ impl Store {
             (Some(o), n, s) => (n.unwrap_or(&o.name).to_string(), s.unwrap_or(&o.spec).clone()),
             (None, _, _) => return Ok(ContextPut::Missing),
         };
-        let lower = name.to_lowercase();
-        if let Some(other) = all.iter().find(|c| c.id != id && c.name.to_lowercase() == lower) {
+        if let Some(other) = all.iter().find(|c| c.id != id && crate::contexts::same_name(&c.name, &name)) {
             return Ok(ContextPut::NameTaken(other.name.clone()));
         }
         if old.is_none() && all.len() >= max {

@@ -2516,6 +2516,24 @@ async fn context_routes_check_the_token_the_origin_and_the_input() {
     assert_eq!(s.context(Method::PUT, "c1", json!({"name": "Renamed", "spec": {}}), Some(&csrf)).await.0, 200);
 }
 
+#[tokio::test]
+async fn context_names_that_match_under_full_case_folding_are_taken() {
+    use reqwest::Method;
+    let s = start(H::new()).await;
+    let csrf = s.csrf();
+    for (id, name) in [("c1", "Σ"), ("c2", "Straße")] {
+        assert_eq!(s.context(Method::PUT, id, json!({"name": name, "spec": {}}), Some(&csrf)).await.0, 201);
+    }
+    for (id, name, taken) in
+        [("c3", "ς", "Σ"), ("c3", "σ", "Σ"), ("c3", "STRASSE", "Straße"), ("c1", "strasse", "Straße")]
+    {
+        let (code, r) = s.context(Method::PUT, id, json!({"name": name, "spec": {}}), Some(&csrf)).await;
+        assert_eq!((code, &r["error"]), (409, &json!(format!("a context named {taken:?} exists"))), "{name}");
+    }
+    assert_eq!(s.context(Method::PUT, "c1", json!({"name": "ς"}), Some(&csrf)).await.0, 200);
+    assert_eq!(context_names(&s.get("/api/contexts").await), [json!("Straße"), json!("ς")]);
+}
+
 async fn next_state(r: &mut reqwest::Response, buf: &mut Vec<u8>) -> Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
