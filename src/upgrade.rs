@@ -417,17 +417,21 @@ fn skills_behind() -> Result<bool> {
     Ok(!drift::current(&st, &steps::check(&steps::Env::from_env()?, &bundle)?))
 }
 
+fn offer_take_over() -> Result<()> {
+    let paths = skills::Paths::from_env()?;
+    if let Some(f) = skills::status(&paths, &skills::Bundle::embedded())?.foreign {
+        println!(
+            "The workflow skills in {} came from {}, so t3cm left them alone. To have t3cm keep them current: t3cm skills install --take-over",
+            paths.dir.display(),
+            f.tool
+        );
+    }
+    Ok(())
+}
+
 async fn sync_skills(exe: &Path, release: &Version) -> Result<()> {
     if skills_managed()?.is_none() {
-        let paths = skills::Paths::from_env()?;
-        if let Some(f) = skills::status(&paths, &skills::Bundle::embedded())?.foreign {
-            println!(
-                "The workflow skills in {} came from {}, so t3cm left them alone. To have t3cm keep them current: t3cm skills install --take-over",
-                paths.dir.display(),
-                f.tool
-            );
-        }
-        return Ok(());
+        return offer_take_over();
     }
     let done = tokio::process::Command::new(exe)
         .args(["skills", "update"])
@@ -469,7 +473,11 @@ pub async fn run(o: Opts) -> Result<()> {
     if want == current || (asked.is_none() && want < current) {
         let _lock = lock_updates(&o.state_dir)?;
         println!("t3cm {current} is up to date (latest release: {want}).");
-        if skills_behind()? {
+        if skills_managed()?.is_none() {
+            if let Err(e) = offer_take_over() {
+                eprintln!("warn: workflow skills not checked ({e:#})");
+            }
+        } else if skills_behind()? {
             return sync_skills(&std::env::current_exe()?, &current).await;
         }
         return Ok(());

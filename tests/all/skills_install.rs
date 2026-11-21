@@ -23,11 +23,11 @@ fn text(out: &Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
 }
 
-fn skills_dir(home: &Path) -> PathBuf {
+pub(crate) fn skills_dir(home: &Path) -> PathBuf {
     home.join(".agents").join("skills")
 }
 
-fn repo_skills() -> PathBuf {
+pub(crate) fn repo_skills() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("skills")
 }
 
@@ -101,7 +101,7 @@ fn update_keeps_a_locally_edited_file_unless_forced() {
     assert!(status_json(home.path()).0);
 }
 
-fn copy_tree(from: &Path, to: &Path) {
+pub(crate) fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for e in std::fs::read_dir(from).unwrap().flatten() {
         let name = e.file_name();
@@ -116,7 +116,7 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-fn npx_install(home: &Path, edit: bool) -> PathBuf {
+pub(crate) fn npx_install(home: &Path, edit: bool) -> PathBuf {
     copy_tree(&repo_skills(), &skills_dir(home));
     if edit {
         let p = skills_dir(home).join("t3-ticket").join("SKILL.md");
