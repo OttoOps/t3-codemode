@@ -12,10 +12,26 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
 use crate::app::App;
+use crate::config::parse_host_header;
 use crate::wf_slots::Reported;
 use crate::{mcp, web};
 
 pub const THREAD_HEADER: &str = "x-t3-thread";
+
+pub const PROXY_HEADERS: &[&str] = &[
+    "tailscale-user-login",
+    "x-forwarded-host",
+    "x-forwarded-for",
+    "x-forwarded-proto",
+    "x-forwarded-port",
+    "forwarded",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestKind {
+    Local,
+    Remote,
+}
 
 fn session_id() -> String {
     let mut b = [0u8; 16];
@@ -23,30 +39,83 @@ fn session_id() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SingleHeader<'a> {
+    Missing,
+    Present(&'a str),
+    Invalid,
+}
+
+pub fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> SingleHeader<'a> {
+    let mut all = headers.get_all(name).iter();
+    let Some(first) = all.next() else {
+        return SingleHeader::Missing;
+    };
+    if all.next().is_some() {
+        return SingleHeader::Invalid;
+    }
+    match first.to_str() {
+        Ok(s) => SingleHeader::Present(s),
+        Err(_) => SingleHeader::Invalid,
+    }
+}
+
+pub fn has_proxy_headers(headers: &HeaderMap) -> bool {
+    PROXY_HEADERS.iter().any(|name| headers.contains_key(*name))
+}
+
+fn is_loopback_name(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+}
+
+pub fn is_own_loopback_host_str(raw: &str, port: u16) -> bool {
+    let Some((host, parsed_port)) = parse_host_header(raw) else {
+        return false;
+    };
+    is_loopback_name(&host) && parsed_port == Some(port)
+}
+
+pub fn is_own_loopback_host(headers: &HeaderMap, port: u16) -> bool {
+    matches!(single_header(headers, header::HOST.as_str()), SingleHeader::Present(host) if is_own_loopback_host_str(host, port))
+}
+
+pub fn classify_request(headers: &HeaderMap, port: u16) -> RequestKind {
+    if !has_proxy_headers(headers) && is_own_loopback_host(headers, port) {
+        RequestKind::Local
+    } else {
+        RequestKind::Remote
+    }
+}
+
 fn local_origin(headers: &HeaderMap) -> bool {
-    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else { return true };
+    let origin = match single_header(headers, header::ORIGIN.as_str()) {
+        SingleHeader::Present(o) => o,
+        SingleHeader::Missing => return true,
+        SingleHeader::Invalid => return false,
+    };
     let Some(rest) = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")) else {
         return false;
     };
-    let host = match rest.strip_prefix('[') {
-        Some(v6) => v6.split(']').next().unwrap_or(""),
-        None => rest.split([':', '/']).next().unwrap_or(""),
-    };
-    matches!(host, "127.0.0.1" | "localhost" | "::1")
+    parse_host_header(rest).is_some_and(|(host, _)| is_loopback_name(&host))
 }
 
 pub fn local_host(headers: &HeaderMap) -> bool {
-    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else { return false };
-    let name = match host.strip_prefix('[') {
-        Some(v6) => v6.split(']').next().unwrap_or(""),
-        None => host.split(':').next().unwrap_or(""),
+    let SingleHeader::Present(host) = single_header(headers, header::HOST.as_str()) else {
+        return false;
     };
-    matches!(name.to_ascii_lowercase().as_str(), "127.0.0.1" | "localhost" | "::1")
+    parse_host_header(host).is_some_and(|(name, _)| is_loopback_name(&name))
 }
 
-async fn check_host(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
-    if !local_host(req.headers()) {
+async fn check_loopback(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let headers = req.headers();
+    if has_proxy_headers(headers) {
+        return json_response(StatusCode::FORBIDDEN, json!({"error": "proxied requests are refused on this endpoint"}));
+    }
+    if !local_host(headers) {
         return json_response(StatusCode::FORBIDDEN, json!({"error": "requests must address a loopback host"}));
+    }
+    if !local_origin(headers) {
+        return json_response(StatusCode::FORBIDDEN, json!({"error": "cross-origin requests are refused"}));
     }
     next.run(req).await
 }
@@ -56,9 +125,6 @@ fn json_response(status: StatusCode, body: Value) -> Response {
 }
 
 async fn post_mcp(State(app): State<Arc<App>>, headers: HeaderMap, body: Bytes) -> Response {
-    if !local_origin(&headers) {
-        return json_response(StatusCode::FORBIDDEN, json!({"error": "cross-origin requests are refused"}));
-    }
     let caller = mcp::caller_from_header(headers.get(THREAD_HEADER).and_then(|v| v.to_str().ok()));
     let reported = Reported::from_header_map(&headers);
     let msg: Value = match serde_json::from_slice(&body) {
@@ -102,12 +168,12 @@ async fn healthz(State(app): State<Arc<App>>) -> Response {
 }
 
 pub fn router(app: Arc<App>, port: u16) -> Router {
-    Router::new()
+    let loopback = Router::new()
         .route("/mcp", post(post_mcp).get(not_allowed).delete(not_allowed))
         .route("/healthz", get(healthz))
-        .with_state(app.clone())
-        .merge(web::routes(app, port))
-        .layer(axum::middleware::from_fn(check_host))
+        .route_layer(axum::middleware::from_fn(check_loopback))
+        .with_state(app.clone());
+    loopback.merge(web::routes(app, port))
 }
 
 pub async fn serve(

@@ -5,7 +5,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -17,7 +17,9 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
 use crate::app::App;
 use crate::board::{CardRef, LaunchArgs, ModelSettingBody};
+use crate::config::{RemoteMode, RemoteOrigin};
 use crate::contexts::{ContextBody, ContextError};
+use crate::server::{RequestKind, SingleHeader, classify_request, is_own_loopback_host_str, single_header};
 
 pub const CSRF_HEADER: &str = "x-t3cm-csrf";
 const PAGE: &str = include_str!("board.html");
@@ -31,6 +33,7 @@ img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none
 struct Web {
     app: Arc<App>,
     port: u16,
+    remote: Option<(RemoteMode, RemoteOrigin)>,
 }
 
 fn error(status: StatusCode, msg: impl Into<String>) -> Response {
@@ -46,28 +49,113 @@ fn same_bytes(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-impl Web {
-    fn own(&self, value: &str, scheme: &str) -> bool {
-        [format!("{scheme}127.0.0.1:{}", self.port), format!("{scheme}localhost:{}", self.port)]
-            .iter()
-            .any(|o| o == value)
-    }
+fn is_mutating(method: &Method) -> bool {
+    !matches!(*method, Method::GET | Method::HEAD)
+}
 
-    fn reject(&self, headers: &HeaderMap, post: bool) -> Option<Response> {
-        let get = |name: &str| headers.get(name).and_then(|v: &HeaderValue| v.to_str().ok());
-        if !get(header::HOST.as_str()).is_some_and(|h| self.own(h, "")) {
-            return Some(error(StatusCode::FORBIDDEN, "the board answers only on its own 127.0.0.1 or localhost host"));
-        }
-        if let Some(origin) = get(header::ORIGIN.as_str())
-            && !self.own(origin, "http://")
-        {
+impl Web {
+    fn check_local_origin(&self, headers: &HeaderMap) -> Option<Response> {
+        let origin = match single_header(headers, header::ORIGIN.as_str()) {
+            SingleHeader::Present(o) => o,
+            SingleHeader::Missing => return None,
+            SingleHeader::Invalid => return Some(error(StatusCode::FORBIDDEN, "cross-origin requests are refused")),
+        };
+        let Some(rest) = origin.strip_prefix("http://") else {
+            return Some(error(StatusCode::FORBIDDEN, "cross-origin requests are refused"));
+        };
+        if !is_own_loopback_host_str(rest, self.port) {
             return Some(error(StatusCode::FORBIDDEN, "cross-origin requests are refused"));
         }
-        if post && !get(CSRF_HEADER).is_some_and(|t| same_bytes(t.as_bytes(), self.app.csrf.as_bytes())) {
+        None
+    }
+
+    fn check_remote_host_and_origin(&self, headers: &HeaderMap, origin: &RemoteOrigin) -> Option<Response> {
+        match single_header(headers, "x-forwarded-proto") {
+            SingleHeader::Missing => {}
+            SingleHeader::Present(proto) if proto.eq_ignore_ascii_case("https") => {}
+            SingleHeader::Present(_) | SingleHeader::Invalid => {
+                return Some(error(StatusCode::FORBIDDEN, "remote board requests must arrive over https"));
+            }
+        }
+        let SingleHeader::Present(host) = single_header(headers, header::HOST.as_str()) else {
+            return Some(error(StatusCode::FORBIDDEN, "remote request Host does not match board.remote.origin"));
+        };
+        let xfh = match single_header(headers, "x-forwarded-host") {
+            SingleHeader::Missing => None,
+            SingleHeader::Present(v) => Some(v),
+            SingleHeader::Invalid => {
+                return Some(error(StatusCode::FORBIDDEN, "remote request Host does not match board.remote.origin"));
+            }
+        };
+        let host_ok = match xfh {
+            Some(forwarded) => {
+                origin.matches_host(forwarded)
+                    && (origin.matches_host(host) || is_own_loopback_host_str(host, self.port))
+            }
+            None => origin.matches_host(host),
+        };
+        if !host_ok {
+            return Some(error(StatusCode::FORBIDDEN, "remote request Host does not match board.remote.origin"));
+        }
+        match single_header(headers, header::ORIGIN.as_str()) {
+            SingleHeader::Missing => {}
+            SingleHeader::Present(req_origin) if origin.matches_origin(req_origin) => {}
+            SingleHeader::Present(_) | SingleHeader::Invalid => {
+                return Some(error(StatusCode::FORBIDDEN, "cross-origin requests are refused"));
+            }
+        }
+        None
+    }
+
+    /// Authenticate a remote board request. Pairing-cookie and Tailscale Serve
+    /// auth modes slot in here; until an auth mode is implemented, every
+    /// remote request is refused.
+    fn authenticate_remote(&self, mode: RemoteMode, _headers: &HeaderMap) -> Option<Response> {
+        let _ = mode;
+        Some(error(StatusCode::UNAUTHORIZED, "remote board authentication is required"))
+    }
+
+    fn check_remote(&self, headers: &HeaderMap) -> Option<Response> {
+        let Some((mode, origin)) = &self.remote else {
+            return Some(error(StatusCode::FORBIDDEN, "remote board access is disabled"));
+        };
+        if let Some(r) = self.check_remote_host_and_origin(headers, origin) {
+            return Some(r);
+        }
+        self.authenticate_remote(*mode, headers)
+    }
+
+    fn check_csrf(&self, headers: &HeaderMap) -> Option<Response> {
+        let ok = matches!(
+            single_header(headers, CSRF_HEADER),
+            SingleHeader::Present(t) if same_bytes(t.as_bytes(), self.app.csrf.as_bytes())
+        );
+        if !ok {
             return Some(error(StatusCode::FORBIDDEN, "missing or wrong X-T3CM-CSRF token; reload the board"));
         }
         None
     }
+}
+
+async fn board_guard(State(web): State<Web>, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let headers = req.headers();
+    let mutating = is_mutating(req.method());
+    match classify_request(headers, web.port) {
+        RequestKind::Local => {
+            if let Some(r) = web.check_local_origin(headers) {
+                return r;
+            }
+        }
+        RequestKind::Remote => {
+            if let Some(r) = web.check_remote(headers) {
+                return r;
+            }
+        }
+    }
+    if mutating && let Some(r) = web.check_csrf(headers) {
+        return r;
+    }
+    next.run(req).await
 }
 
 fn body<T: DeserializeOwned>(raw: &Bytes) -> Result<T, String> {
@@ -82,10 +170,7 @@ fn failed(app: &App, e: anyhow::Error) -> Response {
     error(status, msg)
 }
 
-async fn page(State(web): State<Web>, headers: HeaderMap) -> Response {
-    if let Some(r) = web.reject(&headers, false) {
-        return r;
-    }
+async fn page(State(web): State<Web>) -> Response {
     let wf = web.app.wf.clone();
     tokio::spawn(async move {
         if let Err(e) = wf.reconcile_soon().await {
@@ -106,20 +191,14 @@ async fn page(State(web): State<Web>, headers: HeaderMap) -> Response {
         .into_response()
 }
 
-async fn state(State(web): State<Web>, headers: HeaderMap) -> Response {
-    if let Some(r) = web.reject(&headers, false) {
-        return r;
-    }
+async fn state(State(web): State<Web>) -> Response {
     match web.app.wf.snapshot() {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
 }
 
-async fn message(State(web): State<Web>, headers: HeaderMap, Path(handle): Path<String>) -> Response {
-    if let Some(r) = web.reject(&headers, false) {
-        return r;
-    }
+async fn message(State(web): State<Web>, Path(handle): Path<String>) -> Response {
     match web.app.store.msg_get(&handle) {
         Ok(Some(m)) => json_ok(StatusCode::OK, json!(m)),
         Ok(None) => error(StatusCode::NOT_FOUND, format!("no message {handle:?}")),
@@ -127,10 +206,7 @@ async fn message(State(web): State<Web>, headers: HeaderMap, Path(handle): Path<
     }
 }
 
-async fn events(State(web): State<Web>, headers: HeaderMap) -> Response {
-    if let Some(r) = web.reject(&headers, false) {
-        return r;
-    }
+async fn events(State(web): State<Web>) -> Response {
     let rx = web.app.wf.subscribe();
     let stop = web.app.stopping.subscribe();
     let s = stream::unfold((web.app.clone(), rx, stop, None::<String>), |(app, mut rx, mut stop, last)| async move {
@@ -184,10 +260,7 @@ struct AtBody {
     token: Option<String>,
 }
 
-async fn answer(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>, raw: Bytes) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn answer(State(web): State<Web>, Path(id): Path<String>, raw: Bytes) -> Response {
     let b: TextBody = match body(&raw) {
         Ok(b) => b,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
@@ -198,10 +271,7 @@ async fn answer(State(web): State<Web>, headers: HeaderMap, Path(id): Path<Strin
     }
 }
 
-async fn dismiss(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>, raw: Bytes) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn dismiss(State(web): State<Web>, Path(id): Path<String>, raw: Bytes) -> Response {
     let b: AtBody = if raw.is_empty() {
         AtBody::default()
     } else {
@@ -221,10 +291,7 @@ struct LaunchBody {
     issues: Vec<String>,
 }
 
-async fn launch(State(web): State<Web>, headers: HeaderMap, raw: Bytes) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn launch(State(web): State<Web>, raw: Bytes) -> Response {
     let b: LaunchBody = match body(&raw) {
         Ok(b) => b,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
@@ -254,10 +321,7 @@ struct AskBody {
     question: String,
 }
 
-async fn ask(State(web): State<Web>, headers: HeaderMap, raw: Bytes) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn ask(State(web): State<Web>, raw: Bytes) -> Response {
     let b: AskBody = match body(&raw) {
         Ok(b) => b,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
@@ -268,40 +332,28 @@ async fn ask(State(web): State<Web>, headers: HeaderMap, raw: Bytes) -> Response
     }
 }
 
-async fn settle_ticket(State(web): State<Web>, headers: HeaderMap, Path(thread): Path<String>) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn settle_ticket(State(web): State<Web>, Path(thread): Path<String>) -> Response {
     match web.app.wf.settle_ticket(&thread).await {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => failed(&web.app, e),
     }
 }
 
-async fn restore_ticket(State(web): State<Web>, headers: HeaderMap, Path(thread): Path<String>) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn restore_ticket(State(web): State<Web>, Path(thread): Path<String>) -> Response {
     match web.app.wf.restore_ticket(&thread).await {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => failed(&web.app, e),
     }
 }
 
-async fn settle_ask(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn settle_ask(State(web): State<Web>, Path(id): Path<String>) -> Response {
     match web.app.wf.settle_ask(&id) {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => failed(&web.app, e),
     }
 }
 
-async fn restore_ask(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn restore_ask(State(web): State<Web>, Path(id): Path<String>) -> Response {
     match web.app.wf.restore_ask(&id) {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => failed(&web.app, e),
@@ -313,10 +365,7 @@ struct OpenBody {
     link: String,
 }
 
-async fn open_link(State(web): State<Web>, headers: HeaderMap, raw: Bytes) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn open_link(State(web): State<Web>, raw: Bytes) -> Response {
     let b: OpenBody = match body(&raw) {
         Ok(b) => b,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
@@ -327,50 +376,35 @@ async fn open_link(State(web): State<Web>, headers: HeaderMap, raw: Bytes) -> Re
     }
 }
 
-async fn settle_done(State(web): State<Web>, headers: HeaderMap) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn settle_done(State(web): State<Web>) -> Response {
     match web.app.wf.settle_closed(None).await {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => failed(&web.app, e),
     }
 }
 
-async fn list_new_issues(State(web): State<Web>, headers: HeaderMap) -> Response {
-    if let Some(r) = web.reject(&headers, false) {
-        return r;
-    }
+async fn list_new_issues(State(web): State<Web>) -> Response {
     match web.app.wf.new_issues() {
         Ok((issues, dismissed)) => json_ok(StatusCode::OK, json!({"issues": issues, "dismissed": dismissed})),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
 }
 
-async fn launch_new_issue(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn launch_new_issue(State(web): State<Web>, Path(id): Path<String>) -> Response {
     match web.app.wf.launch_new_issue(&id).await {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => failed(&web.app, e),
     }
 }
 
-async fn dismiss_new_issue(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn dismiss_new_issue(State(web): State<Web>, Path(id): Path<String>) -> Response {
     match web.app.wf.dismiss_new_issue(&id).await {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => failed(&web.app, e),
     }
 }
 
-async fn restore_new_issue(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn restore_new_issue(State(web): State<Web>, Path(id): Path<String>) -> Response {
     match web.app.wf.restore_new_issue(&id).await {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => failed(&web.app, e),
@@ -387,20 +421,14 @@ fn context_failed(app: &App, e: ContextError) -> Response {
     error(status, app.t3.redact(e.to_string()))
 }
 
-async fn list_contexts(State(web): State<Web>, headers: HeaderMap) -> Response {
-    if let Some(r) = web.reject(&headers, false) {
-        return r;
-    }
+async fn list_contexts(State(web): State<Web>) -> Response {
     match web.app.wf.contexts() {
         Ok(v) => json_ok(StatusCode::OK, json!({"contexts": v})),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")),
     }
 }
 
-async fn put_context(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>, raw: Bytes) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn put_context(State(web): State<Web>, Path(id): Path<String>, raw: Bytes) -> Response {
     let b: ContextBody = match body(&raw) {
         Ok(b) => b,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
@@ -411,30 +439,21 @@ async fn put_context(State(web): State<Web>, headers: HeaderMap, Path(id): Path<
     }
 }
 
-async fn delete_context(State(web): State<Web>, headers: HeaderMap, Path(id): Path<String>) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn delete_context(State(web): State<Web>, Path(id): Path<String>) -> Response {
     match web.app.wf.delete_context(&id) {
         Ok(()) => json_ok(StatusCode::OK, json!({"deleted": id})),
         Err(e) => context_failed(&web.app, e),
     }
 }
 
-async fn get_models(State(web): State<Web>, headers: HeaderMap) -> Response {
-    if let Some(r) = web.reject(&headers, false) {
-        return r;
-    }
+async fn get_models(State(web): State<Web>) -> Response {
     match web.app.wf.models_view().await {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, web.app.t3.redact(format!("{e:#}"))),
     }
 }
 
-async fn put_ticket_model(State(web): State<Web>, headers: HeaderMap, raw: Bytes) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn put_ticket_model(State(web): State<Web>, raw: Bytes) -> Response {
     let b: ModelSettingBody = match body(&raw) {
         Ok(b) => b,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
@@ -445,10 +464,7 @@ async fn put_ticket_model(State(web): State<Web>, headers: HeaderMap, raw: Bytes
     }
 }
 
-async fn put_ask_model(State(web): State<Web>, headers: HeaderMap, raw: Bytes) -> Response {
-    if let Some(r) = web.reject(&headers, true) {
-        return r;
-    }
+async fn put_ask_model(State(web): State<Web>, raw: Bytes) -> Response {
     let b: ModelSettingBody = match body(&raw) {
         Ok(b) => b,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
@@ -460,6 +476,8 @@ async fn put_ask_model(State(web): State<Web>, headers: HeaderMap, raw: Bytes) -
 }
 
 pub fn routes(app: Arc<App>, port: u16) -> Router {
+    let remote = app.config.board.active_remote();
+    let web = Web { app, port, remote };
     Router::new()
         .route("/", get(page))
         .route("/api/state", get(state))
@@ -484,5 +502,6 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/open", post(open_link))
         .route("/api/contexts", get(list_contexts))
         .route("/api/contexts/{id}", put(put_context).delete(delete_context))
-        .with_state(Web { app, port })
+        .route_layer(axum::middleware::from_fn_with_state(web.clone(), board_guard))
+        .with_state(web)
 }
