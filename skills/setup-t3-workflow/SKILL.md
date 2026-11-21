@@ -1,6 +1,6 @@
 ---
 name: setup-t3-workflow
-description: Set up or change the T3 workflow's slots - the reviewer that checks a PR before it opens, the worker's passes, credential renewal, delivery (merge or tag-deploy) and the ticket and worker models - by detecting what is installed and interviewing the user one slot at a time, then writing the config. Use when the user asks to set up the T3 workflow, change the reviewer, use a different model for workers or tickets, add a cleanup or voice pass, renew a credential, or deploy with tags, and when a role reports no T3 workflow config yet. Safe to run again to change one slot.
+description: Set up or change the T3 workflow's slots - the reviewer that checks a PR before it opens, the worker's passes, credential renewal, delivery (merge, tag-deploy, or multi-step pipelines in .t3-workflow.json) and the ticket and worker models - by detecting what is installed and interviewing the user one slot at a time, then writing the config. Use when the user asks to set up the T3 workflow, change the reviewer, use a different model for workers or tickets, add a cleanup or voice pass, renew a credential, deploy with tags, or configure multi-stage delivery or .t3-workflow.json, and when a role reports no T3 workflow config yet. Safe to run again to change one slot.
 ---
 
 The T3 workflow's roles name capabilities, not skills. Each **slot** holds
@@ -41,9 +41,10 @@ one. The JSON it prints is the interview's only source of facts:
 - `steps`: the setup steps `recorded` in the config, and those `missing`,
   each with its `id`, its `kind` (`interview`, naming a `slot`, or `auto`)
   and, for an interview step, the slot setup has not asked about yet.
-- `platform`, and `config`: its path, whether it exists, its `problems`, and
-  `repoProblems` from the repository's `AGENTS.md` block, which the user
-  fixes in that file.
+- `platform`, and `config`: its `path`, whether it `exists`, its `repoPath`
+  (`.t3-workflow.json`) and `repoExists`, its `problems`, and `repoProblems`
+  from the repository's `AGENTS.md` block and `.t3-workflow.json`, which
+  the user fixes in those files.
 
 Also read t3cm's pools (the groups of provider instances a launch can be
 spread across), through `mcp__t3cm__execute` or `t3cm exec -`:
@@ -106,15 +107,36 @@ the result, and prints the new `t3cm slots` lines. `--unset <slot>` (or
 `--unset models.worker`) returns a slot to its default. `--replace` starts
 from an empty file.
 
+To write repository-level settings (such as a multi-step `delivery.steps`
+pipeline) to the repository's `.t3-workflow.json` instead of the user
+config, pass `--repo-config` (with the same `--repo <dir>` when targeting
+another repository, and without `--asked`, which applies only to the user
+config):
+
+```bash
+t3cm setup write --repo-config <<'JSON'
+{"delivery": {"steps": [{"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"}, {"id": "deploy", "skill": "deploy", "gate": "chain", "scope": "ticket", "watch": true}], "closeAfter": "ticket"}}
+JSON
+```
+
+`--repo-config` validates the file, merges into `config.repoPath`, omits
+per-machine `steps` and `writtenBy`, and prints the new `t3cm slots` lines.
+When the user sets a repo-level delivery pipeline in `.t3-workflow.json`
+during a full interview, still write the user config (passing `--asked` for
+the interviewed slots) and run the `--repo-config` write as a second
+command.
+
 - **`not written`**: fix what each line names and run it again. A bare name
   that matches several skills means asking the user which one.
 - **`warn: ... not installed yet`**: written anyway; tell the user where to
   get the skill, and that the roles skip it until it is installed.
 
 Show the user the printed slot lines as the summary. A slot whose line ends
-in `[AGENTS.md]` is set by that repository's "Agent workflow" block, which
-wins over the user config there; tell the user, and offer to edit the block
-when they want the change in that repository.
+in `[.t3-workflow.json]` or `[AGENTS.md]` is set by that repository, which
+wins over the user config there (`.t3-workflow.json` wins over `AGENTS.md`);
+tell the user, and offer to update `.t3-workflow.json` (with
+`--repo-config`) or the `AGENTS.md` block when they want the change in that
+repository.
 
 ## 4. Install the filed-issue rule
 

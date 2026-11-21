@@ -255,9 +255,10 @@ echo 'async () => (await t3.thread_list({ allProjects: true, limit: 5 })).thread
 ## Slots
 
 The workflow roles' review, passes, credential renewal, delivery and models
-are slots. The service resolves them, from the user config
-(`~/.config/t3-workflow/config.json`, or `$T3WF_CONFIG`), the repository's
-`AGENTS.md` "Agent workflow" block, and the skills the calling agent has
+are slots. The service resolves them across four layers (defaults, the user
+config at `~/.config/t3-workflow/config.json` or `$T3WF_CONFIG`, the
+repository's `AGENTS.md` "Agent workflow" block, and the repository's root
+`.t3-workflow.json`), along with the skills the calling agent has
 installed. It reads the calling thread's T3 instance and project, and takes
 the agent's config folder from what the call reports: the `X-T3-Config-Dir`
 header, or `t3cm exec`'s environment. It records each instance's folder, so a
@@ -267,8 +268,10 @@ project's `.claude/settings.json` and `.claude/settings.local.json`) leave out
 of `enabledPlugins` do not resolve. Resolutions are stored per project and
 instance and rebuilt when one of their input files changes.
 
-- `wf.slot(name, { repo? })` gives one slot for the step that needs it, each
-  skill with `how` to run it or why it is skipped. See [wf](globals.md#wf).
+- `wf.slot(name, { repo?, files? })` gives one slot for the step that needs it,
+  each skill with `how` to run it or why it is skipped. For `delivery`, `files`
+  filters `paths`-scoped steps against changed repo-relative paths and lists
+  unmatched steps under `skipped`. See [wf](globals.md#wf).
 - `wf.renewal({ output })` matches a failed command's output against the
   `credentials` patterns. The patterns use Python's regular-expression syntax,
   lookaround and backreferences included; `t3cm doctor` names one t3cm cannot

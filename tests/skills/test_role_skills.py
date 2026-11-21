@@ -202,5 +202,105 @@ class MergeRouteTests(unittest.TestCase):
         self.assertNotIn("`<owner>/<name>#<number>` in lower case", watch)
 
 
+class DeliveryStepsTests(unittest.TestCase):
+    ticket = (SKILLS / "t3-ticket" / "SKILL.md").read_text()
+    worker = (SKILLS / "t3-worker" / "procedure.md").read_text()
+    setup_skill = (SKILLS / "setup-t3-workflow" / "SKILL.md").read_text()
+    interview = (SKILLS / "setup-t3-workflow" / "references" / "interview.md").read_text()
+    slots = (SKILLS / "t3-workflow" / "slots.md").read_text()
+    board = (ROOT / "docs" / "src" / "board.md").read_text()
+    adr = (ROOT / "docs" / "adr" / "0007-composable-delivery.md").read_text()
+
+    def test_ticket_builds_gates_from_resolved_delivery_steps(self):
+        ready = " ".join(section(self.ticket, "### Ready to merge").split())
+        self.assertIn('wf.slot("delivery", { files })', ready)
+        self.assertIn("`skipped`", ready)
+        self.assertIn('gate: "merge"', ready)
+        self.assertIn('wf.send({ kind: "gate", gate: "merge", body, options })', ready)
+        self.assertIn('["merge, deploy and verify", "merge and deploy", "merge"]', ready)
+        self.assertIn('mode: "merge"', ready)
+        self.assertIn('mode: "tag-deploy"', ready)
+
+        stages = " ".join(section(self.ticket, "### Delivery stages").split())
+        self.assertIn('gate: "never"', stages)
+        self.assertIn('gate: "chain"', stages)
+        self.assertIn('gate: "always"', stages)
+        self.assertIn('gate: "delivery:<id>"', stages)
+        self.assertIn('"skip <id>"', stages)
+        self.assertIn('kind: "skill"', stages)
+        self.assertIn('kind: "manual"', stages)
+        self.assertIn("watch: true", stages)
+        self.assertIn("The deploy watch", stages)
+        self.assertIn("8-option and 60-character-per-option limits", stages)
+        self.assertIn("done and verify", stages)
+        self.assertIn('state === "MERGED"', ready)
+        self.assertIn("override delivery to merge-only", ready)
+        self.assertIn("resume at the recorded failed stage", " ".join(section(self.ticket, "### The handoff").split()))
+        self.assertIn('For a `post-handoff` stage (under `closeAfter: "all"`)', stages)
+
+    def test_ticket_honors_scope_boundaries_and_close_after(self):
+        stages = " ".join(section(self.ticket, "### Delivery stages").split())
+        self.assertIn("`pr` scope", stages)
+        self.assertIn("`ticket` scope", stages)
+        self.assertIn("`post-handoff` scope", stages)
+        self.assertIn("targeted fix worker on `main`", stages)
+        self.assertIn('wf.send({ kind: "report", body })', stages)
+        self.assertIn('`closeAfter`', stages)
+
+        close = " ".join(section(self.ticket, "## 5. Close").split())
+        self.assertIn("`post-handoff`", close)
+        self.assertIn('`closeAfter` is `"pr"`', close)
+        self.assertIn('`closeAfter` is `"ticket"`', close)
+        self.assertIn('`closeAfter` is `"all"`', close)
+
+    def test_worker_hands_off_after_its_last_pr_scoped_stage(self):
+        text = " ".join(self.worker.split())
+        self.assertIn("`pr`-scoped delivery stages finish", text)
+        self.assertIn("never wait on `ticket`-scoped or `post-handoff` stages", text)
+        self.assertIn("Merged #<number> at <sha>. Hand off.", text)
+        self.assertIn("Delivered: <summary>. Hand off.", text)
+        self.assertIn("Delivery stage <id> failed:", text)
+
+    def test_setup_interview_covers_multi_step_delivery_and_repo_config(self):
+        self.assertIn("t3cm setup write --repo-config", self.setup_skill)
+        self.assertIn(".t3-workflow.json", self.setup_skill)
+        self.assertIn("repoPath", self.setup_skill)
+        self.assertIn("repoExists", self.setup_skill)
+        self.assertIn("without `--asked`", self.setup_skill)
+
+        delivery = " ".join(section(self.interview, "## Delivery").split())
+        self.assertIn("t3cm setup write --repo-config", delivery)
+        self.assertIn(".t3-workflow.json", delivery)
+        self.assertIn("`closeAfter`", delivery)
+        self.assertIn("`post-handoff`", delivery)
+        self.assertIn('"steps"', delivery)
+
+    def test_slots_and_board_docs_describe_composable_delivery(self):
+        slots = " ".join(self.slots.split())
+        self.assertIn(".t3-workflow.json", slots)
+        self.assertIn('wf.slot("delivery", { files? })', slots)
+        self.assertIn("t3cm setup write --repo-config", slots)
+        self.assertIn("`closeAfter`", slots)
+        self.assertIn('gate: "delivery:<id>"', slots)
+
+        board = " ".join(self.board.split())
+        self.assertIn("Delivery gates and chains", board)
+        self.assertIn('wf.slot("delivery", { files })', board)
+        self.assertIn('gate: "merge"', board)
+        self.assertIn('gate: "delivery:<id>"', board)
+        self.assertIn('["merge, deploy and verify", "merge and deploy", "merge"]', board)
+        self.assertIn("0007-composable-delivery.md", board)
+
+    def test_composable_delivery_adr_exists_and_is_accepted(self):
+        fm = frontmatter(self.adr)
+        self.assertEqual(fm.get("status", "").strip(), "accepted")
+        self.assertIn("delivery.steps", self.adr)
+        self.assertIn(".t3-workflow.json", self.adr)
+        self.assertIn('gate: "delivery:<id>"', self.adr)
+        self.assertIn("closeAfter", self.adr)
+        for forbidden in TEAM_SKILLS:
+            self.assertNotIn(forbidden, self.adr, f"ADR mentions {forbidden}")
+
+
 if __name__ == "__main__":
     unittest.main()

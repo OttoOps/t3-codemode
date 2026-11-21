@@ -138,6 +138,42 @@ returns a `warning`: the user can still type an answer, but the sender should
 send it again with `options`, or quote each answer after `reply` on its action
 line.
 
+### Delivery gates and chains
+
+The board keeps no delivery wording of its own. `t3-ticket` reads ordered
+stages from `wf.slot("delivery", { files })` and passes explicit `options` on
+each `wf.send({ kind: "gate", gate, body, options })` call. The builtin merge
+stage keeps `gate: "merge"` so GitHub reconcile tracks the PR, holds approval
+to `head <sha>`, and clears the merge gate once the PR lands. Every later
+gated stage uses `gate: "delivery:<id>"`, such as `gate: "delivery:deploy"` or
+`gate: "delivery:publish"`.
+
+When a gated stage is followed by a consecutive run of `gate: "chain"` stages,
+`t3-ticket` passes one button per composable prefix, longest first, within the
+board's 8-button and 60-character limits. For a pipeline with `merge`
+(`always`), `deploy` (`chain`), and `verify` (`chain`), the merge gate sends:
+
+```js
+async () => wf.send({
+  kind: "gate",
+  gate: "merge",
+  body: '**ACTION NEEDED:** reply "merge, deploy and verify", "merge and deploy", or "merge" to merge #81 at head d4db97c, here: https://github.com/acme/widgets/pull/81',
+  options: ["merge, deploy and verify", "merge and deploy", "merge"],
+})
+```
+
+Picking a shorter prefix runs that prefix and opens the next stage's own
+`gate: "delivery:<id>"` card when reached, such as
+`options: ["deploy and verify", "deploy", "skip deploy"]`. Stages with
+`gate: "never"` run automatically once their predecessor succeeds. Stages with
+`scope: "post-handoff"` run outside the ticket. Under the default
+`closeAfter: "ticket"`, the ticket posts a note on the issue and includes the
+remaining checklist in a final `report` and its `handoff` body without keeping
+the ticket open. Under `closeAfter: "all"`, each remaining `post-handoff`
+stage opens a `delivery:<id>` gate before the ticket closes.
+[ADR 0007](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0007-composable-delivery.md)
+records the composable delivery design.
+
 ## Filtering the page
 
 The bar under the header narrows the page to the work you pick. Each filter
@@ -304,7 +340,7 @@ makes them agree:
 
 | GitHub shows | The board |
 |---|---|
-| Merged | Resolves the pull request's cards opened before the merge, with the note "merged on GitHub at `<sha>`, `<time>`". Clears the ticket's `merge` gate when no other gate card stays open for it. Sends each ticket tracking the pull request one `event` to run its post-merge steps |
+| Merged | Resolves the pull request's cards opened before the merge, with the note "merged on GitHub at `<sha>`, `<time>`". Clears the ticket's `merge` gate when no other gate card stays open for it (later delivery stages use `gate: "delivery:<id>"`, so reconcile leaves those untouched). Sends each ticket tracking the pull request one `event` to run its post-merge steps |
 | Closed without merging | Resolves its cards opened before the close and sends each ticket one `event`. Reopening and closing it again sends another |
 | Dropped from the merge queue for `merge_conflict`, `failed_checks` or `manual` removal | Opens a `report` card per ticket that gives the reason, with `requeue` and `hold` buttons, or one card with no buttons and the steps to take by hand when no ticket tracks it. An approval older than the removal is dropped, so the board never queues the pull request again on its own |
 | Waiting to be queued, now mergeable at the approved head | Sends `enqueuePullRequest` with the approved head as `expectedHeadOid`. If the repository has turned its merge queue off since, sends `mergePullRequest` the same way, with the approval's method or else the repository's default |

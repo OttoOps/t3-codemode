@@ -9,7 +9,7 @@ and enabled.
 | `review` | the independent review a worker runs before it opens a PR | a found `sol-loop`, else none |
 | `passes` | cleanup and templating skills a worker runs, in order | none |
 | `credentials` | renewals: a failure pattern and the skill that renews it | none |
-| `delivery` | `merge`, or `tag-deploy` with a deploy skill | `merge` |
+| `delivery` | ordered delivery stages (`steps` and `closeAfter`; legacy `merge` and `tag-deploy` normalize to `steps`) | `[merge]` |
 | `models` | `ticket` and `worker` thread models, set separately, each a model or a t3cm pool | `claude-opus-5-5`, effort `high`, when T3 confirms it offers Claude; else the provider's default |
 
 A slot with no setting uses its default, so a machine with no config at all
@@ -23,7 +23,7 @@ only the slot it needs, right before it uses it, through `execute` (or
 
 | Step | Call |
 |---|---|
-| ticket, choosing delivery and gate wording | `await wf.slot("delivery")` |
+| ticket, choosing delivery stages and gates | `await wf.slot("delivery", { files? })` |
 | ticket or overseer, launching a thread | `await wf.slot("models", { repo? })` |
 | worker, before opening the PR | `await wf.slot("review")` |
 | worker, publishing | `await wf.slot("passes")` |
@@ -31,13 +31,18 @@ only the slot it needs, right before it uses it, through `execute` (or
 
 Pass `{ repo: "<workspace root>" }` when the repository differs from this
 thread's project root (for example, an overseer checking another repo, or a
-worker reading its worktree's `AGENTS.md`).
+worker reading its worktree's `AGENTS.md` or `.t3-workflow.json`). For
+`delivery`, pass `{ files: ["path/a", ...] }` with the changed repo-relative
+file paths: the service drops any step whose `paths` globs match none of
+those files and lists it under `skipped` (`[{ id, reason, paths }]`).
+Passing `files` to any slot other than `delivery` fails.
 
 `wf.slot(name)` returns the slot's resolved fields, its `source` layer, a
-one-line `line`, and `warnings`. Each skill object carries `status` (`"ok"`,
-`"ambiguous"`, or `"missing"`), `name`, `path`, `invoke` (`"skill"` or
-`"inline"`), `others` (when `"ambiguous"`), and `how`. `"ambiguous"` still
-returns a usable first match; act on each skill object by its fields:
+one-line `line`, and `warnings`. Each skill object (including each `skill`
+step inside `delivery.steps`) carries `status` (`"ok"`, `"ambiguous"`, or
+`"missing"`), `name`, `path`, `invoke` (`"skill"` or `"inline"`), `others`
+(when `"ambiguous"`), and `how`. `"ambiguous"` still returns a usable first
+match; act on each skill object by its fields:
 
 | Fields | Do |
 |---|---|
@@ -89,16 +94,87 @@ every configured pool exists in t3cm's config.
 
 ## Where settings live
 
-The repository's setting wins, slot by slot. `delivery` and `models` merge
-field by field, so a repo can change the deploy skill alone.
+Settings layer slot by slot, highest precedence wins:
 
-1. The defaults above.
+1. The defaults above (`delivery` defaults to `[merge]`, `closeAfter: "ticket"`).
 2. The user config file: `$T3WF_CONFIG`, else
    `$XDG_CONFIG_HOME/t3-workflow/config.json` (by default
    `~/.config/t3-workflow/config.json`).
-3. The repository's `AGENTS.md` "Agent workflow" block.
+3. The repository's `AGENTS.md` "Agent workflow" block (legacy bullets keep
+   working).
+4. The repository's root `.t3-workflow.json` (same JSON schema as the user
+   config, without per-machine `steps` or `writtenBy`; written with
+   `t3cm setup write --repo-config`).
 
-The config file:
+`models` merges per role across layers. For `delivery`, a layer that sets
+`steps` replaces the earlier `steps`; legacy `mode`/`skill` fields merge
+field by field before normalizing into `steps`.
+
+### The delivery slot
+
+A repository with more than a plain merge defines `delivery.steps` (and
+optional `closeAfter`) in `.t3-workflow.json`:
+
+```json
+{
+  "version": 1,
+  "delivery": {
+    "steps": [
+      {"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"},
+      {"id": "deploy", "skill": "deploy", "gate": "chain", "scope": "ticket", "watch": true},
+      {"id": "publish", "skill": "widgets-publish", "gate": "always", "scope": "post-handoff", "paths": ["content/**"]}
+    ],
+    "closeAfter": "ticket"
+  }
+}
+```
+
+Each step carries:
+
+- `id`: unique identifier (letters, digits, `-`, `_`, `.`).
+- Runner (one of three):
+  - `kind: "builtin"` for `id: "merge"` (runs `wf.merge` and GitHub
+    reconcile; may appear at most once, must be first, and must have
+    `scope: "pr"`).
+  - `skill: "<name>"` (with `kind: "skill"` optional), resolved like any
+    other slot skill; a missing skill skips that step with a note rather
+    than blocking the remaining steps.
+  - `kind: "manual"` with a non-empty `prompt` for human-only stages that
+    have no skill.
+- `gate`:
+  - `"always"`: opens a gate before running (`gate: "merge"` for the
+    builtin merge stage, `gate: "delivery:<id>"` for every later stage).
+  - `"chain"`: requires a preceding `"always"` step and can be pre-approved
+    with it; consecutive `"chain"` steps compose into one explicit reply
+    option per prefix. Picking a shorter prefix opens `gate: "delivery:<id>"`
+    when the next stage is reached.
+  - `"never"`: runs automatically once the previous stage succeeds.
+- `scope` (default `"pr"`, must be non-decreasing across `steps`):
+  - `"pr"`: runs per PR before the worker hands off; a failure returns to
+    that worker as a follow-up PR.
+  - `"ticket"`: runs once on `main` after the last PR hands off; a failure
+    launches a targeted fix worker on `main`.
+  - `"post-handoff"`: runs outside the ticket; emits a final report card
+    and issue note without keeping the ticket open (unless `closeAfter` is
+    `"all"`).
+- `paths` (optional non-empty list of repo-relative globs supporting `*`,
+  `**`, `?`, `[...]` and `{a,b}`): `wf.slot("delivery", { files })` drops
+  unmatched steps and reports them in `skipped`.
+- `watch` (optional boolean): `true` runs the stage's pipeline wait through
+  the ticket's scheduled deploy watch.
+- `closeAfter`: `"pr"`, `"ticket"` (default), or `"all"`. Workers always
+  hand off after the last `pr`-scoped stage; `closeAfter` sets when the
+  ticket closes its GitHub issue.
+
+Legacy configs still resolve identically without migration:
+`{"mode": "merge"}` normalizes to `[merge]`, and
+`{"mode": "tag-deploy", "skill": "<s>"}` (plus `AGENTS.md` `Delivery:
+tag-deploy` and `Deploy skill: <s>`) normalizes to
+`[merge, {id: "deploy", skill: "<s>", gate: "chain", scope: "pr", watch:
+true}]` with `closeAfter: "ticket"`. Legacy-equivalent resolved outputs keep
+`mode` and `skill` alongside `steps`.
+
+The user config file:
 
 ```json
 {
@@ -185,5 +261,6 @@ offers its skills.
 | Command | Use |
 |---|---|
 | `t3cm slots [--repo <dir>] [--json] [--no-t3]` | print the service's slot resolution for this shell's agent and repository |
-| `t3cm doctor [--repo <dir>] [--json] [--no-t3]` | check the whole workflow install (config shape, skills, models, pools, service, T3 connection, skills drift, setup steps); exits 1 on a problem |
+| `t3cm doctor [--repo <dir>] [--json] [--no-t3]` | check the whole workflow install (user config and `.t3-workflow.json` shape, delivery step invariants, skills, models, pools, service, T3 connection, skills drift, setup steps); exits 1 on a problem |
+| `t3cm setup write --repo-config [--repo <dir>]` | validate and write repo-level slot settings (such as `delivery.steps`) to `.t3-workflow.json` |
 | `t3cm doctor --resolve <name>` | list every installed skill a name matches, in search order |
