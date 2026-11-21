@@ -70,7 +70,7 @@ escalates.
 | Children at a glance | `return (await wf.board()).children.map(c => `${c.label} ${c.status} ${c.gate ?? ""}`)` |
 | A capped body in full | `return (await wf.show("m42")).body` |
 | Unread notes | `return (await wf.inbox()).map(n => `${n.label}: ${n.head}`)` |
-| One slot at point of use | `await wf.slot("review")` (or `"passes"`, `"delivery"`, `"models"`) |
+| One slot at point of use | `await wf.slot("review")` (or `"passes"`, `"delivery"` with optional `{ files }`, `"models"`) |
 | Match a failed command against renewals | `await wf.renewal({ output })` |
 
 A wake arrives as a message whose first line is
@@ -112,7 +112,7 @@ no ticket message lands in any model's context.
 **Ticket.** Join from the brief, or `wf.init({ role: "ticket" })` when the
 brief has no link block, send gates, blockers and the handoff to the
 board with `wf.send`, and progress as notes. Resume step: `wf.board()` for
-this work's workers. Look up `wf.slot("delivery")` and `wf.slot("models")`
+this work's workers. Look up `wf.slot("delivery", { files? })` and `wf.slot("models")`
 when each step needs them, and `wf.renewal({ output })` when a deploy-watch
 command fails. Hand a worker its next PR's context through shared memory
 instead of pasting it:

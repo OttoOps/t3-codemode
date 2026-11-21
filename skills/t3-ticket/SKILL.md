@@ -33,11 +33,14 @@ the root and talks to the user itself.
   Do not stop to ask for a new thread at step 3.
 - A worker is launched only through `t3_thread_launch` with a `worktree`
   workspace strategy, so T3 owns the checkout and the thread's binding.
-- A worker owns its PR until the change is delivered, not only merged. A
-  failed deploy goes back to it as a follow-up PR.
+- A worker owns its PR until the PR's `pr`-scoped delivery stages finish,
+  not only until merge when later `pr`-scoped stages exist. A failed
+  `pr`-scoped stage returns to that worker as a follow-up PR. Stages scoped
+  to `ticket` run once on `main` after the last PR hands off, and a failure
+  there launches a targeted fix worker on `main`.
 - Workers run one at a time. Each PR branches from `main` after the
-  previous PR has been delivered, and targets `main`. PRs are never stacked
-  on one another.
+  previous PR's `pr`-scoped delivery stages have finished, and targets
+  `main`. PRs are never stacked on one another.
 - Handed several issues at once, this thread works them one after another,
   in the order the user gave, each through steps 2 to 5 before the next
   issue's split. Step 5's unpin and settle wait for the last issue. Issues
@@ -82,10 +85,10 @@ For example:
 `t3-workflow` asks each role for one thing. This role's is:
 
 - **Resume step:** check `wf.board()` for this work's worker threads, and
-  re-show any action line the user has not acted on. While a deploy runs,
-  check `list_scheduled_tasks` for its deploy watch; when it is missing,
-  create it again as "The deploy watch" says, with the original
-  `Started` time.
+  re-show any action line the user has not acted on. While a watched
+  delivery stage (`watch: true`, such as a deploy) runs, check
+  `list_scheduled_tasks` for its deploy watch; when it is missing, create
+  it again as "The deploy watch" says, with the original `Started` time.
 
 Progress to a parent that needs no action goes up as
 `wf.send({ kind: "note", body })`. With a parent (the board or an overseer),
@@ -94,8 +97,12 @@ three more rules hold:
 - While an action line waits on the user, send it up with
   `wf.send({ kind: "gate", gate: "<phase>", body: "<action line>", options })`,
   which opens the gate on the parent link, and `wf.gate({ clear: true })`
-  once the user acts. `options` lists the answers the user can click, such
-  as `["merge and deploy", "merge"]`. Without it, the board makes a button
+  once the user acts. For delivery gates, keep `gate: "merge"` for the
+  builtin merge stage (GitHub reconcile relies on it) and use
+  `gate: "delivery:<id>"` for every later stage. Always pass explicit
+  `options` listing the answers the user can click, such as
+  `["merge, deploy and verify", "merge and deploy", "merge"]` or
+  `["deploy", "skip deploy"]`. Without `options`, the board makes a button
   of each quoted answer after `reply` on the action line. When the send
   comes back with a `warning`, the card has no buttons: send it again with
   `options`.
@@ -104,7 +111,8 @@ three more rules hold:
   overseer's waiting list.
 - The user may answer here, on the board, or through the overseer. A
   `reply` from the parent that relays the user's answer is the user's word,
-  "merge" and "merge and deploy" included.
+  `"merge"`, `"merge and deploy"`, longer chained prefixes, and
+  `delivery:<id>` answers included.
 
 ## 1. Start
 
@@ -144,8 +152,17 @@ With `none`, the user's request is the work.
 
 Look up the delivery slot with `await wf.slot("delivery")` as
 [Looking up slots in a role](../t3-workflow/slots.md#looking-up-slots-in-a-role)
-says, and send any skip or no-config note it calls for. A `tag-deploy`
-whose deploy skill is skipped delivers by `merge`.
+says, and send any skip or no-config note it calls for. The result carries
+ordered `steps` (each with `id`, `kind` of `builtin`, `skill` or `manual`,
+`gate` of `always`, `chain` or `never`, `scope` of `pr`, `ticket` or
+`post-handoff`, optional `paths` globs, optional `watch: true`, plus a
+resolved `skill` or `prompt`) and `closeAfter` (`pr`, `ticket` or `all`,
+default `ticket`). Legacy `merge` and `tag-deploy` configs normalize to
+`steps` in the service (`[merge]` or `[merge, deploy (chain/pr/watch)]`),
+so the same step model runs both old and new configs. A `skill` step whose
+skill is `status: "missing"`, or a legacy `problem` on the slot (such as
+`tag-deploy` with no deploy skill), is skipped with the standard skip note
+and the remaining steps still run.
 
 Write the split: a numbered list of N PRs, in merge order. Each entry
 carries a title (Conventional Commits), the scope, one acceptance line (a
@@ -176,9 +193,10 @@ empty.
 
 Show the split under the action line "approve this PR split, or reply with
 changes", and wait for approval. Under the split, list the settings from
-step 1 (inferred ones marked), the delivery each PR gets (merge only, or
-merge then deploy with the tag family the `delivery` slot's deploy skill
-would pick for its paths), each `Passes:` line (approval runs the passes,
+step 1 (inferred ones marked), the resolved delivery stages (`steps` with
+each stage's `scope`, `gate`, `paths` filter and `watch`, plus `closeAfter`,
+and for a deploy skill with tag families, the family its rules pick for the
+expected paths), each `Passes:` line (approval runs the passes,
 but anything they lead to that the repo's rules reserve for a person, and
 any GPU use, still comes back as a gate), and, with an issue, what approval also does to it: the
 split posted as a comment, the issue assigned to the user when it has no
@@ -239,8 +257,10 @@ Issue: <issue URL, or "none">
 PR <n> of <N>: <PR title>
 Acceptance: <the PR's acceptance line>
 Branch: <branch>
-Delivery: <merge | tag-deploy>. The orchestrator merges and deploys; you
-never merge, tag, or deploy.
+Delivery: <resolved steps summary, e.g. merge, tag-deploy (merge -> deploy),
+or the ordered steps with their scopes>. The orchestrator runs every delivery
+stage; you never merge, tag, or deploy. You hand off once your PR's
+`pr`-scoped stages finish.
 Later PRs (out of scope): <titles of PRs n+1..N, or "none">
 Passes: <the PR's `Passes:` line from the split, in order, or "none">
 
@@ -319,17 +339,62 @@ afterwards (`git -C <main workspace root> worktree add --detach <tmp path>
 <head sha>`, run, `git -C <main workspace root> worktree remove <tmp
 path>`), and name the result.
 
-Look up `await wf.slot("delivery")` to confirm the gate wording, then send
-the gate:
+For a targeted fix PR launched to recover a failed `ticket`-scoped or
+`closeAfter: "all"` `post-handoff` stage, override delivery to merge-only
+(`options: ["merge"]`) so the fix PR does not re-run the repo's PR stages
+or chain the failed stage onto its merge gate.
 
-- Delivery `merge`: "reply \"merge\" to merge #<number> at head <sha>, or
-  review it first, here: <PR URL>".
-- Delivery `tag-deploy`: "reply \"merge and deploy\" to merge #<number>
-  at head <sha> and push <family>/v<next version>, or \"merge\" alone, or
-  review it first, here: <PR URL>". Take the family and the next version
-  from the deploy skill (its rules for choosing the pipeline and the
-  version, applied to the PR's `files`), and say they are recomputed at
-  deploy time.
+Otherwise, collect the PR's changed repo-relative paths from `files` and
+look up `await wf.slot("delivery", { files })` to filter steps with `paths`
+globs. Send a note for any stage in `skipped` (paths unmatched) or any
+`skill` step whose skill is `status: "missing"`, and leave those stages out
+of the active list for this PR. On the last PR of the ticket (`n === N`),
+also compute `await wf.slot("delivery", { files: combinedFiles })` across
+all PRs of the ticket so `ticket`-scoped stages with `paths` are filtered
+on the combined change.
+
+Build the merge gate from the active steps starting at `merge` (keeping
+`gate: "merge"` so GitHub reconcile tracks the PR and holds approval to
+`head <sha>`). Gather the maximal consecutive run of active non-manual
+`gate: "chain"` stages immediately following `merge` that will run now: on
+an earlier PR (`n < N`), stop at `scope: "pr"`; on the last PR (`n === N`),
+continue into `scope: "ticket"` stages too; stop before any `kind: "manual"`
+stage (a manual stage always requires explicit completion at its own
+`delivery:<id>` gate) and never chain `scope: "post-handoff"` stages.
+Build one explicit reply option per composable prefix of that run, longest
+first, respecting the board's 8-option and 60-character-per-option limits
+(always keep `"merge"`, dropping longest prefixes that exceed 60 characters
+or the 8-option cap; any omitted tail opens its own `delivery:<id>` gate
+when reached), and pass them explicitly via
+`wf.send({ kind: "gate", gate: "merge", body, options })`:
+
+- Single `merge` stage (including legacy `mode: "merge"`):
+  `options: ["merge"]`, action line:
+  "reply \"merge\" to merge #<number> at head <sha>, or review it first, here: <PR URL>".
+- `[merge (always), deploy (chain)]` (including legacy `mode: "tag-deploy"`):
+  `options: ["merge and deploy", "merge"]`. When `deploy` is a tag-deploy
+  skill, take its tag family and next version from that skill's rules
+  applied to the changed paths for the stage's scope (this PR's `files` for
+  `scope: "pr"`, or the ticket's `combinedFiles` for `scope: "ticket"` on
+  the last PR), say they are recomputed at deploy time, and use:
+  "reply \"merge and deploy\" to merge #<number> at head <sha> and push <family>/v<next version>, or \"merge\" alone, or review it first, here: <PR URL>".
+  For a non-tag skill, omit the tag wording and describe the stage plainly
+  alongside `head <sha>` and the PR URL.
+- Longer chain, such as `[merge (always), deploy (chain), verify (chain)]`:
+  `options: ["merge, deploy and verify", "merge and deploy", "merge"]`,
+  naming each composable prefix on the action line alongside `head <sha>`
+  and the PR URL.
+
+If the delivery slot defines no builtin `merge` stage, do not call
+`wf.merge`: if the first active stage itself merges the PR, run or gate it
+first; otherwise send `gate: "merge"` with `options: ["merged"]` asking the
+user to merge the PR externally at `head <sha>` and reply `"merged"` (on a
+linked ticket with reconcile on, the board's merged event also wakes this
+thread; on a root ticket or when `board.reconcileIdleMinutes` is `0`, the
+user's `"merged"` reply wakes it). In both cases, verify `state ===
+"MERGED"` on GitHub (`gh pr view <number> -R <repo> --json
+state,mergeCommit`) before deleting the remote branch, running post-merge
+stages, or releasing the worker.
 
 The action line names the head the user approves as `head <sha>`, with
 the SHA at least 7 characters long. The board holds the approval to that
@@ -340,7 +405,11 @@ End the turn.
 
 ### On the user's word
 
-**"merge"** (or "merge and deploy"):
+**"merge"** (or any approved chain prefix starting with `"merge"`, such as
+`"merge and deploy"` or `"merge, deploy and verify"`):
+
+Record the approved stage ids from the user's reply so later `gate: "chain"`
+stages in that prefix run without a second gate.
 
 1. Check the PR against the head the answered gate names: it is open, not a
    draft, and at that head, every check has finished and none failed, and
@@ -382,18 +451,36 @@ End the turn.
    `git -C <main workspace root> push origin --delete <branch>`. Deleting
    the head branch of an open PR closes the PR. The worker's worktree still
    has the branch checked out, so the local branch waits for The handoff.
-4. Delivery `merge`: send the worker "Merged #<number> at <merge commit
-   sha>. Hand off." and end the turn.
-5. Delivery `tag-deploy` with "merge and deploy": go to Deploy. With
-   "merge" alone: send the gate "reply \"deploy\" to push
-   <family>/v<version> from main at <sha>, or \"skip deploy\", here: <PR
-   URL>", and end the turn. "skip deploy" makes this PR's delivery `merge`:
-   send the worker the item 4 message, and say in the issue comment that
-   it is merged but not deployed.
+4. Advance through the PR's remaining active `pr`-scoped delivery stages in
+   order ("Delivery stages" below). When no active `pr`-scoped stage remains
+   after `merge` (including single-stage `merge`, a `tag-deploy` whose
+   deploy skill was skipped, or a pipeline whose later stages are all
+   `ticket`-scoped or `post-handoff`), send the worker "Merged #<number> at
+   <merge commit sha>. Hand off." and end the turn. Otherwise run or gate
+   the next `pr`-scoped stage (using the approved chain prefix from the
+   user's reply; if the user chose `"merge"` alone and a `gate: "chain"`
+   `pr`-scoped stage follows, open `gate: "delivery:<id>"` with options
+   covering its composable prefixes plus `"skip <id>"`, such as
+   `["deploy", "skip deploy"]`).
 
-A user who merged the PR on GitHub themselves counts as "merge": the
-board's merged event (below) tells this thread; verify the merged state and
+A user who merged the PR on GitHub themselves counts as `"merge"` alone: the
+board's merged event (below), or the user's `"merged"` reply on an external
+merge gate, tells this thread; verify `state === "MERGED"` on GitHub and
 continue from item 3.
+
+**Answering `gate: "delivery:<id>"`** (for a later `pr`, `ticket`, or
+`closeAfter: "all"` `post-handoff` stage): clear the gate
+(`wf.gate({ clear: true })`). On `"skip <id>"`, record `<id>` as skipped
+(and note it in the issue comment) and advance to the next stage (when that
+was the last `pr`-scoped stage and no other `pr`-scoped stage ran after
+`merge`, send the worker `"Merged #<number> at <merge commit sha>. Hand
+off."`). On `"done"` (or a manual prefix such as `"done and verify"` for a
+`manual` stage), record `<id>` as done plus any chained stages named after
+`"done"` as pre-approved, and advance to the next stage. On `"retry"` or
+`"fix"` (after a failed `closeAfter: "all"` `post-handoff` stage), either
+re-run `<id>` or launch a targeted fix worker on `main` (step 3) and resume
+at `<id>` once it hands off. Otherwise record the approved chain prefix
+from the user's reply and run `<id>` as "Delivery stages" says.
 
 #### The merge wait
 
@@ -456,7 +543,8 @@ The merge watch serves three cases:
 Create it as items 1 and 2 of "The deploy watch" say, with `title` `<#n or
 slug> PR n/N merge watch`, and a prompt that names the task id, the PR
 number and URL, its approved head SHA (full 40-character SHA) and branch,
-the main workspace root, the user's reply ("merge" or "merge and deploy"),
+the main workspace root, the approved delivery chain from the user's reply
+(such as `"merge"`, `"merge and deploy"`, or `"merge, deploy and verify"`),
 the outcome (`"pending"`, `"queued"`, or `"waiting"`), the `approval` id
 returned by `wf.merge` (or `"none"` while the outcome is `"pending"`),
 whether this ticket uses the reconcile (has a parent and
@@ -537,34 +625,128 @@ statusCheckRollup` when `hasNextPage` is true):
   at head <sha>, or check why it left the queue, here: <PR URL>". End the
   turn.
 
-### Deploy
+### Delivery stages
 
-Look up `await wf.slot("delivery")` and run its deploy skill as its entry
-says, with these overrides:
+Non-merge stages run in the order `wf.slot("delivery", { files })` returns
+(with `files` set to the PR's changed paths for `pr`-scoped stages, and the
+ticket's combined changed paths across all PRs for `ticket`-scoped and
+`post-handoff` stages).
 
-- The user's "deploy" or "merge and deploy" reply in this thread is the
-  skill's go-ahead. Show the family, version and SHA it chose; when they
-  differ from the gate, say so before tagging.
-- The skill's "watch the pipeline to a terminal state" runs as the deploy
-  watch below, never as a poll in the shell.
+**Gating each stage:**
+
+- `gate: "never"`: run automatically once the previous stage succeeds, with
+  no gate (except `kind: "manual"`, which has no runner and always opens
+  `gate: "delivery:<id>"` for explicit completion before advancing).
+- `gate: "chain"`: for a non-manual stage, run automatically when the
+  user's preceding gate reply already approved a prefix covering this
+  stage; otherwise treat it like `gate: "always"` and open
+  `gate: "delivery:<id>"`. A `kind: "manual"` stage with `gate: "chain"` is
+  never auto-advanced by an earlier prefix and always opens its own
+  `gate: "delivery:<id>"` for explicit completion.
+- `gate: "always"`: open `gate: "delivery:<id>"` before running, passing
+  explicit `options` on `wf.send({ kind: "gate", gate: "delivery:<id>",
+  body, options })`. Gather the consecutive run of active non-manual
+  `gate: "chain"` stages immediately following `<id>` in the current scope
+  run (stopping before any `kind: "manual"` or `gate: "always"` stage) and
+  offer one option per composable prefix, longest first, plus `"skip <id>"`:
+  - For a `skill` stage: base option `"<id>"`, chained prefixes such as
+    `"<id> and <next>"`, and `"skip <id>"` (for example
+    `["deploy and verify", "deploy", "skip deploy"]`, or
+    `["deploy", "skip deploy"]` for a single stage).
+  - For a `manual` stage: include the step's `prompt` on the action line,
+    base option `"done"`, chained prefixes covering any immediately
+    following non-manual `gate: "chain"` stages (for example
+    `["done and verify", "done", "skip <id>"]`), and `"skip <id>"`.
+  - Apply the board's 8-option and 60-character-per-option limits to every
+    `delivery:<id>` gate: always reserve room for the base option (`"<id>"`
+    or `"done"`) and `"skip <id>"`, dropping longest chained prefixes that
+    exceed 60 characters or the 8-option cap (any omitted tail opens its
+    own `delivery:<id>` gate when reached).
+  End the turn and wait for the reply.
+
+**Running a stage (by `kind` and `watch`):**
+
+- `kind: "skill"`: check the step's resolved `skill` object. When
+  `status === "missing"`, send the standard skip note and advance to the
+  next stage. Otherwise run `skill` as its `how` says (`Skill` tool, or
+  read `path` inline). The user's gate reply that approved this stage (or a
+  chain prefix covering it) is the skill's go-ahead. For a tag-deploy
+  skill, show the family, version and SHA it chose; when they differ from
+  the gate, say so before tagging.
+  - When `watch: true`: the skill's "watch the pipeline to a terminal state"
+    runs as "The deploy watch" below, never as a poll in the shell.
+  - When `watch` is absent or `false`: run the skill to completion, verify
+    its outcome, and advance to the next stage.
+- `kind: "manual"`: wait for the user's `"done"` or `"skip <id>"` reply on
+  `gate: "delivery:<id>"`, then advance.
+
+**Scope boundaries:**
+
+- **`pr` scope:** runs per PR right after `merge`. When a `pr`-scoped stage
+  fails (inline or in "Each deploy-watch run"), tell the user what failed
+  with its log/URL and any rollback path (never rolling back unasked), and
+  send the worker `"Deploy failed: <tag> <run URL>: <what the log shows>.
+  Fix it in a follow-up PR (step 5)."` (or `"Delivery stage <id> failed:
+  <details>. Fix it in a follow-up PR (step 5)."` for non-deploy stages).
+  Once the last active `pr`-scoped stage succeeds or is skipped, send the
+  worker `"Delivered: <summary, e.g. tag and run URL or completed stage
+  ids>. Hand off."` (or `"Merged #<number> at <merge commit sha>. Hand
+  off."` when no later `pr`-scoped stage ran) and end the turn.
+- **`ticket` scope:** runs once on `main` after the last PR's worker has
+  handed off (freeing PR worktrees early). Refresh `origin/main` first and
+  call `await wf.slot("delivery", { files: combinedFiles })` over all files
+  changed by this ticket's PRs. Run or gate each active `ticket`-scoped
+  stage against the combined `main` SHA. If a `ticket`-scoped stage fails
+  (inline or in "Each deploy-watch run"), tell the user what failed with
+  its log/URL and any rollback path (do not roll back unasked), then launch
+  a targeted fix worker on `main` using step 3 (a fresh worktree branched
+  from `main` on an unused branch such as `fix/<n>-<id>`, acceptance line
+  `"the failed <id> stage on main succeeds"`, merge-only delivery). Once
+  that fix PR merges and its worker hands off, resume the failed
+  `ticket`-scoped stage from the new `main` SHA.
+- **`post-handoff` scope:** runs outside the ticket (cross-ticket batched
+  deploys or owner-gated publishing). Filter with
+  `await wf.slot("delivery", { files: combinedFiles })`. When `closeAfter`
+  is `"ticket"` (default) or `"pr"`, emit a final report/checklist card
+  with `wf.send({ kind: "report", body })` (and show it at the root), post
+  a note on the issue through Publishing naming each remaining
+  `post-handoff` stage (`id`, skill or `prompt`, PRs and `main` SHA), and
+  carry the same checklist in the `handoff` body (on the board, `handoff`
+  resolves open cards for the ticket, so keeping it in both the issue note
+  and the `handoff` preserves the checklist after close). Do not keep the
+  ticket open waiting on `post-handoff` stages. Only when `closeAfter` is
+  `"all"`, gate each active `post-handoff` stage (`gate: "delivery:<id>"`,
+  or run automatically when `gate: "never"`) before closing the issue and
+  handing off; if a `closeAfter: "all"` `post-handoff` stage fails (inline
+  or in "Each deploy-watch run"), keep the issue and ticket open, report
+  what failed with its log/URL and any rollback path without rolling back
+  unasked, record the failed stage id, and send `gate: "delivery:<id>"`
+  with `options: ["retry", "fix", "skip <id>"]` so the user can retry the
+  stage, launch a targeted fix worker on `main`, or skip it.
 
 #### The deploy watch
 
-1. Create the task with `schedule_task`: `title` `<#n or slug> PR n/N
-   deploy watch`, `schedule` `{type: "interval", everyMs: 300000}`,
+Use this watch for every delivery stage with `watch: true` (`pr`, `ticket`,
+or `closeAfter: "all"` `post-handoff`).
+
+1. Create the task with `schedule_task`: `title` `<#n or slug> <PR n/N or
+   ticket> <stage id> watch` (for a `pr`-scoped deploy stage, `<#n or slug>
+   PR n/N deploy watch`), `schedule` `{type: "interval", everyMs: 300000}`,
    `bindToCurrentThread` `true`, `enabled` `false`, and a placeholder
    `prompt`. The prompt needs the task's own id, which exists only after
    this call.
 2. Call `schedule_task` again with the returned `scheduledTaskId`,
-   `enabled` `true`, and a prompt that names: the task id, the tag and SHA,
-   the worker's thread id, the exact status commands the deploy skill uses
-   for this family, what success means (every terminal condition the skill
-   names, such as pipeline `Succeeded` and the service roll `COMPLETED`),
-   the main workspace root, and the flags "Auth gate sent: no. Slowed:
-   no. Started: <UTC time>." End
-   it with "Follow 'Each deploy-watch run' in the t3-ticket skill." A
-   scheduled run must not look itself up in `list_scheduled_tasks`, so the
-   prompt carries everything the next run needs.
+   `enabled` `true`, and a prompt that names: the task id, the stage `id`
+   and `scope` (`pr`, `ticket`, or `post-handoff`), the remaining approved
+   chain prefix (if any), the tag and SHA, the worker's thread id (or
+   `"none"` for `ticket` or `post-handoff` scope), the exact status
+   commands the stage's skill uses for this family, what success means
+   (every terminal condition the skill names, such as pipeline `Succeeded`
+   and the service roll `COMPLETED`), the main workspace root, and the
+   flags "Auth gate sent: no. Slowed: no. Started: <UTC time>." End it with
+   "Follow 'Each deploy-watch run' in the t3-ticket skill." A scheduled run
+   must not look itself up in `list_scheduled_tasks`, so the prompt carries
+   everything the next run needs.
 
 #### Each deploy-watch run
 
@@ -584,30 +766,52 @@ says, with these overrides:
   back to "no" when it holds a time. When it has run 2 hours since
   "Started" and the prompt says "Slowed: no", tell the user once, set
   `everyMs` to 1800000, and update the flag.
-- **Succeeded:** delete the task with `delete_scheduled_task`, then send
-  the worker "Delivered: <tag> <run URL>. Hand off." and tell the user.
+- **Succeeded:** delete the task with `delete_scheduled_task`, tell the
+  user, and advance in "Delivery stages":
+  - If more stages remain in the current scope (`pr`, `ticket`, or
+    `post-handoff`), run or gate the next one (honoring the approved chain
+    prefix).
+  - If that was the last `pr`-scoped stage, send the worker `"Delivered:
+    <tag or summary> <run URL>. Hand off."` and end the turn.
+  - If that was the last `ticket`-scoped stage, proceed to step 5 (Close).
+  - If that was the last `post-handoff` stage (under `closeAfter: "all"`),
+    continue closing the issue and handing off in step 5.
 - **Failed:** delete the task, read the failed step's log, tell the user
-  what failed with its URL, and send the worker "Deploy failed: <tag> <run
-  URL>: <what the log shows>. Fix it in a follow-up PR (step 5)." Nothing
-  else moves until the worker hands off. The follow-up PR runs through
-  "PR opened" and the gates again. Rollback is the user's call; name the
-  skill's rollback path in the message, and do not run it unasked.
+  what failed with its URL, and name the skill's rollback path without
+  running it unasked:
+  - For a `pr`-scoped stage: send the worker `"Deploy failed: <tag> <run
+    URL>: <what the log shows>. Fix it in a follow-up PR (step 5)."` (or
+    `"Delivery stage <id> failed: ..."` for non-deploy stages). Nothing
+    else moves until the worker hands off. The follow-up PR runs through
+    "PR opened" and the gates again.
+  - For a `ticket`-scoped stage: record the failed stage id and launch a
+    targeted fix worker on `main` as "Delivery stages" (`ticket` scope)
+    says.
+  - For a `post-handoff` stage (under `closeAfter: "all"`): keep the issue
+    and ticket open, record the failed stage id, and send
+    `gate: "delivery:<id>"` with `options: ["retry", "fix", "skip <id>"]`
+    so the user can retry the stage, launch a targeted fix worker on
+    `main`, or skip it.
 
 ### The handoff
 
-The worker hands off only after "Merged" or "Delivered". Check its result;
-do not detect it here for the first time. The handoff has already closed
-the worker's link.
+The worker hands off only after "Merged" or "Delivered" (when its last
+`pr`-scoped stage finished). Check its result; do not detect it here for
+the first time. The handoff has already closed the worker's link.
 
 1. Confirm the PR is merged on GitHub: `gh pr view <number> -R <repo>
    --json state,mergeCommit`, and the same for any follow-up PR.
-2. For `tag-deploy`: the tag contains the merge commit (`git -C <main
-   workspace root> fetch origin --tags`, then `git merge-base --is-ancestor
-   <merge sha> <tag>`), and the run the handoff names succeeded, as the
-   deploy watch saw it. When the check disagrees with the handoff, tell the
-   user and the worker before anything else moves.
+2. For any `pr`-scoped stage that ran after merge (such as a tag deploy):
+   confirm its artifact matches the merge commit (for a tag deploy:
+   `git -C <main workspace root> fetch origin --tags`, then
+   `git merge-base --is-ancestor <merge sha> <tag>`, and the run the
+   handoff names succeeded as the deploy watch saw it). When the check
+   disagrees with the handoff, tell the user and the worker before anything
+   else moves.
 3. With an issue: comment on it with the PR, any follow-up PR, what it
-   changed, and the delivery result. Publish through the Publishing section.
+   changed, and the `pr`-scoped delivery result (noting any `ticket` or
+   `post-handoff` stages still to come). Publish through the Publishing
+   section.
 4. Remove the worker's worktree from the main workspace root once GitHub
    shows the PR merged: `git -C <main workspace root> worktree remove
    <worktree path>`. The path is in `t3_worktree_list`. When git refuses
@@ -632,32 +836,55 @@ the worker's link.
    lags the merge. When git refuses the removal or the check fails (a
    squash merge), leave it and tell the user the path or branch and what
    git said.
-5. Launch the next worker (step 3) with this handoff as its previous
-   handoff.
+5. If more PRs remain in the split, launch the next worker (step 3) with
+   this handoff as its previous handoff. If this was a targeted fix PR for
+   a failed `ticket`-scoped or `closeAfter: "all"` `post-handoff` stage,
+   do not repeat already-completed stages: refresh `origin/main` and resume
+   at the recorded failed stage on the new `main` SHA. Otherwise (this was
+   the last PR of the split):
+   - When `closeAfter` is `"pr"`, close the issue now (remove the
+     in-progress label and run
+     `gh issue close <n> -R <repo> --comment "<text>"` through Publishing)
+     before running any remaining `ticket`-scoped stages.
+   - Run any active `ticket`-scoped stages on `main` ("Delivery stages"
+     above), then go to step 5 (Close).
 
 ## 5. Close
 
-After the last PR is delivered:
+After the last PR's `pr`-scoped stages and all active `ticket`-scoped
+stages have finished (or been skipped):
 
-1. Check `(await wf.board({ all: true })).children` for every worker thread id
+1. Handle any active `post-handoff` stages for the ticket's combined
+   changed files ("Delivery stages", `post-handoff` scope): when
+   `closeAfter` is `"all"`, run or gate each one before closing; otherwise
+   emit the final report/checklist card (`wf.send({ kind: "report", body })`)
+   and include the checklist in the issue note (below) and the `handoff`
+   body.
+2. Check `(await wf.board({ all: true })).children` for every worker thread id
    (handoff closes a worker's link, so without `all: true` closed workers are
    omitted), then check each worker's live settlement state in T3
    (`t3.thread_read({ threadId, limit: 1 })`). A message to a worker after its
    handoff wakes it and leaves it unsettled. Settle each such worker with
    `t3_thread_organize`, action `settle`, once its turn has ended
    (`t3_thread_wait`).
-2. `list_scheduled_tasks`: none of this work's deploy or merge watches
+3. `list_scheduled_tasks`: none of this work's deploy or merge watches
    remain. Delete any that do. Then `await wf.sweep()`: it names any worker
    link still open.
-3. Run `git -C <main workspace root> worktree list` and look for a
+4. Run `git -C <main workspace root> worktree list` and look for a
    worktree on any of this work's branches, or bound to any worker's
    subagent child thread (found as "The handoff" item 4 says). A message to
    a worker after its handoff makes T3 recreate its worktree, so a worktree
    removed at the handoff can come back. Remove each one as "The handoff"
    item 4 says.
-4. With an issue: remove the in-progress label, then close it with the
-   outcome as the comment, through Publishing: `gh issue close <n> -R
-   <repo> --comment "<text>"`.
-5. With a parent link: `await wf.send({ kind: "handoff", body })` with the
-   outcome and the PR URLs.
-6. Unpin this thread and settle it.
+5. With an issue:
+   - If `closeAfter` is `"pr"` and the issue was already closed after the
+     last PR's `pr`-scoped stages, post a comment through Publishing with
+     the `ticket`-scoped results and any `post-handoff` checklist.
+   - Otherwise (`closeAfter` is `"ticket"`, the default, or `"all"` once
+     `post-handoff` stages have finished), remove the in-progress label,
+     then close the issue with the outcome (and any remaining
+     `post-handoff` checklist) as the comment, through Publishing:
+     `gh issue close <n> -R <repo> --comment "<text>"`.
+6. With a parent link: `await wf.send({ kind: "handoff", body })` with the
+   outcome, the PR URLs, and any remaining `post-handoff` checklist.
+7. Unpin this thread and settle it.

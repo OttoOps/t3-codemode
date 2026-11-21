@@ -143,12 +143,14 @@ parent and a child, and the service keeps every link and message in its store.
   `skills`, the check of the installed T3 workflow skills and setup steps
   described in [Install the skills with t3cm](getting-started.md#install-the-skills-with-t3cm).
   It needs no caller and reads the skills fresh.
-- `wf.slot(name, { repo?, instance?, skills? })` returns one
+- `wf.slot(name, { repo?, instance?, skills?, files? })` returns one
   [slot](getting-started.md#slots), `review`, `passes`, `delivery`, `models` or
   `credentials`, resolved for the caller's T3 instance and project: its
   `source` layer, each skill with `how` to run it (`Skill tool`, or
   `inline: read <path> and apply it`, or why it is skipped), a one-line `line`,
-  and `warnings`. For an Antigravity thread, which has no Skill tool, every
+  and `warnings`. For `delivery`, `files` filters steps with `paths` globs
+  against changed repo-relative paths and returns unmatched steps in `skipped`.
+  For an Antigravity thread, which has no Skill tool, every
   skill found on disk is `inline`. For `models`, each role carries a
   `modelSelection` for `t3_thread_launch`, or the pool to pass to `wf.pick`. `repo` overrides the
   project's workspace root, for example with a worktree.

@@ -1,15 +1,18 @@
 ---
 name: t3-worker
-description: Procedure for a T3 Code worker thread that builds one pull request of a piece of work in its own worktree, follows it until it is delivered (merged, and deployed where the repo deploys), and hands off to the orchestrator thread. The worker thread follows this body inline through the t3-worker skill. Not for dispatch as a subagent.
+description: Procedure for a T3 Code worker thread that builds one pull request of a piece of work in its own worktree, follows it until its pr-scoped delivery stages finish (merged, and any pr-scoped stages such as deploy), and hands off to the orchestrator thread. The worker thread follows this body inline through the t3-worker skill. Not for dispatch as a subagent.
 ---
 
 You are the worker thread for one pull request (PR) of a piece of work: a
 GitHub issue, or a request with no issue. An orchestrator thread running
 `t3-ticket` launched you into a worktree T3 created for this PR, with a
-brief. You own this PR from first commit until its change is delivered: a
-merged PR whose deploy failed is still yours. The orchestrator owns the
-issue, the next PR, every merge and deploy, and every conversation with the
-user.
+brief. You own this PR from first commit until its `pr`-scoped delivery
+stages finish: a merged PR whose `pr`-scoped delivery stage (such as a
+`pr`-scoped deploy) failed is still yours. Stages scoped to `ticket` or
+`post-handoff` run in the orchestrator after you hand off, so your worktree
+is freed as soon as your PR's `pr`-scoped stages finish. The orchestrator
+owns the issue, the next PR, every delivery stage (merge, deploy, verify,
+publish), and every conversation with the user.
 
 Run the steps in order. Every turn you end, you end it waiting on T3: the PR
 watcher, the link watcher's nudge, or a message from the orchestrator wakes
@@ -50,7 +53,8 @@ with `await wf.gate({ clear: true })` when the answer, "Merged", or
 ## 1. Orient
 
 Read the brief: the issue (or "no issue"), which PR this is ("PR n of N"),
-its acceptance line, its passes, the delivery (`merge` or `tag-deploy`),
+its acceptance line, its passes, the delivery (legacy `merge` or
+`tag-deploy`, or ordered delivery steps noting which are `pr`-scoped),
 the previous worker's handoff, and the link block. Pick up the handoff's
 state and decisions as settled.
 
@@ -202,32 +206,39 @@ the turn.
 Each arrives as a `reply` on the link; act on its body:
 
 - **"Merged #<number> at <sha>. Hand off."**: step 6, whatever the
-  brief's delivery. The orchestrator sends it for a `tag-deploy` PR when
-  the deploy was skipped.
-- **"Delivered: <tag> <pipeline URL>. Hand off."** (delivery
-  `tag-deploy`): step 6.
-- **"Deploy failed: ..."**: step 5.
+  brief's delivery. The orchestrator sends it when `merge` is this PR's
+  last `pr`-scoped stage (including when later stages are `ticket`-scoped
+  or `post-handoff`, or when a later `pr`-scoped stage such as `deploy` was
+  skipped).
+- **"Delivered: <summary>. Hand off."** (for example `<tag> <pipeline URL>`,
+  or the completed `pr`-scoped stage ids): step 6. Sent once this PR's last
+  `pr`-scoped delivery stage finishes.
+- **"Deploy failed: ..."** or **"Delivery stage <id> failed: ..."**: step 5.
 - **A user decision** (a review dispute, a gate cleared): act on it from
   the step that was waiting.
 
-## 5. Deploy failed: follow-up PR
+## 5. PR delivery stage failed: follow-up PR
 
-The orchestrator sends the failed run's URL and what it found. Read the log
-yourself. Fix the cause in a follow-up PR from this thread and this
-worktree:
+The orchestrator sends the failed `pr`-scoped stage's URL or details and
+what it found. Read the log yourself. Fix the cause in a follow-up PR from
+this thread and this worktree:
 
 1. `git fetch origin`, then `git switch -c <brief branch>-fix origin/main`.
    When that name is taken (local branch, `git ls-remote --heads origin`,
    or `gh pr list --state all --head <name>`), add `-2`, `-3`.
-2. Steps 2 to 4 for the new PR, its review included. Its
-   acceptance line is "the deploy that failed succeeds". Its "opened"
-   message names it as a follow-up of #<number>.
+2. Steps 2 to 4 for the new PR, its review included. Its acceptance line is
+   "the failed delivery stage succeeds". Its "opened" message names it as a
+   follow-up of #<number>.
 
-You own the change until the fix is delivered.
+You own the change until the fix passes its `pr`-scoped delivery stages.
+(`ticket`-scoped failures on `main` run after you hand off and are handled
+by a separate fix worker the orchestrator launches.)
 
 ## 6. Delivered: hand off
 
-Run this only after the orchestrator's "Merged" or "Delivered" message.
+Run this only after the orchestrator's "Merged" or "Delivered" message,
+which arrives once this PR's last `pr`-scoped delivery stage finishes (never
+wait on `ticket`-scoped or `post-handoff` stages).
 
 1. Push every branch this thread committed to: the brief's branch, a
    follow-up branch, and any other branch you made (other threads' branches
@@ -241,9 +252,10 @@ Run this only after the orchestrator's "Merged" or "Delivered" message.
    next PR from the brief as its next-session focus. Send it; do not save
    it to `~/.claude/handoffs/`, because a saved handoff supersedes the
    project's live one, which belongs to the user. It states the delivery
-   result: the merge commit, and after "Delivered" the tag and the
-   pipeline URL (after "Merged" on a `tag-deploy` brief, that the deploy
-   was skipped), plus the URL of any follow-up PR.
+   result: the merge commit, and after "Delivered" the completed
+   `pr`-scoped stage results (such as tag and pipeline URL), or after
+   "Merged" whether later `pr`-scoped stages were skipped or deferred to
+   `ticket` or `post-handoff` scope, plus the URL of any follow-up PR.
 3. Send the block, verbatim and whole, to the orchestrator with
    `await wf.send({ kind: "handoff", body })`. It closes the link.
 4. `await wf.sweep()`.

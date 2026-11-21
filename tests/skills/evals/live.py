@@ -132,7 +132,37 @@ class Sandbox:
         passes = {"source": "config" if "passes" in cfg else "default",
                   "skills": [skill_entry(n) for n in cfg.get("passes", [])], "warnings": []}
         delivery_cfg = cfg.get("delivery", {"mode": "merge"})
-        delivery = {"source": "config" if "delivery" in cfg else "default", **delivery_cfg, "warnings": []}
+        if "steps" in delivery_cfg:
+            steps = []
+            for st in delivery_cfg["steps"]:
+                step = dict(st)
+                if isinstance(step.get("skill"), str):
+                    step["skill"] = skill_entry(step["skill"])
+                steps.append(step)
+            delivery = {"source": "config" if "delivery" in cfg else "default",
+                        "closeAfter": delivery_cfg.get("closeAfter", "ticket"),
+                        **delivery_cfg, "steps": steps, "warnings": []}
+        elif delivery_cfg.get("mode") == "tag-deploy" and delivery_cfg.get("skill"):
+            skill_obj = skill_entry(delivery_cfg["skill"])
+            delivery = {
+                "source": "config" if "delivery" in cfg else "default",
+                "steps": [
+                    {"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"},
+                    {"id": "deploy", "kind": "skill", "skill": skill_obj, "gate": "chain", "scope": "pr", "watch": True},
+                ],
+                "closeAfter": "ticket",
+                "mode": "tag-deploy",
+                "skill": skill_obj,
+                "warnings": [],
+            }
+        else:
+            delivery = {
+                "source": "config" if "delivery" in cfg else "default",
+                "steps": [{"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"}],
+                "closeAfter": "ticket",
+                **delivery_cfg,
+                "warnings": [],
+            }
         models_cfg = cfg.get("models", {})
         models = {"slot": "models", "warnings": []}
         for role in ("ticket", "worker"):

@@ -65,20 +65,66 @@ or `[]`.
 
 ## Delivery
 
-**What it is.** What delivers a PR once it is approved.
+**What it is.** Ordered stages that deliver approved work once a PR is
+ready, plus `closeAfter` for when the ticket closes its GitHub issue.
 
-- `merge` (default): the orchestrator merges the PR, and that is delivery.
-- `tag-deploy`: after the merge, the deploy skill pushes a release tag and
-  watches the pipeline to its end.
+- `merge` (default): single stage; the orchestrator merges the PR.
+- `tag-deploy`: legacy two-stage shorthand; after the merge, the deploy
+  skill pushes a release tag and watches the pipeline (`[merge, deploy
+  (chain/pr/watch)]`).
+- Multi-step pipeline (`steps` + optional `closeAfter`): an ordered list of
+  stages, where each stage has:
+  - `id`: unique stage name (`merge`, `deploy`, `verify`, `publish`, ...);
+  - runner: `kind: "builtin"` for `merge` (at most once, first, `scope:
+    "pr"`), `skill: "<name>"` (resolved by `t3cm`), or `kind: "manual"`
+    with a short `prompt` for human-only stages;
+  - `gate`: `"always"` (always opens a gate), `"chain"` (can be
+    pre-approved with a preceding `"always"` stage; consecutive `"chain"`
+    stages compose into prefix options), or `"never"` (runs automatically
+    after the preceding stage succeeds);
+  - `scope`: `"pr"` (default; runs per PR before the worker hands off),
+    `"ticket"` (runs once on `main` after the last PR merges), or
+    `"post-handoff"` (final report card and issue note outside the ticket);
+    scopes must be non-decreasing (`pr` then `ticket` then `post-handoff`);
+  - optional `paths`: list of repo-relative glob patterns (`*`, `**`, `?`,
+    `[...]`, `{a,b}`) so `wf.slot("delivery", { files })` drops stages that
+    match no changed file;
+  - optional `watch`: `true` when the stage hands off to a scheduled
+    pipeline watch;
+  - `closeAfter`: `"pr"`, `"ticket"` (default), or `"all"` (whether the
+    issue closes after the last PR's `pr` stages, after `ticket` stages, or
+    only after `post-handoff` stages too).
 
-**Offer** `merge`, and `tag-deploy` with each skill in
-`slots.delivery.found`. Delivery usually differs by repository: when it does,
-leave the user config on `merge` and offer to set `Delivery:` and
-`Deploy skill:` in that repository's `AGENTS.md` "Agent workflow" block
+**Offer** `merge`, `tag-deploy` with each skill in `slots.delivery.found`,
+and a multi-step pipeline (ask for each stage's `id`, runner, `gate`,
+`scope`, optional `paths`, optional `watch`, and `closeAfter`). Delivery
+usually differs by repository: when it does, leave the user config on
+`merge` and write the repository's multi-step pipeline to its repo-root
+`.t3-workflow.json` using `t3cm setup write --repo-config` (step 3; do not
+pass `--asked` with `--repo-config`). Existing `Delivery:` and `Deploy
+skill:` bullets in `AGENTS.md` still work for simple `tag-deploy`, and
+`.t3-workflow.json` wins over `AGENTS.md` when present
 ([slots.md](../../t3-workflow/slots.md#where-settings-live)).
 
-**Records** `"delivery": {"mode": "merge"}`, or
-`"delivery": {"mode": "tag-deploy", "skill": "<name>"}`.
+**Records**
+
+- Single merge: `"delivery": {"mode": "merge"}`
+- Legacy tag-deploy: `"delivery": {"mode": "tag-deploy", "skill": "<name>"}`
+- Multi-step pipeline (usually written to `.t3-workflow.json` via
+  `t3cm setup write --repo-config`):
+
+```json
+{
+  "delivery": {
+    "steps": [
+      {"id": "merge", "kind": "builtin", "gate": "always", "scope": "pr"},
+      {"id": "deploy", "skill": "deploy", "gate": "chain", "scope": "ticket", "watch": true},
+      {"id": "publish", "skill": "widgets-publish", "gate": "always", "scope": "post-handoff", "paths": ["content/**"]}
+    ],
+    "closeAfter": "ticket"
+  }
+}
+```
 
 ## Models
 
