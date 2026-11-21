@@ -75,13 +75,14 @@ pass. Work the brief assigns to a later PR stays out of this one. When the
 brief names an issue, every commit carries the trailer
 `--trailer "Github-Issue:#<number>"`. Stage explicit paths only.
 
-When the brief lists `Passes:`, they are part of the scope: after the
-build, invoke each pass's skill with the Skill tool, in the brief's order,
-each on the text the one before it left, and commit its fixes. The PR is
-done when the last pass comes back clean. The split's approval runs the
-passes, not what they gate: anything a pass leads to that the repo's rules
-reserve for a person, and any GPU use, goes to the orchestrator as a human
-gate (step 7). Name each pass and its result in the PR description.
+When the brief lists `Passes:`, they are part of the scope: after the build,
+run each pass's skill as its `how` from `wf.slot("passes")` says (the Skill
+tool, or inline from its `SKILL.md`), in the brief's order, each on the text the one before it
+left, and commit its fixes. The PR is done when the last pass comes back
+clean. The split's approval runs the passes, not what they gate: anything a
+pass leads to that the repo's rules reserve for a person, and any GPU use,
+goes to the orchestrator as a human gate (step 7). Name each pass and its
+result in the PR description.
 
 Before every commit and every push, check the identity git and `gh` will
 use:
@@ -284,8 +285,9 @@ not included.
    `docs/agents/`, a `.github/pull_request_template.md`) or the brief set a
    format for this kind of text, write it in that format. When they name a
    skill for it, such as the `pr` skill for PR descriptions, invoke that
-   skill with the Skill tool and follow it. Knowing the skill's sections is
-   not running it. An earlier PR's description is never the format: it may
+   skill with the Skill tool and follow it; in a harness with no Skill
+   tool, read the `SKILL.md` that `t3cm doctor --resolve <name>` prints and follow
+   it. Knowing the skill's sections is not running it. An earlier PR's description is never the format: it may
    have skipped this step too, and copying it passes the miss on.
 2. **Passes.** Look up `await wf.slot("passes")` (sending any skip note as
    [Looking up slots in a role](../t3-workflow/slots.md#looking-up-slots-in-a-role)

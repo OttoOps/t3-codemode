@@ -159,7 +159,9 @@ plugins never resolve. The search order:
 2. `~/.agents/skills`;
 3. the project's `.claude/skills`;
 4. `~/.codex/skills` (or `$CODEX_HOME/skills`);
-5. the Claude plugin cache (enabled plugins only), then the Codex plugin
+5. `~/.gemini/config/skills` (or `$GEMINI_HOME/config/skills`), where
+   Antigravity reads skills;
+6. the Claude plugin cache (enabled plugins only), then the Codex plugin
    cache, as `plugin:name`.
 
 A full name matches only itself, so a recorded full name always wins. A skill
@@ -169,6 +171,13 @@ A bare name that matches only namespaced skills uses the first and lists the
 others. A skill whose frontmatter sets `disable-model-invocation` resolves
 as **inline**: read its `SKILL.md` at the returned `path` and apply it step
 by step, because the Skill tool refuses it.
+
+Antigravity has no Skill tool. For an Antigravity thread, the service
+resolves every skill found on disk as **inline** (`invoke: "inline"`, with
+its `path`), plugin skills included; `t3cm slots --no-t3` does the same in a
+shell where `ANTIGRAVITY_AGENT` is set. Only a skill the session lists that
+no install folder holds keeps `invoke: "skill"`; use it the way the session
+offers its skills.
 
 ## Commands
 

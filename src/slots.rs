@@ -530,6 +530,7 @@ pub struct Folders {
     pub home: PathBuf,
     pub claude: PathBuf,
     pub codex: PathBuf,
+    pub gemini: PathBuf,
     pub config: PathBuf,
 }
 
@@ -547,6 +548,9 @@ impl Folders {
         if let Some(p) = var("CODEX_HOME") {
             f.codex = p;
         }
+        if let Some(p) = var("GEMINI_HOME") {
+            f.gemini = p;
+        }
         Ok(f)
     }
 
@@ -556,6 +560,7 @@ impl Folders {
             home: home.to_path_buf(),
             claude: home.join(".claude"),
             codex: home.join(".codex"),
+            gemini: home.join(".gemini"),
             config: config.join("t3-workflow").join("config.json"),
         }
     }
@@ -1164,6 +1169,7 @@ fn search_roots_with(f: &Folders, root: &Path, enabled: &Enabled, installed_raw:
         plain("~/.agents/skills", f.home.join(".agents").join("skills")),
         plain("project .claude/skills", root.join(".claude").join("skills")),
         plain("~/.codex/skills", f.codex.join("skills")),
+        plain("~/.gemini/config/skills", f.gemini.join("config").join("skills")),
     ];
     let claude =
         claude_plugin_roots_with(&f.claude, root, installed_raw).into_iter().filter(|(_, key, _)| enabled.allows(key));
@@ -1181,6 +1187,7 @@ pub fn search_roots(f: &Folders, root: &Path, enabled: &Enabled) -> Vec<SearchRo
         plain("~/.agents/skills", f.home.join(".agents").join("skills")),
         plain("project .claude/skills", root.join(".claude").join("skills")),
         plain("~/.codex/skills", f.codex.join("skills")),
+        plain("~/.gemini/config/skills", f.gemini.join("config").join("skills")),
     ];
     let claude = claude_plugin_roots(&f.claude, root).into_iter().filter(|(_, key, _)| enabled.allows(key));
     let codex = newest_cached(&f.codex.join("plugins").join("cache"));
@@ -1423,6 +1430,29 @@ fn merged(user: &Map<String, Value>, block: &Map<String, Value>) -> Eff {
     eff
 }
 
+pub const NO_SKILL_TOOL_DRIVERS: &[&str] = &["antigravity"];
+
+pub fn has_skill_tool(driver: Option<&str>) -> bool {
+    !driver.is_some_and(|d| NO_SKILL_TOOL_DRIVERS.contains(&d))
+}
+
+pub fn in_skill_tool_harness() -> bool {
+    std::env::var_os("ANTIGRAVITY_AGENT").is_none_or(|v| v.is_empty())
+}
+
+fn inline_paths(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            if m.get("invoke").and_then(Value::as_str) == Some("skill") && m.get("path").is_some_and(Value::is_string) {
+                m.insert("invoke".into(), json!("inline"));
+            }
+            m.values_mut().for_each(inline_paths);
+        }
+        Value::Array(a) => a.iter_mut().for_each(inline_paths),
+        _ => {}
+    }
+}
+
 impl Resolved {
     pub fn build(i: &Inputs) -> Resolved {
         Snapshot::capture_with(i.folders, i.root, i.listed, Some(i.enabled)).build()
@@ -1503,6 +1533,13 @@ impl Resolved {
             config_problems,
             repo_problems,
         }
+    }
+
+    pub fn without_skill_tool(mut self) -> Resolved {
+        for v in [&mut self.review, &mut self.passes, &mut self.credentials, &mut self.delivery] {
+            inline_paths(v);
+        }
+        self
     }
 
     pub fn problems(&self) -> Vec<String> {

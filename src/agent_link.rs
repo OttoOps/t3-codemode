@@ -29,22 +29,42 @@ pub struct Linked {
     pub error: Option<String>,
 }
 
-pub fn folder(claude: &Path) -> PathBuf {
-    claude.join("skills")
+#[derive(Clone, Debug)]
+pub struct Agent {
+    pub name: &'static str,
+    pub key: &'static str,
+    pub folder: PathBuf,
+    pub present: bool,
+}
+
+impl Agent {
+    pub fn claude(claude: &Path) -> Agent {
+        Agent { name: "Claude Code", key: "claudeLinks", folder: claude.join("skills"), present: claude.is_dir() }
+    }
+
+    pub fn antigravity(gemini: &Path) -> Agent {
+        let config = gemini.join("config");
+        let present =
+            [config.clone(), gemini.join("antigravity"), gemini.join("antigravity-cli")].iter().any(|d| d.is_dir());
+        Agent { name: "Antigravity", key: "antigravityLinks", folder: config.join("skills"), present }
+    }
+
+    pub fn all(env: &crate::steps::Env) -> Vec<Agent> {
+        vec![Agent::claude(&env.claude), Agent::antigravity(&env.gemini)]
+    }
 }
 
 fn same(a: &Path, b: &Path) -> bool {
     matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
 }
 
-pub fn check(claude: &Path, skills_dir: &Path, names: &BTreeSet<String>) -> Vec<Link> {
-    let agent = claude.is_dir();
+pub fn check(agent: &Agent, skills_dir: &Path, names: &BTreeSet<String>) -> Vec<Link> {
     names
         .iter()
         .map(|name| {
-            let path = folder(claude).join(name);
+            let path = agent.folder.join(name);
             let target = skills_dir.join(name);
-            let state = if !agent {
+            let state = if !agent.present {
                 LinkState::NoAgent
             } else if std::fs::symlink_metadata(&path).is_err() {
                 LinkState::Missing
@@ -78,14 +98,14 @@ fn manual(l: &Link) -> String {
     }
 }
 
-pub fn link(claude: &Path, skills_dir: &Path, names: &BTreeSet<String>) -> Linked {
+pub fn link(agent: &Agent, skills_dir: &Path, names: &BTreeSet<String>) -> Linked {
     let mut out = Linked::default();
-    for l in check(claude, skills_dir, names) {
+    for l in check(agent, skills_dir, names) {
         if l.state != LinkState::Missing || !l.target.is_dir() {
             continue;
         }
         if out.error.is_none() {
-            let made = std::fs::create_dir_all(folder(claude)).and_then(|()| make(&l.target, &l.path));
+            let made = std::fs::create_dir_all(&agent.folder).and_then(|()| make(&l.target, &l.path));
             match made {
                 Ok(()) => {
                     out.made.push(l.skill.clone());
@@ -96,23 +116,25 @@ pub fn link(claude: &Path, skills_dir: &Path, names: &BTreeSet<String>) -> Linke
         }
         out.manual.push(manual(&l));
     }
-    out.links = check(claude, skills_dir, names);
+    out.links = check(agent, skills_dir, names);
     out
 }
 
-pub fn describe_check(links: &[Link]) -> String {
+pub fn describe_check(agent: &Agent, links: &[Link]) -> String {
     let mut out = String::new();
     for l in links {
         match l.state {
             LinkState::Missing => out.push_str(&format!(
-                "info: Claude Code does not see {}; t3cm skills update links {} to it\n",
+                "info: {} does not see {}; t3cm skills update links {} to it\n",
+                agent.name,
                 l.skill,
                 l.path.display()
             )),
             LinkState::Taken => out.push_str(&format!(
-                "info: {} is not a link to {}, so Claude Code loads that copy instead; remove it and run t3cm skills update to link it\n",
+                "info: {} is not a link to {}, so {} loads that copy instead; remove it and run t3cm skills update to link it\n",
                 l.path.display(),
-                l.target.display()
+                l.target.display(),
+                agent.name
             )),
             LinkState::Linked | LinkState::NoAgent => {}
         }
@@ -120,22 +142,18 @@ pub fn describe_check(links: &[Link]) -> String {
     out
 }
 
-pub fn describe(l: &Linked) -> String {
+pub fn describe(agent: &Agent, l: &Linked) -> String {
     let mut out = String::new();
-    if let (false, Some(first)) = (l.made.is_empty(), l.links.first()) {
-        out.push_str(&format!(
-            "linked {} into {} for Claude Code\n",
-            l.made.join(", "),
-            first.path.parent().unwrap_or(Path::new("")).display()
-        ));
+    if !l.made.is_empty() {
+        out.push_str(&format!("linked {} into {} for {}\n", l.made.join(", "), agent.folder.display(), agent.name));
     }
     if let Some(e) = &l.error {
-        out.push_str(&format!("warning: {e}. To give Claude Code the skills, run:\n"));
+        out.push_str(&format!("warning: {e}. To give {} the skills, run:\n", agent.name));
         for m in &l.manual {
             out.push_str(&format!("  {m}\n"));
         }
     }
     let taken: Vec<Link> = l.links.iter().filter(|k| k.state == LinkState::Taken).cloned().collect();
-    out.push_str(&describe_check(&taken));
+    out.push_str(&describe_check(agent, &taken));
     out
 }

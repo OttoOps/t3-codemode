@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::claude_link::{self, LinkState};
+use crate::agent_link::{self, Agent, LinkState};
 use crate::config::Config;
 use crate::drift::{self, Home};
 use crate::skills::Bundle;
@@ -43,13 +43,16 @@ pub fn skills(home: &Home, bundle: &Bundle) -> Findings {
 pub fn stale_copies(home: &Home, bundle: &Bundle, codex: &Path) -> Findings {
     let mut f = Findings::default();
     let names = bundle.skills();
-    for l in claude_link::check(&home.env.claude, &home.paths.dir, &names) {
-        if l.state == LinkState::Taken {
-            f.problems.push(format!(
-                "skills: {} is a copy, not a link to {}, so Claude Code loads it instead; remove it and run t3cm skills update",
-                l.path.display(),
-                l.target.display()
-            ));
+    for agent in Agent::all(&home.env) {
+        for l in agent_link::check(&agent, &home.paths.dir, &names) {
+            if l.state == LinkState::Taken {
+                f.problems.push(format!(
+                    "skills: {} is a copy, not a link to {}, so {} loads it instead; remove it and run t3cm skills update",
+                    l.path.display(),
+                    l.target.display(),
+                    agent.name
+                ));
+            }
         }
     }
     for name in &names {

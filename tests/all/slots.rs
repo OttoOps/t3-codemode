@@ -121,6 +121,31 @@ async fn an_empty_header_means_the_default_folder_and_no_header_warns() {
 }
 
 #[tokio::test]
+async fn an_antigravity_thread_reads_every_skill_on_disk_inline() {
+    let s = S::new("antigravity");
+    s.h.fake.set_providers(vec![
+        provider("claudeAgent", "claudeAgent", &["claude-opus-5-5"]),
+        provider("antigravity", "antigravity", &["gemini-4-neon"]),
+    ]);
+    let review = skill(&s.home.join(".gemini/config/skills"), "sol-loop", false);
+    let pass = skill(&s.home.join(".agents/skills"), "pr", false);
+    s.config(json!({"review": "sol-loop", "passes": ["pr"]}));
+    let v = s.call("async () => wf.slots()", Reported::default()).await;
+    assert_eq!(v["context"]["driver"], "antigravity");
+    assert_eq!(
+        (v["review"]["skill"]["invoke"].as_str(), v["review"]["skill"]["path"].as_str()),
+        (Some("inline"), review.to_str())
+    );
+    assert_eq!(v["passes"]["skills"][0]["invoke"], "inline");
+    let one = s.call(r#"async () => wf.slot("passes")"#, Reported::default()).await;
+    assert_eq!(one["skills"][0]["how"], format!("inline: read {} and apply it", pass.display()));
+
+    s.thread("mcp:claude-user", "claudeAgent");
+    let out = s.run(Some("mcp:claude-user"), "async () => wf.slots()", own(&s.home.join(".claude"))).await;
+    assert_eq!(ok_json(&out)["result"]["review"]["skill"]["invoke"], "skill");
+}
+
+#[tokio::test]
 async fn t3cm_exec_reports_both_folders_and_a_codex_instance_uses_its_own() {
     let s = S::new("codex");
     let codex = s.home.join("custom-codex");
@@ -365,9 +390,34 @@ fn t3cm(home: &Path) -> std::process::Command {
         .env_remove("XDG_STATE_HOME")
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
+        .env_remove("GEMINI_HOME")
+        .env_remove("ANTIGRAVITY_AGENT")
         .env_remove("T3WF_CONFIG")
         .env_remove("T3CODE_THREAD_ID");
     cmd
+}
+
+#[test]
+fn the_cli_in_an_antigravity_shell_reads_skills_inline() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = home.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let path = skill(&home.path().join(".gemini/config/skills"), "sol-loop", false);
+    let cfg = home.path().join(".config/t3-workflow/config.json");
+    std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    std::fs::write(&cfg, json!({"review": "sol-loop"}).to_string()).unwrap();
+    let out = t3cm(home.path())
+        .args(["slots", "--no-t3", "--repo"])
+        .arg(&repo)
+        .env("ANTIGRAVITY_AGENT", "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains(&format!("review: sol-loop (inline: read {} and apply it) [user]", path.display())),
+        "{text}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

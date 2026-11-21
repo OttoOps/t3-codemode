@@ -317,8 +317,14 @@ exists, `install` and `update` also link each skill there to its folder in
 `~/.agents/skills`. They never replace a folder or a link already in a skill's
 place, and `status` mentions one that is in an `info:` line, and in
 `claudeLinks` with `--json`, without counting it against the skills being
-current. Where the account cannot make links, as on Windows without Developer
-Mode, they print the copy commands instead.
+current. Antigravity reads `~/.gemini/config/skills`, or
+`$GEMINI_HOME/config/skills` when that is set, and t3cm links the skills there
+the same way when Antigravity is installed (`config`, `antigravity` or
+`antigravity-cli` in that folder), reporting them in `antigravityLinks`. T3
+starts each Antigravity thread with its own `GEMINI_HOME`, whose
+`config/skills` links back to `~/.gemini/config/skills`, so the threads see
+these links too. Where the account cannot make links, as on Windows without
+Developer Mode, they print the copy commands instead.
 
 When `npx skills` (or a copy by hand) installed the skills on an older
 machine, t3cm has no manifest for them. `status` reports that install, the
