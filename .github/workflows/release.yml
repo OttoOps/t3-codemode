@@ -8,7 +8,11 @@ on:
       - .github/workflows/release.yml
       - Cargo.toml
       - Cargo.lock
+      - build.rs
+      - src/**
+      - skills/**
       - deploy/**
+      - .github/scripts/fake_releases.py
 
 permissions: {}
 
