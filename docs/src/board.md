@@ -145,10 +145,13 @@ applies to the decision cards, the ticket tree, the activity feed and the
 Settled section at once.
 
 - **Project, Status and Card kind** are multi-select dropdowns. Type in one to
-  narrow its list, and Enter toggles the first value left. A project is the
-  ticket's `owner/repo`, or its T3 project's title when the repo is not known.
-  Status is running, needs you, blocked or done. Card kind narrows only the
-  cards.
+  narrow its list, and Enter toggles the first value left. A project shows as
+  the ticket's `owner/repo`, or as its T3 project's title while the repo is
+  not known. The filter keeps the T3 project id, so a pick still holds once
+  the repo arrives, and
+  [ADR 0004](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0004-context-projects-by-id.md)
+  has the reasoning. Status is running, needs you, blocked or done. Card
+  kind narrows only the cards.
 - **Search** narrows the page while you type, with no Enter. Every word must
   appear somewhere in the ticket label, the issue title or number, the repo, or
   the card or feed text. `Esc` clears it, and `f` focuses it when single-key
@@ -355,7 +358,7 @@ hand.
 | `POST /api/new-issues/{id}/launch` | Launch a ticket for the entry, as `POST /api/launch` does for one issue; the result adds `id` (404 for no such entry) |
 | `POST /api/new-issues/{id}/dismiss`, `/restore` | Dismiss the entry, or bring a dismissed one back (400 if already dismissed, or not dismissed) |
 | `POST /api/settle-done` | Settle every done ticket and closed ask; returns `{tickets, asks}` counts |
-| `GET /api/contexts` | `{contexts: [...]}`, sorted by name; each is `{id, name, spec, createdAt, updatedAt}`, and `spec` is `{projects, statuses, kinds, q?}` |
+| `GET /api/contexts` | `{contexts: [...]}`, sorted by name; each is `{id, name, spec, createdAt, updatedAt}`, and `spec` is `{projects, statuses, kinds, q?}`. Each project is a T3 project id, or, for an item with no project id, its lowercased `owner/repo` or title. A context saved before project ids holds an `owner/repo` or a project title instead, and an item matches it ignoring case |
 | `PUT /api/contexts/{id}` `{name, spec}` | Create the context (201) or replace its name and filter (200). Leave out `spec` to rename an existing context, or `name` to change only its filter; either form needs the context to exist (404 if it does not). `id` is 1 to 64 letters, digits, `-` or `_`. Names are unique ignoring case (409), at most 60 characters, and never "All". Statuses are `running`, `waiting`, `blocked` and `done`, and kinds are the card kinds. The board keeps at most 100 contexts |
 | `DELETE /api/contexts/{id}` | Delete the context (404 if there is none) |
 | `POST /api/open` `{link}` | Open a T3 thread link in the running Windows desktop app (on Windows, or from WSL); returns `{opened}`, and the page opens a new tab when it is `false` (400 for a link that is not a T3 thread) |

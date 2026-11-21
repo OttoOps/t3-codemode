@@ -1669,9 +1669,54 @@ function filtering() {
   return !!(filter.projects.size || filter.statuses.size || filter.kinds.size || filter.q.trim());
 }
 
-function projectKey(it) {
-  if (!it) return "";
-  return (it.repo || (it.project && (it.project.title || it.project.id)) || "").trim().toLowerCase();
+function placeOf(it) {
+  if (!it) return null;
+  const id = String((it.project && it.project.id) || "").trim();
+  const repo = String(it.repo || "").trim();
+  const title = String((it.project && it.project.title) || "").trim();
+  return id || repo || title ? { id, repo, title } : null;
+}
+
+function placeKey(p) {
+  return p ? p.id || p.repo.toLowerCase() || p.title.toLowerCase() : "";
+}
+
+function placeHit(p, v) {
+  if (!p) return false;
+  if (p.id && v === p.id) return true;
+  const low = String(v).toLowerCase();
+  return (!!p.repo && low === p.repo.toLowerCase()) || (!!p.title && low === p.title.toLowerCase());
+}
+
+let placesOf = null, places = new Map();
+function knownPlaces() {
+  if (placesOf === state) return places;
+  const m = new Map();
+  const add = (it) => {
+    const p = placeOf(it);
+    const k = placeKey(p);
+    if (!k) return;
+    const o = m.get(k);
+    if (!o) m.set(k, { ...p });
+    else { o.repo = o.repo || p.repo; o.title = o.title || p.title; }
+  };
+  if (state) {
+    for (const t of state.tree) add(t);
+    for (const t of state.settled.tickets) add(t);
+    for (const c of state.cards) add(c);
+    for (const f of state.feed) add(f);
+  }
+  placesOf = state;
+  places = m;
+  return m;
+}
+
+function placeMatch(p, v) {
+  if (placeHit(p, v)) return true;
+  if (p && p.id) return placeHit(knownPlaces().get(p.id), v);
+  if (!p || !p.repo) return false;
+  const k = knownPlaces().get(v);
+  return !!(k && k.id && k.repo.toLowerCase() === p.repo.toLowerCase());
 }
 
 function phaseOf(t, cards) {
@@ -1697,13 +1742,13 @@ function placeText(it) {
 }
 
 function ticketDesc(t, ctx) {
-  return { project: projectKey(t), phase: phaseOf(t, ctx.needs.get(t.thread) || []),
+  return { place: placeOf(t), phase: phaseOf(t, ctx.needs.get(t.thread) || []),
     text: [t.label, t.title, ...placeText(t), t.pr && t.pr.number && "#" + t.pr.number] };
 }
 
 function cardDesc(c, ctx) {
   const t = c.ticket && ctx.tix.get(c.ticket);
-  return { project: projectKey(c) || projectKey(t), kind: c.kind,
+  return { place: placeOf(c) || placeOf(t), kind: c.kind,
     phase: ticketPhase(c.ticket, ctx) || (FAIL_KINDS.has(c.kind) ? "blocked" : "waiting"),
     text: [c.id, c.label, c.text, ...placeText(c), t && t.title] };
 }
@@ -1712,18 +1757,19 @@ function feedDesc(f, ctx) {
   const t = f.ticket && (ctx.tix.get(f.ticket) || ctx.settled.get(f.ticket));
   const s = f.ticketStatus;
   const known = s === "done" ? "done" : s === "failed" || s === "gone" ? "blocked" : s === "waiting" ? "waiting" : s ? "running" : null;
-  return { project: projectKey(f) || projectKey(t), phase: ticketPhase(f.ticket, ctx) || known,
+  return { place: placeOf(f) || placeOf(t), phase: ticketPhase(f.ticket, ctx) || known,
     text: [f.label, f.kind, f.head, ...placeText(f), f.ticketLabel, f.ticketTitle, t && t.label, t && t.title] };
 }
 
 function settledDesc(it) {
-  if (it.kind === "t") return { project: projectKey(it.t), phase: "done", text: [it.t.label, it.t.title, it.t.link, ...placeText(it.t)] };
-  return { project: null, phase: null, text: [it.a.question, it.a.answer] };
+  if (it.kind === "t") return { place: placeOf(it.t), phase: "done", text: [it.t.label, it.t.title, it.t.link, ...placeText(it.t)] };
+  return { place: null, phase: null, text: [it.a.question, it.a.answer] };
 }
 
 function matches(d, f = filter) {
   const has = (set, v) => !set.size || (v !== null && v !== undefined && set.has(v));
-  if (!has(f.projects, d.project) || ![].concat(d.phase ?? null).some((p) => has(f.statuses, p))) return false;
+  if (f.projects.size && ![...f.projects].some((v) => placeMatch(d.place, v))) return false;
+  if (![].concat(d.phase ?? null).some((p) => has(f.statuses, p))) return false;
   if (d.kind !== undefined && !has(f.kinds, d.kind)) return false;
   const terms = f.q.toLowerCase().split(/\s+/).filter(Boolean);
   if (!terms.length) return true;
@@ -1750,18 +1796,24 @@ const cardSeen = (c) => c.id + "@" + inst(c);
 
 function projectValues() {
   const m = new Map();
-  const add = (it) => {
-    const k = projectKey(it);
-    if (k && !m.has(k)) m.set(k, it.project && it.project.title && it.project.title !== k ? "T3 project " + it.project.title : null);
-  };
-  if (state) {
-    for (const t of state.tree) add(t);
-    for (const t of state.settled.tickets) add(t);
-    for (const c of state.cards) add(c);
-    for (const f of state.feed) add(f);
+  const all = [...knownPlaces()];
+  for (const [k, p] of all) {
+    if (!p.id && p.repo && all.some(([, o]) => o.id && o.repo.toLowerCase() === p.repo.toLowerCase())) continue;
+    const label = p.repo || p.title || p.id;
+    m.set(k, [k, label, p.title && p.title !== label ? "T3 project " + p.title : null, p]);
   }
-  for (const k of filter.projects) if (!m.has(k)) m.set(k, null);
-  return [...m].sort((a, b) => a[0].localeCompare(b[0])).map(([k, title]) => [k, k, title]);
+  const known = [...m.values()];
+  for (const v of filter.projects) if (!m.has(v) && !known.some((o) => placeHit(o[3], v))) m.set(v, [v, v, null, null]);
+  return [...m.values()].sort((a, b) => a[1].localeCompare(b[1]) || (a[0] < b[0] ? -1 : 1));
+}
+
+function projectLabel(v) {
+  const o = projectValues().find((x) => x[0] === v || placeHit(x[3], v));
+  return o ? o[1] : v;
+}
+
+function picked(set, val) {
+  return set.has(val[0]) || (!!val[3] && [...set].some((x) => placeHit(val[3], x)));
 }
 
 function facetEl(key) {
@@ -1779,7 +1831,7 @@ function makeFacet(f) {
       if (e.key !== "Enter") return;
       e.preventDefault();
       const first = [...part(wrap, "fopts").children].find((o) => !o.hidden);
-      if (first) pickValue(f.key, first.dataset.val, !filter[f.key].has(first.dataset.val));
+      if (first) pickValue(f.key, first.dataset.val, !first.firstChild.checked);
     } });
   const pop = h("div", { class: "fpop", id: "fpop-" + f.key, "data-part": "fpop", role: "group", "aria-label": f.name + " filter", hidden: true },
     find,
@@ -1798,8 +1850,13 @@ function makeFacet(f) {
 }
 
 function pickValue(key, v, on) {
-  if (on) filter[key].add(v);
-  else filter[key].delete(v);
+  const set = filter[key];
+  if (on) set.add(v);
+  else {
+    const val = FACETS.find((f) => f.key === key).values().find((x) => x[0] === v);
+    set.delete(v);
+    if (val && val[3]) for (const x of [...set]) if (placeHit(val[3], x)) set.delete(x);
+  }
   filterChanged();
 }
 
@@ -1809,7 +1866,7 @@ function paintFacet(key) {
   const set = filter[key];
   const vals = f.values();
   const btn = part(wrap, "fbtn");
-  const one = set.size === 1 ? (vals.find((v) => set.has(v[0])) || [null, [...set][0]])[1] : null;
+  const one = set.size === 1 ? (vals.find((v) => picked(set, v)) || [null, [...set][0]])[1] : null;
   setText(btn, f.name + (set.size ? ": " + (one || set.size) : ""));
   setAttr(btn, "data-on", set.size ? "1" : null);
   setAttr(btn, "aria-label", f.name + " filter" + (set.size ? ", " + set.size + " selected" : ""));
@@ -1827,7 +1884,7 @@ function paintFacet(key) {
     have.delete(v);
     setText(o.querySelector("span"), label);
     setAttr(o, "title", title || null);
-    o.firstChild.checked = set.has(v);
+    o.firstChild.checked = picked(set, vals[i]);
     o.hidden = !!q && !String(label).toLowerCase().includes(q) && !String(title || "").toLowerCase().includes(q);
     if (!o.hidden) any = true;
     if (list.children[i] !== o) list.insertBefore(o, list.children[i] || null);
@@ -1913,8 +1970,8 @@ try { contexts.active = localStorage.getItem(CTX_KEY) || ""; } catch (_) {}
 
 function normSpec(spec) {
   spec = spec || {};
-  const list = (k, low) => [...new Set((spec[k] || []).map((v) => low ? String(v).toLowerCase() : String(v)))].sort();
-  return { projects: list("projects", true), statuses: list("statuses"), kinds: list("kinds"), q: String(spec.q || "").trim() };
+  const list = (k) => [...new Set((spec[k] || []).map(String))].sort();
+  return { projects: list("projects"), statuses: list("statuses"), kinds: list("kinds"), q: String(spec.q || "").trim() };
 }
 
 const specKey = (spec) => JSON.stringify(normSpec(spec));
@@ -1927,7 +1984,7 @@ function specFilter(spec) {
 function describeSpec(spec) {
   const n = normSpec(spec);
   const said = [];
-  if (n.projects.length) said.push("Project: " + n.projects.join(", "));
+  if (n.projects.length) said.push("Project: " + n.projects.map(projectLabel).join(", "));
   if (n.statuses.length) said.push("Status: " + n.statuses.map((v) => (PHASES.find((p) => p[0] === v) || [v, v])[1]).join(", "));
   if (n.kinds.length) said.push("Card kind: " + n.kinds.join(", "));
   if (n.q) said.push("Search: " + n.q);
@@ -2626,7 +2683,7 @@ function syncSettled(s, force) {
 const newView = { dismissed: false, changed: false, colPointer: false, hover: null };
 
 function newDesc(i) {
-  return { project: projectKey(i), phase: null, text: [i.label, i.repo, i.title, i.note, i.threadTitle] };
+  return { place: placeOf(i), phase: null, text: [i.label, i.repo, i.title, i.note, i.threadTitle] };
 }
 
 function newColumn() {

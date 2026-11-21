@@ -89,7 +89,7 @@ fn pick(values: &[String], allowed: &[&str], what: &str) -> Result<Vec<String>, 
 }
 
 fn check_spec(spec: ContextSpec) -> Result<ContextSpec, ContextError> {
-    let mut projects: Vec<String> = spec.projects.iter().map(|p| p.trim().to_lowercase()).collect();
+    let mut projects: Vec<String> = spec.projects.iter().map(|p| p.trim().to_string()).collect();
     if projects.iter().any(|p| p.is_empty() || p.chars().count() > MAX_PROJECT || p.chars().any(char::is_control)) {
         return Err(invalid(format!("each project is one line of 1 to {MAX_PROJECT} characters")));
     }
