@@ -13,6 +13,7 @@ mod merge;
 mod pools;
 mod reconcile;
 mod sandbox;
+mod setup;
 mod setup_steps;
 mod skills_install;
 mod slots;

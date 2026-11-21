@@ -124,11 +124,17 @@ pub struct RuleTarget {
     new: String,
 }
 
+impl RuleTarget {
+    pub fn content(&self) -> &str {
+        &self.new
+    }
+}
+
 fn lf(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
 
-fn real(path: &Path) -> PathBuf {
+pub fn real(path: &Path) -> PathBuf {
     if let Ok(p) = std::fs::canonicalize(path) {
         return PathBuf::from(crate::upgrade::plain(&p));
     }

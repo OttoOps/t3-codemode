@@ -1,6 +1,6 @@
 # The interview, slot by slot
 
-Each section says what the slot does, what to offer from `setup detect`,
+Each section says what the slot does, what to offer from `t3cm setup detect`,
 what to suggest when nothing is found, and the JSON the answer records. Every
 question also offers "keep the current setting" (from `summary`).
 
