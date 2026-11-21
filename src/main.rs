@@ -216,6 +216,8 @@ enum SetupCmd {
         no_t3: bool,
         #[arg(long, env = "T3CM_PORT")]
         port: Option<String>,
+        #[command(flatten)]
+        state: StateArgs,
         #[arg(long, env = "T3CODE_THREAD_ID")]
         thread: Option<String>,
     },
@@ -241,6 +243,8 @@ enum SetupCmd {
         no_t3: bool,
         #[arg(long, env = "T3CM_PORT")]
         port: Option<String>,
+        #[command(flatten)]
+        state: StateArgs,
         #[arg(long, env = "T3CODE_THREAD_ID")]
         thread: Option<String>,
     },
@@ -693,19 +697,40 @@ async fn run_doctor(a: DoctorArgs) -> Result<ExitCode> {
     Ok(if f.problems.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
+async fn direct_caps(state: &StateArgs) -> Result<Value> {
+    use t3_codemode::t3::T3Client;
+    let runtime_file = t3_codemode::t3_http::t3_home().join("userdata").join("server-runtime.json");
+    if !runtime_file.is_file() {
+        bail!("T3 Code is not running here: no readable {}", runtime_file.display());
+    }
+    let store = Arc::new(Store::open(&state_dir(state))?);
+    let clock = Arc::new(SystemClock);
+    let t3 = HttpT3::new(store, clock);
+    t3.call("orchestrator_capabilities", json!({})).await.map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 async fn run_setup(cmd: SetupCmd) -> Result<ExitCode> {
     let folders = Folders::from_env()?;
     let env = steps::Env::from_env()?;
     let bundle = skills::Bundle::embedded();
     match cmd {
-        SetupCmd::Detect { repo, skills, json: _, no_t3, port, thread } => {
+        SetupCmd::Detect { repo, skills, json: _, no_t3, port, state, thread } => {
             let root = repo_root(repo.as_deref())?;
             let listed = setup::parse_listed(skills.as_deref());
             let probe = setup::probe_t3cm(&folders.home, port.as_deref()).await;
             let (caps, providers) = if no_t3 {
                 (Caps::Unchecked, json!({"error": "T3 unreachable (skipped with --no-t3)"}))
-            } else if let (Some(p), true) = (probe.port, probe.running) {
-                match exec_value(p, "async () => t3.orchestrator_capabilities({})".into(), thread.as_deref()).await {
+            } else {
+                let fetched = if let (Some(p), true) = (probe.port, probe.running) {
+                    match exec_value(p, "async () => t3.orchestrator_capabilities({})".into(), thread.as_deref()).await
+                    {
+                        Ok(c) => Ok(c),
+                        Err(_) => direct_caps(&state).await,
+                    }
+                } else {
+                    direct_caps(&state).await
+                };
+                match fetched {
                     Ok(c) => {
                         let prov = setup::format_providers(&c);
                         (Caps::Got(c), prov)
@@ -715,10 +740,6 @@ async fn run_setup(cmd: SetupCmd) -> Result<ExitCode> {
                         (Caps::Failed(msg.clone()), json!({"error": msg}))
                     }
                 }
-            } else {
-                let why = probe.json["error"].as_str().unwrap_or("t3cm service is not running");
-                let msg = format!("T3 unreachable ({why})");
-                (Caps::Failed(msg.clone()), json!({"error": msg}))
             };
             let out = setup::detect_json(&setup::DetectInputs {
                 folders: &folders,
@@ -732,7 +753,7 @@ async fn run_setup(cmd: SetupCmd) -> Result<ExitCode> {
             })?;
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
-        SetupCmd::Write { repo, skills, unset, replace, asked, no_t3, port, thread } => {
+        SetupCmd::Write { repo, skills, unset, replace, asked, no_t3, port, state, thread } => {
             let root = repo_root(repo.as_deref())?;
             let listed = setup::parse_listed(skills.as_deref());
             let mut stdin_buf = String::new();
@@ -764,7 +785,10 @@ async fn run_setup(cmd: SetupCmd) -> Result<ExitCode> {
                     .await
                 {
                     Ok(c) => Caps::Got(c),
-                    Err(_) => Caps::Unchecked,
+                    Err(_) => match direct_caps(&state).await {
+                        Ok(c) => Caps::Got(c),
+                        Err(_) => Caps::Unchecked,
+                    },
                 }
             };
             let enabled = Enabled::load(&folders.claude, &root);

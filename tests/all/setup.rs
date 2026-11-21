@@ -138,7 +138,11 @@ impl SetupEnv {
             .env("USERPROFILE", &self.home)
             .env("PATH", &self.bin)
             .env("T3CM_PORT", self.port.to_string())
+            .env("T3CM_STATE_DIR", self.dir.path().join("state"))
             .env("T3CM_NO_UPDATE_CHECK", "1")
+            .env_remove("T3CODE_HOME")
+            .env_remove("T3CM_T3_ORIGIN")
+            .env_remove("T3CM_T3_BIN")
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("CODEX_HOME")
@@ -352,6 +356,7 @@ async fn detect_lists_enabled_providers_and_their_models_and_summary() {
 
     let mut s = SetupEnv::new();
     s.port = addr.port();
+    let want_config = s.config.to_string_lossy().into_owned();
     let d = tokio::task::spawn_blocking(move || s.detect(&["--json"])).await.unwrap();
     let p = &d["providers"];
     assert_eq!(p["disabled"], json!(["claudeAgent"]));
@@ -360,9 +365,118 @@ async fn detect_lists_enabled_providers_and_their_models_and_summary() {
     assert_eq!(p["enabled"][0]["models"], json!(["gpt-6.2-sol (effort low|medium|high)"]));
     assert_eq!(p["enabled"][1]["models"], json!(["g-1 (effort low|high; default low)", "g-2"]));
     assert_eq!(d["config"]["exists"], false);
+    assert_eq!(d["config"]["path"], want_config);
     assert!(d["summary"].as_array().unwrap().contains(&json!(
         "review: none (no reviewer installed; suggest sol-loop from https://github.com/t3dotgg/tstack) [default]"
     )));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn detect_queries_t3_directly_when_t3cm_service_is_stopped() {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::{Form, State};
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use sha2::{Digest, Sha256};
+
+    #[derive(Default)]
+    struct DirectT3 {
+        challenge: String,
+        issued: Vec<String>,
+    }
+    type St = Arc<Mutex<DirectT3>>;
+
+    async fn reg() -> Json<Value> {
+        Json(json!({"client_id": "client-1"}))
+    }
+    async fn dec(State(st): State<St>, Json(body): Json<Value>) -> Json<Value> {
+        let a = &body["authorization"];
+        st.lock().unwrap().challenge = a["code_challenge"].as_str().unwrap().into();
+        Json(
+            json!({"redirectTo": format!("http://127.0.0.1/callback?code=AUTH&state={}", a["state"].as_str().unwrap())}),
+        )
+    }
+    async fn tok(State(st): State<St>, Form(f): Form<HashMap<String, String>>) -> Response {
+        let mut g = st.lock().unwrap();
+        let want = URL_SAFE_NO_PAD.encode(Sha256::digest(f["code_verifier"].as_bytes()));
+        if want != g.challenge || f["code"] != "AUTH" {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant"}))).into_response();
+        }
+        g.issued.push("tok-1".into());
+        Json(json!({"access_token": "tok-1", "token_type": "Bearer", "expires_in": 3600})).into_response()
+    }
+    async fn mcp(State(st): State<St>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+        let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
+        if !st.lock().unwrap().issued.iter().any(|t| auth == format!("Bearer {t}")) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        let Some(id) = body.get("id").cloned() else { return StatusCode::ACCEPTED.into_response() };
+        match body["method"].as_str().unwrap_or_default() {
+            "initialize" => (
+                [("mcp-session-id", "sess-1"), ("content-type", "application/json")],
+                json!({"jsonrpc": "2.0", "id": id, "result": {"protocolVersion": "2025-06-18"}}).to_string(),
+            )
+                .into_response(),
+            "tools/call" => {
+                let caps = json!({
+                    "providers": [
+                        {"providerInstanceId": "codex", "displayName": "Codex", "constraints": [],
+                         "models": [{"id": "gpt-6.2-sol", "options": [{"id": "reasoningEffort", "values": ["low", "high"]}]}]}
+                    ]
+                });
+                let payload = json!({"jsonrpc": "2.0", "id": id, "result": {"structuredContent": caps, "content": []}});
+                ([("content-type", "text/event-stream")], format!("event: message\ndata: {payload}\n\n"))
+                    .into_response()
+            }
+            _ => StatusCode::BAD_REQUEST.into_response(),
+        }
+    }
+
+    let st = St::default();
+    let app = Router::new()
+        .route("/oauth/mcp/register", post(reg))
+        .route("/oauth/mcp/decision", post(dec))
+        .route("/oauth/mcp/token", post(tok))
+        .route("/mcp", post(mcp))
+        .with_state(st);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let t3_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let s = SetupEnv::new();
+    let t3_home = s.dir.path().join("t3-home");
+    std::fs::create_dir_all(t3_home.join("userdata")).unwrap();
+    std::fs::write(
+        t3_home.join("userdata/server-runtime.json"),
+        json!({"origin": format!("http://{t3_addr}"), "port": t3_addr.port()}).to_string(),
+    )
+    .unwrap();
+    let fake_t3_bin = env!("CARGO_BIN_EXE_t3cm-fake-mcp").to_string();
+    let t3_home_str = t3_home.to_string_lossy().into_owned();
+    let t3_log = s.dir.path().join("t3.log").to_string_lossy().into_owned();
+    let out = tokio::task::spawn_blocking(move || {
+        s.setup_raw(
+            "detect",
+            &[],
+            None,
+            &[("T3CODE_HOME", &t3_home_str), ("T3CM_T3_BIN", &fake_t3_bin), ("FAKE_T3_LOG", &t3_log)],
+        )
+    })
+    .await
+    .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let d: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(d["t3cm"]["running"], false, "t3cm service is stopped");
+    assert_eq!(d["providers"]["enabled"][0]["provider"], "codex", "{d}");
+    assert_eq!(d["providers"]["enabled"][0]["models"], json!(["gpt-6.2-sol (effort low|high)"]));
 }
 
 #[test]
@@ -480,12 +594,19 @@ fn write_records_the_namespaced_choice() {
 fn write_records_the_bare_choice() {
     let s = SetupEnv::new();
     let (_, bare_path) = s.both_sol_loops();
-    s.write_ok(&json!({"review": "sol-loop"}), &["--no-t3", "--skills", "cbrip:sol-loop"]);
-    let out = s.cmd(&["slots", "--no-t3", "--json", "--repo", &s.repo.to_string_lossy()], None, &[]);
-    assert!(out.status.success());
-    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["review"]["skill"]["status"], "ok");
-    assert_eq!(v["review"]["skill"]["path"], bare_path.to_string_lossy().as_ref());
+    let out = s.write_ok(&json!({"review": "sol-loop"}), &["--no-t3", "--skills", "cbrip:sol-loop"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("review: sol-loop (Skill tool) [user]"), "{stdout}");
+    let folders = Folders::under(&s.home, None);
+    let enabled = t3_codemode::slots::Enabled::load(&folders.claude, &s.repo);
+    let resolved = t3_codemode::slots::Resolved::build(&t3_codemode::slots::Inputs {
+        folders: &folders,
+        root: &s.repo,
+        listed: &["cbrip:sol-loop".into()],
+        enabled: &enabled,
+    });
+    assert_eq!(resolved.review["skill"]["status"], "ok");
+    assert_eq!(resolved.review["skill"]["path"], bare_path.to_string_lossy().as_ref());
 }
 
 #[test]
