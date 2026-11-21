@@ -245,8 +245,8 @@ when `CI` is set.
 rolls it to `<file>.1` at start once it passes 10 MB; the macOS and Windows
 services use it. `t3cm exec` takes `--session`, `--timeout-ms` and `--thread`
 (default `$T3CODE_THREAD_ID`), and exits non-zero when the script fails. It
-also sends its own `CLAUDE_CONFIG_DIR` and `CODEX_HOME`, so `wf.slot` resolves
-for the agent whose shell runs it.
+also sends its own `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_HOME`, so
+`wf.slot` resolves for the agent whose shell runs it.
 
 ```bash
 echo 'async () => (await t3.thread_list({ allProjects: true, limit: 5 })).threads.map(t => t.title)' | t3cm exec -

@@ -16,7 +16,7 @@ struct S {
 }
 
 fn own(dir: &Path) -> Reported {
-    Reported { own: Some(dir.to_string_lossy().into_owned()), claude: None, codex: None }
+    Reported { own: Some(dir.to_string_lossy().into_owned()), ..Reported::default() }
 }
 
 fn skill(base: &Path, name: &str, inline: bool) -> PathBuf {
@@ -148,6 +148,24 @@ async fn an_antigravity_thread_reads_every_skill_on_disk_inline() {
 }
 
 #[tokio::test]
+async fn a_reported_gemini_home_resolves_that_profiles_skills() {
+    let s = S::new("antigravity");
+    s.h.fake.set_providers(vec![provider("antigravity", "antigravity", &["gemini-4-neon"])]);
+    let profile = s.home.join("profile");
+    let mine = skill(&profile.join("config/skills"), "profile-only", false);
+    s.config(json!({"review": "profile-only"}));
+    let v = s.call("async () => wf.slots()", Reported::default()).await;
+    assert_eq!(v["review"]["skill"]["status"], "missing");
+    let reported = Reported { gemini: Some(profile.to_string_lossy().into_owned()), ..Reported::default() };
+    let v = s.call("async () => wf.slots()", reported).await;
+    assert_eq!(v["review"]["skill"]["path"].as_str(), mine.to_str());
+    assert_eq!(v["context"]["geminiHome"], profile.to_string_lossy().as_ref());
+    let empty = Reported { gemini: Some(String::new()), ..Reported::default() };
+    let v = s.call("async () => wf.slots()", empty).await;
+    assert_eq!(v["context"]["geminiHome"], s.home.join(".gemini").to_string_lossy().as_ref());
+}
+
+#[tokio::test]
 async fn t3cm_exec_reports_both_folders_and_a_codex_instance_uses_its_own() {
     let s = S::new("codex");
     let codex = s.home.join("custom-codex");
@@ -159,6 +177,7 @@ async fn t3cm_exec_reports_both_folders_and_a_codex_instance_uses_its_own() {
         own: None,
         claude: Some(claude.to_string_lossy().into_owned()),
         codex: Some(codex.to_string_lossy().into_owned()),
+        gemini: None,
     };
     let v = s.call("async () => wf.slots()", reported).await;
     let paths: Vec<&str> =
@@ -455,6 +474,7 @@ async fn the_http_header_and_t3cm_exec_report_the_config_folder() {
             .env("T3CODE_THREAD_ID", ME)
             .env("CLAUDE_CONFIG_DIR", home.join("from-exé"))
             .env("CODEX_HOME", &codex)
+            .env("GEMINI_HOME", home.join("profile"))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -470,6 +490,7 @@ async fn the_http_header_and_t3cm_exec_report_the_config_folder() {
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["result"]["claudeDir"], s.home.join("from-exé").to_string_lossy().as_ref());
     assert_eq!(v["result"]["codexHome"], s.home.join("cx").to_string_lossy().as_ref());
+    assert_eq!(v["result"]["geminiHome"], s.home.join("profile").to_string_lossy().as_ref());
 
     s.thread("mcp:other", "claude-3");
     let home = s.home.clone();
