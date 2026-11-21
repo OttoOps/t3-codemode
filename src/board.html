@@ -3545,7 +3545,7 @@ function showAuthScreen(status, data) {
     } else {
       setText(descEl, "Your Tailscale account is not allowed to access this board.");
     }
-    hint = "Switch Tailscale accounts on this device, or add this login to board.remote.allowUsers in t3cm's config.json on the host and restart t3cm.";
+    hint = "Switch Tailscale accounts on this device, or set board.remote.allowUsers in t3cm's config.json on the host (include the host's own Tailscale login too, since a non-empty list replaces the default) and restart t3cm.";
   } else if (kind === "tailscale_unavailable") {
     title = "Tailscale sign-in required";
     setText(descEl, "The host could not verify its Tailscale login to authorize this request.");
@@ -3608,10 +3608,15 @@ function scheduleReconnect() {
 async function probeRemoteAuth() {
   if (authBlocked || authProbeInFlight) return;
   authProbeInFlight = true;
+  let abortTimer = null;
   try {
     const opts = { credentials: "same-origin", cache: "no-store" };
     if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
       opts.signal = AbortSignal.timeout(5000);
+    } else if (typeof AbortController !== "undefined") {
+      const ac = new AbortController();
+      opts.signal = ac.signal;
+      abortTimer = setTimeout(() => ac.abort(), 5000);
     }
     const r = await fetch("/api/state", opts);
     if (authBlocked) return;
@@ -3622,6 +3627,7 @@ async function probeRemoteAuth() {
       try { render(data); } catch (err) { console.error(err); }
     }
   } catch (_) {} finally {
+    if (abortTimer !== null) clearTimeout(abortTimer);
     authProbeInFlight = false;
   }
   if (!authBlocked) scheduleReconnect();

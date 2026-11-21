@@ -542,8 +542,9 @@ without changing direct loopback behavior:
   `POST /api/open` to focus the desktop app on the host (unless
   `board.openLinks` is `"tab"`). On any remote host, the browser opens the
   `https://app.t3.codes/threads/...` URL directly on that device and never calls
-  `POST /api/open`; the server also refuses remote `POST /api/open` requests
-  with 403.
+  `POST /api/open`; server-side, authenticated remote `POST /api/open` requests
+  receive 403 while unauthenticated or disallowed requests receive the usual
+  401/403 guard refusal.
 - **Add to Home Screen.** The board serves an embedded `/manifest.webmanifest`
   and icons (`/icon.svg`, `/icon-192.png`, `/icon-512.png`) behind the same
   authentication guards and zero-external-request CSP. On iOS Safari, open the
@@ -697,7 +698,7 @@ server {
 | `GET /api/contexts` | `{contexts: [...]}`, sorted by name; each is `{id, name, spec, createdAt, updatedAt}`, and `spec` is `{projects, statuses, kinds, q?}`. Each project is a T3 project id, or, for an item with no project id, its lowercased `owner/repo` or title. A context saved before project ids holds an `owner/repo` or a project title instead, and an item matches it ignoring case |
 | `PUT /api/contexts/{id}` `{name, spec}` | Create the context (201) or replace its name and filter (200), answering `{context, rev}`. Leave out `spec` to rename an existing context, or `name` to change only its filter; either form needs the context to exist (404 if it does not). `id` is 1 to 64 letters, digits, `-` or `_`. Names are unique ignoring case (409), at most 60 characters, and never "All". Statuses are `running`, `waiting`, `blocked` and `done`, and kinds are the card kinds. The board keeps at most 100 contexts |
 | `DELETE /api/contexts/{id}` | Delete the context (404 if there is none), answering `{deleted, rev}` |
-| `POST /api/open` `{link}` | Loopback-only: open a T3 thread link in the running Windows desktop app (on Windows, or from WSL); returns `{opened}`, and the page opens a new tab when it is `false` (400 for a link that is not a T3 thread; 403 for all remote requests) |
+| `POST /api/open` `{link}` | Loopback-only: open a T3 thread link in the running Windows desktop app (on Windows, or from WSL); returns `{opened}`, and the page opens a new tab when it is `false` (400 for a link that is not a T3 thread; 403 for authenticated remote requests, or the usual 401/403 guard refusal otherwise) |
 
 Direct loopback requests require `Host` to be `127.0.0.1:<port>`,
 `localhost:<port>`, or `[::1]:<port>` with no proxy headers and refuse any other
