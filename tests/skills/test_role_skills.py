@@ -156,8 +156,7 @@ class MergeRouteTests(unittest.TestCase):
         watch = section(self.ticket, "#### The merge watch")
         self.assertIn("`wf.cards()`", watch)
         self.assertIn("call `wf.merge` again", watch)
-        self.assertIn("starts no\n  new watch", watch)
-        self.assertIn("`<owner>/<name>#<number>` in lower case", watch)
+        self.assertIn("starts no new watch", watch)
         self.assertNotIn("has the PR URL", watch)
         for phrase in ("merged on GitHub at", "Run your post-merge steps.", "was closed on GitHub without merging"):
             self.assertIn(phrase, wait)
@@ -165,6 +164,42 @@ class MergeRouteTests(unittest.TestCase):
         for answer in ("merge", "requeue", "ok", "hold"):
             self.assertIn(f'\\"{answer}\\"', self.reconcile, answer)
             self.assertIn(f'"{answer}"', wait, answer)
+
+    def test_a_pending_check_on_an_approved_head_starts_a_merge_watch(self):
+        word = " ".join(section(self.ticket, "### On the user's word").split())
+        self.assertNotIn("end the turn; the worker reports again", word)
+        self.assertIn('outcome `"pending"`', word)
+        self.assertIn('without a second "merge"', word)
+        watch = " ".join(section(self.ticket, "#### The merge watch").split())
+        self.assertIn('with outcome `"pending"`', watch)
+        self.assertIn("Approval never carries over to a new head", watch)
+        self.assertIn("Once every check has finished and none failed: call `wf.merge` at the approved head", watch)
+        self.assertIn('hand off to "The merge wait"', watch)
+
+    def test_the_merge_watch_retry_repeats_the_check_gate_when_reconcile_is_off(self):
+        watch = " ".join(section(self.ticket, "#### The merge watch").split())
+        m = re.search(r"query='([^']+)'", watch)
+        self.assertIsNotNone(m, "merge-watch GraphQL query missing")
+        query = m.group(1)
+        depth = 0
+        for ch in query:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                self.assertGreaterEqual(depth, 0, f"unmatched closing brace in query: {query}")
+        self.assertEqual(depth, 0, f"unbalanced braces in merge-watch query: {query}")
+        self.assertIn("isDraft", query)
+        self.assertIn("statusCheckRollup", query)
+        self.assertIn('Before calling `wf.merge` again, repeat "On the user\'s word" item 1\'s check gate', watch)
+        self.assertIn("including an optional check that re-ran while `mergeStateStatus` is `CLEAN` or `HAS_HOOKS`", watch)
+        self.assertIn("do not call `wf.merge` and end the turn quietly", watch)
+
+    def test_the_root_merge_watch_matches_reconcile_cards_by_approval_id(self):
+        watch = " ".join(section(self.ticket, "#### The merge watch").split())
+        self.assertIn('c.approval === "<approval>"', watch)
+        self.assertIn("Ignore cards with no `approval` or a different `approval`", watch)
+        self.assertNotIn("`<owner>/<name>#<number>` in lower case", watch)
 
 
 if __name__ == "__main__":

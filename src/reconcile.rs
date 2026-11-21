@@ -521,7 +521,7 @@ impl Wf {
         mut wait: Option<MergeWait>,
         pass: &mut Pass,
     ) -> Result<Option<MergeWait>> {
-        if self.dropped(t, o, pass)?
+        if self.dropped(t, o, wait.as_ref(), pass)?
             && let Some(w) = wait.take()
         {
             self.store.merge_wait_retire(&w)?;
@@ -560,7 +560,8 @@ impl Wf {
                 self.resolve_cards(|c| seqs.contains(&c.seq), "superseded by a newer merge approval")?;
                 continue;
             }
-            self.moved(t, o, ticket.as_deref(), base, seqs, pass)?;
+            let approval = wait.as_ref().filter(|w| w.thread == *ticket).map(|w| w.approval.as_str());
+            self.moved(t, o, ticket.as_deref(), base, seqs, approval, pass)?;
             if let Some(w) = wait.take_if(|w| w.thread == *ticket) {
                 self.store.merge_wait_retire(&w)?;
             }
@@ -595,7 +596,7 @@ impl Wf {
                         w.pull_request_id, o.id
                     ),
                 };
-                self.raise(t, w.thread.as_deref(), "report", &ask, &o.head, None, pass)?;
+                self.raise(t, w.thread.as_deref(), "report", &ask, &o.head, None, Some(&w.approval), pass)?;
                 self.store.merge_wait_retire(&w)?;
                 Ok(None)
             }
@@ -626,14 +627,14 @@ impl Wf {
 head has passed or ended cancelled, skipped or neutral. A push drops the approval."
                 .into(),
         };
-        self.raise(t, ticket, "report", &ask, &o.head, Some(&event), pass)?;
+        self.raise(t, ticket, "report", &ask, &o.head, Some(&event), Some(&w.approval), pass)?;
         let text = format!("{} is held: a check failed at its approved head {}", t.label(), short(&o.head));
         self.feed_note(ticket, &text)?;
         pass.actions.push(text);
         Ok(())
     }
 
-    fn dropped(&self, t: &Tracked, o: &Obs, pass: &mut Pass) -> Result<bool> {
+    fn dropped(&self, t: &Tracked, o: &Obs, wait: Option<&MergeWait>, pass: &mut Pass) -> Result<bool> {
         let Some((reason, at)) = o.removal.as_ref().filter(|(r, _)| !o.queued && r != "merged") else {
             return Ok(false);
         };
@@ -658,13 +659,15 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
             if self.store.pr_event_seen(&t.repo, t.number, &event, ticket.unwrap_or(BOARD))? {
                 continue;
             }
-            self.raise(t, ticket, "report", &ask, &o.head, Some(&event), pass)?;
+            let approval = wait.filter(|w| w.thread.as_deref() == ticket).map(|w| w.approval.as_str());
+            self.raise(t, ticket, "report", &ask, &o.head, Some(&event), approval, pass)?;
             self.feed_note(ticket, &format!("{} was dropped from the merge queue: {why}", t.label()))?;
             pass.actions.push(format!("{} dropped from the merge queue: {why}", t.label()));
         }
         Ok(true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn moved(
         &self,
         t: &Tracked,
@@ -672,6 +675,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         ticket: Option<&str>,
         base: &str,
         old: &[i64],
+        approval: Option<&str>,
         pass: &mut Pass,
     ) -> Result<()> {
         let label = t.label();
@@ -697,7 +701,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
             };
             ("gate", ask)
         };
-        self.raise(t, ticket, kind, &ask, &o.head, None, pass)?;
+        self.raise(t, ticket, kind, &ask, &o.head, None, approval, pass)?;
         let note = format!("head moved to {} after this approval; replaced by a new card", short(&o.head));
         self.resolve_cards(|c| old.contains(&c.seq), &note)?;
         if kind == "report" {
@@ -771,7 +775,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
             reply: "reply \"merge\" to try again, or \"hold\" to leave it",
             context: format!("It was approved at head {}. GitHub refused {MAX_FAILURES} checks in a row.", w.head),
         };
-        self.raise(t, w.thread.as_deref(), "report", &ask, &w.head, None, pass)?;
+        self.raise(t, w.thread.as_deref(), "report", &ask, &w.head, None, Some(&w.approval), pass)?;
         self.store.merge_wait_retire(&w)?;
         self.feed_note(w.thread.as_deref(), &format!("{} could not be queued: {why}", t.label()))?;
         pass.actions.push(format!("{} could not be queued: {why}", t.label()));
@@ -797,6 +801,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         ask: &Ask,
         head: &str,
         event: Option<&str>,
+        approval: Option<&str>,
         pass: &mut Pass,
     ) -> Result<()> {
         let link = ticket.map(|x| self.store.link_get(x)).transpose()?.flatten().filter(|l| !l.closed);
@@ -819,6 +824,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
                     handle: Some(&handle),
                     options: None,
                     pr: Some(t.pr(head)),
+                    approval,
                 })?;
                 if kind == "gate" && l.gate.as_deref().is_none_or(|g| g == "merge") {
                     l.gate = Some("merge".into());
@@ -858,6 +864,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
                     handle: Some(&handle),
                     options: Some(Vec::new()),
                     pr: Some(t.pr(head)),
+                    approval,
                 })?;
                 mark(ticket.unwrap_or(BOARD))
             }

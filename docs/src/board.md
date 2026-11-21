@@ -328,7 +328,9 @@ opens a `report` card with GitHub's last message and drops the approval. A pull
 request sent to the queue that leaves it with no removal GitHub recorded gets
 the same 3 checks. The board never sends an approval whose number GitHub now
 resolves to another pull request, such as after a repository rename. It drops
-that approval and opens a `report` card. Every fix goes on the activity feed
+that approval and opens a `report` card. Every card the reconcile raises for an
+approval carries that `approval` id, so `wf.cards()` callers can match it to
+the `wf.merge` call that recorded it. Every fix goes on the activity feed
 from `github`.
 
 The tree shows a pull request in the merge queue as `queued`, next to `open`,

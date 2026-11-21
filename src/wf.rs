@@ -971,6 +971,7 @@ impl Wf {
                 handle: Some(handle),
                 options: None,
                 pr: None,
+                approval: None,
             })?;
             return Ok(());
         }
@@ -1145,6 +1146,7 @@ impl Wf {
                     handle: Some(&handle),
                     options: None,
                     pr: None,
+                    approval: None,
                 })?;
             } else {
                 let msg = format!("{}\n{body}", header("report", &p.label, &handle, None));

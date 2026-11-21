@@ -175,7 +175,8 @@ impl Wf {
         let state = pr["mergeStateStatus"].as_str().unwrap_or("UNKNOWN");
         let ready = ready(pr);
         let failing = |f: &str| out.refused(format!("a check failed at head {}: {f}", &head[..7]));
-        let record = |status: WaitStatus| -> Result<()> {
+        let record = |status: WaitStatus| -> Result<String> {
+            let approval = random_id();
             let label = match caller {
                 Some(c) => self.store.link_get(c)?.map(|l| l.label),
                 None => None,
@@ -191,31 +192,34 @@ impl Wf {
                 merge_state: state.into(),
                 at: self.now(),
                 status,
-                approval: random_id(),
+                approval: approval.clone(),
                 failures: 0,
                 last_error: None,
-            })
+            })?;
+            Ok(approval)
         };
 
         if pr["isMergeQueueEnabled"] == true {
             if pr["isInMergeQueue"] == true {
-                record(WaitStatus::Sent)?;
-                return Ok(out.with("queued", json!({"position": pr["mergeQueueEntry"]["position"]})));
+                let approval = record(WaitStatus::Sent)?;
+                return Ok(
+                    out.with("queued", json!({"position": pr["mergeQueueEntry"]["position"], "approval": approval}))
+                );
             }
             if let Ready::Failing(f) = &ready {
                 return Ok(failing(f));
             }
             if ready != Ready::Yes {
-                record(WaitStatus::Waiting)?;
-                return Ok(out.with("waiting", json!({"mergeState": state})));
+                let approval = record(WaitStatus::Waiting)?;
+                return Ok(out.with("waiting", json!({"mergeState": state, "approval": approval})));
             }
             let r = self.github.graphql(ENQUEUE_PR, json!({"id": id, "head": head})).await?;
             if let Some(e) = errors(&r) {
                 return Ok(out.refused(e));
             }
-            record(WaitStatus::Sent)?;
+            let approval = record(WaitStatus::Sent)?;
             let position = &r["data"]["enqueuePullRequest"]["mergeQueueEntry"]["position"];
-            return Ok(out.with("queued", json!({"position": position})));
+            return Ok(out.with("queued", json!({"position": position, "approval": approval})));
         }
 
         match &ready {
