@@ -2022,6 +2022,14 @@ fn read_optional(p: &Path) -> std::result::Result<Option<Vec<u8>>, String> {
     }
 }
 
+fn stamp_root(h: &mut Sha256, r: &SearchRoot) {
+    h.update(r.label.as_bytes());
+    h.update(b"|");
+    h.update(r.namespace.as_deref().unwrap_or_default().as_bytes());
+    h.update(if r.inline { "|inline|" } else { "|skill|" }.as_bytes());
+    stamp(h, &r.dir);
+}
+
 fn stamp(h: &mut Sha256, p: &Path) {
     h.update(text(p).as_bytes());
     h.update(text(&realpath(p)).as_bytes());
@@ -2116,11 +2124,7 @@ impl Snapshot {
         let mut seen = HashSet::new();
         let mut skills = Vec::new();
         for r in &roots {
-            h.update(r.label.as_bytes());
-            h.update(b"|");
-            h.update(r.namespace.as_deref().unwrap_or_default().as_bytes());
-            h.update(b"|");
-            stamp(&mut h, &r.dir);
+            stamp_root(&mut h, r);
             for n in sorted_names(&r.dir) {
                 let path = r.dir.join(&n).join("SKILL.md");
                 let real = realpath(&path);
@@ -2265,6 +2269,23 @@ mod tests {
         assert!(!search("(?a)\\w(?u:\\w)", "éa").unwrap());
         assert!(compile("(?au)x").is_err());
         assert!(compile("(?-a:x)").is_err());
+    }
+
+    #[test]
+    fn a_roots_inline_rule_is_part_of_the_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = |inline| SearchRoot {
+            label: "~/.gemini/config/skills".into(),
+            namespace: None,
+            dir: dir.path().to_path_buf(),
+            inline,
+        };
+        let digest = |r: &SearchRoot| {
+            let mut h = Sha256::new();
+            stamp_root(&mut h, r);
+            h.finalize()
+        };
+        assert_ne!(digest(&root(true)), digest(&root(false)));
     }
 
     #[test]
