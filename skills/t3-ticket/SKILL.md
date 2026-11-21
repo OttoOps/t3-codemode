@@ -346,12 +346,17 @@ or chain the failed stage onto its merge gate.
 
 Otherwise, collect the PR's changed repo-relative paths from `files` and
 look up `await wf.slot("delivery", { files })` to filter steps with `paths`
-globs. Send a note for any stage in `skipped` (paths unmatched) or any
-`skill` step whose skill is `status: "missing"`, and leave those stages out
-of the active list for this PR. On the last PR of the ticket (`n === N`),
-also compute `await wf.slot("delivery", { files: combinedFiles })` across
-all PRs of the ticket so `ticket`-scoped stages with `paths` are filtered
-on the combined change.
+globs. For a follow-up PR fixing a failed `pr`-scoped delivery stage (step
+5), pass the union of the original PR's `files` and the follow-up PR's
+`files` (and retain the failed stage and any remaining `pr`-scoped stages
+from that recovery run) so a fix touching only workflow or config files
+never drops the failed stage. Send a note for any stage in `skipped` (paths
+unmatched) or any `skill` step whose skill is `status: "missing"`, and
+omit those stages from the active list for this PR. On the last PR of the
+ticket (`n === N`), also compute
+`await wf.slot("delivery", { files: combinedFiles })` across all PRs of the
+ticket so `ticket`-scoped stages with `paths` are filtered on the combined
+change.
 
 Build the merge gate from the active steps starting at `merge` (keeping
 `gate: "merge"` so GitHub reconcile tracks the PR and holds approval to
@@ -479,7 +484,7 @@ off."`). On `"done"` (or a manual prefix such as `"done and verify"` for a
 `"done"` as pre-approved, and advance to the next stage. On `"retry"` or
 `"fix"` (after a failed `closeAfter: "all"` `post-handoff` stage), either
 re-run `<id>` or launch a targeted fix worker on `main` (step 3) and resume
-at `<id>` once it hands off. Otherwise record the approved chain prefix
+through "The handoff" item 5 once it hands off. Otherwise record the approved chain prefix
 from the user's reply and run `<id>` as "Delivery stages" says.
 
 #### The merge wait
@@ -702,8 +707,9 @@ ticket's combined changed paths across all PRs for `ticket`-scoped and
   a targeted fix worker on `main` using step 3 (a fresh worktree branched
   from `main` on an unused branch such as `fix/<n>-<id>`, acceptance line
   `"the failed <id> stage on main succeeds"`, merge-only delivery). Once
-  that fix PR merges and its worker hands off, resume the failed
-  `ticket`-scoped stage from the new `main` SHA.
+  that fix PR merges and its worker hands off, repeat any earlier completed
+  stages invalidated by the new `main` revision before resuming the failed
+  `ticket`-scoped stage ("The handoff" item 5).
 - **`post-handoff` scope:** runs outside the ticket (cross-ticket batched
   deploys or owner-gated publishing). Filter with
   `await wf.slot("delivery", { files: combinedFiles })`. When `closeAfter`
@@ -839,9 +845,14 @@ the first time. The handoff has already closed the worker's link.
 5. If more PRs remain in the split, launch the next worker (step 3) with
    this handoff as its previous handoff. If this was a targeted fix PR for
    a failed `ticket`-scoped or `closeAfter: "all"` `post-handoff` stage,
-   do not repeat already-completed stages: refresh `origin/main` and resume
-   at the recorded failed stage on the new `main` SHA. Otherwise (this was
-   the last PR of the split):
+   refresh `origin/main`, update `combinedFiles` with the fix PR's changed
+   files, and check which earlier completed stages in that scope the new
+   `main` revision invalidates (for example, when `verify` failed after
+   `deploy` and the fix changed code that `deploy` must ship). Repeat any
+   invalidated earlier stages through their required gates and approvals
+   before re-running the failed stage; preserve an earlier completed stage
+   only when its result still holds for the new `main` SHA. Otherwise (this
+   was the last PR of the split):
    - When `closeAfter` is `"pr"`, close the issue now (remove the
      in-progress label and run
      `gh issue close <n> -R <repo> --comment "<text>"` through Publishing)
