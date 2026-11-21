@@ -1778,7 +1778,7 @@ fn merge_delivery_layer(prev: &Map<String, Value>, next_layer: &Map<String, Valu
     if next_layer.contains_key("steps") {
         return Some(next_layer.clone());
     }
-    if let Some(mode_val) = next_layer.get("mode") {
+    if let Some(mode_val) = next_layer.get("mode").filter(|m| m.as_str().is_some_and(|m| DELIVERY_MODES.contains(&m))) {
         let mut next = Map::new();
         let mode = mode_val.as_str().unwrap_or_default();
         next.insert("mode".into(), mode_val.clone());
