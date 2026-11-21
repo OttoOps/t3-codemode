@@ -235,7 +235,10 @@ class DeliveryStepsTests(unittest.TestCase):
         self.assertIn("done and verify", stages)
         self.assertIn('state === "MERGED"', ready)
         self.assertIn("override delivery to merge-only", ready)
-        self.assertIn("resume at the recorded failed stage", " ".join(section(self.ticket, "### The handoff").split()))
+        self.assertIn("union of the original PR's `files` and the follow-up PR's `files`", ready)
+        handoff = " ".join(section(self.ticket, "### The handoff").split())
+        self.assertIn("Repeat any invalidated earlier stages", handoff)
+        self.assertIn("preserve an earlier completed stage only when its result still holds", handoff)
         self.assertIn('For a `post-handoff` stage (under `closeAfter: "all"`)', stages)
 
     def test_ticket_honors_scope_boundaries_and_close_after(self):
