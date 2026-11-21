@@ -5,6 +5,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::board::gh_name;
 use crate::field::{self, invalid, within};
 use crate::pools::PoolConfig;
 use crate::upstream::UpstreamConfig;
@@ -310,6 +311,66 @@ pub struct Config {
     pub pools: BTreeMap<String, PoolConfig>,
     pub limit_hold_minutes: u64,
     pub update_check: bool,
+    #[serde(default)]
+    pub flow: Option<FlowConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowConfig {
+    pub repos: Vec<String>,
+    pub opt_in: OptIn,
+    pub max_tickets: usize,
+    #[serde(default)]
+    pub launch: Launch,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OptIn {
+    pub label: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Launch {
+    #[default]
+    Ask,
+    Auto,
+    Off,
+}
+
+impl FlowConfig {
+    fn validate(&self) -> Result<()> {
+        if self.repos.is_empty() {
+            return Err(invalid("repos", "repos must name at least one owner/name repository"));
+        }
+        let mut names: BTreeMap<String, &str> = BTreeMap::new();
+        for (i, repo) in self.repos.iter().enumerate() {
+            let at = format!("repos.{i}");
+            let Some((_, name)) = repo.split_once('/').filter(|(o, n)| gh_name(o) && gh_name(n)) else {
+                return Err(invalid(at, format!("repos: {repo:?} is not an owner/name repository")));
+            };
+            if let Some(other) = names.insert(name.to_ascii_lowercase(), repo) {
+                if other.eq_ignore_ascii_case(repo) {
+                    return Err(invalid(at, format!("repos lists {repo} twice")));
+                }
+                return Err(invalid(
+                    at,
+                    format!(
+                        "repos: {other} and {repo} share the name {name}, and board ticket labels ({name}#41) cannot tell them apart"
+                    ),
+                ));
+            }
+        }
+        if self.opt_in.label.trim().is_empty() {
+            return Err(invalid("optIn.label", "optIn.label must name a label"));
+        }
+        if self.max_tickets == 0 {
+            return Err(invalid("maxTickets", "maxTickets must be at least 1"));
+        }
+        Ok(())
+    }
 }
 
 pub fn builtin_defaults() -> Value {
@@ -524,6 +585,9 @@ impl Config {
         }
         if let Some(remote) = &self.board.remote {
             remote.validate()?;
+        }
+        if let Some(flow) = &self.flow {
+            flow.validate().map_err(|e| within(e, "flow", "flow"))?;
         }
         Ok(())
     }

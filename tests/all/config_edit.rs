@@ -159,6 +159,11 @@ pub(crate) fn every_kind_of_key() -> Vec<(&'static str, Value)> {
         ("upstreams.1", json!({"name": "web", "transport": "http", "http": {"url": "https://mcp.example.com/mcp"}})),
         ("upstreams.1.http.headers", json!({"X-Team": "docs"})),
         ("upstreams.1.http.allow_insecure", json!(true)),
+        ("flow", json!({"repos": ["acme/widgets"], "optIn": {"label": "flow"}, "maxTickets": 2})),
+        ("flow.repos.1", json!("acme/tools")),
+        ("flow.optIn.label", json!("ready")),
+        ("flow.maxTickets", json!(3)),
+        ("flow.launch", json!("auto")),
     ]
 }
 

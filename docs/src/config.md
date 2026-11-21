@@ -469,6 +469,52 @@ thread launched straight on an instance never is, and neither is a board
 question. A thread that runs again before the answer
 loses its card, and a move refuses a thread that is running.
 
+### Flow
+
+`flow` turns on the project flow, the board's queue of issues that are ready
+to work next. Without a `flow` block the flow is off. For now the flow only
+computes the queue, which [`wf.flow()`](globals.md#wfflow) returns, and
+nothing launches from it yet.
+
+```json
+{
+  "flow": {
+    "repos": ["acme/widgets", "acme/tools"],
+    "optIn": { "label": "flow" },
+    "maxTickets": 2,
+    "launch": "ask"
+  }
+}
+```
+
+| Key | Default | Does |
+|---|---|---|
+| `repos` | required | The `owner/name` repositories the flow covers. Two repos can't share a name, because a board ticket's label, such as `widgets#41`, doesn't name the owner. |
+| `optIn.label` | required | The label that puts an issue in the flow. Issues without it are never queued. |
+| `maxTickets` | required | How many flow tickets can be open on the board at once, at least 1. |
+| `launch` | `ask` | `ask`, `auto` or `off`, the way a free slot will launch the next ready issue. Config load checks it, but nothing reads it yet. |
+
+An issue is ready when all of these hold:
+
+- It is open, in a covered repo, and carries the opt-in label.
+- No open issue blocks it through GitHub's blocked-by links.
+- It is not labelled `blocked: external`.
+- No board ticket is open for it.
+- It is not a sub-issue whose parent has an open board ticket. That ticket
+  works its sub-issues itself.
+
+The queue runs by `priority:` label first, from `priority: high` through
+`medium` and `low` to issues with no priority label. Ties go to the earlier
+milestone due date, with issues that have no due date last, and then to the
+oldest issue.
+
+A flow ticket is an open board ticket, or a launch still waiting to join, for
+an issue in a covered repo. Tickets are matched by label, which carries no
+owner, so a ticket for `other/widgets#41` counts as `acme/widgets#41` when
+`acme/widgets` is covered. A ticket takes one slot however many sub-issues or
+workers it runs. The free slots are `maxTickets` minus the flow tickets, and
+never fewer than zero.
+
 ### Updates
 
 | Key | Default | Does |

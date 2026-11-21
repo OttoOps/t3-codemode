@@ -787,6 +787,7 @@ async fn the_dialog_has_a_control_or_an_editor_for_every_key() {
             "board.pool",
             "board.ticketEffort",
             "board.ticketModel",
+            "flow",
         ],
         "a new key needs a control, or a place on this list of keys only the JSON editor holds"
     );

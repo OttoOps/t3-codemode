@@ -31,6 +31,10 @@ const CARD: &str = r#"{ id: string; kind: string; label: string | null; ticket: 
 
 const NEW_ISSUE: &str = "{ id: string; url: string; repo: string; number: number; label: string; title: string | null; note: string | null; thread: string; threadLink: string | null; threadTitle: string | null; at: string; atLocal: string; dismissed: boolean; dismissedAt: string | null; dismissedAtLocal: string | null; restoredAt: string | null }";
 const SKIPPED: &str = "{ instanceId: string; reason: string }";
+const ISSUE_REF: &str = "{ repo: string; number: number; label: string; url: string; title: string | null }";
+const FLOW_ISSUE: &str = "{ repo: string; number: number; label: string; url: string; title: string; priority: \"high\" | \"medium\" | \"low\" | null; milestone: { title: string; dueOn: string | null } | null; createdAt: string; parent: { repo: string; number: number; label: string; url: string; title: string | null } | null; unblockedBy: { repo: string; number: number; label: string; url: string; title: string | null }[] }";
+const FLOW_TICKET: &str =
+    "{ label: string; repo: string; number: number; url: string; thread: string | null; link: string | null }";
 
 fn builtin(name: &str, kind: &'static str, description: &str, sig: &str, input: Value) -> Entry {
     Entry {
@@ -285,6 +289,15 @@ pub fn builtins() -> Vec<Entry> {
                 json!({"repo": {"type": "string"}, "instance": {"type": "string"}, "skills": {"type": "array", "items": {"type": "string"}}}),
                 &[],
             ),
+        ),
+        builtin(
+            "wf.flow",
+            "wf",
+            "The project flow's ready queue, read live from GitHub: each covered repo's open issues that carry the opt-in label, have no open blocker (GitHub blocked-by links), are not labelled \"blocked: external\", have no open board ticket, and are not sub-issues of an issue with an open board ticket. queue is in launch order: priority label (priority: high, medium, low, then none), then milestone due date (none last), then oldest. blocked lists the opt-in issues held by an open blocker or the external label, each with its open blockers. running is the open board tickets for issues in covered repos; free is maxTickets minus running. With no flow block in the config, enabled is false and the lists are empty. Read-only; throws when gh cannot read a covered repo.",
+            &format!(
+                "wf.flow(): Promise<{{ enabled: boolean; launch: \"ask\" | \"auto\" | \"off\" | null; maxTickets: number; free: number; running: {FLOW_TICKET}[]; queue: {FLOW_ISSUE}[]; blocked: ({FLOW_ISSUE} & {{ blockers: {ISSUE_REF}[]; moreBlockers: boolean; external: boolean }})[] }}>;"
+            ),
+            obj(json!({}), &[]),
         ),
         builtin(
             "wf.merge",

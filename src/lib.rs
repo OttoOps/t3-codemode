@@ -14,6 +14,7 @@ pub mod drift;
 pub mod editor;
 pub mod fake;
 pub mod field;
+pub mod flow;
 pub mod github;
 pub mod issues;
 pub mod js;

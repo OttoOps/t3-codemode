@@ -444,6 +444,8 @@ impl T3Client for FakeT3 {
 struct GhState {
     repos: BTreeMap<String, Value>,
     prs: BTreeMap<(String, u64), Value>,
+    issues: BTreeMap<(String, u64), Value>,
+    issue_page: usize,
     calls: Vec<Value>,
     errors: BTreeMap<String, String>,
     read_errors: BTreeMap<(String, u64), String>,
@@ -473,6 +475,16 @@ pub fn head_commit(head: &str, checks: Value) -> Value {
 
 pub fn check_run(name: &str, conclusion: &str) -> Value {
     json!({"__typename": "CheckRun", "name": name, "status": "COMPLETED", "conclusion": conclusion})
+}
+
+pub fn github_issue(number: u64, title: &str, labels: &[&str], created_at: &str) -> Value {
+    let labels: Vec<Value> = labels.iter().map(|l| json!({"name": l})).collect();
+    json!({"number": number, "title": title, "state": "OPEN", "createdAt": created_at,
+           "labels": {"nodes": labels}, "milestone": null, "blockers": [], "parentRef": null})
+}
+
+fn issue_key(repo: &str, number: u64) -> (String, u64) {
+    (repo.to_ascii_lowercase(), number)
 }
 
 fn gh_error(message: &str) -> Value {
@@ -556,6 +568,51 @@ impl FakeGitHub {
         self.st().down = down;
     }
 
+    pub fn add_repo(&self, repo: &str) {
+        self.st()
+            .repos
+            .entry(repo.to_ascii_lowercase())
+            .or_insert_with(|| json!({"viewerDefaultMergeMethod": "MERGE"}));
+    }
+
+    pub fn set_issue(&self, repo: &str, issue: Value) {
+        let mut st = self.st();
+        let mut issue = issue;
+        let number = issue["number"].as_u64().expect("issue number");
+        issue["nameWithOwner"] = json!(repo);
+        st.repos.entry(repo.to_ascii_lowercase()).or_insert_with(|| json!({"viewerDefaultMergeMethod": "MERGE"}));
+        st.issues.insert(issue_key(repo, number), issue);
+    }
+
+    pub fn update_issue(&self, repo: &str, number: u64, patch: Value) {
+        let mut st = self.st();
+        let issue = st.issues.get_mut(&issue_key(repo, number)).expect("known issue");
+        for (k, v) in patch.as_object().expect("object patch") {
+            issue[k] = v.clone();
+        }
+    }
+
+    pub fn set_blockers(&self, repo: &str, number: u64, blockers: &[(&str, u64)]) {
+        let refs: Vec<Value> = blockers.iter().map(|(r, n)| json!([r, n])).collect();
+        self.update_issue(repo, number, json!({"blockers": refs}));
+    }
+
+    pub fn set_parent(&self, repo: &str, number: u64, parent: (&str, u64)) {
+        self.update_issue(repo, number, json!({"parentRef": [parent.0, parent.1]}));
+    }
+
+    pub fn set_milestone(&self, repo: &str, number: u64, title: &str, due_on: Option<&str>) {
+        self.update_issue(repo, number, json!({"milestone": {"title": title, "dueOn": due_on}}));
+    }
+
+    pub fn close_issue(&self, repo: &str, number: u64) {
+        self.update_issue(repo, number, json!({"state": "CLOSED"}));
+    }
+
+    pub fn set_issue_page(&self, size: usize) {
+        self.st().issue_page = size;
+    }
+
     pub fn calls(&self) -> Vec<Value> {
         self.st().calls.clone()
     }
@@ -569,12 +626,73 @@ fn operation(query: &str) -> &'static str {
     if query.starts_with("query Reconcile(") {
         return "reconcile";
     }
+    if query.starts_with("query FlowIssues(") {
+        return "flowIssues";
+    }
     for op in ["enqueuePullRequest", "mergePullRequest", "enablePullRequestAutoMerge"] {
         if query.contains(op) {
             return op;
         }
     }
     "read"
+}
+
+fn issue_node(st: &GhState, r: &Value) -> Value {
+    let (Some(repo), Some(number)) = (r[0].as_str(), r[1].as_u64()) else { return Value::Null };
+    let found = st.issues.get(&issue_key(repo, number));
+    let repo = found.and_then(|i| i["nameWithOwner"].as_str()).unwrap_or(repo);
+    json!({"number": number, "title": found.map_or(json!(format!("Issue {number}")), |i| i["title"].clone()),
+           "url": format!("https://github.com/{repo}/issues/{number}"),
+           "state": found.map_or(json!("OPEN"), |i| i["state"].clone()),
+           "repository": {"nameWithOwner": repo}})
+}
+
+fn flow_issues(st: &GhState, variables: &Value) -> Value {
+    let repo = format!("{}/{}", variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap())
+        .to_ascii_lowercase();
+    if !st.repos.contains_key(&repo) {
+        return gh_error(&format!("Could not resolve to a Repository with the name '{repo}'."));
+    }
+    let label = variables["label"].as_str().unwrap().to_ascii_lowercase();
+    let mut matching: Vec<&Value> = st
+        .issues
+        .iter()
+        .filter(|((r, _), i)| {
+            *r == repo
+                && i["state"] == "OPEN"
+                && i["labels"]["nodes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|l| l["name"].as_str().is_some_and(|n| n.to_ascii_lowercase() == label))
+        })
+        .map(|(_, i)| i)
+        .collect();
+    matching.sort_by(|a, b| a["createdAt"].as_str().cmp(&b["createdAt"].as_str()));
+    let start: usize = variables["after"].as_str().and_then(|c| c.parse().ok()).unwrap_or(0);
+    let size = if st.issue_page == 0 { 100 } else { st.issue_page };
+    let end = (start + size).min(matching.len());
+    let nodes: Vec<Value> = matching[start.min(end)..end]
+        .iter()
+        .map(|i| {
+            let name = i["nameWithOwner"].as_str().unwrap_or_default();
+            let number = i["number"].as_u64().unwrap_or_default();
+            let blockers: Vec<Value> =
+                i["blockers"].as_array().into_iter().flatten().map(|r| issue_node(st, r)).collect();
+            let mut parent = issue_node(st, &i["parentRef"]);
+            if let Some(p) = parent.as_object_mut() {
+                p.remove("state");
+            }
+            json!({"number": number, "title": i["title"], "url": format!("https://github.com/{name}/issues/{number}"),
+                   "createdAt": i["createdAt"], "labels": i["labels"], "milestone": i["milestone"], "parent": parent,
+                   "blockedBy": {"totalCount": blockers.len(), "nodes": blockers}})
+        })
+        .collect();
+    let name = matching.first().and_then(|i| i["nameWithOwner"].as_str()).unwrap_or(&repo).to_string();
+    json!({"data": {"repository": {"nameWithOwner": name, "issues": {
+        "pageInfo": {"hasNextPage": end < matching.len(), "endCursor": (end < matching.len()).then(|| end.to_string())},
+        "nodes": nodes
+    }}}})
 }
 
 impl crate::github::GitHub for FakeGitHub {
@@ -588,6 +706,9 @@ impl crate::github::GitHub for FakeGitHub {
             }
             if let Some(message) = st.errors.get(op) {
                 return Ok(gh_error(message));
+            }
+            if op == "flowIssues" {
+                return Ok(flow_issues(&st, &variables));
             }
             if op == "reconcile" {
                 let mut data = serde_json::Map::new();
