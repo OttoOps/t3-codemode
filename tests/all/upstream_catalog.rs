@@ -1,8 +1,6 @@
-mod common;
-
 use std::sync::Arc;
 
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::app::{App, ExecuteRequest, ToolOutput};
 use t3_codemode::catalog::{Catalog, aliases};

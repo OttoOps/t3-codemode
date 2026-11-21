@@ -1,8 +1,6 @@
-mod common;
-
 use std::time::Duration;
 
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::{BOARD, card_text, parse_issue, parse_remote, reply_options};
 use t3_codemode::config::Config;
@@ -1015,7 +1013,7 @@ fn run_page(html: &str, scenario: &str) -> Value {
     let open = html.find("<script>").unwrap() + "<script>".len();
     let close = html.rfind("</script>").unwrap();
     let src =
-        format!("{}\n{}\nJSON.stringify(({scenario})())", include_str!("support/board_dom.js"), &html[open..close]);
+        format!("{}\n{}\nJSON.stringify(({scenario})())", include_str!("../support/board_dom.js"), &html[open..close]);
     let rt = rquickjs::Runtime::new().unwrap();
     let ctx = rquickjs::Context::full(&rt).unwrap();
     ctx.with(|ctx| {
@@ -1178,7 +1176,7 @@ fn run_page_async_with(html: &str, prelude: &str, scenario: &str) -> Value {
     let close = html.rfind("</script>").unwrap();
     let src = format!(
         "{prelude}\n{}\n{}\nPromise.resolve(({scenario})()).then((v) => {{ globalThis.__out = JSON.stringify(v); }}, (e) => {{ globalThis.__out = JSON.stringify({{ error: String(e) }}); }});",
-        include_str!("support/board_dom.js"),
+        include_str!("../support/board_dom.js"),
         &html[open..close]
     );
     let rt = rquickjs::Runtime::new().unwrap();

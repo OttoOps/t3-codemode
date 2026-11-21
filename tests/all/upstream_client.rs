@@ -1,6 +1,3 @@
-#[path = "support/http_server.rs"]
-mod http_server;
-
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -13,7 +10,7 @@ use t3_codemode::upstream::{
     UpstreamState,
 };
 
-use http_server::FakeHttp;
+use crate::http_server::{self, FakeHttp};
 
 const NS: &str = "fk";
 const TOKEN: &str = "tok-abcdef-123";

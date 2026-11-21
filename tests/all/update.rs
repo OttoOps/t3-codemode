@@ -304,7 +304,7 @@ mod service {
     use super::*;
     use std::time::{Duration, Instant};
 
-    const SHIPPED_UNIT: &str = include_str!("../deploy/t3-codemode.service");
+    const SHIPPED_UNIT: &str = include_str!("../../deploy/t3-codemode.service");
 
     const STUB: &str = r#"#!/bin/sh
 case "$1" in

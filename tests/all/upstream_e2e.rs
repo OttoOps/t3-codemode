@@ -1,13 +1,8 @@
-mod common;
-#[path = "support/http_server.rs"]
-#[allow(dead_code)]
-mod http_server;
-
 use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use common::*;
-use http_server::FakeHttp;
+use crate::common::*;
+use crate::http_server::{self, FakeHttp};
 use serde_json::{Value, json};
 use t3_codemode::config::Config;
 use t3_codemode::server;

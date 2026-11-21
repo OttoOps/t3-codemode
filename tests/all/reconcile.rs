@@ -1,8 +1,6 @@
-mod common;
-
 use std::time::Duration;
 
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::BOARD;
 use t3_codemode::config::Config;

@@ -1,6 +1,4 @@
-mod common;
-
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;

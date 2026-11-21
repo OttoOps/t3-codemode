@@ -1,6 +1,4 @@
-mod common;
-
-use common::*;
+use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::store::{Bind, Link, Store};
 use t3_codemode::wf::LAST_PASS;
