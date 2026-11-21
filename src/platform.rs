@@ -214,10 +214,21 @@ impl ProcessTree {
         cmd.process_group(0);
     }
 
+    pub fn prepare_std(cmd: &mut std::process::Command) {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     pub fn start(child: &tokio::process::Child) -> std::io::Result<ProcessTree> {
-        child
-            .id()
-            .and_then(|p| i32::try_from(p).ok())
+        Self::from_pid(child.id())
+    }
+
+    pub fn start_std(child: &std::process::Child) -> std::io::Result<ProcessTree> {
+        Self::from_pid(Some(child.id()))
+    }
+
+    fn from_pid(pid: Option<u32>) -> std::io::Result<ProcessTree> {
+        pid.and_then(|p| i32::try_from(p).ok())
             .filter(|p| *p > 1)
             .map(|pgid| ProcessTree { pgid })
             .ok_or_else(|| std::io::Error::other("the child has no process id"))
@@ -241,15 +252,30 @@ impl ProcessTree {
         cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
     }
 
+    pub fn prepare_std(cmd: &mut std::process::Command) {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+    }
+
     pub fn start(child: &tokio::process::Child) -> std::io::Result<ProcessTree> {
+        use std::io::Error;
+        let process = child.raw_handle().ok_or_else(|| Error::other("the child has no process handle"))?;
+        let pid = child.id().ok_or_else(|| Error::other("the child has no process id"))?;
+        Self::from_raw(process, pid)
+    }
+
+    pub fn start_std(child: &std::process::Child) -> std::io::Result<ProcessTree> {
+        use std::os::windows::io::AsRawHandle;
+        Self::from_raw(child.as_raw_handle(), child.id())
+    }
+
+    fn from_raw(process: std::os::windows::io::RawHandle, pid: u32) -> std::io::Result<ProcessTree> {
         use std::io::Error;
         use std::os::windows::io::{FromRawHandle, OwnedHandle};
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
         };
-        let process = child.raw_handle().ok_or_else(|| Error::other("the child has no process handle"))?;
-        let pid = child.id().ok_or_else(|| Error::other("the child has no process id"))?;
         unsafe {
             let raw = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if raw.is_null() {
