@@ -28,7 +28,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Read the Cargo.toml version
@@ -71,7 +71,7 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       ARCHIVE: t3cm-${{ needs.version.outputs.version }}-${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
@@ -324,7 +324,7 @@ jobs:
       ARCHIVE: t3cm-${{ needs.version.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
       T3CM_RELEASES_URL: http://127.0.0.1:8765
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/download-artifact@v8
