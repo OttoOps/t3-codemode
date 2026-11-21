@@ -481,3 +481,23 @@ fn takeover_over_a_pre_retirement_bundle_removes_retired_python_and_role_files()
     assert!(!skills_dir(home.path()).join("t3-workflow").join("scripts").exists());
     assert!(!skills_dir(home.path()).join("setup-t3-workflow").join("scripts").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn takeover_refuses_to_delete_retired_files_through_a_symlinked_parent() {
+    let home = tempfile::tempdir().unwrap();
+    npx_install(home.path(), false);
+    let outside = home.path().join("other-checkout");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("t3wf.py"), "outside\n").unwrap();
+    std::os::unix::fs::symlink(&outside, skills_dir(home.path()).join("t3-workflow").join("scripts")).unwrap();
+
+    let out = t3cm(home.path(), &["skills", "install", "--take-over", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let removed: Vec<&str> = v["removed"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    let kept: Vec<&str> = v["kept"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(!removed.contains(&"t3-workflow/scripts/t3wf.py"), "{removed:?}");
+    assert!(kept.contains(&"t3-workflow/scripts/t3wf.py"), "{kept:?}");
+    assert_eq!(std::fs::read_to_string(outside.join("t3wf.py")).unwrap(), "outside\n");
+}
