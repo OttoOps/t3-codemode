@@ -109,9 +109,9 @@ opt-in `board.remote` configuration.
 
 ### Consequences
 
-- Good: `/mcp` and `/healthz` refuse requests from any proxy that preserves
-  the public `Host` or sends forwarding headers, even when remote board access
-  is turned on.
+- Good: `/mcp` and `/healthz` refuse requests from any proxy that adds trusted
+  forwarding headers and enforces the configured public `Host`, even when
+  remote board access is turned on.
 - Good: direct loopback users keep zero-auth access with no workflow change,
   while remote access stays completely off until opted in.
 - Good: one board middleware guards every read and write route, so new routes
@@ -119,11 +119,17 @@ opt-in `board.remote` configuration.
 - Good: proxy-header spoofing and host-confusion attempts cannot downgrade a
   proxied request into local zero-auth access.
 - Bad: route isolation and remote classification depend on the reverse proxy
-  exposing only board routes, preserving the public `Host` or setting trusted
-  forwarding headers, and stripping client-supplied `Tailscale-User-Login`,
-  `Forwarded`, and `X-Forwarded-*` headers. A proxy that both rewrites `Host`
-  to loopback and omits all forwarding metadata is indistinguishable from a
-  direct loopback client.
+  exposing only board routes, stripping client-supplied `Tailscale-User-Login`,
+  `Forwarded`, and `X-Forwarded-*` headers, always adding a trusted forwarding
+  header (`X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, or
+  `Forwarded`; Tailscale Serve adds its own), and rejecting or overwriting any
+  client `Host` that does not match the configured public name. nginx's default
+  `proxy_pass` sets `Host` to the upstream and adds no `X-Forwarded-*` header,
+  so it needs explicit `proxy_set_header` lines (`Host $host`,
+  `X-Forwarded-For $proxy_add_x_forwarded_for`, `X-Forwarded-Proto $scheme`).
+  Raw TCP forwarders (`ssh -L`, `socat`, `tailscale serve --tcp`) are
+  indistinguishable from direct loopback and hand out zero-auth board access,
+  so they must never front the board.
 - Bad: splitting the rollout across four PRs leaves remote requests refused
   with 401 in PR 1 until pairing and Tailscale auth land in PRs 2 and 3.
 - Neutral: reversing this decision means restoring one loopback middleware in
