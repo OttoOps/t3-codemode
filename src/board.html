@@ -4245,9 +4245,18 @@ function wire() {
   loadHash();
 }
 
+const MAX_MODEL_RETRIES = 3;
 const modelsState = {
   data: null,
-  rev: -1,
+  appliedRev: -1,
+  appliedSession: null,
+  appliedSeq: 0,
+  observedRev: -1,
+  observedSession: null,
+  reqSeq: 0,
+  activeGetSeq: 0,
+  retryCount: 0,
+  refreshErr: null,
   t3Seen: false,
   t3WasConnected: false,
   ticket: { mode: "model" },
@@ -4303,8 +4312,8 @@ function paintModelsButton() {
   const d = modelsState.data;
   if (!d) {
     setText(txt, "Models");
-    btn.classList.remove("model-err");
-    setAttr(btn, "title", "Launch and Ask models");
+    btn.classList.toggle("model-err", !!modelsState.refreshErr);
+    setAttr(btn, "title", modelsState.refreshErr || "Launch and Ask models");
     return;
   }
   const t = d.ticket || {};
@@ -4313,11 +4322,12 @@ function paintModelsButton() {
     ? "Pool: " + (t.pool || "?")
     : ([t.model, t.effort].filter(Boolean).join(" · ") || "Models");
   setText(txt, shortLabel);
-  btn.classList.toggle("model-err", !!(t.error || a.error));
+  btn.classList.toggle("model-err", !!(t.error || a.error || modelsState.refreshErr));
   const tip = "Launch: " + formatModelChoice(t) + " (" + sourceLabel(t.source) + ")" +
     (t.error ? " - " + t.error : "") +
     ". Ask: " + formatModelChoice(a) + " (" + sourceLabel(a.source) + ")" +
-    (a.error ? " - " + a.error : "");
+    (a.error ? " - " + a.error : "") +
+    (modelsState.refreshErr ? ". " + modelsState.refreshErr : "");
   setAttr(btn, "title", tip);
   setAttr(btn, "aria-label", "Launch and Ask models. " + tip);
 }
@@ -4325,7 +4335,14 @@ function paintModelsButton() {
 function paintLaunchModelLine() {
   const el = $("launch-model-text");
   const d = modelsState.data;
-  if (!d) { setText(el, "Model: loading..."); return; }
+  if (!d) {
+    if (modelsState.refreshErr) {
+      el.replaceChildren(h("span", { class: "ml-err" }, modelsState.refreshErr));
+    } else {
+      setText(el, "Model: loading...");
+    }
+    return;
+  }
   const t = d.ticket || {};
   const ovrs = d.repoOverrides || [];
   const typed = ($("issues").value || "").split(/[\s,]+/).map(parseIssueRepo).filter(Boolean);
@@ -4368,19 +4385,34 @@ function paintLaunchModelLine() {
   } else if (ovrs.length > 1) {
     kids.push(h("span", { class: "ml-ovr" }, " · " + ovrs.length + " repos override"));
   }
+  if (modelsState.refreshErr) {
+    kids.push(h("span", { class: "ml-err" }, " · " + modelsState.refreshErr));
+  }
   el.replaceChildren(...kids);
 }
 
 function paintAskModelLine() {
   const el = $("ask-model-text");
   const d = modelsState.data;
-  if (!d) { setText(el, "Ask model: loading..."); return; }
-  const a = d.ask || {};
-  if (a.error) {
-    el.replaceChildren(h("span", { class: "ml-err" }, "Ask model error (" + sourceLabel(a.source) + "): " + a.error));
-  } else {
-    el.replaceChildren(h("span", {}, "Ask: "), h("span", { class: "ml-val" }, formatModelChoice(a)), h("span", {}, " (" + sourceLabel(a.source) + ")"));
+  if (!d) {
+    if (modelsState.refreshErr) {
+      el.replaceChildren(h("span", { class: "ml-err" }, modelsState.refreshErr));
+    } else {
+      setText(el, "Ask model: loading...");
+    }
+    return;
   }
+  const a = d.ask || {};
+  const kids = [];
+  if (a.error) {
+    kids.push(h("span", { class: "ml-err" }, "Ask model error (" + sourceLabel(a.source) + "): " + a.error));
+  } else {
+    kids.push(h("span", {}, "Ask: "), h("span", { class: "ml-val" }, formatModelChoice(a)), h("span", {}, " (" + sourceLabel(a.source) + ")"));
+  }
+  if (modelsState.refreshErr) {
+    kids.push(h("span", { class: "ml-err" }, " · " + modelsState.refreshErr));
+  }
+  el.replaceChildren(...kids);
 }
 
 function pickerPrefix(which) { return which === "ticket" ? "tm" : "am"; }
@@ -4547,7 +4579,11 @@ function paintModels(forceForm) {
   paintAskModelLine();
   const d = modelsState.data;
   const capErr = $("models-cap-err");
-  const errs = d ? [d.capabilitiesError ? "T3 capabilities: " + d.capabilitiesError : "", d.projectsError ? "Projects: " + d.projectsError : ""].filter(Boolean) : [];
+  const errs = [
+    modelsState.refreshErr || "",
+    d && d.capabilitiesError ? "T3 capabilities: " + d.capabilitiesError : "",
+    d && d.projectsError ? "Projects: " + d.projectsError : "",
+  ].filter(Boolean);
   capErr.hidden = !errs.length;
   setText(capErr, errs.join(" · "));
   syncPickerSection("ticket", forceForm);
@@ -4555,26 +4591,92 @@ function paintModels(forceForm) {
   paintRepoOverrides();
 }
 
+function applyModelsSnapshot(d, seq, forceForm) {
+  if (!d || typeof d !== "object") return false;
+  const rev = typeof d.modelsRev === "number" ? d.modelsRev : -1;
+  const sess = typeof d.modelsSession === "string" && d.modelsSession ? d.modelsSession : null;
+  const newSession = !!(sess && modelsState.appliedSession && sess !== modelsState.appliedSession);
+  if (!newSession) {
+    if (rev >= 0 && modelsState.appliedRev >= 0) {
+      if (rev < modelsState.appliedRev) return false;
+      if (rev === modelsState.appliedRev && seq < modelsState.appliedSeq) return false;
+    } else if (seq < modelsState.appliedSeq) {
+      return false;
+    }
+  }
+  modelsState.data = d;
+  modelsState.appliedSeq = seq;
+  if (modelsState.activeGetSeq <= seq) modelsState.activeGetSeq = 0;
+  if (rev >= 0) modelsState.appliedRev = rev;
+  if (sess) modelsState.appliedSession = sess;
+  modelsState.refreshErr = null;
+  const caughtUp = newSession || modelsState.observedRev < 0 || rev < 0 || rev >= modelsState.observedRev;
+  if (caughtUp) modelsState.retryCount = 0;
+  paintModels(!!forceForm);
+  return true;
+}
+
 async function refreshModels(forceForm) {
+  const seq = ++modelsState.reqSeq;
+  modelsState.activeGetSeq = seq;
   try {
     const r = await fetch("/api/models");
-    if (!r.ok) return;
+    if (!r.ok) {
+      let detail = "HTTP " + r.status;
+      try {
+        const errBody = await r.json();
+        if (errBody && errBody.error) detail = errBody.error;
+      } catch (_) {}
+      if (seq >= modelsState.appliedSeq) {
+        modelsState.refreshErr = "Could not refresh models: " + detail;
+        paintModels(false);
+      }
+      return false;
+    }
     const d = await r.json();
-    modelsState.data = d;
-    if (typeof d.modelsRev === "number") modelsState.rev = d.modelsRev;
-    paintModels(!!forceForm);
-  } catch (_) {}
+    applyModelsSnapshot(d, seq, forceForm);
+    return true;
+  } catch (err) {
+    if (seq >= modelsState.appliedSeq) {
+      modelsState.refreshErr = "Could not refresh models: " + ((err && err.message) || "network error");
+      paintModels(false);
+    }
+    return false;
+  } finally {
+    if (modelsState.activeGetSeq === seq) modelsState.activeGetSeq = 0;
+  }
 }
 
 function syncModelsRev(s) {
-  const rev = s && s.service && typeof s.service.modelsRev === "number" ? s.service.modelsRev : -1;
-  const t3Up = !!(s && s.service && s.service.t3 && s.service.t3.connected);
+  const svc = s && s.service;
+  const rev = svc && typeof svc.modelsRev === "number" ? svc.modelsRev : -1;
+  const sess = svc && typeof svc.modelsSession === "string" && svc.modelsSession ? svc.modelsSession : null;
+  const t3Up = !!(svc && svc.t3 && svc.t3.connected);
   const becameConnected = modelsState.t3Seen && t3Up && !modelsState.t3WasConnected;
   modelsState.t3Seen = true;
   modelsState.t3WasConnected = t3Up;
-  const revChanged = rev >= 0 && modelsState.rev >= 0 && rev !== modelsState.rev;
-  if (rev >= 0) modelsState.rev = rev;
-  if (revChanged || becameConnected) refreshModels(false);
+  const sessionChanged = !!(sess && modelsState.observedSession && sess !== modelsState.observedSession);
+  const appliedSessionDiff = !!(sess && modelsState.appliedSession && sess !== modelsState.appliedSession);
+  const revChanged = rev >= 0 && modelsState.observedRev >= 0 && rev !== modelsState.observedRev;
+  if (sess) modelsState.observedSession = sess;
+  if (rev >= 0) modelsState.observedRev = rev;
+  if (sessionChanged || appliedSessionDiff || becameConnected) {
+    modelsState.retryCount = 0;
+    refreshModels(false);
+    return;
+  }
+  if (revChanged) {
+    if (modelsState.appliedRev >= 0 && rev <= modelsState.appliedRev) return;
+    modelsState.retryCount = 0;
+    refreshModels(false);
+    return;
+  }
+  const behind = (rev >= 0 && modelsState.appliedRev >= 0 && rev > modelsState.appliedRev)
+    || (rev >= 0 && modelsState.appliedRev < 0 && !!modelsState.refreshErr);
+  if (behind && !modelsState.activeGetSeq && modelsState.retryCount < MAX_MODEL_RETRIES) {
+    modelsState.retryCount++;
+    refreshModels(false);
+  }
 }
 
 async function saveModelSection(which) {
@@ -4584,16 +4686,15 @@ async function saveModelSection(which) {
   const payload = mode === "pool"
     ? { mode: "pool", pool: $(p + "-pool").value }
     : { mode: "model", provider: $(p + "-provider").value, model: $(p + "-model").value, effort: $(p + "-effort").value || null };
+  const seq = ++modelsState.reqSeq;
   modelsState.busy[which] = true;
   updateSaveEnabled(which);
   setText(msg, "Saving...");
   msg.className = "md-msg";
   try {
     const updated = await send("PUT", "/api/models/" + which, payload);
-    modelsState.data = updated;
-    if (typeof updated.modelsRev === "number") modelsState.rev = updated.modelsRev;
     modelsState.dirty[which] = false;
-    paintModels(true);
+    applyModelsSnapshot(updated, seq, true);
     setText(msg, "Saved.");
     msg.className = "md-msg good";
     announce((which === "ticket" ? "Ticket launch" : "Ask") + " model saved: " + formatModelChoice(updated[which]) + ".");
@@ -4611,6 +4712,7 @@ function openModelsDlg(focusSection) {
   const dlg = $("models-dlg");
   modelsState.dirty.ticket = false;
   modelsState.dirty.ask = false;
+  modelsState.retryCount = 0;
   setText($("tm-msg"), "");
   setText($("am-msg"), "");
   if (modelsState.data) paintModels(true);

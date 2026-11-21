@@ -5211,3 +5211,270 @@ return { beforeLaunch, beforeAsk, beforeBtn, withOverride, ovrList, afterTicketL
         ])
     );
 }
+
+#[tokio::test]
+async fn board_models_picker_preserves_catalog_only_models_exact_instance_and_validates_pools() {
+    use t3_codemode::fake::{disabled_provider, provider};
+
+    let raw_cfg = json!({
+        "pools": {
+            "opus": {
+                "driver": "claudeAgent",
+                "model": "claude-opus-5-5",
+                "effort": "high",
+                "members": [{"instanceId": "claudeAgent"}, {"instanceId": "claude-2"}]
+            },
+            "stale": {
+                "driver": "claudeAgent",
+                "model": "claude-opus-5-5",
+                "effort": "high",
+                "members": [{"instanceId": "claude-gone"}]
+            },
+            "wrong-driver": {
+                "driver": "claudeAgent",
+                "model": "claude-opus-5-5",
+                "effort": "high",
+                "members": [{"instanceId": "codex"}]
+            }
+        }
+    });
+    let cfg = Config::from_value(raw_cfg.clone()).unwrap();
+    let s = start(H::build(Vec::new(), cfg)).await;
+    let cfg_path = s.h.dir.path().join("t3cm-config.json");
+    std::fs::write(&cfg_path, serde_json::to_string_pretty(&raw_cfg).unwrap()).unwrap();
+    let repo = s.h.dir.path().join("widgets");
+    std::fs::create_dir_all(&repo).unwrap();
+    s.h.fake.set_projects(vec![project("p-widgets", &repo.to_string_lossy())]);
+    s.h.remotes.set(&repo.to_string_lossy(), "git@github.com:acme/widgets.git");
+    s.h.fake.set_providers(vec![
+        provider("claudeAgent", "claudeAgent", &["claude-opus-5-5", "claude-haiku-5-5"]),
+        provider("claude-2", "claudeAgent", &["claude-opus-5-5", "claude-catalog-only"]),
+        codex_provider("codex", &["gpt-6.2-sol"]),
+    ]);
+    s.h.fake.set_short_list(1);
+
+    // 1. Catalog-only saved model stays selectable in GET /api/models providers with its effort options.
+    write_workflow_config(
+        &s.h,
+        json!({"version": 1, "models": {"ticket": {"provider": "claude-2", "model": "claude-catalog-only", "effort": "high"}}}),
+    );
+    let body = s.get("/api/models").await;
+    assert_eq!(body["ticket"]["instanceId"], "claude-2");
+    assert_eq!(body["ticket"]["model"], "claude-catalog-only");
+    assert_eq!(body["ticket"]["effort"], "high");
+    assert_eq!(body["ticket"]["error"], Value::Null);
+    let claude2 = body["providers"].as_array().unwrap().iter().find(|p| p["id"] == "claude-2").unwrap();
+    let cat = claude2["models"].as_array().unwrap().iter().find(|m| m["id"] == "claude-catalog-only").unwrap();
+    assert!(cat["efforts"].as_array().unwrap().iter().any(|e| e == "medium"), "{cat}");
+
+    // User can keep the catalog-only model and change only effort.
+    let r = s
+        .put(
+            "/api/models/ticket",
+            json!({"mode": "model", "provider": "claude-2", "model": "claude-catalog-only", "effort": "medium"}),
+            Some(&s.csrf()),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let updated: Value = r.json().await.unwrap();
+    assert_eq!(updated["ticket"]["model"], "claude-catalog-only");
+    assert_eq!(updated["ticket"]["effort"], "medium");
+
+    // 2. Pools with missing members or wrong driver are rejected before replacing a working choice.
+    for bad_pool in ["stale", "wrong-driver"] {
+        let rt = s.put("/api/models/ticket", json!({"mode": "pool", "pool": bad_pool}), Some(&s.csrf())).await;
+        assert_eq!(rt.status(), 400, "ticket should reject {bad_pool}");
+        let ra = s.put("/api/models/ask", json!({"mode": "pool", "pool": bad_pool}), Some(&s.csrf())).await;
+        assert_eq!(ra.status(), 400, "ask should reject {bad_pool}");
+    }
+    let after_bad = s.get("/api/models").await;
+    assert_eq!(after_bad["ticket"]["model"], "claude-catalog-only");
+
+    // Temporary usage limits do not block saving an otherwise valid pool.
+    s.h.exec("async () => wf.limit({ instance: 'claudeAgent', until: '2026-04-16T02:00:00Z' })").await;
+    s.h.exec("async () => wf.limit({ instance: 'claude-2', until: '2026-04-16T02:00:00Z' })").await;
+    let r = s.put("/api/models/ticket", json!({"mode": "pool", "pool": "opus"}), Some(&s.csrf())).await;
+    assert_eq!(r.status(), 200);
+
+    // 3. Removing a pool from disk prevents PUT /api/models/ask from writing an invalid config.
+    std::fs::write(&cfg_path, serde_json::to_string_pretty(&json!({"pools": {}})).unwrap()).unwrap();
+    let r = s.put("/api/models/ask", json!({"mode": "pool", "pool": "opus"}), Some(&s.csrf())).await;
+    assert_eq!(r.status(), 400);
+    let err: Value = r.json().await.unwrap();
+    assert!(err["error"].as_str().unwrap().contains("no longer defined"), "{err}");
+    assert!(Config::load(&cfg_path).is_ok(), "disk config must remain valid");
+    let still_default = s.get("/api/models").await;
+    assert_eq!(still_default["ask"]["mode"], "model");
+
+    // 4. Saved ticket instance never falls back silently to a sibling instance with the same driverKind.
+    s.h.fake.set_short_list(10);
+    let r = s
+        .put(
+            "/api/models/ticket",
+            json!({"mode": "model", "provider": "claudeAgent", "model": "claude-opus-5-5", "effort": "high"}),
+            Some(&s.csrf()),
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    s.h.fake.set_providers(vec![
+        disabled_provider("claudeAgent", "claudeAgent"),
+        provider("claude-2", "claudeAgent", &["claude-opus-5-5"]),
+    ]);
+    let view = s.get("/api/models").await;
+    assert!(view["ticket"]["error"].as_str().unwrap().contains("claudeAgent"), "{view}");
+    assert_eq!(view["ticket"]["instanceId"], Value::Null);
+    let launch: Value = s
+        .post("/api/launch", json!({"issues": ["acme/widgets#42"]}), Some(&s.csrf()), None)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(launch["results"][0]["ok"], false, "{launch}");
+    assert!(launch["results"][0]["error"].as_str().unwrap().contains("claudeAgent"), "{launch}");
+    assert!(s.h.fake.launched().is_empty(), "must not fall back to claude-2");
+}
+
+#[tokio::test]
+async fn board_page_rejects_stale_model_snapshots_and_retries_failed_refreshes() {
+    let (html, st) = two_gate_page().await;
+    let rev1 = json!({
+        "ticket": {"mode": "model", "source": "user", "provider": "claudeAgent", "instanceId": "claudeAgent", "model": "claude-opus-5-5", "effort": "high", "pool": null, "error": null},
+        "ask": {"mode": "model", "source": "default", "provider": "claudeAgent", "instanceId": "claudeAgent", "model": "claude-haiku-5-5", "effort": null, "pool": null, "error": null},
+        "providers": [{"id": "claudeAgent", "driver": "claudeAgent", "name": "Claude", "models": [{"id": "claude-opus-5-5", "efforts": ["high"], "defaultEffort": "high"}]}],
+        "pools": [{"name": "opus", "mixed": false, "driver": "claudeAgent", "model": "claude-opus-5-5", "effort": "high", "strategy": "weighted", "members": [{"instanceId": "claudeAgent", "model": "claude-opus-5-5", "effort": "high"}]}],
+        "repoOverrides": [],
+        "capabilitiesError": null,
+        "projectsError": null,
+        "modelsRev": 1,
+        "modelsSession": "sess-a"
+    });
+    let rev2 = json!({
+        "ticket": {"mode": "pool", "source": "user", "provider": null, "instanceId": null, "model": "claude-opus-5-5", "effort": "high", "pool": "opus", "mixed": false, "error": null},
+        "ask": rev1["ask"],
+        "providers": rev1["providers"],
+        "pools": rev1["pools"],
+        "repoOverrides": [],
+        "capabilitiesError": null,
+        "projectsError": null,
+        "modelsRev": 2,
+        "modelsSession": "sess-a"
+    });
+    let rev3 = json!({
+        "ticket": {"mode": "model", "source": "user", "provider": "claudeAgent", "instanceId": "claudeAgent", "model": "claude-opus-5-5", "effort": "high", "pool": null, "error": null},
+        "ask": rev1["ask"],
+        "providers": rev1["providers"],
+        "pools": rev1["pools"],
+        "repoOverrides": [],
+        "capabilitiesError": null,
+        "projectsError": null,
+        "modelsRev": 3,
+        "modelsSession": "sess-a"
+    });
+    let rev0_new = json!({
+        "ticket": rev2["ticket"],
+        "ask": rev1["ask"],
+        "providers": rev1["providers"],
+        "pools": rev1["pools"],
+        "repoOverrides": [],
+        "capabilitiesError": null,
+        "projectsError": null,
+        "modelsRev": 0,
+        "modelsSession": "sess-b"
+    });
+    let r = run_page_async(
+        &html,
+        &format!(
+            "async () => {{\n{PAGE_HELPERS}\nconst base = {st};\nconst rev1 = {rev1};\nconst rev2 = {rev2};\nconst rev3 = {rev3};\nconst rev0New = {rev0_new};\n{}\n}}",
+            r##"
+const tick = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); };
+const stateWith = (rev, sess) => {
+  const copy = JSON.parse(JSON.stringify(base));
+  copy.service.modelsRev = rev;
+  copy.service.modelsSession = sess;
+  return copy;
+};
+let resolveLateGet = null;
+let mode = "init";
+let getCount = 0;
+fetchReply = (url, opts) => {
+  const m = (opts && opts.method) || "GET";
+  if (url === "/api/models" && m === "GET") {
+    getCount++;
+    if (mode === "init") return Promise.resolve({ ok: true, json: async () => rev1 });
+    if (mode === "late") return new Promise((res) => { resolveLateGet = () => res({ ok: true, json: async () => rev1 }); });
+    if (mode === "fail") return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: "boom" }) });
+    if (mode === "rev3") return Promise.resolve({ ok: true, json: async () => rev3 });
+    if (mode === "newSession") return Promise.resolve({ ok: true, json: async () => rev0New });
+  }
+  if (url === "/api/models/ticket" && m === "PUT") {
+    return Promise.resolve({ ok: true, json: async () => rev2 });
+  }
+  return Promise.resolve({ ok: true, json: async () => ({}) });
+};
+emitState(stateWith(1, "sess-a"));
+await refreshModels(true);
+
+// 1. Start a GET (resolving to rev1), save via PUT (resolving to rev2), then finish the late GET.
+mode = "late";
+const lateP = refreshModels(false);
+document.getElementById("tm-mode-pool").dispatch("click");
+document.getElementById("tm-save").dispatch("click");
+await tick();
+resolveLateGet();
+await lateP;
+await tick();
+const afterLateBtn = document.getElementById("models-btn-text").textContent;
+const afterLateRev = modelsState.appliedRev;
+
+// 2. Revision moves to 3, GET fails -> error is surfaced and rev stays at 2.
+mode = "fail";
+emitState(stateWith(3, "sess-a"));
+await tick();
+const errBanner = document.getElementById("models-cap-err").textContent;
+const errLine = document.getElementById("launch-model-text").textContent;
+const revDuringFail = modelsState.appliedRev;
+
+// 3. Next state event with same revision 3 retries and succeeds -> error clears and rev3 renders.
+mode = "rev3";
+emitState(stateWith(3, "sess-a"));
+await tick();
+const afterRetryBtn = document.getElementById("models-btn-text").textContent;
+const afterRetryErr = document.getElementById("models-cap-err").textContent;
+const afterRetryRev = modelsState.appliedRev;
+
+// 4. Repeated failures stay bounded at MAX_MODEL_RETRIES.
+mode = "fail";
+const beforeBound = getCount;
+for (let i = 0; i < 6; i++) {
+  emitState(stateWith(4, "sess-a"));
+  await tick();
+}
+const boundedAttempts = getCount - beforeBound;
+
+// 5. New service session resets modelsRev to 0 and is accepted.
+mode = "newSession";
+emitState(stateWith(0, "sess-b"));
+await tick();
+const afterRestartBtn = document.getElementById("models-btn-text").textContent;
+const afterRestartRev = modelsState.appliedRev;
+
+return {
+  afterLateBtn, afterLateRev, errBanner, errLine, revDuringFail,
+  afterRetryBtn, afterRetryErr, afterRetryRev, boundedAttempts,
+  afterRestartBtn, afterRestartRev
+};
+"##
+        ),
+    );
+    assert_eq!(r["afterLateBtn"], "Pool: opus", "{r}");
+    assert_eq!(r["afterLateRev"], 2, "{r}");
+    assert!(r["errBanner"].as_str().unwrap().contains("Could not refresh models"), "{r}");
+    assert!(r["errLine"].as_str().unwrap().contains("Could not refresh models"), "{r}");
+    assert_eq!(r["revDuringFail"], 2, "{r}");
+    assert_eq!(r["afterRetryBtn"], "claude-opus-5-5 · high", "{r}");
+    assert_eq!(r["afterRetryErr"], "", "{r}");
+    assert_eq!(r["afterRetryRev"], 3, "{r}");
+    assert_eq!(r["boundedAttempts"], 4, "1 initial + 3 bounded retries: {r}");
+    assert_eq!(r["afterRestartBtn"], "Pool: opus", "{r}");
+    assert_eq!(r["afterRestartRev"], 0, "{r}");
+}
