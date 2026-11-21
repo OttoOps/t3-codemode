@@ -27,6 +27,10 @@ and the threads running. Only the lists scroll.
   Answering a card sends the ticket one reply and resolves the card. A ticket
   that clears its gate, or sends a newer `gate` message, resolves its older
   gate cards, and its handoff resolves all of its open cards.
+  A pool thread that stops on a usage limit gets a `move`/`wait` card, unless
+  its pool's [`moveOnLimit`](config.md#moving-a-limited-thread) is `auto`,
+  which moves the thread with no card, or `never`, which leaves it. A failed
+  automatic move falls back to the card.
 - **New issues,** at the top of the Tickets column: the issues threads have
   filed and reported with `wf.issue` that have no ticket yet, newest first.
   Each row shows the issue's `repo#n` linked to GitHub, its title, how long ago
