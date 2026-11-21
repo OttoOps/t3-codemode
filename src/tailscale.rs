@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -203,57 +204,78 @@ pub struct TailscaleCli {
 }
 
 fn run_command_with_timeout(bin: &Path, args: &[&str], timeout: Duration) -> Result<Output> {
-    let mut child = Command::new(bin)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("running `{} {}`", bin.display(), args.join(" ")))?;
+    let deadline = Instant::now() + timeout;
+    let mut cmd = Command::new(bin);
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    platform::ProcessTree::prepare_std(&mut cmd);
 
+    let mut child = cmd.spawn().with_context(|| format!("running `{} {}`", bin.display(), args.join(" ")))?;
+    let tree = match platform::ProcessTree::start_std(&child) {
+        Ok(tree) => tree,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e).with_context(|| format!("starting `{} {}`", bin.display(), args.join(" ")));
+        }
+    };
+
+    let (out_tx, out_rx) = mpsc::channel();
+    let (err_tx, err_rx) = mpsc::channel();
     let mut out_pipe = child.stdout.take();
     let mut err_pipe = child.stderr.take();
-    let out_reader = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(p) = out_pipe.as_mut() {
             let _ = p.read_to_end(&mut buf);
         }
-        buf
+        let _ = out_tx.send(buf);
     });
-    let err_reader = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         if let Some(p) = err_pipe.as_mut() {
             let _ = p.read_to_end(&mut buf);
         }
-        buf
+        let _ = err_tx.send(buf);
     });
 
-    let start = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
-                if start.elapsed() >= timeout {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    tree.kill();
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ = out_reader.join();
-                    let _ = err_reader.join();
                     bail!("`tailscale {}` timed out after {}s", args.join(" "), timeout.as_secs().max(1));
-                }
-                std::thread::sleep(Duration::from_millis(25));
+                };
+                std::thread::sleep(remaining.min(Duration::from_millis(25)));
             }
             Err(e) => {
+                tree.kill();
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = out_reader.join();
-                let _ = err_reader.join();
                 return Err(e).with_context(|| format!("waiting for `{} {}`", bin.display(), args.join(" ")));
             }
         }
     };
 
-    let stdout = out_reader.join().unwrap_or_default();
-    let stderr = err_reader.join().unwrap_or_default();
+    let collect = |rx: mpsc::Receiver<Vec<u8>>| -> Option<Vec<u8>> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(buf) => Some(buf),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Some(Vec::new()),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+        }
+    };
+
+    let Some(stdout) = collect(out_rx) else {
+        tree.kill();
+        bail!("`tailscale {}` timed out after {}s", args.join(" "), timeout.as_secs().max(1));
+    };
+    let Some(stderr) = collect(err_rx) else {
+        tree.kill();
+        bail!("`tailscale {}` timed out after {}s", args.join(" "), timeout.as_secs().max(1));
+    };
     Ok(Output { status, stdout, stderr })
 }
 
@@ -1024,6 +1046,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("slow-tailscale");
         std::fs::write(&script, "#!/bin/sh\nexec sleep 5\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let start = Instant::now();
+        let err = run_command_with_timeout(&script, &["status", "--json"], Duration::from_millis(150)).unwrap_err();
+        assert!(format!("{err:#}").contains("timed out"), "{err:#}");
+        assert!(start.elapsed() < Duration::from_secs(3), "took too long: {:?}", start.elapsed());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_with_timeout_bounds_output_when_helper_keeps_stdout_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("leaking-tailscale");
+        std::fs::write(&script, "#!/bin/sh\nsleep 5 &\nprintf '{\"ok\":true}'\nexit 0\n").unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
