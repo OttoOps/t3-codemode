@@ -197,6 +197,8 @@ pub struct PrSeen {
     pub at: String,
     #[serde(default)]
     pub left: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_at: Option<String>,
 }
 
 pub struct Wake<'a> {

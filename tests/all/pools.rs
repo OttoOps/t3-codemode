@@ -1197,6 +1197,7 @@ async fn a_limited_pool_ticket_moves_to_another_ready_member_on_one_card() {
             tickets: vec![(old.clone(), T0.into()), ("mcp:other".into(), T0.into())],
             at: T0.into(),
             left: None,
+            queued_at: None,
         })
         .unwrap();
     let running = launch(&h, 42).await["thread"].as_str().unwrap().to_string();
