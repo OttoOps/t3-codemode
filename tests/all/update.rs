@@ -299,6 +299,33 @@ async fn an_up_to_date_update_still_repairs_the_skills() {
     assert!(back, "the missing skill file is written again");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn an_up_to_date_update_waits_for_a_running_update() {
+    let env = setup(NEW, false).await;
+    let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let (blocked, back_while_held, after, back) = tokio::task::spawn_blocking(move || {
+        install_skills(&env);
+        let file = env.dir.path().join(".agents/skills/t3-worker/procedure.md");
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir_all(env.state()).unwrap();
+        let lock = std::fs::File::create(env.state().join("update.lock")).unwrap();
+        lock.lock().unwrap();
+        let blocked = env.t3cm(&["update", "--no-restart", "--version", &current]);
+        let back_while_held = file.is_file();
+        drop(lock);
+        let after = env.t3cm(&["update", "--no-restart", "--version", &current]);
+        (blocked, back_while_held, after, file.is_file())
+    })
+    .await
+    .unwrap();
+    let t = text(&blocked);
+    assert!(!blocked.status.success(), "{t}");
+    assert!(t.contains("another t3cm update is running"), "{t}");
+    assert!(!back_while_held, "no skill file is written while another update holds the lock");
+    assert!(after.status.success(), "{}", text(&after));
+    assert!(back, "the sync runs once the lock is free");
+}
+
 #[cfg(target_os = "linux")]
 mod service {
     use super::*;

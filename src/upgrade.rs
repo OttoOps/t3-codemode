@@ -456,6 +456,7 @@ pub async fn run(o: Opts) -> Result<()> {
         return Ok(());
     }
     if want == current || (asked.is_none() && want < current) {
+        let _lock = lock_updates(&o.state_dir)?;
         println!("t3cm {current} is up to date (latest release: {want}).");
         if skills_behind()? {
             return sync_skills(&std::env::current_exe()?, &current).await;
