@@ -77,9 +77,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install the musl toolchain
-        if: endsWith(matrix.target, '-musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: |
+          pkgs=(mold)
+          if [[ "$TARGET" == *-musl ]]; then
+            pkgs+=(musl-tools)
+          fi
+          sudo apt-get update && sudo apt-get install -y "${pkgs[@]}"
+          mold --version
+          echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - run: cargo build --profile dist --locked --target "$TARGET" --bin t3cm
       - name: Locate the binary
         run: |
@@ -87,6 +97,11 @@ jobs:
             *-windows-*) echo "BIN=target/$TARGET/dist/t3cm.exe" >> "$GITHUB_ENV" ;;
             *) echo "BIN=target/$TARGET/dist/t3cm" >> "$GITHUB_ENV" ;;
           esac
+      - name: Verify mold linked the binary
+        if: runner.os == 'Linux'
+        run: |
+          readelf -p .comment "$BIN"
+          readelf -p .comment "$BIN" | grep -q 'mold '
       - name: The binary runs and reports the version
         if: matrix.target != 'x86_64-apple-darwin'
         run: test "$("$BIN" --version)" = "t3cm $VERSION"
