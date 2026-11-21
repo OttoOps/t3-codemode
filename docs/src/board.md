@@ -189,14 +189,31 @@ inside it. A card outside it still counts toward "N hidden".
 | Call | Does |
 |---|---|
 | `wf.launchTicket({ issue, project?, title?, model?, effort? })` | Launch a ticket thread for a GitHub issue |
-| `wf.cards({ all? })` | The open cards, oldest first; `all` includes resolved ones |
+| `wf.cards({ all?, context?, projects? })` | The open cards, oldest first, each with its `repo` and `project`; `all` includes resolved ones |
 | `wf.answer(id, text)` | Answer a card for the user, the same as a button on the page |
-| `wf.feed({ limit? })` | The latest notes and events, each with its `ticket`, `ticketLabel`, `ticketTitle`, `ticketStatus`, `repo` and `project` |
+| `wf.feed({ limit?, context?, projects? })` | The latest notes and events, each with its `ticket`, `ticketLabel`, `ticketTitle`, `ticketStatus`, `repo` and `project` |
 | `wf.board({ parent: "board", all: true })` | Every ticket on the board, with live status |
 | `wf.issue({ url, title?, note? })` | Put an issue this thread just filed on the [new issues](#new-issues) list |
 
 ```js
 async () => (await wf.cards()).map(c => `${c.id} ${c.label}: ${c.options.join(" | ")}`)
+```
+
+`context` and `projects` narrow `wf.cards` and `wf.feed` to the same projects
+the page would show. `context` takes a saved [context](#contexts)'s id or its
+name, and uses only its projects. Its statuses, card kinds and search stay on
+the page. `projects` takes a list of T3 project ids. A repo or title value
+from an older context works there too. Both follow the page's rule from
+[ADR 0004](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0004-context-projects-by-id.md),
+so a card or row matches by its project id, by the repo or title the board
+knows for that id, or, with no project id, by a repo the board ties to the
+picked id. A card or row with no project and no repo matches nothing. An
+empty list, or a context with no projects, keeps everything. Giving both, or
+a context that does not exist, throws. With a filter, `wf.feed` scans the
+latest 200 rows and returns up to `limit` of the ones that match.
+
+```js
+async () => (await wf.cards({ context: "Widget work" })).map(c => `${c.id} ${c.repo}: ${c.text}`)
 ```
 
 `wf.launchTicket` finds the T3 project whose workspace `origin` remote is the

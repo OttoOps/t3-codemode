@@ -114,12 +114,16 @@ struct AnswerArgs {
 struct CardsArgs {
     #[serde(default)]
     all: bool,
+    context: Option<String>,
+    projects: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct FeedArgs {
     limit: Option<usize>,
+    context: Option<String>,
+    projects: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -406,11 +410,13 @@ impl Wf {
             "show" => return self.show(&parse::<HandleArgs>(method, args)?.handle),
             "cards" => {
                 let a: CardsArgs = parse(method, args)?;
-                return Ok(json!(self.cards_with(a.all)?));
+                let filter = self.project_filter(a.context.as_deref(), a.projects)?;
+                return Ok(json!(self.cards_in(a.all, filter.as_ref())?));
             }
             "feed" => {
                 let a: FeedArgs = parse(method, args)?;
-                return Ok(json!(self.feed(a.limit.unwrap_or(self.config.board.feed))?));
+                let filter = self.project_filter(a.context.as_deref(), a.projects)?;
+                return Ok(json!(self.feed_in(a.limit.unwrap_or(self.config.board.feed), filter.as_ref())?));
             }
             "answer" => {
                 let a: AnswerArgs = parse(method, args)?;

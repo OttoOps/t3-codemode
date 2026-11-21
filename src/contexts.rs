@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::fmt;
 
+use anyhow::bail;
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::board::CARD_KINDS;
 use crate::store::{BoardContext, ContextPut, ContextSpec};
@@ -110,7 +113,88 @@ fn check_spec(spec: ContextSpec) -> Result<ContextSpec, ContextError> {
     })
 }
 
+#[derive(Clone)]
+struct Place {
+    id: String,
+    repo: String,
+    title: String,
+}
+
+impl Place {
+    fn of(item: &Value) -> Option<Place> {
+        let s = |v: &Value| v.as_str().unwrap_or_default().trim().to_string();
+        let p = Place { id: s(&item["project"]["id"]), repo: s(&item["repo"]), title: s(&item["project"]["title"]) };
+        (!p.id.is_empty() || !p.repo.is_empty() || !p.title.is_empty()).then_some(p)
+    }
+
+    fn hit(&self, v: &str) -> bool {
+        if !self.id.is_empty() && v == self.id {
+            return true;
+        }
+        let low = v.to_lowercase();
+        (!self.repo.is_empty() && low == self.repo.to_lowercase())
+            || (!self.title.is_empty() && low == self.title.to_lowercase())
+    }
+}
+
+pub struct ProjectFilter {
+    want: Vec<String>,
+    known: HashMap<String, Place>,
+}
+
+impl ProjectFilter {
+    pub fn new<'a>(want: Vec<String>, board: impl IntoIterator<Item = &'a Value>) -> ProjectFilter {
+        let mut known: HashMap<String, Place> = HashMap::new();
+        for p in board.into_iter().filter_map(Place::of).filter(|p| !p.id.is_empty()) {
+            let k = known.entry(p.id.clone()).or_insert_with(|| p.clone());
+            if k.repo.is_empty() {
+                k.repo = p.repo;
+            }
+            if k.title.is_empty() {
+                k.title = p.title;
+            }
+        }
+        ProjectFilter { want, known }
+    }
+
+    pub fn keeps(&self, item: &Value) -> bool {
+        Place::of(item).is_some_and(|p| self.want.iter().any(|v| self.matches(&p, v)))
+    }
+
+    fn matches(&self, p: &Place, v: &str) -> bool {
+        if p.hit(v) {
+            return true;
+        }
+        if !p.id.is_empty() {
+            return self.known.get(&p.id).is_some_and(|k| k.hit(v));
+        }
+        !p.repo.is_empty() && self.known.get(v).is_some_and(|k| k.repo.to_lowercase() == p.repo.to_lowercase())
+    }
+}
+
 impl Wf {
+    pub fn project_filter(
+        &self,
+        context: Option<&str>,
+        projects: Option<Vec<String>>,
+    ) -> anyhow::Result<Option<ProjectFilter>> {
+        let want: Vec<String> = match (context, projects) {
+            (Some(_), Some(_)) => bail!("give a context or projects, not both"),
+            (Some(key), None) => {
+                let all = self.contexts()?;
+                let found = all.iter().find(|c| c.id == key).or_else(|| all.iter().find(|c| same_name(&c.name, key)));
+                let Some(c) = found else { bail!("no saved context with the id or name {key:?}") };
+                c.spec.projects.clone()
+            }
+            (None, Some(p)) => p.into_iter().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect(),
+            (None, None) => return Ok(None),
+        };
+        if want.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(ProjectFilter::new(want, &self.board_places()?)))
+    }
+
     pub fn contexts(&self) -> anyhow::Result<Vec<BoardContext>> {
         self.store.contexts_all()
     }

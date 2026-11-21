@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::clock::{local_clock, parse_ts};
+use crate::contexts::ProjectFilter;
 use crate::issues::issue_key;
 use crate::pools::Picked;
 use crate::reconcile::{CardPr, card_pr};
@@ -17,6 +18,7 @@ pub const BOARD: &str = "board";
 pub const CARD_KINDS: &[&str] = &["gate", "blocker", "report", "escalate"];
 const FEED_KINDS: &[&str] = &["note", "event"];
 const DONE_SHOWN: usize = 20;
+const FEED_MAX: usize = 200;
 const ASKS_SHOWN: usize = 8;
 const SETTLED_SHOWN: usize = 200;
 const MAX_OPTIONS: usize = 8;
@@ -365,6 +367,13 @@ pub fn ask_brief(question: &str) -> String {
     )
 }
 
+fn kept(mut items: Vec<Value>, filter: Option<&ProjectFilter>) -> Vec<Value> {
+    if let Some(f) = filter {
+        items.retain(|v| f.keeps(v));
+    }
+    items
+}
+
 pub fn pr_of(th: &Value) -> Value {
     let last = th["pullRequests"].as_array().and_then(|a| a.last()).cloned();
     let pr = last.or_else(|| Some(th["linkedPullRequest"].clone()).filter(Value::is_object));
@@ -641,6 +650,21 @@ impl Wf {
             .collect())
     }
 
+    pub fn cards_in(&self, all: bool, filter: Option<&ProjectFilter>) -> Result<Vec<Value>> {
+        let cards = self.cards_with(all)?.iter().map(|c| self.placed(json!(c), c.ticket.as_deref())).collect();
+        Ok(kept(cards, filter))
+    }
+
+    pub(crate) fn board_places(&self) -> Result<Vec<Value>> {
+        let mut settled = self.settled_tickets()?;
+        settled.truncate(SETTLED_SHOWN);
+        let mut out = self.tree()?;
+        out.extend(settled);
+        out.extend(self.cards_in(false, None)?);
+        out.extend(self.feed(self.config.board.feed)?);
+        Ok(out)
+    }
+
     pub(crate) fn card_add(&self, c: NewCard) -> Result<String> {
         let options = c.options.unwrap_or_else(|| reply_options(c.body));
         let pr = c.pr.or_else(|| card_pr(c.body));
@@ -798,7 +822,7 @@ impl Wf {
         let ticket_of = |id: &str| labels.iter().find(|(c, _, _)| c == id).map(|(_, _, t)| t.clone());
         Ok(self
             .store
-            .msgs_recent(FEED_KINDS, &to, limit.clamp(1, 200))?
+            .msgs_recent(FEED_KINDS, &to, limit.clamp(1, FEED_MAX))?
             .into_iter()
             .map(|m| {
                 let ticket = ticket_of(&m.from).or_else(|| ticket_of(&m.to));
@@ -820,6 +844,13 @@ impl Wf {
                 self.placed(v, ticket.as_deref())
             })
             .collect())
+    }
+
+    pub fn feed_in(&self, limit: usize, filter: Option<&ProjectFilter>) -> Result<Vec<Value>> {
+        let Some(f) = filter else { return self.feed(limit) };
+        let mut rows = kept(self.feed(FEED_MAX)?, Some(f));
+        rows.truncate(limit.clamp(1, FEED_MAX));
+        Ok(rows)
     }
 
     fn ensure_not_on_board(&self, label: &str) -> Result<()> {
