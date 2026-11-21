@@ -60,8 +60,8 @@ models." A ticket with a parent sends that line up as a note.
 
 `model worker: pool <name>` (or `model ticket`) means t3cm picks the T3
 provider instance for each launch from the pool `<name>` in the t3cm config,
-so threads spread across several accounts of one provider. The pool sets the
-model and effort. `t3wf` cannot read t3cm's pools, so it prints the line
+so threads spread across several accounts. The pool sets the model and
+effort; in a mixed pool, each member sets its own. `t3wf` cannot read t3cm's pools, so it prints the line
 without checking it; the pick checks it.
 
 - **t3cm listed** (`mcp__t3cm__execute`): just before the launch, run one
