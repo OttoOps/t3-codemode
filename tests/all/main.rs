@@ -17,7 +17,6 @@ mod setup;
 mod setup_steps;
 mod skills_install;
 mod slots;
-mod slots_parity;
 mod t3_http;
 mod types;
 mod update;

@@ -705,6 +705,6 @@ mod tests {
             assert!(skills.contains(name), "{name} missing from {skills:?}");
             assert!(b.raw(&format!("{name}/SKILL.md")).is_some());
         }
-        assert!(b.raw("t3-workflow/scripts/t3wf.py").is_some());
+        assert!(!b.expected().keys().any(|p| p.ends_with(".py")), "embedded bundle must carry no Python files");
     }
 }

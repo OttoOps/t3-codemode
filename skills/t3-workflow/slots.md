@@ -1,7 +1,8 @@
 # Slots
 
 The role skills name capabilities, not skills. Each **slot** holds one, and
-`t3wf` resolves it to whatever this machine has installed.
+the `t3cm` service resolves it to whatever the calling agent has installed
+and enabled.
 
 | Slot | Holds | Default |
 |---|---|---|
@@ -14,58 +15,66 @@ The role skills name capabilities, not skills. Each **slot** holds one, and
 A slot with no setting uses its default, so a machine with no config at all
 works.
 
-## Reading slots in a role
+## Looking up slots in a role
 
-A role reads its slots when it starts and again on every resume, because a
-skill can be installed or removed mid-ticket:
+Roles do not bulk-read all slots at start or on resume. Each step looks up
+only the slot it needs, right before it uses it, through `execute` (or
+`t3cm exec -` when `mcp__t3cm__execute` is not listed):
 
-```bash
-t3wf slots --skills '<every skill this session lists, comma separated>'
-```
-
-Run it through the `t3wf` script in code mode too: t3cm has no `wf` route
-for slots. Each line is one slot, `<slot>: <setting> [<source layer>]`; add
-`--json` for the same data as fields. Act on each skill entry by its form:
-
-| Entry | Do |
+| Step | Call |
 |---|---|
-| `<name> (Skill tool)` | invoke `<name>` with the Skill tool |
-| `<name> (inline: read <path> and apply it)` | read that `SKILL.md` and apply it step by step, as if invoked; the Skill tool refuses it |
-| `SKIP <name>: no longer resolves` | **skip** it (below) |
-| `none` | the slot is off |
+| ticket, choosing delivery and gate wording | `await wf.slot("delivery")` |
+| ticket or overseer, launching a thread | `await wf.slot("models", { repo? })` |
+| worker, before opening the PR | `await wf.slot("review")` |
+| worker, publishing | `await wf.slot("passes")` |
+| any role, a command fails | `await wf.renewal({ output, repo? })` |
 
-A `PROBLEM:` on a line (a tag-deploy with no deploy skill, a model T3 does
-not offer) is a skip too, and that slot falls back to its default. A
-`config problem (ignored)` line is one note: the file or block it names is
-ignored, and the layers below it decide.
+Pass `{ repo: "<workspace root>" }` when the repository differs from this
+thread's project root (for example, an overseer checking another repo, or a
+worker reading its worktree's `AGENTS.md`).
 
-A model line reads `<model> effort <effort> on <provider>`, each part present
-only when set, `provider default`, or `pool <name>`. A pool line needs t3cm at
-launch: [A pool on a model line](#a-pool-on-a-model-line).
+`wf.slot(name)` returns the slot's resolved fields, its `source` layer, a
+one-line `line`, and `warnings`. Each skill object carries `status` (`"ok"`
+or `"missing"`), `name`, `path`, `inline`, and `how`. Act on each skill
+object by its fields:
+
+| Fields | Do |
+|---|---|
+| `status: "ok"`, `how: "Skill tool"` | invoke `name` with the Skill tool |
+| `status: "ok"`, `inline: true` (`how: "inline: read <path> and apply it"`) | read `path` and apply it step by step, as if invoked; the Skill tool refuses it |
+| `status: "missing"` | **skip** it (below) |
+| `skill: null` (or `skills: []`) | the slot is off |
+
+A `problem` field on a slot (a tag-deploy with no deploy skill, a model T3
+does not offer) is a skip too, and that slot falls back to its default. Any
+item in `warnings` (such as an ignored config problem or a missing
+`X-T3-Config-Dir` header) goes in one note to the parent (at the root, to
+the user).
 
 **Skip** means carry on without that skill, and say so once per skill per
 run, in one note to the parent:
-`t3wf send --kind note --body 'slot <slot>: <name> skipped, <reason>'`. At
-the root, tell the user that line. A skipped slot never opens a gate,
-raises a blocker, or stops the ticket; `t3wf doctor` is where the user
+`await wf.send({ kind: "note", body: "slot <slot>: <name> skipped, <reason>" })`.
+At the root, tell the user that line. A skipped slot never opens a gate,
+raises a blocker, or stops the ticket; `t3cm doctor` is where the user
 repairs it.
 
-**No config.** When the first line says `config: none (defaults)`, every
-slot runs on its default. The overseer and the ticket each tell the user
-once per run: "No T3 workflow config yet, so every slot uses its default.
-Run the `setup-t3-workflow` skill to pick a reviewer, passes, delivery and
-models." A ticket with a parent sends that line up as a note.
+**No config.** When a slot's `source` is `"default"` and `t3cm` reports no
+user config (for example in `wf.slots().config`), every slot runs on its
+default. Tell the user once per run at the root: "No T3 workflow config yet,
+so every slot uses its default. Run the `setup-t3-workflow` skill to pick a
+reviewer, passes, delivery and models." A ticket with a parent sends that
+line up as a note.
 
-### A pool on a model line
+### A pool on a model slot
 
-`model worker: pool <name>` (or `model ticket`) means t3cm picks the T3
+When `wf.slot("models")` returns a role whose `spec.pool` is set (and whose
+`modelSelection` is `{ pool: "<name>", pick: ... }`), t3cm picks the T3
 provider instance for each launch from the pool `<name>` in the t3cm config,
 so threads spread across several accounts. The pool sets the model and
-effort; in a mixed pool, each member sets its own. `t3wf` cannot read t3cm's pools, so it prints the line
-without checking it; the pick checks it.
+effort; in a mixed pool, each member sets its own. `t3cm doctor` checks that
+every configured pool exists in t3cm's config.
 
-- **t3cm listed** (`mcp__t3cm__execute`): just before the launch, run one
-  `execute` with `async () => wf.pick({ pool: "<name>" })`. Pass its
+- Just before the launch, call `await wf.pick({ pool: "<name>" })`. Pass its
   `modelSelection` to `t3_thread_launch` as it is, and compare the launched
   thread's model against it. Pick once per launch, and never reuse an
   earlier pick: each pick moves the pool's balance. Tell the parent (at the
@@ -76,10 +85,6 @@ without checking it; the pick checks it.
   the action line `reply "retry" once a member is back, or "default" to
   launch on the provider default`. On "default", launch without
   `modelSelection`.
-- **No t3cm:** skip the pool, as for a `PROBLEM:`: send
-  `slot model <role>: pool <name> skipped, needs t3cm`, and launch without
-  `modelSelection`, on the provider default. Never guess a member from the
-  pool's name or from `orchestrator_capabilities`.
 
 ## Where settings live
 
@@ -105,7 +110,7 @@ The config file:
     "ticket": {"provider": "claudeAgent", "model": "claude-opus-5-5", "effort": "high"},
     "worker": {"model": "claude-opus-5-5", "effort": "high"}
   },
-  "writtenBy": "0.6.0",
+  "writtenBy": "0.7.0",
   "steps": ["slot:review", "slot:passes", "slot:credentials", "slot:delivery", "slot:models", "rule:filed-issues"]
 }
 ```
@@ -115,19 +120,17 @@ A role set to a pool holds `pool` alone, such as
 config.
 
 `"review": null` turns review off; leaving `review` out keeps the default.
-`match` is a Python regular expression tried against the failing command's
-output.
+`match` is a regular expression (with lookaround and backreferences, matching
+Python's syntax) tried against the failing command's output by `wf.renewal`;
+`t3cm doctor` flags any pattern t3cm cannot compile.
 
 Setup and t3cm write the last two keys themselves. `writtenBy` is the release
 that last wrote the file. `steps` lists the setup steps done on this machine,
 by the ids in `setup-t3-workflow/steps.json`. That file lists each release's
 steps: an `interview` step is a slot setup asks about, and an `auto` step
-(the filed-issue rule) needs no answers, so `t3cm skills install` and
-`update` apply it. A file with no `steps` was written before setup recorded
-them, so every step marked `legacy` counts as done. Setup reads its release
-from the stamp `t3cm skills install` puts in its `SKILL.md`, so a copy with
-no stamp, such as one from `npx skills` or a git clone, leaves `writtenBy`
-out.
+needs no answers, so `t3cm skills install` and `update` apply it. A file with
+no `steps` was written before setup recorded them, so every step marked
+`legacy` counts as done.
 
 The `AGENTS.md` block reads these bullets and ignores the rest:
 
@@ -146,33 +149,30 @@ The `AGENTS.md` block reads these bullets and ignores the rest:
 ## Finding skills
 
 A slot names a skill by its bare name (`sol-loop`) or its full name
-(`cbrip:sol-loop`). A bare name matches in any namespace. The search order:
+(`cbrip:sol-loop`). A bare name matches in any namespace. The service reads
+each agent's reported config folder (`X-T3-Config-Dir`, or `t3cm exec`'s
+environment) and applies its `settings.json` `enabledPlugins`, so disabled
+plugins never resolve. The search order:
 
-1. the skills listed in this session (`--skills`);
-2. `~/.claude/skills` (or `$CLAUDE_CONFIG_DIR/skills`);
-3. `~/.agents/skills`;
-4. the project's `.claude/skills`;
-5. `~/.codex/skills` (or `$CODEX_HOME/skills`);
-6. the Claude plugin cache, then the Codex plugin cache, as `plugin:name`.
+1. `~/.claude/skills` (or `$CLAUDE_CONFIG_DIR/skills`);
+2. `~/.agents/skills`;
+3. the project's `.claude/skills`;
+4. `~/.codex/skills` (or `$CODEX_HOME/skills`);
+5. the Claude plugin cache (enabled plugins only), then the Codex plugin
+   cache, as `plugin:name`.
 
 A full name matches only itself, so a recorded full name always wins. A skill
 installed with no namespace has its bare name as its full name: `sol-loop`
 picks tstack's bare `sol-loop` even when `cbrip:sol-loop` is installed too.
 A bare name that matches only namespaced skills uses the first and lists the
-others. A
-skill whose frontmatter sets `disable-model-invocation` resolves as
-**inline**: read its `SKILL.md` at the printed path and apply it step by
-step, because the Skill tool refuses it.
+others. A skill whose frontmatter sets `disable-model-invocation` resolves
+as **inline**: read its `SKILL.md` at the returned `path` and apply it step
+by step, because the Skill tool refuses it.
 
 ## Commands
 
 | Command | Use |
 |---|---|
-| `t3wf slots [--skills <names>]` | at run time: each slot's effective setting, its source layer, and how to invoke its skill ([Reading slots in a role](#reading-slots-in-a-role)) |
-| `t3wf resolve <name>` | every installed skill a name matches, in search order |
-| `t3wf doctor` | every configured skill still resolves, models exist in T3, delivery is complete; exits 1 on a problem |
-| `t3wf check-config` | the config file's and the `AGENTS.md` block's shape, offline |
-
-`slots`, `resolve` and `doctor` take `--repo <dir>` (default: the current
-directory's repository) and `--json`. `slots` and `doctor` check models
-through T3 when it is reachable; `--no-t3` skips that.
+| `t3cm slots [--repo <dir>] [--json] [--no-t3]` | print the service's slot resolution for this shell's agent and repository |
+| `t3cm doctor [--repo <dir>] [--json] [--no-t3]` | check the whole workflow install (config shape, skills, models, pools, service, T3 connection, skills drift, setup steps); exits 1 on a problem |
+| `t3cm doctor --resolve <name>` | list every installed skill a name matches, in search order |

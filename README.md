@@ -45,10 +45,8 @@ every OS, the config, and the `t3cm` commands.
 
 The T3 workflow runs on five agent skills in [`skills/`](skills). They need
 T3 Code, whose `t3_thread_launch` tool starts the ticket and worker threads,
-and they load in its Claude Code and Codex threads. Their scripts need Linux,
-macOS or WSL, because `t3wf.py` uses
-`fcntl`, which native Windows lacks; the `t3cm` service itself also runs on
-Windows.
+and the `t3cm` service, which runs the link protocol and resolves the slots.
+They load in T3 Code's Claude Code and Codex threads.
 
 | Skill | Say | What it does |
 |---|---|---|
@@ -97,24 +95,18 @@ installed, no passes, delivery by merge.
 Some skills call others, and a few read their neighbors' files by relative
 path, so t3cm installs all five together in one folder:
 
-- Every skill needs `t3-workflow`, whose scripts run the protocol and read
-  the slots.
+- Every skill needs `t3-workflow`, which documents the `wf.*` link protocol
+  and slot lookups, and a running `t3cm` service (via `mcp__t3cm__execute`
+  in Claude Code, or `t3cm exec -` in Codex and other shell-only agents).
 - `t3-overseer` launches `t3-ticket` threads.
 - `t3-ticket` launches `t3-worker` threads and reads `t3-worker`'s procedure.
   For tag-deploy delivery it runs the deploy skill you name in setup.
-- `setup-t3-workflow` uses `t3-workflow`'s scripts and docs.
+- `setup-t3-workflow` runs `t3cm setup` and uses `t3-workflow`'s docs.
 - `t3-worker` uses the skills you put in its slots: a reviewer such as
   `sol-loop` from [t3dotgg/tstack](https://github.com/t3dotgg/tstack), passes
   such as `pr` from [mattpocock/skills](https://github.com/mattpocock/skills),
   and a credential renewal skill. Each is optional, and the worker skips a
   slot with no skill.
-
-When the t3cm service is not running, the `t3-workflow` skill's own script
-runs the link protocol. Its watcher then runs only when a `t3wf` command does,
-so idle threads get no nudges until one runs. To put the watcher on a timer,
-run `python3 ~/.agents/skills/t3-workflow/scripts/t3wf.py daemon install`
-once. It sets up a systemd user timer. macOS has no systemctl, so there a
-launchd agent that runs `t3wf.py tick` every 2 minutes does the same job.
 
 ## Contributing
 

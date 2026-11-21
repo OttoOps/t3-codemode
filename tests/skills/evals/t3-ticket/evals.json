@@ -17,7 +17,8 @@
       ],
       "checks": [
         {
-          "bash": "t3wf\\.py.*init.*--role ticket"
+          "tool": "*",
+          "input": "wf\\.init\\([^)]*ticket"
         },
         {
           "gh": "issue view 42"
@@ -145,28 +146,23 @@
     },
     {
       "id": 3,
-      "name": "pool-without-t3cm",
+      "name": "pool-via-t3cm-exec",
       "prompt": "Work on issue 42 and ship it. Split it as one PR, \"feat: add a --quiet flag\", on branch feat/42-quiet. I approve that split now, so launch its worker without asking again.",
-      "expected_output": "Without t3cm, skips the worker's pool, says it needs t3cm, and launches the worker on the provider default with no modelSelection.",
+      "expected_output": "Without the t3cm MCP tool listed, reaches t3cm through `t3cm exec -` to pick from the opus pool and launches the worker with the pick's modelSelection.",
       "files": [],
       "expectations": [
-        "Launches the worker",
-        "Passes no modelSelection, so the worker gets the provider default",
-        "Tells the user the pool needs t3cm",
+        "Picks from the opus pool through t3cm exec -",
+        "Launches the worker with the pick's modelSelection on claude-b",
         "Changes, adds or deletes no file in the repo",
         "Commits nothing"
       ],
       "checks": [
         {
-          "t3": "t3_thread_launch"
+          "bash": "t3cm\\s+exec\\s+-.*wf\\.pick\\([^)]*opus"
         },
         {
           "t3": "t3_thread_launch",
-          "input": "modelSelection",
-          "none": true
-        },
-        {
-          "text": "t3cm"
+          "input": "(?=.*\"modelSelection\")(?=.*\"instanceId\":\\s*\"claude-b\")"
         },
         {
           "repo": ".",

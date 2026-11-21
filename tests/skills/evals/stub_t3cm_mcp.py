@@ -75,6 +75,20 @@ def handle(msg):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--cli":
+        args = sys.argv[2:]
+        if len(args) >= 1 and args[0] == "exec":
+            src = sys.stdin.read() if len(args) < 2 or args[1] == "-" else open(args[1]).read()
+            log("execute", {"code": src})
+            res = answer(src)
+            text = res["content"][0]["text"]
+            if res.get("isError"):
+                sys.stderr.write(text + "\n")
+                sys.exit(1)
+            sys.stdout.write(text + "\n")
+            return
+        sys.stderr.write(f"stub t3cm: unsupported args {args}\n")
+        sys.exit(1)
     for line in sys.stdin:
         line = line.strip()
         if not line:

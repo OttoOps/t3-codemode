@@ -1,10 +1,13 @@
 # t3-workflow over code mode (t3-codemode)
 
-Read this when the `t3cm` MCP server is connected, so its two tools,
-`mcp__t3cm__search` and `mcp__t3cm__execute`, are listed. It replaces every
-`t3wf` command and most direct `mcp__t3-code__*` calls: the protocol state,
-message bodies, notes, the waiting list and your own scratch state live in
-the service, and only what your code returns enters your context.
+The `t3cm` service runs the T3 workflow. Every thread reaches it through its
+two MCP tools, `mcp__t3cm__search` and `mcp__t3cm__execute`, or, when those
+tools are not listed (Codex, other non-Claude agents, or a session started
+before t3cm connected), by piping the same async arrow function to
+`t3cm exec -` (`~/.local/bin/t3cm` when `t3cm` is not on `PATH`). The
+protocol state, message bodies, notes, slots, the waiting list and your own
+scratch state live in the service, and only what your code returns enters
+your context.
 
 ## The two tools
 
@@ -27,13 +30,26 @@ async () => {
 }
 ```
 
+### Peek a thread
+
+Read a child or retiring thread in a few lines without pulling its whole
+transcript into context:
+
+```js
+async () => {
+  const th = await t3.thread_read({ threadId: "<id>", limit: 3 });
+  const tail = (th.items ?? []).slice(-3).map(m => `${m.role ?? m.kind}: ${(m.text ?? "").slice(0, 300)}`);
+  return { status: th.status, link: th.link, tail };
+}
+```
+
 ## The link protocol in code
 
-The rules are the same as in SKILL.md: notes never wake, wakes carry a capped
-body and a handle, wakes to a busy thread coalesce, and the service's watcher
-nudges idle children and escalates. Only the calls change.
+Notes never wake, wakes carry a capped body and a handle, wakes to a busy
+thread coalesce, and the service's watcher nudges idle children and
+escalates.
 
-| Moment | In `execute` |
+| Moment | In `execute` (or `t3cm exec -`) |
 |---|---|
 | Root thread starts | `await wf.init({ role: "overseer" })` |
 | Ticket starts with no brief link | `await wf.init({ role: "ticket" })` joins the board under the thread's T3 title, or under `label` when you pass one. `root: true` keeps it off the board |
@@ -45,9 +61,11 @@ nudges idle children and escalates. Only the calls change.
 | Merging a PR on the user's word | `await wf.merge({ repo: "acme/widgets", pr: 41, head: sha, method: "rebase" })` returns `queued`, `merged`, `waiting` or `refused` |
 | Done | `await wf.send({ kind: "handoff", body })` |
 | Message a child | `await wf.reply({ to: "widgets#41", body })` |
-| Children at a glance | `return (await wf.board()).map(c => `${c.label} ${c.status} ${c.gate ?? ""}`)` |
+| Children at a glance | `return (await wf.board()).children.map(c => `${c.label} ${c.status} ${c.gate ?? ""}`)` |
 | A capped body in full | `return (await wf.show("m42")).body` |
 | Unread notes | `return (await wf.inbox()).map(n => `${n.label}: ${n.head}`)` |
+| One slot at point of use | `await wf.slot("review")` (or `"passes"`, `"delivery"`, `"models"`) |
+| Match a failed command against renewals | `await wf.renewal({ output })` |
 
 A wake arrives as a message whose first line is
 `[t3cm <kind> from=<label> msg=<handle>]`. Act on it as your role says.
@@ -83,16 +101,15 @@ no ticket message lands in any model's context.
   with `wf.board({ parent: "board", all: true })`, `wf.cards({ all: true })`
   and `wf.feed()`, writes the answer onto the page, and is archived.
 
-Slots have no `wf` route: read them with the `t3wf slots` script, as
-[slots.md](slots.md#reading-slots-in-a-role) says, in code mode too.
-
 ## Per role
 
 **Ticket.** Join from the brief, or `wf.init({ role: "ticket" })` when the
 brief has no link block, send gates, blockers and the handoff to the
 board with `wf.send`, and progress as notes. Resume step: `wf.board()` for
-this work's workers. Hand a worker its next PR's context through shared
-memory instead of pasting it:
+this work's workers. Look up `wf.slot("delivery")` and `wf.slot("models")`
+when each step needs them, and `wf.renewal({ output })` when a deploy-watch
+command fails. Hand a worker its next PR's context through shared memory
+instead of pasting it:
 
 ```js
 async () => {
@@ -116,7 +133,9 @@ t3-ticket's "The merge wait" says.
 
 **Worker.** Join from the brief, send routine progress as notes, the PR as
 an `event`, the merge request as a `gate` that names its head
-(`head <sha>`), and the handoff at the end. It never merges. On a
+(`head <sha>`), and the handoff at the end. Look up `wf.slot("review")`
+before opening the PR, `wf.slot("passes")` in Publishing, and
+`wf.renewal({ output })` when a command fails. It never merges. On a
 `[t3cm nudge`, run the resume step, then send a note, open a gate, or hand
 off.
 
@@ -128,8 +147,8 @@ questions go through `wf.board()` and `wf.inbox()`, never `t3_thread_read`.
 
 ## When the service is down
 
-`execute` fails to connect: fall back to `t3wf` as SKILL.md says, and tell
-the user once: **ACTION NEEDED:** start the code-mode service, here:
+When `execute` or `t3cm exec -` cannot reach the service, stop and tell the
+user once: **ACTION NEEDED:** start the code-mode service, here:
 `systemctl --user start t3-codemode` (macOS:
 `launchctl kickstart gui/$(id -u)/com.ottoops.t3-codemode`, or when the agent
 is not loaded,
@@ -137,12 +156,16 @@ is not loaded,
 Windows:
 `Enable-ScheduledTask t3-codemode; Start-ScheduledTask t3-codemode`).
 
+When `wf.slot` or `wf.renewal` fails with an unknown-method error, the
+running binary is older than these skills. Stop and tell the user once:
+**ACTION NEEDED:** update t3cm so the service matches these skills, here:
+`t3cm update`.
+
 ## Installing t3cm
 
-t3cm is optional. Without it, `t3wf` runs the whole protocol. Offer it at
-most once per session, and install only after the user says yes: it adds a
-per-user service (a systemd user unit, a launchd agent, or a Windows logon
-task) and a user-scope MCP server.
+`t3cm` is required for the T3 workflow. Install only after the user says
+yes: it adds a per-user service (a systemd user unit, a launchd agent, or a
+Windows logon task) and a user-scope MCP server for Claude Code.
 
 1. **Release first.** The installer downloads the latest release, checks it
    against `SHA256SUMS`, installs `t3cm` and its service, and registers the
@@ -172,9 +195,14 @@ task) and a user-scope MCP server.
 3. **Verify.** `curl -s http://127.0.0.1:47731/healthz` must show
    `"connected": true` under `t3` (Windows:
    `(Invoke-RestMethod http://127.0.0.1:47731/healthz).t3.connected` must be
-   `True`), and `claude mcp get t3cm` must show an HTTP entry for
-   `http://127.0.0.1:47731/mcp` with the `X-T3-Thread` header. When the
-   installer printed the `claude mcp add` command instead, run it first. When an
-   older `t3cm` entry points elsewhere, ask the user before replacing it.
-4. **Tell the user** the MCP tools load at session start, so new threads use
-   t3cm and this one stays on `t3wf`. The board is at http://127.0.0.1:47731/.
+   `True`). Run `claude mcp get t3cm` from the project directory where the
+   next thread will run, because project-scope MCP entries override
+   user-scope ones: it must show an HTTP entry for
+   `http://127.0.0.1:47731/mcp` with the `X-T3-Thread` and
+   `X-T3-Config-Dir` headers. When the installer printed the
+   `claude mcp add` command instead, run it first. When an older `t3cm`
+   entry points elsewhere, ask the user before replacing it.
+4. **Tell the user** Claude Code loads MCP tools at session start, so new
+   Claude sessions use `mcp__t3cm__execute` directly, and this session (and
+   non-Claude agents such as Codex) reaches the same service through
+   `t3cm exec -`. The board is at http://127.0.0.1:47731/.

@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -5,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::skills::{Bundle, user_home, write_atomic};
+use crate::store::Store;
 
 pub const CATALOG: &str = "setup-t3-workflow/steps.json";
 pub const RULE: &str = "t3-workflow/rules/report-filed-issues.md";
@@ -13,6 +16,10 @@ pub const RULE_FILE: &str = "t3-workflow-filed-issues.md";
 pub const RULE_START: &str = "<!-- t3-workflow:filed-issues:start -->";
 pub const RULE_END: &str = "<!-- t3-workflow:filed-issues:end -->";
 pub const HEADER_STEP: &str = "mcp:config-dir-header";
+pub const RETIRE_T3WF_STEP: &str = "retire:t3wf";
+pub const T3WF_UNITS: [&str; 2] = ["t3wf-tick", "cbrip-t3wf-tick"];
+pub const SKILLS_CHANGED_NOTE: &str =
+    "The workflow skills changed. Invoke the t3-workflow skill again before your next step.";
 pub const MCP_NAME: &str = "t3cm";
 pub const CONFIG_DIR_HEADER: &str = "X-T3-Config-Dir";
 pub const CONFIG_DIR_VALUE: &str = "${CLAUDE_CONFIG_DIR:-}";
@@ -52,7 +59,7 @@ pub fn catalog(bundle: &Bundle) -> Result<Vec<Step>> {
     }
     for s in &c.steps {
         match s.kind {
-            Kind::Auto if s.id != RULE_STEP && s.id != HEADER_STEP => {
+            Kind::Auto if s.id != RULE_STEP && s.id != HEADER_STEP && s.id != RETIRE_T3WF_STEP => {
                 bail!("{CATALOG}: t3cm does not know how to apply step {}", s.id)
             }
             Kind::Interview if s.slot.is_none() => bail!("{CATALOG}: interview step {} names no slot", s.id),
@@ -69,6 +76,10 @@ pub struct Env {
     pub claude_json: PathBuf,
     pub claude_config_dir: Option<PathBuf>,
     pub claude_cmd: PathBuf,
+    pub systemd_user: PathBuf,
+    pub t3wf_state: PathBuf,
+    pub skills_dir: PathBuf,
+    pub systemctl_cmd: Option<PathBuf>,
 }
 
 impl Env {
@@ -87,6 +98,12 @@ impl Env {
         if let Some(p) = var("CODEX_HOME") {
             env.codex = p;
         }
+        if let Some(p) = var("T3WF_STATE_DIR") {
+            env.t3wf_state = p;
+        } else if let Some(p) = var("XDG_STATE_HOME") {
+            env.t3wf_state = p.join("t3-workflow");
+        }
+        env.systemctl_cmd = var("T3WF_SYSTEMCTL").or_else(|| Some(PathBuf::from("systemctl")));
         Ok(env)
     }
 
@@ -99,6 +116,10 @@ impl Env {
             claude_json: home.join(".claude.json"),
             claude_config_dir: None,
             claude_cmd: PathBuf::from("claude"),
+            systemd_user: config.join("systemd").join("user"),
+            t3wf_state: home.join(".local").join("state").join("t3-workflow"),
+            skills_dir: home.join(".agents").join("skills"),
+            systemctl_cmd: None,
         }
     }
 }
@@ -392,8 +413,228 @@ pub fn reregister_command(env: &Env, r: &Registration, removed: bool) -> String 
     reregister_command_for(env, r, removed, cfg!(windows))
 }
 
-fn auto_state(id: &str, rule: &[RuleTarget], reg: &Registration) -> AutoState {
-    if id == HEADER_STEP { reg_state(reg) } else { rule_state(rule) }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RetireState {
+    Present,
+    Clean,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct T3wfRetire {
+    pub status: RetireState,
+    pub units: Vec<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shim: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pycache: Option<PathBuf>,
+}
+
+pub fn inspect_retire(env: &Env) -> T3wfRetire {
+    let mut units = Vec::new();
+    for unit in T3WF_UNITS {
+        for ext in ["timer", "service"] {
+            let p = env.systemd_user.join(format!("{unit}.{ext}"));
+            if p.exists() || std::fs::symlink_metadata(&p).is_ok() {
+                units.push(p);
+            }
+        }
+    }
+    let shim_path = env.t3wf_state.join("v2").join("bin").join("t3wf-tick");
+    let shim = (shim_path.exists() || std::fs::symlink_metadata(&shim_path).is_ok()).then_some(shim_path);
+    let pycache_path = env.skills_dir.join("t3-workflow").join("scripts").join("__pycache__");
+    let pycache = pycache_path.is_dir().then_some(pycache_path);
+    let status = if !units.is_empty() || shim.is_some() || pycache.is_some() {
+        RetireState::Present
+    } else {
+        RetireState::Clean
+    };
+    T3wfRetire { status, units, shim, pycache }
+}
+
+fn retire_state(r: &T3wfRetire) -> AutoState {
+    match r.status {
+        RetireState::Present => AutoState::Missing,
+        RetireState::Clean => AutoState::NotApplicable,
+    }
+}
+
+fn run_systemctl(cmd: &Path, args: &[&str]) {
+    let _ = std::process::Command::new(cmd)
+        .arg("--user")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+fn apply_retire(env: &Env, r: &T3wfRetire) -> Result<Vec<PathBuf>> {
+    let mut removed = Vec::new();
+    if !r.units.is_empty() {
+        if let Some(sysctl) = &env.systemctl_cmd {
+            for unit in T3WF_UNITS {
+                let has_unit = r.units.iter().any(|p| {
+                    p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(&format!("{unit}.")))
+                });
+                if has_unit {
+                    run_systemctl(sysctl, &["disable", "--now", &format!("{unit}.timer")]);
+                }
+            }
+        }
+        for path in &r.units {
+            match std::fs::remove_file(path) {
+                Ok(()) => removed.push(path.clone()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
+            }
+        }
+        if let Some(sysctl) = &env.systemctl_cmd {
+            run_systemctl(sysctl, &["daemon-reload"]);
+        }
+    }
+    if let Some(shim) = &r.shim {
+        match std::fs::remove_file(shim) {
+            Ok(()) => removed.push(shim.clone()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("removing {}", shim.display())),
+        }
+        if let Some(bin_dir) = shim.parent() {
+            let _ = std::fs::remove_dir(bin_dir);
+        }
+    }
+    if let Some(pycache) = &r.pycache {
+        match std::fs::remove_dir_all(pycache) {
+            Ok(()) => removed.push(pycache.clone()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("removing {}", pycache.display())),
+        }
+        if let Some(scripts_dir) = pycache.parent() {
+            let _ = std::fs::remove_dir(scripts_dir);
+        }
+    }
+    Ok(removed)
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenLinksReport {
+    pub warnings: Vec<String>,
+    pub t3cm_threads: Vec<String>,
+    pub t3wf_threads: Vec<String>,
+}
+
+pub fn check_open_links(env: &Env, t3cm_state_dir: &Path) -> OpenLinksReport {
+    let mut out = OpenLinksReport::default();
+    let mut t3wf_ids = BTreeSet::new();
+    let links_path = env.t3wf_state.join("v2").join("links.json");
+    if let Ok(raw) = std::fs::read(&links_path)
+        && let Ok(v) = serde_json::from_slice::<Value>(&raw)
+    {
+        let mut labels = Vec::new();
+        for l in v["links"].as_object().into_iter().flatten().map(|(_, l)| l).filter(|l| l["closed"] != true) {
+            let child = l["child"].as_str().unwrap_or("");
+            let parent = l["parent"].as_str().unwrap_or("");
+            let label = l["label"].as_str().unwrap_or(child);
+            if !child.is_empty() {
+                t3wf_ids.insert(child.to_string());
+            }
+            if !parent.is_empty() && parent != "board" {
+                t3wf_ids.insert(parent.to_string());
+            }
+            labels.push(format!("{label} ({child})"));
+        }
+        let queued = v["outbox"].as_array().map_or(0, Vec::len);
+        if let Some(outbox) = v["outbox"].as_array() {
+            for m in outbox {
+                if let Some(to) = m["to"].as_str().filter(|s| !s.is_empty() && *s != "board") {
+                    t3wf_ids.insert(to.to_string());
+                }
+            }
+        }
+        if !labels.is_empty() || queued > 0 {
+            let list = if labels.is_empty() { String::new() } else { format!(": {}", labels.join(", ")) };
+            out.warnings.push(format!(
+                "t3wf registry {} has {} open link(s) and {queued} undelivered message(s){list}",
+                links_path.display(),
+                labels.len()
+            ));
+        }
+    }
+    out.t3wf_threads = t3wf_ids.into_iter().collect();
+
+    let mut t3cm_ids = BTreeSet::new();
+    if t3cm_state_dir.join("store.db").is_file()
+        && let Ok(store) = Store::open(t3cm_state_dir)
+        && let Ok(open) = store.links_open()
+    {
+        let mut labels = Vec::new();
+        for l in open.iter().filter(|l| l.role == "worker" || l.role == "ticket") {
+            t3cm_ids.insert(l.child.clone());
+            if !l.parent.is_empty() && l.parent != "board" {
+                t3cm_ids.insert(l.parent.clone());
+            }
+            labels.push(format!("{} ({})", l.label, l.child));
+        }
+        if !labels.is_empty() {
+            out.warnings.push(format!("t3cm store has {} open workflow link(s): {}", labels.len(), labels.join(", ")));
+        }
+    }
+    out.t3cm_threads = t3cm_ids.into_iter().collect();
+    out
+}
+
+pub fn nudge_threads(t3_bin: Option<&Path>, threads: &[String]) -> (Vec<String>, Vec<String>) {
+    if threads.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let Some(bin) = t3_bin else {
+        return (
+            Vec::new(),
+            vec![format!(
+                "could not nudge {} open workflow thread(s) because the `t3` CLI was not found: {}",
+                threads.len(),
+                threads.join(", ")
+            )],
+        );
+    };
+    let mut nudged = Vec::new();
+    let mut notes = Vec::new();
+    for id in threads {
+        let res = std::process::Command::new(bin)
+            .args(["thread", "send", id, "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(SKILLS_CHANGED_NOTE.as_bytes());
+                }
+                child.wait_with_output()
+            });
+        match res {
+            Ok(o) if o.status.success() => nudged.push(id.clone()),
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                let msg = err.trim();
+                notes.push(format!("could not nudge thread {id}: `t3 thread send` exited {} ({msg})", o.status));
+            }
+            Err(e) => notes.push(format!("could not nudge thread {id}: {e}")),
+        }
+    }
+    (nudged, notes)
+}
+
+fn auto_state(id: &str, rule: &[RuleTarget], reg: &Registration, retire: &T3wfRetire) -> AutoState {
+    if id == HEADER_STEP {
+        reg_state(reg)
+    } else if id == RETIRE_T3WF_STEP {
+        retire_state(retire)
+    } else {
+        rule_state(rule)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -488,6 +729,7 @@ pub struct Steps {
     pub missing: Vec<Missing>,
     pub rule: Vec<RuleTarget>,
     pub registration: Registration,
+    pub retire_t3wf: T3wfRetire,
 }
 
 impl Steps {
@@ -504,6 +746,7 @@ pub fn check(env: &Env, bundle: &Bundle) -> Result<Steps> {
     let steps = catalog(bundle)?;
     let rule = rule_targets(env, bundle)?;
     let reg = registration(env);
+    let retire = inspect_retire(env);
     let config = load_config(&env.config);
     let (state, problem, written_by, recorded) = match &config {
         Config::Absent => (ConfigState::Absent, None, None, Vec::new()),
@@ -518,7 +761,9 @@ pub fn check(env: &Env, bundle: &Bundle) -> Result<Steps> {
     let mut missing = Vec::new();
     for s in &steps {
         let fix = match s.kind {
-            Kind::Auto if auto_state(&s.id, &rule, &reg) == AutoState::Missing => "t3cm skills update".to_string(),
+            Kind::Auto if auto_state(&s.id, &rule, &reg, &retire) == AutoState::Missing => {
+                "t3cm skills update".to_string()
+            }
             Kind::Auto => continue,
             Kind::Interview if recorded.contains(&s.id) || state == ConfigState::Problem => continue,
             Kind::Interview if state == ConfigState::Absent => format!("run {SETUP_SKILL}"),
@@ -536,6 +781,7 @@ pub fn check(env: &Env, bundle: &Bundle) -> Result<Steps> {
         missing,
         rule,
         registration: reg,
+        retire_t3wf: retire,
     })
 }
 
@@ -548,6 +794,8 @@ pub fn missing_steps(env: &Env, bundle: &Bundle) -> Result<Vec<Missing>> {
 pub struct Applied {
     pub wrote: Vec<PathBuf>,
     pub registered: Vec<PathBuf>,
+    pub removed: Vec<PathBuf>,
+    pub nudged: Vec<String>,
     pub notes: Vec<String>,
     pub newly_recorded: Vec<String>,
     pub steps: Steps,
@@ -564,7 +812,7 @@ pub fn apply(env: &Env, bundle: &Bundle) -> Result<Applied> {
             wrote.push(t.path.clone());
         }
     }
-    let (mut registered, mut notes) = (Vec::new(), Vec::new());
+    let (mut registered, mut removed, mut notes) = (Vec::new(), Vec::new(), Vec::new());
     let mut reg = registration(env);
     if steps.iter().any(|s| s.id == HEADER_STEP) && reg.status == RegState::Stale {
         match reregister(env, &reg) {
@@ -582,11 +830,22 @@ pub fn apply(env: &Env, bundle: &Bundle) -> Result<Applied> {
             ),
         }
     }
+    let mut retire = inspect_retire(env);
+    if steps.iter().any(|s| s.id == RETIRE_T3WF_STEP) && retire.status == RetireState::Present {
+        removed = apply_retire(env, &retire)?;
+        retire = inspect_retire(env);
+    }
+    let retired_any = !removed.is_empty();
     let mut newly = Vec::new();
     if let Config::Found { mut cfg, recorded } = load_config(&env.config) {
         let mut ids = done_ids(&steps, &recorded);
         for s in steps.iter().filter(|s| s.kind == Kind::Auto) {
-            if auto_state(&s.id, &rule, &reg) == AutoState::Done && !ids.contains(&s.id) {
+            let done = if s.id == RETIRE_T3WF_STEP {
+                retired_any && retire.status == RetireState::Clean
+            } else {
+                auto_state(&s.id, &rule, &reg, &retire) == AutoState::Done
+            };
+            if done && !ids.contains(&s.id) {
                 ids.push(s.id.clone());
                 newly.push(s.id.clone());
             }
@@ -602,7 +861,15 @@ pub fn apply(env: &Env, bundle: &Bundle) -> Result<Applied> {
             write_atomic(&real(&env.config), text.as_bytes())?;
         }
     }
-    Ok(Applied { wrote, registered, notes, newly_recorded: newly, steps: check(env, bundle)? })
+    Ok(Applied {
+        wrote,
+        registered,
+        removed,
+        nudged: Vec::new(),
+        notes,
+        newly_recorded: newly,
+        steps: check(env, bundle)?,
+    })
 }
 
 fn setup_lines(s: &Steps, out: &mut String) {
@@ -654,6 +921,13 @@ pub fn describe_steps(s: &Steps) -> String {
                 s.registration.path.display()
             ));
         }
+        if s.retire_t3wf.status == RetireState::Present {
+            let mut items = Vec::new();
+            items.extend(s.retire_t3wf.units.iter().map(|p| p.display().to_string()));
+            items.extend(s.retire_t3wf.shim.iter().map(|p| p.display().to_string()));
+            items.extend(s.retire_t3wf.pycache.iter().map(|p| p.display().to_string()));
+            out.push_str(&format!("setup step {RETIRE_T3WF_STEP}: t3wf leftovers remain ({})\n", items.join(", ")));
+        }
         out.push_str("fix: t3cm skills update\n");
     }
     setup_lines(s, &mut out);
@@ -673,6 +947,12 @@ pub fn describe_applied(a: &Applied) -> String {
             "re-registered Claude Code's {MCP_NAME} server in {} with the {CONFIG_DIR_HEADER} header; new sessions send it\n",
             p.display()
         ));
+    }
+    for p in &a.removed {
+        out.push_str(&format!("removed t3wf leftover {}\n", p.display()));
+    }
+    if !a.nudged.is_empty() {
+        out.push_str(&format!("nudged {} open workflow thread(s): {}\n", a.nudged.len(), a.nudged.join(", ")));
     }
     for n in &a.notes {
         out.push_str(&format!("warning: {n}\n"));

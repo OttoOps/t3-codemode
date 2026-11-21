@@ -20,37 +20,39 @@ so they never stand in for a wake.
 ## The link protocol
 
 You are a child on a `t3-workflow` link, and the orchestrator is your
-parent. Invoke that skill before step 1 and run the `t3wf join` line from
-the brief's "t3-workflow link" block; it binds the link. From then on,
-every message to the orchestrator goes through `t3wf send`, and a message
-that opens with `[t3wf2` needs no command before you act on its body. The
-kinds this procedure sends: `event` (PR opened, ready to merge, updated),
-`note` (routine progress that needs nothing from the orchestrator: built,
-review started, checks green, a skipped slot), `gate` (step 7), `blocker` (a
-stop: wrong checkout, wrong identity), and `handoff` (step 6).
+parent. Invoke that skill before step 1 and run the `wf.join(...)` call from
+the brief's link block (through `mcp__t3cm__execute`, or piped to
+`t3cm exec -` when `execute` is not listed; see
+[Reaching t3cm](../t3-workflow/SKILL.md#reaching-t3cm)); it binds the link.
+From then on, every message to the orchestrator goes through `wf.send(...)`,
+and a message that opens with `[t3cm` needs no command before you act on its
+body. The kinds this procedure sends: `event` (PR opened, ready to merge,
+updated), `note` (routine progress that needs nothing from the orchestrator:
+built, review started, checks green, a skipped slot), `gate` (step 7),
+`blocker` (a stop: wrong checkout, wrong identity), and `handoff` (step 6).
 
 `t3-workflow` asks each role for one thing. Yours is:
 
-- **Resume step:** re-read the step you were on, and read the slots again
-  (step 1). Once the PR is open,
+- **Resume step:** re-read the step you were on. Once the PR is open,
   `list_thread_pull_requests`: when this PR (or a follow-up PR) is no
   longer watched, call `watch_pull_request` on it again. Then check the
   PR's state (`gh pr view <number> --json state,headRefOid,statusCheckRollup`)
   and act on any wake you missed (step 4). Then carry on from that step.
 
-When you wait on a person, send the gate: `t3wf send --kind gate --gate
-merge --body '<action line>'` when you send "ready to merge", `--gate
-review` when you send review findings for the user to decide, and the
-gate's own name for step 7. It opens the gate, so the watcher reads
-your silence as a wait, not a stall. Clear it with `t3wf gate --clear` when
-the answer, "Merged", or "Delivered" arrives.
+When you wait on a person, send the gate:
+`await wf.send({ kind: "gate", gate: "merge", body: "<action line>" })` when
+you send "ready to merge", `gate: "review"` when you send review findings
+for the user to decide, and the gate's own name for step 7. It opens the
+gate, so the watcher reads your silence as a wait, not a stall. Clear it
+with `await wf.gate({ clear: true })` when the answer, "Merged", or
+"Delivered" arrives.
 
 ## 1. Orient
 
 Read the brief: the issue (or "no issue"), which PR this is ("PR n of N"),
 its acceptance line, its passes, the delivery (`merge` or `tag-deploy`),
-the previous worker's handoff, and the "t3-workflow link" block. Pick up
-the handoff's state and decisions as settled.
+the previous worker's handoff, and the link block. Pick up the handoff's
+state and decisions as settled.
 
 Call `t3_worktree_status`. The thread must be attached to a worktree on the
 brief's branch. When it reports the project root, the main workspace, or
@@ -58,12 +60,6 @@ the default branch, send the orchestrator the status output and the line
 "worker bound to the main checkout, not building", then end the turn. The
 main checkout belongs to every thread; this PR's work belongs in its own
 worktree.
-
-Read the slots with `t3wf slots`, as
-[Reading slots in a role](../t3-workflow/slots.md#reading-slots-in-a-role)
-says. Three lines steer this procedure: `review` (the review in step 2),
-`passes` (Publishing, step 2) and `credentials` (step 7). Send the skip
-notes it calls for now.
 
 ## 2. Build
 
@@ -107,8 +103,10 @@ pushed under the wrong identity.
 ### Independent review
 
 When the acceptance line holds and the done-checks pass, commit the PR's
-scope, read the slots again, then run the `review` slot's skill on this
-branch, as its entry says, before anything is pushed. Its base is
+scope, then look up the review slot with `await wf.slot("review")` as
+[Looking up slots in a role](../t3-workflow/slots.md#looking-up-slots-in-a-role)
+says (sending any skip note it calls for). Run the returned skill on this
+branch as its `how` says, before anything is pushed. Its base is
 `git merge-base HEAD origin/main`, its intent is the PR's acceptance line,
 and its out-of-scope is the work the brief gives to later PRs. Follow it to
 its verdict. Name any review worktree it could not remove in the "opened"
@@ -123,7 +121,7 @@ check above.
   2-3 lines each, or the blocker, as the `review` gate. End the turn. The
   user decides, and the orchestrator relays the answer. Push nothing until
   it comes.
-- **No reviewer** (`review: none`, or the reviewer skipped): go to step 3.
+- **No reviewer** (`skill: null`, or the reviewer skipped): go to step 3.
   The PR description says no independent review ran, and why: none is
   configured, or the configured reviewer no longer resolves.
 
@@ -179,17 +177,17 @@ does those and messages you. Never merge the PR yourself, through `gh`,
   done-checks, push with `--force-with-lease=<branch>:<old head sha>`. The
   PR targets `main`; it is never stacked on another PR.
 - **The required checks passed:** send the orchestrator "PR n/N ready to
-  merge: #<number>, head <sha>, checks passed" as the `merge` gate (`t3wf
-  send --kind gate --gate merge --body '<action line>'`). Keep `head <sha>`
-  in it: a merge approval holds only for the head its gate names. Send it
-  once per head sha, and never while a `review` gate is open: send it after
-  the user's answer clears that gate.
+  merge: #<number>, head <sha>, checks passed" as the `merge` gate
+  (`await wf.send({ kind: "gate", gate: "merge", body: "<action line>" })`).
+  Keep `head <sha>` in it: a merge approval holds only for the head its
+  gate names. Send it once per head sha, and never while a `review` gate is
+  open: send it after the user's answer clears that gate.
 - **After any push:** when you already sent "opened" or "ready" for an older
   head, send "PR n/N updated: #<number>, head <sha>" with what changed. The
   orchestrator merges only at the head you named (`wf.merge` takes it as
-  `head`, `gh pr merge` as `--match-head-commit`), so it must know the head.
+  `head`), so it must know the head.
 
-- **A message that opens with `[t3wf2 nudge`:** "The link protocol"
+- **A message that opens with `[t3cm nudge`:** "The link protocol"
   above. It sends you through your resume step, then a note, a gate, or the
   handoff.
 
@@ -245,9 +243,9 @@ Run this only after the orchestrator's "Merged" or "Delivered" message.
    result: the merge commit, and after "Delivered" the tag and the
    pipeline URL (after "Merged" on a `tag-deploy` brief, that the deploy
    was skipped), plus the URL of any follow-up PR.
-3. Send the block, verbatim and whole, to the orchestrator with `t3wf send
-   --kind handoff --body -` through a quoted heredoc. It closes the link.
-4. `t3wf sweep`.
+3. Send the block, verbatim and whole, to the orchestrator with
+   `await wf.send({ kind: "handoff", body })`. It closes the link.
+4. `await wf.sweep()`.
 5. `t3_thread_organize` with action `settle`.
 
 Send first, settle second, every time. A settled thread with an unsent
@@ -256,22 +254,24 @@ handoff leaves the orchestrator waiting on a message that will never arrive.
 ## 7. On a human gate
 
 Some steps only a person can do: a login, a decision, a review. When you
-reach one, send the orchestrator one `gate` message (`t3wf send --kind gate
---gate <name> --body '<action line>'`) naming the gate, what you need, and
-the exact command or link the user will use; it opens the gate. End the
-turn. The orchestrator
-tells the user and messages you once it clears; then `t3wf gate --clear`.
+reach one, send the orchestrator one `gate` message
+(`await wf.send({ kind: "gate", gate: "<name>", body: "<action line>" })`)
+naming the gate, what you need, and the exact command or link the user will
+use; it opens the gate. End the turn. The orchestrator tells the user and
+messages you once it clears; then `await wf.gate({ clear: true })`.
 
-**Credential renewal.** When a command fails and its output matches a
-pattern on the `credentials` slot's line (`/<pattern>/ -> <skill>`, a
-Python regular expression), run that renewal skill as its entry says, then
-run the failed command again, once. When the renewal needs the user (a
-sign-in to approve), send its gate naming what the user does; when the
-renewal's own exit wakes you, retry then, without waiting for the
+**Credential renewal.** When a command fails, call
+`await wf.renewal({ output })` with the failing command's output (sending
+any skip note as
+[Looking up slots in a role](../t3-workflow/slots.md#looking-up-slots-in-a-role)
+says). When it returns a renewal skill that is not skipped, run it as its
+`how` says, then run the failed command again, once. When the renewal needs
+the user (a sign-in to approve), send its gate naming what the user does;
+when the renewal's own exit wakes you, retry then, without waiting for the
 orchestrator. When the retry fails too, send a `blocker` carrying the
-command and its output. A failure no pattern matches, or one whose renewal
-skill is skipped, goes back to the step it came from, as it would with no
-renewal configured.
+command and its output. When `wf.renewal` returns `null` or a skipped
+skill, go back to the step it came from, as it would with no renewal
+configured.
 
 ## Publishing
 
@@ -287,16 +287,18 @@ not included.
    skill with the Skill tool and follow it. Knowing the skill's sections is
    not running it. An earlier PR's description is never the format: it may
    have skipped this step too, and copying it passes the miss on.
-2. **Passes.** Run the `passes` slot's skills on the whole text from
-   step 1, in the order the slot lists them, each on the text the one
-   before it left, each as its entry says: the Skill tool, or inline from
-   its `SKILL.md`. Follow all of each pass, including any check script it
-   ships, and apply every rule it sets, one rule at a time. Fix each
-   violation before the next pass. Where the format from step 1 requires
-   something a rule forbids (a parenthetical issue reference, a template
-   heading), keep the format and note the exception. A slot of `none` runs
-   no pass. A pass scoped to part of the text, such as a skill call whose
-   arguments name only one section, does not cover the rest.
+2. **Passes.** Look up `await wf.slot("passes")` (sending any skip note as
+   [Looking up slots in a role](../t3-workflow/slots.md#looking-up-slots-in-a-role)
+   says) and run its skills on the whole text from step 1, in the order
+   returned, each on the text the one before it left, each as its `how`
+   says: the Skill tool, or inline from its `path`. Follow all of each
+   pass, including any check script it ships, and apply every rule it sets,
+   one rule at a time. Fix each violation before the next pass. Where the
+   format from step 1 requires something a rule forbids (a parenthetical
+   issue reference, a template heading), keep the format and note the
+   exception. An empty `skills` list runs no pass. A pass scoped to part of
+   the text, such as a skill call whose arguments name only one section,
+   does not cover the rest.
 3. **Report.** Where you report the publish (for a PR, the "opened"
    message), add a `Publishing:` line: the format skill you invoked, the
    template you filled, or "no format set by the repo"; each pass you ran,

@@ -7,6 +7,7 @@
     {"id": "slot:delivery", "since": "0.3.0", "kind": "interview", "slot": "delivery", "legacy": true},
     {"id": "slot:models", "since": "0.3.0", "kind": "interview", "slot": "models", "legacy": true},
     {"id": "rule:filed-issues", "since": "0.5.0", "kind": "auto"},
-    {"id": "mcp:config-dir-header", "since": "0.7.0", "kind": "auto"}
+    {"id": "mcp:config-dir-header", "since": "0.7.0", "kind": "auto"},
+    {"id": "retire:t3wf", "since": "0.7.0", "kind": "auto"}
   ]
 }

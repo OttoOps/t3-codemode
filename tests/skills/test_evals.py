@@ -65,7 +65,7 @@ class EvalSets(unittest.TestCase):
         for skill in BRIEF_SKILLS:
             briefs = [i for i in live.load(skill, "triggers") if i["should_trigger"] and i["form"] == "brief"]
             self.assertTrue(briefs, skill)
-            self.assertTrue(any("## t3-workflow link" in i["query"] for i in briefs), skill)
+            self.assertTrue(any("## t3-codemode link" in i["query"] for i in briefs), skill)
             self.assertTrue(any(f"the {skill} skill" not in i["query"] for i in briefs),
                             f"{skill} needs a brief that does not name the skill")
 
@@ -116,10 +116,13 @@ class EvalSets(unittest.TestCase):
                                 for e in with_t3cm for c in e["checks"]), skill)
         self.assertTrue([e for e in live.load("t3-ticket", "evals")["evals"]
                          if "pool" in e["setup"].get("config", {}).get("models", {}).get("worker", {})
-                         and "t3cm" not in e["setup"]], "no eval launches a pool slot without t3cm")
+                         and "t3cm" not in e["setup"]], "no eval launches a pool slot through t3cm exec -")
         setup = live.load("setup-t3-workflow", "evals")["evals"]
         self.assertTrue(any(c.get("tool") == "execute" and "wf\\.pools" in c.get("input", "")
                             for e in setup for c in e["checks"]))
+        worker = live.load("t3-worker", "evals")["evals"]
+        self.assertTrue(any(c.get("tool") == "*" and "wf\\.renewal" in c.get("input", "")
+                            for e in worker for c in e["checks"]), "no worker eval exercises wf.renewal")
 
     def test_the_worker_runs_a_slash_only_pass(self):
         evs = [e for e in live.load("t3-worker", "evals")["evals"]
@@ -154,12 +157,12 @@ class SandboxHarness(unittest.TestCase):
     def test_the_environment_stays_inside_the_sandbox(self):
         box = self.box()
         env = box.environ()
-        for key in ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "T3CODE_HOME", "T3WF_FAKE_T3", "GH_FAKE_DIR"):
+        for key in ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "T3CODE_HOME", "GH_FAKE_DIR"):
             self.assertTrue(env[key].startswith(str(box.root)), key)
         self.assertTrue(env["PATH"].startswith(str(box.bin) + ":"))
         self.assertEqual(env["PATH"], f"{box.bin}:/usr/bin:/bin")
         for tool in box.bin.iterdir():
-            self.assertIn(tool.name, ("python3", "claude", "gh", "systemctl"))
+            self.assertIn(tool.name, ("python3", "claude", "gh", "t3cm", "systemctl"))
         self.assertEqual(env["T3CODE_THREAD_ID"], live.SELF)
         self.assertEqual(env["GIT_ALLOW_PROTOCOL"], "file")
         self.assertFalse({"CLAUDE_CONFIG_DIR", "CODEX_HOME", "GH_TOKEN", "GITHUB_TOKEN"} & set(env))
@@ -210,18 +213,20 @@ class SandboxHarness(unittest.TestCase):
 
     def test_the_link_block_is_a_worker_join_line(self):
         box = self.box(setup={"link": "#42 PR 1/2"})
-        self.assertTrue(box.link_block.startswith("## t3-workflow link"))
-        self.assertIn(f"t3wf join --parent {live.PARENT} --label '#42 PR 1/2' --role worker", box.link_block)
+        self.assertTrue(box.link_block.startswith("## t3-codemode link"))
+        self.assertIn(f'wf.join({{ parent: "{live.PARENT}", label: "#42 PR 1/2", role: "worker"', box.link_block)
         self.assertIn(box.link_block, box.prompt("brief\n\n{link_block}\n"))
-        r = self.run_in(box, sys.executable, str(live.T3WF), *shlex.split(box.link_block.splitlines()[-1])[1:])
+        r = self.run_in(box, "t3cm", "exec", "-", stdin=box.link_block.splitlines()[-1])
         self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["result"]["thread"], live.SELF)
 
     def test_an_inline_pass_resolves_to_its_sandbox_skill_file(self):
         unslop = {"inline": True, "description": "Strip slop.", "body": "1. Delete robust."}
         box = self.box(setup={"config": {"version": 1, "passes": ["unslop"]}, "home_skills": {"unslop": unslop}})
-        r = self.run_in(box, sys.executable, str(live.T3WF), "slots", "--repo", str(box.repo))
+        r = self.run_in(box, "t3cm", "exec", "-", stdin='async () => wf.slot("passes")')
+        self.assertEqual(r.returncode, 0, r.stderr)
         path = box.home / ".claude" / "skills" / "unslop" / "SKILL.md"
-        self.assertIn(f"unslop (inline: read {path} and apply it)", r.stdout)
+        self.assertEqual(json.loads(r.stdout)["result"]["skills"][0]["how"], f"inline: read {path} and apply it")
 
     def test_the_stub_t3_server_lists_answers_and_logs(self):
         box = self.box(setup={"t3": {"t3_worktree_status": {"attached": True, "worktreePath": "{repo}"}}})
@@ -283,7 +288,7 @@ class Checks(unittest.TestCase):
     STREAM = [
         {"type": "system", "subtype": "init"},
         {"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "name": "Bash", "input": {"command": "python3 t3wf.py init --role ticket"}},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "t3cm exec - <<'EOF'\nasync () => wf.init({ role: 'ticket' })\nEOF"}},
             {"type": "tool_use", "name": "mcp__t3-code__t3_worktree_status", "input": {}},
             {"type": "tool_use", "name": "Read", "input": {"file_path": "/x/skills/unslop/SKILL.md"}}]}},
         {"type": "result", "result": "**ACTION NEEDED:** approve this PR split", "total_cost_usd": 0.5,
@@ -311,7 +316,7 @@ class Checks(unittest.TestCase):
         self.assertEqual((self.facts["cost"], self.facts["turns"]), (0.5, 3))
 
     def test_each_check_kind(self):
-        self.assertTrue(self.passes({"bash": r"t3wf\.py.*init.*--role ticket"}))
+        self.assertTrue(self.passes({"bash": r"t3cm exec -.*wf\.init.*ticket"}))
         self.assertTrue(self.passes({"tool": "t3_worktree_status"}))
         self.assertTrue(self.passes({"tool": "*", "input": r"unslop/SKILL\.md"}))
         self.assertTrue(self.passes({"text": "approve this PR split"}))

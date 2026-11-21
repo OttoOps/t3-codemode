@@ -101,6 +101,9 @@ pub fn t3wf_leftovers(folders: &Folders) -> Findings {
                 "t3wf: {} has {open} open link(s) and {queued} undelivered message(s); keep it until they close",
                 links.display()
             ));
+        } else {
+            f.warnings
+                .push(format!("t3wf: {} has no open links or undelivered messages; safe to delete", links.display()));
         }
     }
     f

@@ -55,7 +55,7 @@
     "env": "plain"
   },
   {
-    "query": "Work https://github.com/acme/widgets/issues/57 with the t3-ticket skill.\n\n## t3-workflow link\nThis thread is a child on a t3-workflow link. Before anything else, invoke the t3-workflow skill and run:\nt3wf join --parent thread-boss --label 'widgets#57' --role ticket --down 240 --miss 2 --stall 480 --protocol 2\n",
+    "query": "Work https://github.com/acme/widgets/issues/57 with the t3-ticket skill.\n\n## t3-codemode link\nThis thread is a child on a t3-codemode link. Before anything else, call the t3cm `execute` tool with:\nasync () => wf.join({ parent: \"thread-boss\", label: \"widgets#57\", role: \"ticket\", down: 240, miss: 2, stall: 480 })\n",
     "should_trigger": false
   }
 ]

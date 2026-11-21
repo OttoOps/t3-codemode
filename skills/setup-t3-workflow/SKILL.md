@@ -18,7 +18,7 @@ or `~/.local/bin/t3cm setup --help` when `~/.local/bin` is not on `PATH`):
 ## 1. Detect
 
 ```bash
-t3cm setup detect --skills '<every skill this session lists, comma separated>'
+t3cm setup detect
 ```
 
 Add `--repo <dir>` when the user means a repository other than the current
@@ -45,15 +45,16 @@ one. The JSON it prints is the interview's only source of facts:
   `repoProblems` from the repository's `AGENTS.md` block, which the user
   fixes in that file.
 
-When `mcp__t3cm__execute` is listed, also read t3cm's pools, the groups of
-provider instances a launch can be spread across:
+Also read t3cm's pools (the groups of provider instances a launch can be
+spread across), through `mcp__t3cm__execute` or `t3cm exec -`:
 
 ```js
 async () => (await wf.pools()).map(p => ({ pool: p.pool, model: p.model, effort: p.effort,
   error: p.error, members: p.members.map(m => `${m.instanceId} ${m.state}`) }))
 ```
 
-Without it, there are no pools to offer.
+When the service is not running yet, note that pools will be available once
+it starts.
 
 Show the user the `summary` lines, then one line each for the providers,
 the pools and t3cm. When `config.problems` is not empty, the roles ignore the whole file
@@ -90,7 +91,7 @@ Gather the answers into one JSON object with only the slots that changed,
 and write it, with the same `--repo` as step 1 when you passed one:
 
 ```bash
-t3cm setup write --skills '<same list as step 1>' <<'JSON'
+t3cm setup write <<'JSON'
 {"review": "cbrip:sol-loop", "passes": ["unslop", "pr"]}
 JSON
 ```
@@ -135,23 +136,24 @@ step in the config when the config exists. Tell the user in one line what it
 wrote; new sessions load it. `t3cm skills install` and `t3cm skills update`
 install the same rule the same way.
 
-## 5. Offer t3cm
+## 5. Check t3cm
 
-t3cm runs the same protocol as `t3wf` through code mode, with fewer tokens
-and a board in the browser. Act on `t3cm` from step 1:
+`t3cm` is required: it runs the link protocol, resolves every slot, and
+serves the board. Act on `t3cm` from step 1:
 
-- **`running` and `connected`**: nothing to do. When this session lists no
-  `mcp__t3cm__execute`, say new sessions pick it up.
+- **`running` and `connected`**: nothing to do. When this Claude Code session
+  lists no `mcp__t3cm__execute`, say new sessions pick it up (and this
+  session, like Codex, reaches it through `t3cm exec -`).
 - **`binary` but not `running`**: show the user `t3cm.error`. A bad
   `T3CM_PORT` needs that variable fixed, and "did not answer like t3cm" means
-  another service holds the port. Otherwise, when `platform.systemdUser` is
-  true, offer `systemctl --user start t3-codemode`; without it, say t3cm needs
-  systemd user services.
+  another service holds the port. Otherwise, give the start command from
+  [When the service is down](../t3-workflow/codemode.md#when-the-service-is-down).
 - **`running`, not `connected`**: the service cannot reach T3 Code; point
   the user at the board at `t3cm.url` for its last error.
-- **No `binary`**: offer to install it, once. On yes, follow
+- **No `binary`**: install it with the user's go-ahead:
   [Installing t3cm](../t3-workflow/codemode.md#installing-t3cm).
 
 Setup is done when the config holds every answer and records every slot
 asked about, the user has seen the summary, the filed-issue rule is current for
-each installed agent, and t3cm is running or was offered.
+each installed agent, and `t3cm` is running and connected (or the user has
+the command to start or install it).
