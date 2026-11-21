@@ -97,6 +97,10 @@ impl BoardConfig {
     pub fn active_remote(&self) -> Option<(RemoteMode, RemoteOrigin)> {
         self.remote.as_ref().and_then(BoardRemoteConfig::active)
     }
+
+    pub fn active_remote_config(&self) -> Option<(&BoardRemoteConfig, RemoteOrigin)> {
+        self.remote.as_ref().and_then(|r| r.active().map(|(_, origin)| (r, origin)))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +129,10 @@ pub struct BoardRemoteConfig {
     pub mode: RemoteMode,
     #[serde(default)]
     pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_users: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_pairing: bool,
 }
 
 impl BoardRemoteConfig {
@@ -135,6 +143,9 @@ impl BoardRemoteConfig {
         if self.mode != RemoteMode::Off && self.origin.is_none() {
             bail!("board.remote.origin is required when board.remote.mode is {:?}", self.mode.as_str());
         }
+        for user in &self.allow_users {
+            crate::tailscale::validate_login(user).context("board.remote.allowUsers")?;
+        }
         Ok(())
     }
 
@@ -144,6 +155,14 @@ impl BoardRemoteConfig {
         }
         let origin = self.origin.as_deref().and_then(|o| RemoteOrigin::parse(o).ok())?;
         Some((self.mode, origin))
+    }
+
+    pub fn pairing_enabled(&self) -> bool {
+        match self.mode {
+            RemoteMode::Off => false,
+            RemoteMode::Pairing => true,
+            RemoteMode::Tailscale => self.require_pairing,
+        }
     }
 }
 

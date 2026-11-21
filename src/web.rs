@@ -18,7 +18,7 @@ use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use crate::app::App;
 use crate::board::{CardRef, LaunchArgs, ModelSettingBody};
 use crate::clock::iso;
-use crate::config::{RemoteMode, RemoteOrigin};
+use crate::config::{BoardRemoteConfig, RemoteMode, RemoteOrigin};
 use crate::contexts::{ContextBody, ContextError};
 use crate::pairing::{self, CookieExtract};
 use crate::server::{RequestKind, SingleHeader, classify_request, is_own_loopback_host_str, single_header};
@@ -42,7 +42,7 @@ struct AuthSession {
 struct Web {
     app: Arc<App>,
     port: u16,
-    remote: Option<(RemoteMode, RemoteOrigin)>,
+    remote: Option<(BoardRemoteConfig, RemoteOrigin)>,
 }
 
 fn error(status: StatusCode, msg: impl Into<String>) -> Response {
@@ -121,7 +121,7 @@ impl Web {
     }
 
     fn pairing_enabled(&self) -> bool {
-        matches!(self.remote, Some((RemoteMode::Pairing, _)))
+        self.remote.as_ref().is_some_and(|(cfg, _)| cfg.pairing_enabled())
     }
 
     fn authenticate_pairing_cookie(&self, headers: &HeaderMap) -> Result<AuthSession, (StatusCode, &'static str)> {
@@ -146,29 +146,71 @@ impl Web {
         }
     }
 
-    /// Authenticate a remote board request. Pairing-cookie auth verifies a
-    /// hashed session cookie from `store.db`; Tailscale Serve auth slots in
-    /// alongside it (and can layer `authenticate_pairing_cookie` when
-    /// `requirePairing` is enabled).
-    fn authenticate_remote(
+    async fn authenticate_tailscale(
         &self,
-        mode: RemoteMode,
+        cfg: &BoardRemoteConfig,
         headers: &HeaderMap,
-    ) -> Result<Option<AuthSession>, (StatusCode, &'static str)> {
-        match mode {
-            RemoteMode::Pairing => self.authenticate_pairing_cookie(headers).map(Some),
-            RemoteMode::Off | RemoteMode::Tailscale => {
-                Err((StatusCode::UNAUTHORIZED, "remote board authentication is required"))
+    ) -> Result<(), (StatusCode, &'static str)> {
+        let login = match single_header(headers, "tailscale-user-login") {
+            SingleHeader::Present(v)
+                if !v.is_empty()
+                    && v == v.trim()
+                    && !v.bytes().any(|b| b.is_ascii_whitespace() || b.is_ascii_control()) =>
+            {
+                v
+            }
+            SingleHeader::Missing | SingleHeader::Present(_) | SingleHeader::Invalid => {
+                return Err((StatusCode::UNAUTHORIZED, "remote board authentication is required"));
+            }
+        };
+        if !cfg.allow_users.is_empty() {
+            if cfg.allow_users.iter().any(|u| u.eq_ignore_ascii_case(login)) {
+                return Ok(());
+            }
+            return Err((StatusCode::FORBIDDEN, "Tailscale user is not allowed to access this board"));
+        }
+        match self.app.tailscale_host_login_async().await {
+            Ok(Some(host_login)) => {
+                if host_login.eq_ignore_ascii_case(login) {
+                    Ok(())
+                } else {
+                    Err((StatusCode::FORBIDDEN, "Tailscale user is not allowed to access this board"))
+                }
+            }
+            Ok(None) => Err((StatusCode::UNAUTHORIZED, "Tailscale host login is unavailable")),
+            Err(e) => {
+                tracing::warn!("tailscale status lookup failed: {e}");
+                Err((StatusCode::UNAUTHORIZED, "Tailscale host login is unavailable"))
             }
         }
     }
 
-    fn check_remote(&self, headers: &HeaderMap) -> Result<Option<AuthSession>, (StatusCode, &'static str)> {
-        let Some((mode, origin)) = &self.remote else {
+    /// Authenticate a remote board request. Pairing-cookie auth verifies a
+    /// hashed session cookie from `store.db`; Tailscale Serve auth verifies
+    /// `Tailscale-User-Login` against `allowUsers` (defaulting to the host's
+    /// own login) and layers `authenticate_pairing_cookie` when
+    /// `requirePairing` is enabled.
+    async fn authenticate_remote(
+        &self,
+        cfg: &BoardRemoteConfig,
+        headers: &HeaderMap,
+    ) -> Result<Option<AuthSession>, (StatusCode, &'static str)> {
+        match cfg.mode {
+            RemoteMode::Pairing => self.authenticate_pairing_cookie(headers).map(Some),
+            RemoteMode::Tailscale => {
+                self.authenticate_tailscale(cfg, headers).await?;
+                if cfg.require_pairing { self.authenticate_pairing_cookie(headers).map(Some) } else { Ok(None) }
+            }
+            RemoteMode::Off => Err((StatusCode::FORBIDDEN, "remote board access is disabled")),
+        }
+    }
+
+    async fn check_remote(&self, headers: &HeaderMap) -> Result<Option<AuthSession>, (StatusCode, &'static str)> {
+        let Some((cfg, origin)) = &self.remote else {
             return Err((StatusCode::FORBIDDEN, "remote board access is disabled"));
         };
         self.check_remote_host_and_origin(headers, origin)?;
-        self.authenticate_remote(*mode, headers)
+        self.authenticate_remote(cfg, headers).await
     }
 
     fn check_csrf(&self, headers: &HeaderMap) -> Option<Response> {
@@ -197,7 +239,7 @@ async fn board_guard(
             }
             None
         }
-        RequestKind::Remote => match web.check_remote(headers) {
+        RequestKind::Remote => match web.check_remote(headers).await {
             Ok(session) => session,
             Err((status, msg)) => return error(status, msg),
         },
@@ -218,18 +260,30 @@ async fn pair_guard(State(web): State<Web>, req: axum::extract::Request, next: a
             if let Some(r) = web.check_local_origin(headers) {
                 return r;
             }
+            if !web.pairing_enabled() {
+                return error(StatusCode::FORBIDDEN, "remote pairing is not enabled");
+            }
+            return error(
+                StatusCode::FORBIDDEN,
+                "remote pairing must be completed over the configured https:// origin",
+            );
         }
         RequestKind::Remote => {
-            let Some((_, origin)) = &web.remote else {
+            let Some((cfg, origin)) = &web.remote else {
                 return error(StatusCode::FORBIDDEN, "remote board access is disabled");
             };
             if let Err((status, msg)) = web.check_remote_host_and_origin(headers, origin) {
                 return error(status, msg);
             }
+            if !web.pairing_enabled() {
+                return error(StatusCode::FORBIDDEN, "remote pairing is not enabled");
+            }
+            if cfg.mode == RemoteMode::Tailscale
+                && let Err((status, msg)) = web.authenticate_tailscale(cfg, headers).await
+            {
+                return error(status, msg);
+            }
         }
-    }
-    if !web.pairing_enabled() {
-        return error(StatusCode::FORBIDDEN, "remote pairing is not enabled");
     }
     next.run(req).await
 }
@@ -651,7 +705,7 @@ async fn put_ask_model(State(web): State<Web>, raw: Bytes) -> Response {
 }
 
 pub fn routes(app: Arc<App>, port: u16) -> Router {
-    let remote = app.config.board.active_remote();
+    let remote = app.config.board.active_remote_config().map(|(cfg, origin)| (cfg.clone(), origin));
     let web = Web { app, port, remote };
     let board = Router::new()
         .route("/", get(page))

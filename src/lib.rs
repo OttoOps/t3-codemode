@@ -30,6 +30,7 @@ pub mod steps;
 pub mod store;
 pub mod t3;
 pub mod t3_http;
+pub mod tailscale;
 pub mod truncate;
 pub mod types;
 pub mod upgrade;

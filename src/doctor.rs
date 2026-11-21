@@ -3,11 +3,12 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::agent_link::{self, Agent, LinkState};
-use crate::config::Config;
+use crate::config::{Config, RemoteMode};
 use crate::drift::{self, Home};
 use crate::skills::Bundle;
 use crate::slots::{self, Enabled, Folders, Inputs, Resolved};
 use crate::store::InstanceFolder;
+use crate::tailscale::{TailscaleRunner, proxy_matches_local_port};
 
 #[derive(Debug, Default)]
 pub struct Findings {
@@ -178,6 +179,231 @@ pub fn service(health: Option<&Value>, unreachable: Option<&str>) -> Findings {
             f.problems.push(format!("service: up, but not connected to T3 ({why})"));
         }
         _ => {}
+    }
+    f
+}
+
+pub fn remote_board(
+    cfg: Option<&Config>,
+    local_port: u16,
+    health: Option<&Value>,
+    ts: &dyn TailscaleRunner,
+) -> Findings {
+    let mut f = Findings::default();
+    let Some(cfg) = cfg else { return f };
+    let active = cfg.board.active_remote_config();
+
+    // 1. Check config vs running service `/healthz["remote"]` drift.
+    if let Some(health) = health {
+        match health.get("remote").and_then(Value::as_object) {
+            Some(svc_remote) => {
+                let cfg_mode = active.as_ref().map(|(r, _)| r.mode).unwrap_or(RemoteMode::Off);
+                let cfg_origin = active.as_ref().map(|(_, o)| o.canonical());
+                let cfg_req_pair = active.as_ref().is_some_and(|(r, _)| r.pairing_enabled());
+                let svc_mode = svc_remote.get("mode").and_then(Value::as_str).unwrap_or("off");
+                let svc_origin = svc_remote.get("origin").and_then(Value::as_str);
+                let svc_req_pair = svc_remote.get("requirePairing").and_then(Value::as_bool).unwrap_or(false);
+                let allow_drift = match &active {
+                    Some((r, _)) if r.mode == RemoteMode::Tailscale && !r.allow_users.is_empty() => {
+                        let svc_src = svc_remote.get("allowUsersSource").and_then(Value::as_str);
+                        let svc_users: Vec<&str> = svc_remote
+                            .get("allowUsers")
+                            .and_then(Value::as_array)
+                            .map(|a| a.iter().filter_map(Value::as_str).collect())
+                            .unwrap_or_default();
+                        let cfg_users: Vec<&str> = r.allow_users.iter().map(String::as_str).collect();
+                        svc_src != Some("config") || svc_users != cfg_users
+                    }
+                    Some((r, _)) if r.mode == RemoteMode::Tailscale => {
+                        svc_remote.get("allowUsersSource").and_then(Value::as_str) == Some("config")
+                    }
+                    _ => false,
+                };
+                if svc_mode != cfg_mode.as_str()
+                    || svc_origin != cfg_origin.as_deref()
+                    || svc_req_pair != cfg_req_pair
+                    || allow_drift
+                {
+                    f.problems.push(format!(
+                        "remote: config sets mode {:?} (origin {:?}, requirePairing={cfg_req_pair}), \
+                         but the running service reports mode {svc_mode:?} (origin {svc_origin:?}, requirePairing={svc_req_pair}); \
+                         restart t3cm to apply",
+                        cfg_mode.as_str(),
+                        cfg_origin.as_deref()
+                    ));
+                }
+            }
+            None => {
+                if let Some((remote, origin)) = &active {
+                    f.problems.push(format!(
+                        "remote: config enables mode {:?} ({}), but the running service does not report remote status \
+                         (older t3cm binary?); restart t3cm to apply",
+                        remote.mode.as_str(),
+                        origin.canonical()
+                    ));
+                }
+            }
+        }
+    }
+
+    match active {
+        Some((remote, origin)) if remote.mode == RemoteMode::Tailscale => {
+            if ts.binary().is_none() {
+                f.problems
+                    .push("remote: board.remote.mode is \"tailscale\", but the tailscale CLI was not found".into());
+                return f;
+            }
+            match ts.status() {
+                Err(e) => f.problems.push(format!("remote: tailscale status failed ({e:#})")),
+                Ok(st) => {
+                    if !st.is_running() {
+                        let state = st.backend_state.as_deref().unwrap_or("unknown");
+                        f.problems.push(format!("remote: Tailscale is not running (BackendState: {state})"));
+                    }
+                    match &st.dns_name {
+                        None => f.problems.push(
+                            "remote: Tailscale MagicDNS name is empty; enable MagicDNS in the Tailscale admin console"
+                                .into(),
+                        ),
+                        Some(dns) if dns != &origin.host => f.problems.push(format!(
+                            "remote: board.remote.origin host ({}) does not match this machine's Tailscale DNS name ({dns}); \
+                             run `t3cm board expose --tailscale` to update",
+                            origin.host
+                        )),
+                        Some(_) => {}
+                    }
+                    if !st.has_cert_for(&origin.host) {
+                        f.problems.push(format!(
+                            "remote: Tailscale HTTPS certificates are not enabled for {}; \
+                             enable HTTPS Certificates in the Tailscale admin console",
+                            origin.host
+                        ));
+                    }
+                    if remote.allow_users.is_empty() && st.host_login.is_none() {
+                        f.problems.push(
+                            "remote: cannot determine this machine's Tailscale user login and board.remote.allowUsers is empty; \
+                             every remote request will be refused"
+                                .into(),
+                        );
+                    }
+                }
+            }
+            match ts.serve_status() {
+                Err(e) => f.problems.push(format!("remote: tailscale serve status failed ({e:#})")),
+                Ok(serve) => {
+                    if let Some(tcp) = serve.tcp.get(&origin.port)
+                        && tcp.tcp_forward.is_some()
+                    {
+                        f.problems.push(format!(
+                            "remote: Tailscale Serve port {} uses raw TCP forwarding, which bypasses remote auth; \
+                             replace it with `t3cm board expose --tailscale`",
+                            origin.port
+                        ));
+                    }
+                    match serve.web_routes_for(&origin.host, origin.port) {
+                        None => f.problems.push(format!(
+                            "remote: Tailscale Serve is not serving {}; run `t3cm board expose --tailscale`",
+                            origin.canonical()
+                        )),
+                        Some(routes) => {
+                            if serve.tcp.get(&origin.port).is_none_or(|t| !t.https) {
+                                f.problems.push(format!(
+                                    "remote: Tailscale Serve port {} is not serving HTTPS for {}; \
+                                     run `t3cm board expose --tailscale`",
+                                    origin.port,
+                                    origin.canonical()
+                                ));
+                            }
+                            match routes.iter().find(|r| r.mount == "/") {
+                                Some(r)
+                                    if r.proxy
+                                        .as_deref()
+                                        .is_some_and(|p| proxy_matches_local_port(p, local_port)) => {}
+                                Some(r) => {
+                                    let got = r
+                                        .proxy
+                                        .as_deref()
+                                        .or(r.path.as_deref())
+                                        .or(r.text.as_deref())
+                                        .unwrap_or("non-proxy handler");
+                                    f.problems.push(format!(
+                                        "remote: Tailscale Serve for {} targets {got:?}, expected http://127.0.0.1:{local_port}; \
+                                         run `t3cm board expose --tailscale`",
+                                        origin.canonical()
+                                    ));
+                                }
+                                None => f.problems.push(format!(
+                                    "remote: Tailscale Serve for {} has no `/` proxy handler for http://127.0.0.1:{local_port}; \
+                                     run `t3cm board expose --tailscale`",
+                                    origin.canonical()
+                                )),
+                            }
+                        }
+                    }
+                    if serve.is_funnel_enabled(&origin.host, origin.port) {
+                        f.problems.push(format!(
+                            "remote: Tailscale Funnel is enabled for {}, exposing the board to the public internet; \
+                             disable Funnel on port {}",
+                            origin.canonical(),
+                            origin.port
+                        ));
+                    }
+                    let wanted_key = format!("{}:{}", origin.host, origin.port);
+                    for r in serve.routes_targeting_local_port(local_port) {
+                        if r.is_raw_tcp && r.port != origin.port {
+                            f.problems.push(format!(
+                                "remote: Tailscale Serve raw TCP port {} forwards to 127.0.0.1:{local_port}, \
+                                 which bypasses remote auth",
+                                r.port
+                            ));
+                        } else if !r.is_raw_tcp && r.host_port.as_deref() != Some(wanted_key.as_str()) {
+                            f.warnings.push(format!(
+                                "remote: Tailscale Serve also exposes 127.0.0.1:{local_port} at {}, \
+                                 which does not match board.remote.origin ({})",
+                                r.host_port.as_deref().unwrap_or("unknown"),
+                                origin.canonical()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Some((remote, _)) if remote.mode == RemoteMode::Pairing => {
+            if ts.binary().is_some()
+                && let Ok(serve) = ts.serve_status()
+            {
+                for r in serve.routes_targeting_local_port(local_port) {
+                    if r.is_raw_tcp {
+                        f.problems.push(format!(
+                            "remote: Tailscale Serve raw TCP port {} forwards to 127.0.0.1:{local_port}, \
+                             which bypasses remote auth",
+                            r.port
+                        ));
+                    }
+                }
+            }
+        }
+        _ => {
+            if ts.binary().is_some()
+                && let Ok(serve) = ts.serve_status()
+            {
+                for r in serve.routes_targeting_local_port(local_port) {
+                    if r.is_raw_tcp {
+                        f.problems.push(format!(
+                            "remote: Tailscale Serve raw TCP port {} forwards to 127.0.0.1:{local_port} \
+                             while board.remote is off (bypasses loopback boundary)",
+                            r.port
+                        ));
+                    } else {
+                        f.problems.push(format!(
+                            "remote: Tailscale Serve exposes 127.0.0.1:{local_port} at {}, \
+                             but board.remote is off; run `t3cm board unexpose` or `t3cm board expose --tailscale`",
+                            r.host_port.as_deref().unwrap_or("unknown")
+                        ));
+                    }
+                }
+            }
+        }
     }
     f
 }

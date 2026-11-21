@@ -139,6 +139,7 @@ impl SetupEnv {
             .env("PATH", &self.bin)
             .env("T3CM_PORT", self.port.to_string())
             .env("T3CM_STATE_DIR", self.dir.path().join("state"))
+            .env("T3CM_TAILSCALE_BIN", self.dir.path().join("no-tailscale"))
             .env("T3CM_NO_UPDATE_CHECK", "1")
             .env_remove("T3CODE_HOME")
             .env_remove("T3CM_T3_ORIGIN")

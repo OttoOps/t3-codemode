@@ -90,9 +90,26 @@ All under `board`:
 
 #### Remote board
 
-`board.remote` is off by default (`null`). To serve the board behind an HTTPS
-reverse proxy with browser pairing, set `mode` and `origin` in `config.json`
-and restart the service:
+`board.remote` is off by default (`null`). To serve the board over Tailscale
+Serve, run `t3cm board expose --tailscale` (which sets `tailscale serve` on
+HTTPS port `47732` and writes `board.remote` for you) and restart the service,
+or edit `config.json` directly:
+
+```json
+{
+  "board": {
+    "remote": {
+      "mode": "tailscale",
+      "origin": "https://box.acme.ts.net:47732",
+      "allowUsers": ["alice@acme.example"],
+      "requirePairing": false
+    }
+  }
+}
+```
+
+For Caddy, nginx, or `cloudflared`, use `"mode": "pairing"` with your public
+HTTPS origin:
 
 ```json
 {
@@ -107,12 +124,15 @@ and restart the service:
 
 | Key | Default | Does |
 |---|---|---|
-| `mode` | `"off"` | `"off"`: refuse all remote and proxied requests (403). `"pairing"`: require a session cookie minted via `t3cm board pair` and redeemed through `/pair#<token>`. `"tailscale"`: reserved for Tailscale Serve identity auth (currently refuses remote requests with 401). |
-| `origin` | unset | Required when `mode` is not `"off"`. Canonical `https://` origin with no path, query, fragment, or credentials, such as `"https://board.example.com"` or `"https://board.example.com:47732"`. |
+| `mode` | `"off"` | `"off"`: refuse all remote and proxied requests (403). `"pairing"`: require a session cookie minted via `t3cm board pair` and redeemed through `/pair#<token>`. `"tailscale"`: verify `Tailscale-User-Login` (injected by Tailscale Serve) against `allowUsers` or the host's own Tailscale login. |
+| `origin` | unset | Required when `mode` is not `"off"`. Canonical `https://` origin with no path, query, fragment, or credentials, such as `"https://box.acme.ts.net:47732"` or `"https://board.example.com"`. |
+| `allowUsers` | `[]` | Tailscale logins allowed in `"tailscale"` mode (matched case-insensitively). When omitted or empty, defaults to the host's own login from `tailscale status --json`. When non-empty, it replaces that default, so include your own login if you want to keep access. Ignored outside `"tailscale"` mode. |
+| `requirePairing` | `false` | When `true` in `"tailscale"` mode, requires both an allowed `Tailscale-User-Login` and a valid `__Host-t3cm_session` pairing cookie minted with `t3cm board pair`. Pairing is always required in `"pairing"` mode. |
 
 `/mcp` and `/healthz` remain strictly loopback-only regardless of `board.remote`.
-See [Remote access](board.md#remote-access) for pairing commands and reverse-proxy
-examples, and [Security model](security.md#network) for the proxy trust rules.
+See [Remote access](board.md#remote-access) for Tailscale Serve, pairing
+commands, and reverse-proxy examples, and [Security model](security.md#network)
+for the proxy trust rules.
 
 ### Pools
 
@@ -356,6 +376,7 @@ loses its card, and a move refuses a thread that is running.
 | `T3CM_STATE_DIR` | State directory, same as `--state-dir` |
 | `T3CM_PORT` | Port for `serve`, `status`, `exec` and `search` (default `47731`) |
 | `T3CM_T3_BIN` | The `t3` binary used to mint pairing codes; see [Security model](security.md#t3-sign-in) |
+| `T3CM_TAILSCALE_BIN` | Override path to the `tailscale` CLI used by `board expose`, `board unexpose`, `doctor`, and Tailscale identity mode (otherwise discovered on `PATH`, in `/Applications/Tailscale.app` on macOS, or under `Program Files\Tailscale\tailscale.exe` on Windows/WSL) |
 | `T3CM_T3_ORIGIN` | T3's origin, when `server-runtime.json` has the wrong one |
 | `T3CODE_HOME` | T3's home directory (default `~/.t3`) |
 | `T3CM_TZ` | Time zone for times the board and `wf` show (default `America/Denver`; an unknown zone falls back to UTC) |

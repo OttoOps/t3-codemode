@@ -164,7 +164,7 @@ async fn not_allowed() -> Response {
 }
 
 async fn healthz(State(app): State<Arc<App>>) -> Response {
-    json_response(StatusCode::OK, app.health())
+    json_response(StatusCode::OK, app.health_async().await)
 }
 
 pub fn router(app: Arc<App>, port: u16) -> Router {
