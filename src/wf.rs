@@ -247,6 +247,7 @@ pub struct Wf {
     pub(crate) config_path: Mutex<Option<PathBuf>>,
     pub(crate) config_lock: tokio::sync::Mutex<()>,
     pub(crate) models_rev: AtomicU64,
+    pub(crate) models_session: String,
 }
 
 const MAX_PR_PAGES: usize = 20;
@@ -301,6 +302,7 @@ impl Wf {
             config_path: Mutex::new(None),
             config_lock: tokio::sync::Mutex::new(()),
             models_rev: AtomicU64::new(0),
+            models_session: crate::board::random_id(),
         }
     }
 
