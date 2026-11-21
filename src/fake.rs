@@ -800,3 +800,124 @@ impl crate::tailscale::TailscaleRunner for FakeTailscale {
         std::time::Duration::ZERO
     }
 }
+
+/// Write an executable script at `path` without holding a writable fd to it in
+/// the calling process on Unix.
+///
+/// In a multithreaded test binary on Linux, calling `std::fs::write` opens a
+/// writable fd in the test process; if another test thread concurrently forks a
+/// subprocess, that child inherits the writable fd until its `execve` runs,
+/// causing `execve` of `path` to fail with `ETXTBSY` (`os error 26`) even after
+/// the parent closes its fd or renames the inode. Writing and `chmod`ing inside
+/// a short-lived child process guarantees the test process never holds a
+/// writable fd to the executable inode.
+pub fn write_executable(path: &std::path::Path, body: &str) {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        const PRINTF_SCRIPT: &str = r#"tmp="$1.tmp.$$"; printf '%s' "$2" > "$tmp" && chmod -- 755 "$tmp" && mv -f -- "$tmp" "$1" || { s=$?; rm -f -- "$tmp"; exit "$s"; }"#;
+        const CAT_SCRIPT: &str = r#"tmp="$1.tmp.$$"; cat > "$tmp" && chmod -- 755 "$tmp" && mv -f -- "$tmp" "$1" || { s=$?; rm -f -- "$tmp"; exit "$s"; }"#;
+
+        let status = if body.len() <= 32_768 && !body.contains('\0') {
+            Command::new("/bin/sh")
+                .args(["-c", PRINTF_SCRIPT, "sh"])
+                .arg(path)
+                .arg(body)
+                .stdin(Stdio::null())
+                .status()
+                .unwrap_or_else(|e| panic!("spawning /bin/sh to write {}: {e}", path.display()))
+        } else {
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", CAT_SCRIPT, "sh"])
+                .arg(path)
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap_or_else(|e| panic!("spawning /bin/sh to write {}: {e}", path.display()));
+            child.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
+            child.wait().unwrap()
+        };
+        assert!(status.success(), "writing executable {} failed: {status}", path.display());
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, body).unwrap();
+    }
+}
+
+/// Copy an executable from `src` to `dst` without holding a writable fd to
+/// `dst` in the calling process on Unix, avoiding `ETXTBSY` races across
+/// parallel test threads.
+pub fn copy_executable(src: &std::path::Path, dst: &std::path::Path) {
+    if let Some(parent) = dst.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::process::{Command, Stdio};
+
+        const COPY_SCRIPT: &str = r#"tmp="$2.tmp.$$"; cp -- "$1" "$tmp" && chmod -- 755 "$tmp" && mv -f -- "$tmp" "$2" || { s=$?; rm -f -- "$tmp"; exit "$s"; }"#;
+
+        let status = Command::new("/bin/sh")
+            .args(["-c", COPY_SCRIPT, "sh"])
+            .arg(src)
+            .arg(dst)
+            .stdin(Stdio::null())
+            .status()
+            .unwrap_or_else(|e| panic!("spawning /bin/sh to copy {} to {}: {e}", src.display(), dst.display()));
+        assert!(status.success(), "copying executable {} to {} failed: {status}", src.display(), dst.display());
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(src, dst).unwrap();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn write_executable_and_copy_executable_preserve_content_and_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("nested/script");
+        let body = "#!/bin/sh\nprintf '%s\\n' '-n \\\\ hello'\n";
+        write_executable(&script, body);
+        assert_eq!(std::fs::read_to_string(&script).unwrap(), body);
+        let out = Command::new(&script).output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "-n \\\\ hello\n");
+
+        // Overwrite an existing executable in place.
+        write_executable(&script, "#!/bin/sh\nprintf 'v2'\n");
+        let out = Command::new(&script).output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "v2");
+
+        // Large scripts (> 32 KiB) fall back to piping through stdin.
+        let large_script = dir.path().join("large-script");
+        let padding = "#".repeat(40_000);
+        let large_body = format!("#!/bin/sh\n# {padding}\nprintf 'big-ok'\n");
+        write_executable(&large_script, &large_body);
+        assert_eq!(std::fs::read_to_string(&large_script).unwrap(), large_body);
+        let out = Command::new(&large_script).output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "big-ok");
+
+        // Copy an executable and execute the copy.
+        let copied = dir.path().join("copied/script");
+        copy_executable(&script, &copied);
+        let out = Command::new(&copied).output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "v2");
+    }
+}

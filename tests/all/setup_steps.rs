@@ -241,7 +241,6 @@ fn an_unpaired_codex_marker_stops_before_any_write() {
 
 #[cfg(unix)]
 fn fake_claude(dir: &Path, claude_json: &Path, fail_add: bool) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let log = dir.join("claude.log");
     let script = dir.join("claude");
     let add = if fail_add {
@@ -249,15 +248,13 @@ fn fake_claude(dir: &Path, claude_json: &Path, fail_add: bool) -> PathBuf {
     } else {
         format!(r#"printf '{{"mcpServers":{{"t3cm":%s}}}}' "$6" > '{}'"#, claude_json.display())
     };
-    std::fs::write(
+    t3_codemode::fake::write_executable(
         &script,
-        format!(
+        &format!(
             "#!/bin/sh\necho \"$2 ${{CLAUDE_CONFIG_DIR:-unset}}\" >> '{}'\ncase \"$2\" in\n  add-json) {add} ;;\nesac\n",
             log.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     script
 }
 
@@ -386,13 +383,11 @@ fn null_header_value_is_stale_and_recovery_commands_quote_for_unix_and_powershel
 #[cfg(unix)]
 #[test]
 fn retire_t3wf_removes_timers_shim_and_pycache_and_keeps_registry_data() {
-    use std::os::unix::fs::PermissionsExt;
     let home = tempfile::tempdir().unwrap();
     let bin = tempfile::tempdir().unwrap();
     let log = bin.path().join("systemctl.log");
     let fake_sysctl = bin.path().join("systemctl");
-    std::fs::write(&fake_sysctl, format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display())).unwrap();
-    std::fs::set_permissions(&fake_sysctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    t3_codemode::fake::write_executable(&fake_sysctl, &format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display()));
 
     let mut env = Env::under(home.path(), None);
     env.systemctl_cmd = Some(fake_sysctl);
@@ -436,7 +431,6 @@ fn retire_t3wf_removes_timers_shim_and_pycache_and_keeps_registry_data() {
 #[cfg(unix)]
 #[test]
 fn retire_t3wf_warns_and_nudges_open_links_without_blocking() {
-    use std::os::unix::fs::PermissionsExt;
     use t3_codemode::config::LinkParams;
     use t3_codemode::store::{Link, Store};
 
@@ -499,9 +493,10 @@ fn retire_t3wf_warns_and_nudges_open_links_without_blocking() {
 
     let log = bin.path().join("t3.log");
     let fake_t3 = bin.path().join("t3");
-    std::fs::write(&fake_t3, format!("#!/bin/sh\nmsg=$(cat)\necho \"$1 $2 $3|$msg\" >> '{}'\n", log.display()))
-        .unwrap();
-    std::fs::set_permissions(&fake_t3, std::fs::Permissions::from_mode(0o755)).unwrap();
+    t3_codemode::fake::write_executable(
+        &fake_t3,
+        &format!("#!/bin/sh\nmsg=$(cat)\necho \"$1 $2 $3|$msg\" >> '{}'\n", log.display()),
+    );
 
     let (nudged, notes) = steps::nudge_threads(Some(&fake_t3), &report.t3wf_threads);
     assert_eq!(nudged, vec!["t-ticket-1", "t-worker-1"]);
@@ -518,12 +513,10 @@ fn retire_t3wf_warns_and_nudges_open_links_without_blocking() {
 #[cfg(unix)]
 #[test]
 fn retire_t3wf_surfaces_systemctl_failure_and_leaves_unit_detectable_for_retry() {
-    use std::os::unix::fs::PermissionsExt;
     let home = tempfile::tempdir().unwrap();
     let bin = tempfile::tempdir().unwrap();
     let fake_sysctl = bin.path().join("systemctl");
-    std::fs::write(&fake_sysctl, "#!/bin/sh\necho 'Failed to connect to bus' >&2\nexit 1\n").unwrap();
-    std::fs::set_permissions(&fake_sysctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    t3_codemode::fake::write_executable(&fake_sysctl, "#!/bin/sh\necho 'Failed to connect to bus' >&2\nexit 1\n");
 
     let mut env = Env::under(home.path(), None);
     env.systemctl_cmd = Some(fake_sysctl);

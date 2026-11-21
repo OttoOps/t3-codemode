@@ -64,25 +64,16 @@ impl Env {
     }
 
     fn t3cm(&self, args: &[&str]) -> Output {
-        let mut tries = 0;
-        loop {
-            let out = Command::new(&self.bin)
-                .args(args)
-                .env_clear()
-                .env("HOME", self.dir.path())
-                .env("PATH", self.path())
-                .env("T3CM_RELEASES_URL", &self.url)
-                .env("T3CM_STATE_DIR", self.state())
-                .env("T3CM_CONFIG", self.dir.path().join("none.json"))
-                .output();
-            match out {
-                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 50 => {
-                    tries += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                out => return out.unwrap(),
-            }
-        }
+        Command::new(&self.bin)
+            .args(args)
+            .env_clear()
+            .env("HOME", self.dir.path())
+            .env("PATH", self.path())
+            .env("T3CM_RELEASES_URL", &self.url)
+            .env("T3CM_STATE_DIR", self.state())
+            .env("T3CM_CONFIG", self.dir.path().join("none.json"))
+            .output()
+            .unwrap()
     }
 }
 
@@ -133,7 +124,7 @@ async fn serve_release(script: &str, unit: Option<&str>, corrupt: bool, bin_dir:
     let bin_dir = dir.path().join(bin_dir);
     std::fs::create_dir_all(&bin_dir).unwrap();
     let bin = bin_dir.join("t3cm");
-    std::fs::copy(env!("CARGO_BIN_EXE_t3cm"), &bin).unwrap();
+    t3_codemode::fake::copy_executable(Path::new(env!("CARGO_BIN_EXE_t3cm")), &bin);
     Env { dir, bin, url }
 }
 
@@ -312,6 +303,7 @@ async fn an_up_to_date_update_waits_for_a_running_update() {
         lock.lock().unwrap();
         let blocked = env.t3cm(&["update", "--no-restart", "--version", &current]);
         let back_while_held = file.is_file();
+        lock.unlock().unwrap();
         drop(lock);
         let after = env.t3cm(&["update", "--no-restart", "--version", &current]);
         (blocked, back_while_held, after, file.is_file())
@@ -354,18 +346,6 @@ esac
 "#;
 
     const CRASHES: &str = "#!/bin/sh\ncase \"$1\" in\n  --version) echo 't3cm 9.9.9' ;;\n  serve) exit 1 ;;\nesac\n";
-
-    fn write_exec(path: &Path, body: &str) {
-        use std::io::Write;
-        let mut cp = Command::new("/bin/sh")
-            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
-            .arg(path)
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        cp.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
-        assert!(cp.wait().unwrap().success());
-    }
 
     struct Service {
         env: Env,
@@ -432,14 +412,14 @@ esac
         std::fs::write(units.join("t3-codemode.service"), SHIPPED_UNIT).unwrap();
         let home = env.dir.path().display().to_string();
         let f = fake.display().to_string();
-        write_exec(
+        t3_codemode::fake::write_executable(
             &fake.join("service"),
             &format!(
                 "#!/bin/sh\nexport T3CODE_HOME='{home}' T3CM_T3_BIN='{home}/no-t3' T3CM_CONFIG='{home}/none.json' T3CM_NO_UPDATE_CHECK=1\n\
                  exec '{home}/.local/bin/t3cm' serve --no-watcher --port {port} --state-dir '{f}/state'\n"
             ),
         );
-        write_exec(
+        t3_codemode::fake::write_executable(
             &env.path().join("systemctl"),
             &format!(
                 r#"#!/bin/sh
@@ -509,7 +489,10 @@ esac
     async fn an_update_is_refused_while_the_service_serves_another_version() {
         let svc = installed(STUB, None).await;
         let other = svc.fake().join("service");
-        write_exec(&other, &format!("#!/bin/sh\nexec python3 -c '{}' --port {}\n", OLD_SERVER, svc.port));
+        t3_codemode::fake::write_executable(
+            &other,
+            &format!("#!/bin/sh\nexec python3 -c '{}' --port {}\n", OLD_SERVER, svc.port),
+        );
         svc.restart();
         assert!(svc.serves("0.0.1"));
         let before = std::fs::read(&svc.env.bin).unwrap();

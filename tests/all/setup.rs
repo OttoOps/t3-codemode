@@ -513,10 +513,8 @@ fn detect_platform_reports_systemd_user_units() {
     assert_eq!(plat["systemdUser"], false, "no systemctl on minimal PATH");
     #[cfg(target_os = "linux")]
     {
-        use std::os::unix::fs::PermissionsExt;
         let fake_systemctl = s.bin.join("systemctl");
-        std::fs::write(&fake_systemctl, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&fake_systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        t3_codemode::fake::write_executable(&fake_systemctl, "#!/bin/sh\nexit 0\n");
         let plat = s.detect(&[])["platform"].clone();
         assert_eq!(plat["systemdUser"], true);
         assert_eq!(plat["t3cmSupported"], true);
@@ -540,12 +538,7 @@ fn t3cm_missing_and_stopped() {
 fn t3cm_running_and_connected() {
     let mut s = SetupEnv::new();
     let fake_bin = s.bin.join(t3_codemode::platform::exe_name("t3cm"));
-    std::fs::write(&fake_bin, "#!/bin/sh\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    t3_codemode::fake::write_executable(&fake_bin, "#!/bin/sh\n");
     s.port = serve_health(json!({"version": "9.9.9", "t3": {"connected": true}}).to_string());
     let t = s.detect(&["--no-t3"])["t3cm"].clone();
     assert_eq!(t["binary"], fake_bin.to_string_lossy().as_ref());

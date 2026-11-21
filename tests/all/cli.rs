@@ -289,8 +289,6 @@ fn board_pair_sessions_and_revoke_cli_lifecycle() {
 #[cfg(unix)]
 #[test]
 fn board_expose_unexpose_status_and_doctor_cli_with_fake_tailscale() {
-    use std::os::unix::fs::PermissionsExt;
-
     use serde_json::{Value, json};
 
     let home = tempfile::tempdir().unwrap();
@@ -338,8 +336,7 @@ exit 1
         log = ts_log.display(),
         serve = ts_serve_file.display()
     );
-    std::fs::write(&fake_ts, script).unwrap();
-    std::fs::set_permissions(&fake_ts, std::fs::Permissions::from_mode(0o755)).unwrap();
+    t3_codemode::fake::write_executable(&fake_ts, &script);
 
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let port_str = port.to_string();

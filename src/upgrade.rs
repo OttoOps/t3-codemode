@@ -311,7 +311,18 @@ fn save_unit(packaged: &Path, state_dir: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(copy))
 }
 
-fn lock_updates(state_dir: &Path) -> Result<std::fs::File> {
+#[derive(Debug)]
+struct UpdateLock(std::fs::File);
+
+impl Drop for UpdateLock {
+    fn drop(&mut self) {
+        // Unlock explicitly before closing so a sibling thread's forked child
+        // that transiently inherited this fd cannot keep the flock held.
+        let _ = self.0.unlock();
+    }
+}
+
+fn lock_updates(state_dir: &Path) -> Result<UpdateLock> {
     std::fs::create_dir_all(state_dir).with_context(|| format!("creating {}", state_dir.display()))?;
     let path = state_dir.join("update.lock");
     let f = std::fs::OpenOptions::new()
@@ -321,7 +332,7 @@ fn lock_updates(state_dir: &Path) -> Result<std::fs::File> {
         .open(&path)
         .with_context(|| format!("opening {}", path.display()))?;
     match f.try_lock() {
-        Ok(()) => Ok(f),
+        Ok(()) => Ok(UpdateLock(f)),
         Err(std::fs::TryLockError::WouldBlock) => {
             bail!("another t3cm update is running (it holds {}); try again when it finishes", path.display())
         }
