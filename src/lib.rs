@@ -28,6 +28,7 @@ pub mod reconcile;
 pub mod release;
 pub mod sandbox;
 pub mod server;
+pub mod settings;
 pub mod setup;
 pub mod skills;
 pub mod slots;

@@ -15,17 +15,18 @@ pub struct Reloaded {
 
 impl Wf {
     pub async fn reload_config(&self) -> Result<Reloaded> {
-        let restart = {
-            let _g = self.config_lock.lock().await;
-            let path = self.config_path();
-            let mut next: Config = Document::read(&path)
-                .and_then(|file| Ok(file.config()?))
-                .with_context(|| format!("config {}", path.display()))?;
-            let restart = next.hold_restart_only(&self.config());
-            self.config.send_replace(Arc::new(next));
-            self.models_rev.fetch_add(1, Ordering::AcqRel);
-            restart
-        };
+        let _g = self.config_lock.lock().await;
+        self.reload_locked()
+    }
+
+    pub(crate) fn reload_locked(&self) -> Result<Reloaded> {
+        let path = self.config_path();
+        let mut next: Config = Document::read(&path)
+            .and_then(|file| Ok(file.config()?))
+            .with_context(|| format!("config {}", path.display()))?;
+        let restart = next.hold_restart_only(&self.config());
+        self.config.send_replace(Arc::new(next));
+        self.models_rev.fetch_add(1, Ordering::AcqRel);
         self.changed();
         tracing::info!(?restart, "config reloaded");
         Ok(Reloaded { restart })

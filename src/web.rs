@@ -19,9 +19,11 @@ use crate::app::App;
 use crate::board::{CardRef, LaunchArgs, ModelSettingBody};
 use crate::clock::iso;
 use crate::config::{BoardRemoteConfig, RemoteMode, RemoteOrigin};
+use crate::config_edit::{Rejected, Stale};
 use crate::contexts::{ContextBody, ContextError};
 use crate::pairing::{self, CookieExtract};
 use crate::server::{RequestKind, SingleHeader, classify_request, is_own_loopback_host_str, single_header};
+use crate::settings::SettingsBody;
 
 pub const CSRF_HEADER: &str = "x-t3cm-csrf";
 const PAGE: &str = include_str!("board.html");
@@ -633,6 +635,17 @@ async fn board_guard(
     next.run(req).await
 }
 
+async fn loopback_only(
+    Extension(kind): Extension<RequestKind>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if kind == RequestKind::Remote {
+        return error(StatusCode::FORBIDDEN, "board settings are only allowed from loopback");
+    }
+    next.run(req).await
+}
+
 async fn pair_guard(State(web): State<Web>, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let is_pair_html = req.method() == Method::GET && req.uri().path() == "/pair" && accepts_html(req.headers());
     let headers = req.headers();
@@ -1178,9 +1191,47 @@ async fn put_ask_model(State(web): State<Web>, raw: Bytes) -> Response {
     }
 }
 
+fn settings_failed(app: &App, e: anyhow::Error) -> Response {
+    if let Some(rejected) = e.downcast_ref::<Rejected>() {
+        let body = json!({"error": rejected.to_string(), "errors": rejected.errors});
+        return json_ok(StatusCode::UNPROCESSABLE_ENTITY, app.redact_value(body));
+    }
+    let status = if e.is::<Stale>() { StatusCode::CONFLICT } else { StatusCode::INTERNAL_SERVER_ERROR };
+    error(status, app.redact(format!("{e:#}")))
+}
+
+async fn get_settings(State(web): State<Web>) -> Response {
+    match web.app.wf.settings().await {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => settings_failed(&web.app, e),
+    }
+}
+
+async fn put_settings(State(web): State<Web>, raw: Bytes) -> Response {
+    let b: SettingsBody = match body(&raw) {
+        Ok(b) => b,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    match web.app.wf.save_settings(b).await {
+        Ok(saved) => json_ok(StatusCode::OK, json!(saved)),
+        Err(e) => settings_failed(&web.app, e),
+    }
+}
+
+async fn get_settings_pools(State(web): State<Web>) -> Response {
+    match web.app.wf.pools().await {
+        Ok(v) => json_ok(StatusCode::OK, web.app.redact_value(json!({"pools": v}))),
+        Err(e) => settings_failed(&web.app, e),
+    }
+}
+
 pub fn routes(app: Arc<App>, port: u16) -> Router {
     let remote = app.config().board.active_remote_config().map(|(cfg, origin)| (cfg.clone(), origin));
     let web = Web { app, port, remote };
+    let settings = Router::new()
+        .route("/api/settings", get(get_settings).put(put_settings))
+        .route("/api/settings/pools", get(get_settings_pools))
+        .route_layer(axum::middleware::from_fn(loopback_only));
     let board = Router::new()
         .route("/", get(page))
         .route("/manifest.webmanifest", get(manifest))
@@ -1209,6 +1260,7 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/open", post(open_link))
         .route("/api/contexts", get(list_contexts))
         .route("/api/contexts/{id}", put(put_context).delete(delete_context))
+        .merge(settings)
         .route_layer(axum::middleware::from_fn_with_state(web.clone(), board_guard))
         .with_state(web.clone());
     let pair = Router::new()

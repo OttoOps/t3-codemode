@@ -552,6 +552,10 @@ without changing direct loopback behavior:
   `POST /api/open`; server-side, authenticated remote `POST /api/open` requests
   receive 403 while unauthenticated or disallowed requests receive the usual
   401/403 guard refusal.
+- **Settings stay on the host.** The [settings API](#settings-api) refuses an
+  authenticated remote request with 403, reads included, and the board's guard
+  refuses any other remote request with its usual 401 or 403. The **Models**
+  control still works remotely.
 - **Add to Home Screen.** The board serves an embedded `/manifest.webmanifest`
   and icons (`/icon.svg`, `/icon-192.png`, `/icon-512.png`) behind the same
   authentication guards and zero-external-request CSP. On iOS Safari, open the
@@ -679,6 +683,62 @@ server {
 }
 ```
 
+## Settings API
+
+`/api/settings` reads and saves all of t3cm's `config.json`. Its routes answer
+only direct loopback requests, reads included, so a signed-in remote browser
+gets 403.
+
+`GET /api/settings` returns these fields:
+
+| Field | Holds |
+|---|---|
+| `path` | The config file |
+| `revision` | An id for the file's content, which a save sends back |
+| `file` | The file as parsed JSON, or `{}` when there is none. The file sets a key when the key is present here, even at its default. `null` when the file is invalid JSON. |
+| `values` | The file merged over the defaults, as `t3cm config get` prints it. A `null` in a child role inherits the top-level value. `null` when the file is invalid. |
+| `running` | The config the service runs. It differs from `values` after a hand edit, and while a [restart-only key](config.md#restart-only-keys) waits for a restart. |
+| `restart` | Every restart-only key whose saved value differs from the running one. `null` when the file is invalid. |
+| `errors` | Why the file is invalid, as `{field, message}`, or an empty list |
+
+A client saves by changing a copy of `file` and sending `PUT /api/settings`
+with `{"revision": "<revision>", "file": {...}}`. It starts from `file`
+because a save of `values` would write every default into the file, and it
+omits a key to return that key to its default.
+
+The route requires whole values and takes no edits by path, so a client adds
+an item to a list by sending the whole list. When `file` lacks the list, the
+client copies it from `values` first, because a list in the file replaces the
+default one. A child role with no `wake` of its own copies the top-level
+`wake`.
+
+A save runs the checks of config load, keeps the layout of the values it does
+not change and [reloads](config.md#reload) the service. It answers with one of
+these:
+
+| Status | Body | Means |
+|---|---|---|
+| 200 | `{revision, restart, warnings}` | The file is saved and `revision` is the one for the next save. `restart` lists every key that waits for a restart, earlier changes included. It is `null`, with a warning, when the save worked and the reload failed. |
+| 400 | `{error}` | The body lacks a revision or a `file` object, or has another key. |
+| 409 | `{error}` | The file changed after the client read that revision, so t3cm wrote nothing and the client reads it again. |
+| 422 | `{error, errors}` | The result is invalid, so t3cm wrote nothing. Each of `errors` is `{field, message}`, and `field` is a dotted path such as `board.feed` or `pools."gpt-6.1".members.0.weight`. |
+| 500 | `{error}` | t3cm could not read or write the file. |
+
+Config validation reports the first error it finds, and the member check
+reports one error for each bad pool. The member check asks T3 about the pools
+that the save adds or changes. When T3 does not answer, the save goes on and
+`warnings` says that t3cm did not check the members. The route refuses to
+replace broken JSON, which `t3cm config edit` can repair.
+
+`GET /api/settings/pools` returns `{pools}`, which is the list `wf.pools()`
+gives for the running config, with each member's live state. It is a separate
+route so that a refresh leaves a form's revision alone and the settings still
+load while T3 is down.
+
+`GET /api/models` supplies the instance, model and effort choices. A client
+changes the ticket launch model with `PUT /api/models/ticket`, which writes
+`models.ticket` and leaves the legacy `board` ticket keys alone.
+
 ## HTTP routes
 
 | Route | Does |
@@ -698,6 +758,9 @@ server {
 | `GET /api/models` | Current ticket and ask model resolution (`ticket`, `ask`), enabled providers/models/efforts from `orchestrator_capabilities` (`providers`), configured pools (`pools`), and per-project repo overrides (`repoOverrides`) |
 | `PUT /api/models/ticket` `{mode, ...}` | Persist `models.ticket` to the user workflow config (`mode: "model"` with `provider`, `model`, `effort?`, or `mode: "pool"` with `pool`) after validating against live capabilities or configured pools; returns the updated `/api/models` view |
 | `PUT /api/models/ask` `{mode, ...}` | Persist the ask box mode to t3cm's `config.json` (`board.askInstanceId`/`askModel`/`askEffort` or `board.askPool`) and apply it live with no restart; returns the updated `/api/models` view |
+| `GET /api/settings` | Loopback-only: the config file, its revision, the saved and running values, the keys that need a restart, and any errors. See [Settings API](#settings-api) |
+| `PUT /api/settings` `{revision, file}` | Loopback-only: check and save the whole config, then reload it; returns `{revision, restart, warnings}` (409 for a stale revision, 422 with per-field `errors` for an invalid result) |
+| `GET /api/settings/pools` | Loopback-only: `{pools}`, each pool's live member state as `wf.pools()` reports it |
 | `POST /api/tickets/{thread}/settle`, `/restore` | Settle a done ticket, or bring a settled one back (400 if open, or not settled) |
 | `POST /api/asks/{id}/settle`, `/restore` | The same for a closed ask; `id` is `q<n>` |
 | `GET /api/new-issues` | `{issues, dismissed}`, newest first; an issue that has a board ticket is in neither |

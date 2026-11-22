@@ -378,7 +378,7 @@ impl App {
         self.upstreams.redact(self.t3.redact(text))
     }
 
-    fn redact_value(&self, value: Value) -> Value {
+    pub(crate) fn redact_value(&self, value: Value) -> Value {
         let r = self.upstreams.redactor();
         redact_json(value, &|s| r.apply(self.t3.redact(s)))
     }
