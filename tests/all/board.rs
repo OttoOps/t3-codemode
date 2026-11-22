@@ -1183,7 +1183,7 @@ fn run_page_async(html: &str, scenario: &str) -> Value {
     run_page_async_with(html, "", scenario)
 }
 
-fn run_page_async_with(html: &str, prelude: &str, scenario: &str) -> Value {
+pub(crate) fn run_page_async_with(html: &str, prelude: &str, scenario: &str) -> Value {
     let open = html.find("<script>").unwrap() + "<script>".len();
     let close = html.rfind("</script>").unwrap();
     let src = format!(

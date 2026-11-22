@@ -702,7 +702,7 @@ fn failed(app: &App, e: anyhow::Error) -> Response {
     error(status, msg)
 }
 
-async fn page(State(web): State<Web>) -> Response {
+async fn page(State(web): State<Web>, Extension(kind): Extension<RequestKind>) -> Response {
     let wf = web.app.wf.clone();
     tokio::spawn(async move {
         if let Err(e) = wf.reconcile_soon().await {
@@ -718,7 +718,9 @@ async fn page(State(web): State<Web>) -> Response {
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (header::REFERRER_POLICY, "no-referrer"),
         ],
-        PAGE.replace("{{CSRF}}", &web.app.csrf).replace("{{VERSION}}", env!("CARGO_PKG_VERSION")),
+        PAGE.replace("{{CSRF}}", &web.app.csrf)
+            .replace("{{VERSION}}", env!("CARGO_PKG_VERSION"))
+            .replace("{{LOCAL}}", &(kind == RequestKind::Local).to_string()),
     )
         .into_response()
 }

@@ -82,7 +82,102 @@ and the threads running. Only the lists scroll.
 
 Times show as ages (`36m`, `1h 32m`); hover one for the local time.
 
+On a local board, the gear button in the header opens [Settings](#settings).
+
 A `handoff` or `closed` message marks a ticket done.
+
+## Settings
+
+On a board you open at a loopback address, the gear button in the header opens
+Settings, which edits all of t3cm's `config.json`. A remote board shows no gear
+button, because settings are
+[local only](security.md#board-settings). Its **Models** control still works.
+
+| Section | Holds |
+|---|---|
+| Launches | The same ticket and ask pickers as **Models**, and `board.runtimeMode` |
+| Pools | Each [pool](config.md#pools) and its members, with each member's live state |
+| Board | The other `board` keys, such as `feed`, the GitHub check intervals, `openLinks` and `remote` |
+| Workflow links | `link`, `wake`, the body and reply caps, `digestLines`, and a JSON editor for `roles` |
+| Runtime | Timeouts, run limits, the watcher interval, the hold limits and `updateCheck` |
+| Upstreams and deny list | `deny`, one tool per line, and a JSON editor for `upstreams` |
+| All keys (JSON) | An editor for the whole file, and a read-only view of every key with its default |
+
+Edit a key that has no control of its own, such as the older
+`board.ticketModel`, under All keys (JSON). Outside Pools, a field shows
+**Default** when the file does not set its key, and **Reset** takes the key out
+of the file so the default applies again. Settings leaves the keys you don't
+edit as the file has them, and it writes a list whole. In Pools, choosing a
+member can fill in the pool's driver, and turning **Mixed** on or off moves the
+model and effort between the pool and its members. Each field shows the value
+that Save will write.
+
+The two model pickers save on their own. The ticket picker writes
+`models.ticket` in the workflow config, which is a different file. The ask
+picker writes `config.json`, so its Save is off while you have other unsaved
+changes. The other fields wait while it saves.
+
+**Save settings** writes every section at once and pauses editing until it
+finishes. It then [reloads](config.md#reload) the service, which also applies
+any hand edit that was waiting in the file. The dialog lists those waiting keys
+before you save.
+A save can end in these ways:
+
+- An edit that fails t3cm's checks writes nothing. The error shows next to its
+  field and at the top of the dialog, where a click takes you to the field.
+  Validation reports the first error it finds, so the next save can show
+  another. When T3 does not answer, the save goes on with pool members that
+  t3cm could not check, and the dialog says so. That holds for a retry too. If
+  T3 rejects a member and then stops answering, saving again without a change
+  writes that member with the warning.
+- Settings refuses to save when the file changed on disk since it read it. It
+  finds the change when you save or when it reads the file again, lists the
+  keys that changed and turns Save off until you discard your edits and load
+  the file. You can copy your edits from All keys (JSON) first. An editor that
+  saves the file while t3cm writes it can still lose its change, as
+  [How t3cm writes the file](config.md#how-t3cm-writes-the-file) explains.
+- A change to `maxConcurrentRuns`, `upstreams` or `board.remote` waits in the
+  saved file for a [restart](config.md#restart-only-keys). The dialog marks
+  those fields **Needs restart** and lists every key that still waits, earlier
+  changes included.
+
+In Pools, add a pool by name and then choose its driver, model and members.
+The lists hold what T3 offers now. **Type another value** takes one that is
+missing, such as when T3 is down or leaves a model off its short list. The
+states beside the members describe the pool the service runs, so they change
+after you save. They refresh every 20 seconds while Pools is open. Member order
+matters to the `priority` strategy, so each member has Up and Down buttons.
+
+Esc closes the dialog, and it asks before it drops unsaved changes to the
+file. A model picker's unsaved choice doesn't count: opening Settings or
+**Models** again discards it. The arrow keys move between sections, and a
+narrow window shows the sections as a menu.
+
+The dialog holds an edit it can't save as shown:
+
+- Save writes nothing while a field fails the dialog's own checks, and takes
+  you to it. The service checks the whole file again on each save.
+- While All keys (JSON) holds text that isn't valid JSON, the other sections
+  take no edits.
+- While a field elsewhere fails the dialog's own checks, All keys (JSON) is
+  read-only. The dialog names the field to fix first.
+- A number field refuses text it would change, such as `12abc`, or `1,5` in a
+  browser that reads only `.` as a decimal point. Clear the field and type the
+  number again.
+- Save waits while the pool name box holds a name you haven't added.
+
+The dialog cannot repair a file that is broken JSON. It shows the error, and
+`t3cm config edit` repairs the file. The dialog also refuses an integer beyond
+9007199254740991 in either direction, because a browser would round it. Edit a
+file that holds one with `t3cm config edit`. A whole number written with a
+decimal, such as `25.0`, becomes `25` when Settings saves the file, even when
+you did not edit it, and a number with more digits than a browser keeps is
+rounded, so `700000.00000000001` saves as `700000`. When All keys (JSON) repeats
+a key, the last one wins and Settings drops the others. When `link`, `board` or
+`board.remote` holds a list with entries, the dialog edits nothing until
+`t3cm config edit` makes it an object. The JSON editors
+show any literal credential in the file, so use an `${env:NAME}` or
+`${file:path}` reference in `upstreams`.
 
 ## Updates
 
@@ -552,7 +647,8 @@ without changing direct loopback behavior:
   `POST /api/open`; server-side, authenticated remote `POST /api/open` requests
   receive 403 while unauthenticated or disallowed requests receive the usual
   401/403 guard refusal.
-- **Settings stay on the host.** The [settings API](#settings-api) refuses an
+- **Settings stay on the host.** A remote board shows no
+  [Settings](#settings) button. The [settings API](#settings-api) refuses an
   authenticated remote request with 403, reads included, and the board's guard
   refuses any other remote request with its usual 401 or 403. The **Models**
   control still works remotely.
@@ -697,6 +793,7 @@ gets 403.
 | `revision` | An id for the file's content, which a save sends back |
 | `file` | The file as parsed JSON, or `{}` when there is none. The file sets a key when the key is present here, even at its default. `null` when the file is invalid JSON. |
 | `values` | The file merged over the defaults, as `t3cm config get` prints it. A `null` in a child role inherits the top-level value. `null` when the file is invalid. |
+| `defaults` | The built-in defaults in the shape of `values`. A key returns to its default when a save omits it. |
 | `running` | The config the service runs. It differs from `values` after a hand edit, and while a [restart-only key](config.md#restart-only-keys) waits for a restart. |
 | `restart` | Every restart-only key whose saved value differs from the running one. `null` when the file is invalid. |
 | `errors` | Why the file is invalid, as `{field, message}`, or an empty list |
@@ -759,7 +856,7 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `GET /api/models` | Current ticket and ask model resolution (`ticket`, `ask`), enabled providers/models/efforts from `orchestrator_capabilities` (`providers`), configured pools (`pools`), and per-project repo overrides (`repoOverrides`) |
 | `PUT /api/models/ticket` `{mode, ...}` | Persist `models.ticket` to the user workflow config (`mode: "model"` with `provider`, `model`, `effort?`, or `mode: "pool"` with `pool`) after validating against live capabilities or configured pools; returns the updated `/api/models` view |
 | `PUT /api/models/ask` `{mode, ...}` | Persist the ask box mode to t3cm's `config.json` (`board.askInstanceId`/`askModel`/`askEffort` or `board.askPool`) and apply it live with no restart; returns the updated `/api/models` view |
-| `GET /api/settings` | Loopback-only: the config file, its revision, the saved and running values, the keys that need a restart, and any errors. See [Settings API](#settings-api) |
+| `GET /api/settings` | Loopback-only: the config file, its revision, the saved, default and running values, the keys that need a restart, and any errors. See [Settings API](#settings-api) |
 | `PUT /api/settings` `{revision, file}` | Loopback-only: check and save the whole config, then reload it; returns `{revision, restart, warnings}` (409 for a stale revision, 422 with per-field `errors` for an invalid result) |
 | `GET /api/settings/pools` | Loopback-only: `{pools}`, each pool's live member state as `wf.pools()` reports it |
 | `POST /api/tickets/{thread}/settle`, `/restore` | Settle a done ticket, or bring a settled one back (400 if open, or not settled) |

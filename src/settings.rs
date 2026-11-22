@@ -35,6 +35,7 @@ impl Wf {
             "revision": file.revision(),
             "file": file.value().ok(),
             "values": values,
+            "defaults": effective(&Config::default()),
             "running": effective(&running),
             "restart": restart,
             "errors": errors,
