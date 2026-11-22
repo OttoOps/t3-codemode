@@ -31,6 +31,67 @@ The service reads the file at start. Restart it after an edit:
 A deep merge replaces arrays whole, so this `deny` replaces the default list,
 and it has to repeat the two default entries to keep them.
 
+## Change the config
+
+`t3cm config` reads and changes the config file. Before it writes, it checks
+the whole result as config load does, so a rejected change prints the field
+that failed and leaves the file as it was. The service still needs a
+[restart](#the-config-file) before it uses a change.
+
+| Command | Does |
+|---|---|
+| `t3cm config get [<path>]` | Prints the value in effect as JSON, defaults included. Without a path, it prints the whole config. |
+| `t3cm config set <path> <value>` | Changes one key. The value is parsed as JSON, and a value that is not JSON is taken as a string. |
+| `t3cm config unset <path>` | Removes one key from the file so that its default applies, or removes one item from a list. |
+| `t3cm config edit` | Opens a copy of the file in `$VISUAL` or `$EDITOR` and replaces the file once the copy is valid. |
+| `t3cm config validate` | Checks the file and exits 1 when it is invalid. |
+
+```sh
+t3cm config get board.feed
+t3cm config set board.feed 80
+t3cm config set deny '["t3_project_delete", "t3_environment_unlink", "t3_thread_interrupt"]'
+t3cm config set pools.opus '{"driver": "claudeAgent", "model": "claude-opus-5-5", "members": [{"instanceId": "claude-a"}]}'
+t3cm config set pools.opus.members.0.weight 3
+t3cm config set 'pools."gpt-6.1".effort' high
+t3cm config unset board.feed
+```
+
+A path joins key names with dots and names a list item by its index from 0,
+and setting the index one past the end appends an item. A name that holds a dot goes in
+double quotes, with single quotes around the whole path so that the shell
+passes them through. To save a string that also reads as JSON, such as `5` or
+`true`, quote it twice, as in `'"5"'`.
+
+Each `set` has to leave a valid config, so keys that depend on each other need
+an order or one value that holds them all. A new pool is set whole, and
+`board.remote.origin` is set before `board.remote.mode`. An edit inside a list
+that the key inherits, such as `deny.2` from the defaults or a child role's
+`wake.0` from `wake`, copies that list into the file first. A copied list no
+longer follows the one it came from.
+
+`get` needs a valid file, and `set` and `unset` write only when their one
+change leaves the file valid. Use `edit` to repair a file with several errors
+or broken JSON.
+
+When a change adds or alters a pool, t3cm asks the running service whether
+each member of that pool is a T3 provider instance and has the pool's
+`driver`. `validate` asks about every pool. If the service or T3 does not
+answer, or you pass `--no-t3`, t3cm warns that it did not check the members
+and goes on, since each pick checks them again. `--port` names the service's
+port when it is not the default.
+
+A write replaces the file in one step. It keeps the file's permissions, a
+symlink to it, and the formatting of the values it does not change. t3cm
+refuses to write when the file changed after it read it, and you run the
+command again. Two `t3cm config` writes take turns through a lock file beside
+the config, `.config.json.t3cm-lock` for the default name. The board,
+`t3cm board expose` and your editor do not take that lock, so a save from one
+of them during a write can still be lost.
+
+When the copy from `edit` is invalid and t3cm runs in a terminal, it offers to
+open the copy again. If t3cm does not save a copy that you changed, it keeps
+that copy and prints its path.
+
 ## Keys
 
 ### Sandbox and runs

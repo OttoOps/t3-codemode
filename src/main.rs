@@ -10,6 +10,7 @@ use t3_codemode::app::App;
 use t3_codemode::catalog::Catalog;
 use t3_codemode::clock::{Clock, SystemClock, iso, local_datetime, parse_ts};
 use t3_codemode::config::{self, Config, RemoteMode};
+use t3_codemode::config_edit::{self, Document, Draft, Edit};
 use t3_codemode::pairing;
 use t3_codemode::release::{self, Version};
 use t3_codemode::slots::{self, Caps, Enabled, Folders, Inputs, Resolved};
@@ -17,7 +18,7 @@ use t3_codemode::store::Store;
 use t3_codemode::t3_http::HttpT3;
 use t3_codemode::tailscale::{self, ExposeOptions, TailscaleCli};
 use t3_codemode::wf_slots::Reported;
-use t3_codemode::{agent_link, bench, doctor, platform, server, setup, skills, steps, upgrade, watcher};
+use t3_codemode::{agent_link, bench, doctor, editor, field, platform, server, setup, skills, steps, upgrade, watcher};
 
 #[derive(Parser)]
 #[command(
@@ -163,6 +164,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SetupCmd,
     },
+    /// Read, change, edit or validate t3cm's config file
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
+    },
     /// Expose the board remotely, pair browsers, and manage sessions
     Board {
         #[command(subcommand)]
@@ -268,6 +274,51 @@ enum SetupCmd {
     },
     /// Install the always-loaded filed-issue rule for Claude Code and Codex
     Rule,
+}
+
+#[derive(clap::Args)]
+struct CheckArgs {
+    /// Skip checking pool members against T3 through the running service
+    #[arg(long)]
+    no_t3: bool,
+    #[command(flatten)]
+    port: PortArgs,
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Print the value in effect as JSON, defaults included; the whole config without PATH
+    Get {
+        /// Dotted path, such as board.pool or 'pools."gpt-6.1".members.0' (quote a name that holds a dot)
+        path: Option<String>,
+    },
+    /// Change one key and write the file, unless the result is invalid
+    Set {
+        /// Dotted path, such as board.pool or 'pools."gpt-6.1".members.0' (quote a name that holds a dot)
+        path: String,
+        /// Parsed as JSON, or taken as a string when it is not JSON
+        #[arg(allow_hyphen_values = true)]
+        value: String,
+        #[command(flatten)]
+        check: CheckArgs,
+    },
+    /// Remove one key from the file, so its default applies, or one item from a list
+    Unset {
+        /// Dotted path, such as board.pool or deny.1
+        path: String,
+        #[command(flatten)]
+        check: CheckArgs,
+    },
+    /// Open a copy of the file in $VISUAL or $EDITOR and keep it only when it is valid
+    Edit {
+        #[command(flatten)]
+        check: CheckArgs,
+    },
+    /// Check the file as config load does, and its pools' members against T3; exits 1 when it is invalid
+    Validate {
+        #[command(flatten)]
+        check: CheckArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -759,6 +810,139 @@ async fn shutdown_signal() {
     tracing::info!("shutting down");
 }
 
+async fn run_config(cmd: ConfigCmd) -> Result<ExitCode> {
+    let file = config::default_path();
+    match cmd {
+        ConfigCmd::Get { path } => config_get(&file, path.as_deref())?,
+        ConfigCmd::Set { path, value, check } => {
+            let value = serde_json::from_str(&value).unwrap_or(Value::String(value));
+            let edit = Edit::Set { path: field::parse(&path)?, value };
+            config_change(&file, &format!("set {path}"), edit, &check).await?;
+        }
+        ConfigCmd::Unset { path, check } => {
+            let edit = Edit::Unset { path: field::parse(&path)? };
+            config_change(&file, &format!("unset {path}"), edit, &check).await?;
+        }
+        ConfigCmd::Edit { check } => config_editor(&file, &check).await?,
+        ConfigCmd::Validate { check } => config_validate(&file, &check).await?,
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn config_get(file: &Path, path: Option<&str>) -> Result<()> {
+    let cfg = Document::read(file)?.config().with_context(|| format!("config {}", file.display()))?;
+    let all = config_edit::effective(&cfg);
+    let shown = match path {
+        None => all,
+        Some(raw) => config_edit::lookup(&all, &field::parse(raw)?)
+            .with_context(|| format!("{raw}: no such key in the config"))?,
+    };
+    println!("{shown:#}");
+    Ok(())
+}
+
+async fn config_change(file: &Path, action: &str, edit: Edit, check: &CheckArgs) -> Result<()> {
+    let doc = Document::read(file)?;
+    let rejected = || format!("cannot {action}; {} is unchanged", file.display());
+    let draft = doc.edit(&[edit]).with_context(rejected)?;
+    check_pool_members(draft.config(), &draft.changed_pools(), check).await.with_context(rejected)?;
+    config_save(file, draft)
+}
+
+fn config_save(file: &Path, draft: Draft<'_>) -> Result<()> {
+    let changed = draft.is_changed();
+    draft.save()?;
+    if changed {
+        println!("Updated config: {}", file.display());
+        println!("Restart the service to apply: {}", platform::SERVICE.restart);
+    } else {
+        println!("No change to {}", file.display());
+    }
+    Ok(())
+}
+
+async fn config_validate(file: &Path, check: &CheckArgs) -> Result<()> {
+    let doc = Document::read(file)?;
+    let invalid = || format!("config {}", file.display());
+    let cfg = doc.config().with_context(invalid)?;
+    let pools: Vec<&str> = cfg.pools.keys().map(String::as_str).collect();
+    check_pool_members(&cfg, &pools, check).await.with_context(invalid)?;
+    if doc.exists() {
+        println!("{} is valid", file.display());
+    } else {
+        println!("No file at {}; the built-in defaults apply", file.display());
+    }
+    Ok(())
+}
+
+const MEMBER_CHECK_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+// The service cuts a long answer, so this asks only for the two provider keys the check reads.
+const MEMBER_CAPS_CODE: &str = "async () => ({ providers: (await t3.orchestrator_capabilities({})).providers\
+    .map(p => ({ providerInstanceId: p.providerInstanceId, driverKind: p.driverKind })) })";
+
+async fn check_pool_members(cfg: &Config, pools: &[&str], check: &CheckArgs) -> Result<()> {
+    if pools.is_empty() {
+        return Ok(());
+    }
+    let caps = if check.no_t3 {
+        Err("skipped with --no-t3".to_string())
+    } else {
+        match tokio::time::timeout(MEMBER_CHECK_BUDGET, exec_value(check.port.port, MEMBER_CAPS_CODE.into(), None))
+            .await
+        {
+            Ok(Ok(caps)) if caps["providers"].is_array() => Ok(caps),
+            Ok(Ok(_)) => Err("the service listed no providers".to_string()),
+            Ok(Err(e)) => Err(format!("{e:#}")),
+            Err(_) => Err("the service did not answer in time".to_string()),
+        }
+    };
+    match caps {
+        Ok(caps) => config_edit::check_members(cfg, pools, &caps)?,
+        Err(why) => eprintln!("warn: pool members not checked against T3 ({why}); each pick checks them"),
+    }
+    Ok(())
+}
+
+async fn config_editor(file: &Path, check: &CheckArgs) -> Result<()> {
+    let command = editor::command()?;
+    let doc = Document::read(file)?;
+    let scratch = editor::scratch(file, doc.text())?;
+    let result = edit_until_valid(file, &doc, &command, &scratch, check).await;
+    let untouched = std::fs::read_to_string(&scratch).is_ok_and(|text| text == doc.text());
+    if result.is_ok() || untouched {
+        let _ = std::fs::remove_file(&scratch);
+        return result;
+    }
+    result.with_context(|| format!("{} was not written; your edit is kept at {}", file.display(), scratch.display()))
+}
+
+async fn edit_until_valid(file: &Path, doc: &Document, command: &str, scratch: &Path, check: &CheckArgs) -> Result<()> {
+    loop {
+        editor::open(command, scratch)?;
+        let text = std::fs::read_to_string(scratch).with_context(|| format!("reading {}", scratch.display()))?;
+        if text == doc.text() {
+            println!("No change to {}", file.display());
+            return Ok(());
+        }
+        let checked = match doc.replace(text) {
+            Ok(draft) => check_pool_members(draft.config(), &draft.changed_pools(), check).await.map(|()| draft),
+            Err(e) => Err(e.into()),
+        };
+        match checked {
+            Ok(draft) => return config_save(file, draft),
+            Err(e) if std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
+                eprint!("invalid config: {e:#}\nEdit again? [Y/n] ");
+                let mut answer = String::new();
+                if std::io::stdin().read_line(&mut answer)? == 0 || answer.trim().to_lowercase().starts_with('n') {
+                    return Err(e);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn read_source(file: &str) -> Result<String> {
     if file == "-" {
         let mut s = String::new();
@@ -1206,6 +1390,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Cmd::Skills { cmd } => return run_skills(cmd),
         Cmd::Setup { cmd } => return run_setup(cmd).await,
+        Cmd::Config { cmd } => return run_config(cmd).await,
         Cmd::Board { cmd } => return run_board(cmd),
         Cmd::Slots { repo, json, no_t3, port, thread } => return run_slots(repo, json, no_t3, port.port, thread).await,
         Cmd::Doctor { repo, json, no_t3, resolve, port, state, thread } => {

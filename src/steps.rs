@@ -957,7 +957,22 @@ where
     if create_dir {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    let name = target.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let _lock = lock_beside(&target)?;
+    for _ in 0..3 {
+        let before = read_optional_bytes(&target)?;
+        let Some(bytes) = edit(before.as_deref())? else {
+            return Ok(false);
+        };
+        if replace_unchanged(&target, before.as_deref(), &bytes)? {
+            return Ok(true);
+        }
+    }
+    bail!("{} changed while updating; retry", path.display())
+}
+
+pub(crate) fn lock_beside(target: &Path) -> Result<std::fs::File> {
+    let dir = target.parent().context("a file path has a parent")?;
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
     let lock_path = dir.join(format!(".{name}.t3cm-lock"));
     let mut lock_opts = std::fs::OpenOptions::new();
     lock_opts.read(true).write(true).create(true);
@@ -965,45 +980,37 @@ where
     std::os::unix::fs::OpenOptionsExt::mode(&mut lock_opts, 0o600);
     let lock_file = lock_opts.open(&lock_path).with_context(|| format!("opening {}", lock_path.display()))?;
     lock_file.lock().with_context(|| format!("locking {}", lock_path.display()))?;
+    Ok(lock_file)
+}
 
-    for attempt in 0..3 {
-        let before = read_optional_bytes(&target)?;
-        let perms = std::fs::metadata(&target).ok().map(|m| m.permissions());
-        let Some(bytes) = edit(before.as_deref())? else {
-            return Ok(false);
-        };
-        let (tmp, mut file) = open_unique_staging(dir, &name, perms.as_ref())?;
-        let written = std::io::Write::write_all(&mut file, &bytes).and_then(|()| match perms {
+pub(crate) fn replace_unchanged(target: &Path, before: Option<&[u8]>, bytes: &[u8]) -> Result<bool> {
+    let dir = target.parent().context("a file path has a parent")?;
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    let perms = std::fs::metadata(target).ok().map(|m| m.permissions());
+    let (tmp, mut file) = open_unique_staging(dir, &name, perms.as_ref())?;
+    let written =
+        std::io::Write::write_all(&mut file, bytes).and_then(|()| file.sync_all()).and_then(|()| match perms {
             Some(p) => std::fs::set_permissions(&tmp, p),
             None => Ok(()),
         });
-        drop(file);
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e).with_context(|| format!("writing {}", tmp.display()));
-        }
-        let current = match read_optional_bytes(&target) {
-            Ok(b) => b,
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(e);
-            }
-        };
-        if current != before {
-            let _ = std::fs::remove_file(&tmp);
-            if attempt + 1 < 3 {
-                continue;
-            }
-            bail!("{} changed while updating; retry", path.display());
-        }
-        std::fs::rename(&tmp, &target)
-            .inspect_err(|_| {
-                let _ = std::fs::remove_file(&tmp);
-            })
-            .with_context(|| format!("replacing {}", target.display()))?;
-        return Ok(true);
+    drop(file);
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("writing {}", tmp.display()));
     }
-    bail!("{} changed while updating; retry", path.display())
+    let current = read_optional_bytes(target).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+    if current.as_deref() != before {
+        let _ = std::fs::remove_file(&tmp);
+        return Ok(false);
+    }
+    std::fs::rename(&tmp, target)
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
+        .with_context(|| format!("replacing {}", target.display()))?;
+    Ok(true)
 }
 
 pub fn write_antigravity(path: &Path, t3cm_bin: &Path) -> Result<bool> {
