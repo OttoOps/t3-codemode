@@ -109,6 +109,10 @@ impl Document {
         Ok(Document { path: path.to_path_buf(), target, text, revision })
     }
 
+    pub fn location(path: &Path) -> PathBuf {
+        steps::real(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()))
+    }
+
     pub fn revision(&self) -> &Revision {
         &self.revision
     }

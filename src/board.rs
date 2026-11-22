@@ -550,7 +550,7 @@ impl Wf {
     }
 
     pub fn update_view(&self) -> Value {
-        let latest = self.release.lock().unwrap().clone();
+        let latest = self.release.lock().unwrap().clone().filter(|_| self.config().update_check);
         let releases = crate::release::releases_url().unwrap_or_else(|_| crate::release::RELEASES.to_string());
         crate::release::view(&crate::release::Version::current(), latest.as_ref(), &releases)
     }
@@ -1372,8 +1372,7 @@ impl Wf {
                 Ok(r) => r,
                 Err(e) => return self.launch_failed(&label, &format!("Cannot launch {label}: {e:#}")),
             };
-        let config = self.config();
-        let params = config.link_params("overseer", "ticket")?;
+        let params = self.config().link_params("overseer", "ticket")?;
         {
             let _g = self.lock.lock().await;
             self.ensure_not_on_board(&label)?;
@@ -1389,7 +1388,6 @@ impl Wf {
             })?;
         }
         self.changed();
-        let b = &config.board;
         let title = format!("{label}: {}", nonempty(a.title).unwrap_or_else(|| issue.url()));
         let mut input = json!({
             "projectId": project_id,
@@ -1398,7 +1396,7 @@ impl Wf {
             "message": ticket_brief(&issue.url(), &label),
             "clientRequestId": format!("t3cm-board-{}", random_id()),
         });
-        if let Some(m) = &b.runtime_mode {
+        if let Some(m) = &self.config().board.runtime_mode {
             input["runtimeMode"] = json!(m);
         }
         let launched = self.t3.call("t3_thread_launch", input).await;
@@ -1465,8 +1463,6 @@ impl Wf {
         if q.chars().count() > MAX_TEXT {
             bail!("the question is over {MAX_TEXT} chars");
         }
-        let config = self.config();
-        let b = &config.board;
         let resolved = match self.resolve_ask_model().await {
             Ok(r) => r,
             Err(e) => {
@@ -1482,7 +1478,7 @@ impl Wf {
             "message": ask_brief(q),
             "clientRequestId": format!("t3cm-ask-{}", random_id()),
         });
-        if let Some(m) = &b.runtime_mode {
+        if let Some(m) = &self.config().board.runtime_mode {
             input["runtimeMode"] = json!(m);
         }
         let r = self.t3.call("t3_thread_launch", input).await?;

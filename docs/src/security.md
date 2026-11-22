@@ -10,10 +10,10 @@ Any local process that can reach the loopback port directly acts with the
 service's T3 session. That is the same trust boundary as the `t3` CLI for the
 same user. Direct loopback callers are not authenticated beyond that.
 
-The HTTP server splits `/mcp` and `/healthz` from the web board (`/`,
+The HTTP server splits `/mcp`, `/healthz` and `/reload` from the web board (`/`,
 `/api/*`) into separate middleware boundaries:
 
-- `/mcp` and `/healthz` are strictly loopback-only. When fronted by a proxy
+- `/mcp`, `/healthz` and `/reload` are strictly loopback-only. When fronted by a proxy
   that adds trusted forwarding headers and rejects or overwrites non-public
   `Host` values, they refuse remote hosts, remote origins, and proxied requests
   even when remote board access is enabled.
@@ -26,10 +26,19 @@ The HTTP server splits `/mcp` and `/healthz` from the web board (`/`,
 See [ADR 0008](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0008-remote-board-trust-boundary.md)
 for the split trust boundary and reverse-proxy trust assumptions.
 
+## Config reload
+
+`POST /reload` makes the service read its own config file again. It takes no
+config from the request, refuses a caller that names another file, and
+changes neither `board.remote` nor `upstreams` until a restart. It does apply
+`deny`, so whoever can write the config file can loosen that list without a
+restart. The sandbox has no network access and no reload global, so `execute`
+code cannot call the route directly.
+
 ## Network
 
 - The service binds `127.0.0.1` only.
-- `/mcp` and `/healthz` require a single `Host` naming `127.0.0.1`, `localhost`,
+- `/mcp`, `/healthz` and `/reload` require a single `Host` naming `127.0.0.1`, `localhost`,
   or `[::1]` (any valid port), refuse any non-loopback `Origin` (including a
   configured remote board origin), and refuse any request carrying proxy
   headers (`Tailscale-User-Login`, `X-Forwarded-Host`, `X-Forwarded-For`,
@@ -93,8 +102,8 @@ for the split trust boundary and reverse-proxy trust assumptions.
 - **Reverse-proxy trust assumption.** Because `t3cm` listens on `127.0.0.1`,
   any forwarder that sends a loopback `Host` with no forwarding headers looks
   identical on the wire to a direct loopback client. Any proxy fronting the
-  board must terminate TLS, forward only board routes (never `/mcp` or
-  `/healthz`), strip client-supplied forwarding and identity headers
+  board must terminate TLS, forward only board routes (never `/mcp`,
+  `/healthz` or `/reload`), strip client-supplied forwarding and identity headers
   (`X-Forwarded-*`, `Forwarded`, `Tailscale-User-Login`), always add a trusted
   forwarding header (`X-Forwarded-For`, `X-Forwarded-Host`,
   `X-Forwarded-Proto`, or `Forwarded`; Tailscale Serve adds its own), and

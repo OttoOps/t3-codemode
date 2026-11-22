@@ -496,11 +496,10 @@ impl App {
         let v = self.wf.ask(question).await?;
         let seq = v["seq"].as_i64().unwrap_or_default();
         let app = self.clone();
-        let config = self.config();
-        let every = Duration::from_secs(config.board.ask_poll_secs.max(1));
-        let until = Instant::now() + Duration::from_secs(config.board.ask_timeout_minutes.max(1) * 60 + 60);
+        let every = Duration::from_secs(self.config().board.ask_poll_secs.max(1));
+        let asked = tokio::time::Instant::now();
         tokio::spawn(async move {
-            while Instant::now() < until {
+            while asked.elapsed().as_secs() / 60 <= app.config().board.ask_timeout_minutes.max(1) {
                 tokio::time::sleep(every).await;
                 match app.wf.check_asks(Some(seq)).await {
                     Ok(false) => break,

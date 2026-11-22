@@ -6,6 +6,7 @@ mod http_server;
 mod board;
 mod cli;
 mod config_edit;
+mod config_reload;
 mod issues;
 mod live_github;
 mod mcp_http;

@@ -2,18 +2,39 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::app::App;
+use crate::config::Config;
 
 const CATALOG_EVERY: Duration = Duration::from_secs(600);
 
+fn period(config: &Config) -> Duration {
+    Duration::from_secs(config.watcher_interval_secs.max(5))
+}
+
+fn ticker_of(every: Duration) -> tokio::time::Interval {
+    let mut ticker = tokio::time::interval(every);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker
+}
+
 pub fn spawn(app: Arc<App>) -> tokio::task::JoinHandle<()> {
-    let every = Duration::from_secs(app.config().watcher_interval_secs.max(5));
+    let mut changes = app.wf.config_changes();
+    let mut every = period(&changes.borrow_and_update());
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(every);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut ticker = ticker_of(every);
         let mut catalog_at: Option<Instant> = None;
         let mut upstreams: Option<tokio::task::JoinHandle<()>> = None;
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = ticker.tick() => {}
+                Ok(()) = changes.changed() => {
+                    let next = period(&changes.borrow_and_update());
+                    if next != every {
+                        every = next;
+                        ticker = ticker_of(every);
+                    }
+                    continue;
+                }
+            }
             match app.wf.tick().await {
                 Ok(actions) if actions.is_empty() => tracing::debug!("watcher pass: no action"),
                 Ok(actions) => tracing::info!(?actions, "watcher pass"),

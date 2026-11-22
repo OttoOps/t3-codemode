@@ -290,7 +290,7 @@ when `CI` is set.
 
 | Command | Does |
 |---|---|
-| `t3cm serve [--port N] [--state-dir D] [--no-watcher] [--log-file F]` | MCP Streamable HTTP at `/mcp`, `/healthz`, the board at `/` |
+| `t3cm serve [--port N] [--state-dir D] [--no-watcher] [--log-file F]` | MCP Streamable HTTP at `/mcp`, `/healthz`, `/reload`, the board at `/` |
 | `t3cm stdio [--state-dir D] [--watcher]` | MCP over stdio; the caller is `$T3CODE_THREAD_ID` |
 | `t3cm status` | The running service's `/healthz` |
 | `t3cm exec <file\|->`, `t3cm search <file\|->` | Call the running service's tools, for humans and scripts |

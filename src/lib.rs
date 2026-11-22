@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod clock;
 pub mod config;
 pub mod config_edit;
+pub mod config_reload;
 pub mod contexts;
 pub mod desktop;
 pub mod doctor;

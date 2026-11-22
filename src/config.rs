@@ -512,6 +512,24 @@ impl Config {
         Ok(())
     }
 
+    pub(crate) fn hold_restart_only(&mut self, running: &Config) -> Vec<&'static str> {
+        let mut held = Vec::new();
+        if self.max_concurrent_runs != running.max_concurrent_runs {
+            self.max_concurrent_runs = running.max_concurrent_runs;
+            held.push("maxConcurrentRuns");
+        }
+        if self.upstreams != running.upstreams {
+            self.upstreams.clone_from(&running.upstreams);
+            held.push("upstreams");
+        }
+        let remote = |config: &Config| config.board.remote.clone().unwrap_or_default();
+        if remote(self) != remote(running) {
+            held.push("board.remote");
+        }
+        self.board.remote.clone_from(&running.board.remote);
+        held
+    }
+
     pub fn check_role(&self, role: &str) -> Result<()> {
         if self.roles.contains_key(role) {
             Ok(())

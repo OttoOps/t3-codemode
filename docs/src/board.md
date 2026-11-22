@@ -428,7 +428,8 @@ hand.
 The board is loopback-only by default. To open it from another device over
 HTTPS, expose it with Tailscale Serve or put your own HTTPS reverse proxy in
 front of `127.0.0.1:47731`, configure [`board.remote`](config.md#remote-board)
-in `config.json`, and restart `t3cm`. `/mcp` and `/healthz` stay loopback-only.
+in `config.json`, and restart `t3cm`. `/mcp`, `/healthz` and `/reload` stay
+loopback-only.
 
 ### Tailscale Serve
 
@@ -570,8 +571,8 @@ without changing direct loopback behavior:
 ### Reverse-proxy examples
 
 Any proxy fronting the board must follow the rules in
-[Security model](security.md#network): terminate TLS, refuse `/mcp` and
-`/healthz`, strip client-supplied forwarding and identity headers, always inject
+[Security model](security.md#network): terminate TLS, refuse `/mcp`,
+`/healthz` and `/reload`, strip client-supplied forwarding and identity headers, always inject
 a trusted forwarding header, and reject or overwrite any `Host` that does not
 match `board.remote.origin`. Do not configure the proxy to log `POST /api/pair`
 request bodies, which carry the raw pairing token during redemption. Never front
@@ -584,11 +585,11 @@ Caddy terminates TLS automatically, rejects requests whose `Host` does not match
 the site address, preserves `Host`, and injects `X-Forwarded-For`,
 `X-Forwarded-Proto`, and `X-Forwarded-Host` (replacing untrusted client values
 by default). Strip `Tailscale-User-Login`, `Forwarded`, and `X-Forwarded-Port`,
-block `/mcp` and `/healthz`, and set `flush_interval -1` for SSE:
+block `/mcp`, `/healthz` and `/reload`, and set `flush_interval -1` for SSE:
 
 ```caddyfile
 board.example.com {
-    @blocked path /mcp /mcp/* /healthz /healthz/*
+    @blocked path /mcp /mcp/* /healthz /healthz/* /reload /reload/*
     respond @blocked 403
 
     reverse_proxy 127.0.0.1:47731 {
@@ -602,13 +603,13 @@ board.example.com {
 
 #### Cloudflare Tunnel (`cloudflared`)
 
-Place the `/mcp` and `/healthz` deny rule ahead of the board rule in your
+Place the `/mcp`, `/healthz` and `/reload` deny rule ahead of the board rule in your
 tunnel's `config.yml`:
 
 ```yaml
 ingress:
   - hostname: board.example.com
-    path: ^/(mcp|healthz)(/.*)?$
+    path: ^/(mcp|healthz|reload)(/.*)?$
     service: http_status:403
   - hostname: board.example.com
     service: http://127.0.0.1:47731
@@ -651,6 +652,8 @@ server {
     location ^~ /mcp/ { return 403; }
     location = /healthz { return 403; }
     location ^~ /healthz/ { return 403; }
+    location = /reload { return 403; }
+    location ^~ /reload/ { return 403; }
 
     location / {
         proxy_pass http://127.0.0.1:47731;
@@ -679,7 +682,7 @@ server {
 | `GET /icon.svg`, `/icon-192.png`, `/icon-512.png` | Embedded board icons for browser tabs, notifications, and Add to Home Screen (same board auth guards) |
 | `GET /pair` | Remote browser pairing page (enabled when `board.remote.mode` is `"pairing"`, or `"tailscale"` with `requirePairing: true`); reads the token from `#<token>`, clears the fragment, and posts to `POST /api/pair` |
 | `POST /api/pair` `{token, label?}` | Redeem a single-use 5-minute pairing token (`Content-Type: application/json`) over the remote HTTPS origin and set a 30-day `HttpOnly; Secure; SameSite=Strict; Path=/` session cookie |
-| `GET /api/state` | `{rev, cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, counts, service}`, with `counts.newIssues`. `rev` is the board revision: it goes up with every change, keeps going up across a restart, and a state whose `rev` is at least a write's `rev` already holds that write; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
+| `GET /api/state` | `{rev, cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, counts, service}`, with `counts.newIssues`. `rev` is the board revision: it goes up with every change, keeps going up across a restart, and a state whose `rev` is at least a write's `rev` already holds that write; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` while `updateCheck` is `false` or until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
 | `GET /api/events` | SSE: a `state` event on every change, carrying the same `rev` (closes when a remote pairing session is revoked or expires, or when a Tailscale login is no longer allowed) |
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it |
