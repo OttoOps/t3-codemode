@@ -12,7 +12,10 @@ the built-in defaults, so a file only needs the keys you change:
 | macOS | `~/Library/Application Support/t3-codemode/` for both |
 | Windows | `%LOCALAPPDATA%\t3-codemode\` for both |
 
-The service reads the file at start. Restart it after an edit:
+The service reads the file at start, and again when
+[`t3cm config`](#change-the-config) saves a change and asks it to reload. It
+does not watch the file, so restart it after you edit the file another way or
+change a [restart-only key](#restart-only-keys):
 
 | OS | Restart |
 |---|---|
@@ -35,8 +38,9 @@ and it has to repeat the two default entries to keep them.
 
 `t3cm config` reads and changes the config file. Before it writes, it checks
 the whole result as config load does, so a rejected change prints the field
-that failed and leaves the file as it was. The service still needs a
-[restart](#the-config-file) before it uses a change.
+that failed and leaves the file as it was. After `set`, `unset` or a saved
+`edit`, it asks the running service to reload the file and prints the keys
+that still need a restart.
 
 | Command | Does |
 |---|---|
@@ -79,6 +83,41 @@ each member of that pool is a T3 provider instance and has the pool's
 answer, or you pass `--no-t3`, t3cm warns that it did not check the members
 and goes on, since each pick checks them again. `--port` names the service's
 port when it is not the default.
+
+### Reload
+
+A reload applies the whole file, so it also picks up what you edited by hand
+since the service last read it. The service checks the file first and keeps
+the config it was running when the file is invalid. A `set` that changes
+nothing still reloads.
+
+The reload goes to the service on `--port` or `T3CM_PORT`, and that service
+reloads only when it reads the file you changed. If it reads another file,
+t3cm names that file. If no service answers, or the service is older than this
+t3cm, t3cm says that it did not reload and prints the restart command. t3cm
+saves the file in each case. When the service rejects the saved file, t3cm
+prints its error and exits 1.
+
+Work already under way can finish with the value it started with. An open
+link keeps its `link` numbers, a run keeps its CPU and time limits, and an
+open ask keeps its poll interval. A `t3cm stdio` process reads the file only
+at start.
+
+### Restart-only keys
+
+| Key | Why it needs a restart |
+|---|---|
+| `maxConcurrentRuns` | It sets the service's run slots and memory bound at start. |
+| `upstreams` | Every key under it, `allow` and `deny` included, belongs to connections and a catalog built at start. |
+| `board.remote` | It sets who can reach the board from another device. To revoke a login, change it and restart. |
+
+Every other key takes effect on reload. The service keeps the starting value
+of these three until it restarts, and each reload names the ones whose saved
+value differs from that.
+[ADR 0009](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0009-reload-config-in-place.md)
+records why.
+
+### How t3cm writes the file
 
 A write replaces the file in one step. It keeps the file's permissions, a
 symlink to it, and the formatting of the values it does not change. t3cm
@@ -190,7 +229,7 @@ HTTPS origin:
 | `allowUsers` | `[]` | Tailscale logins allowed in `"tailscale"` mode (matched case-insensitively). When omitted or empty, defaults to the host's own login from `tailscale status --json`. When non-empty, it replaces that default, so include your own login if you want to keep access. Ignored outside `"tailscale"` mode. |
 | `requirePairing` | `false` | When `true` in `"tailscale"` mode, requires both an allowed `Tailscale-User-Login` and a valid `__Host-t3cm_session` pairing cookie minted with `t3cm board pair`. Pairing is always required in `"pairing"` mode. |
 
-`/mcp` and `/healthz` remain strictly loopback-only regardless of `board.remote`.
+`/mcp`, `/healthz` and `/reload` remain strictly loopback-only regardless of `board.remote`.
 See [Remote access](board.md#remote-access) for Tailscale Serve, pairing
 commands, and reverse-proxy examples, and [Security model](security.md#network)
 for the proxy trust rules.

@@ -9,16 +9,28 @@ use t3_codemode::{field, server};
 
 use crate::common::H;
 
-struct Cfg {
-    dir: tempfile::TempDir,
-    file: std::path::PathBuf,
+// Port 0 cannot be connected to, so a test never reaches a service installed on the default port.
+const NO_SERVICE: u16 = 0;
+
+pub(crate) struct Cfg {
+    pub(crate) dir: tempfile::TempDir,
+    pub(crate) file: std::path::PathBuf,
+    port: u16,
 }
 
 impl Cfg {
-    fn absent() -> Cfg {
+    pub(crate) fn absent() -> Cfg {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("config.json");
-        Cfg { dir, file }
+        Cfg { dir, file, port: NO_SERVICE }
+    }
+
+    pub(crate) fn at(file: std::path::PathBuf) -> Cfg {
+        Cfg { file, ..Cfg::absent() }
+    }
+
+    pub(crate) fn on_port(self, port: u16) -> Cfg {
+        Cfg { port, ..self }
     }
 
     fn with(text: &str) -> Cfg {
@@ -31,7 +43,7 @@ impl Cfg {
         std::fs::read_to_string(&self.file).unwrap()
     }
 
-    fn command(&self, args: &[&str]) -> Command {
+    pub(crate) fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_t3cm"));
         cmd.arg("config")
             .args(args)
@@ -41,17 +53,18 @@ impl Cfg {
             .env("T3CM_CONFIG", &self.file)
             .env("T3CM_STATE_DIR", self.dir.path().join("state"))
             .env("T3CM_NO_UPDATE_CHECK", "1")
+            .env("T3CM_PORT", self.port.to_string())
             .env_remove("VISUAL")
             .env_remove("EDITOR")
             .env_remove("T3CODE_THREAD_ID");
         cmd
     }
 
-    fn run(&self, args: &[&str]) -> Output {
+    pub(crate) fn run(&self, args: &[&str]) -> Output {
         self.command(args).output().unwrap()
     }
 
-    fn ok(&self, args: &[&str]) -> String {
+    pub(crate) fn ok(&self, args: &[&str]) -> String {
         let out = self.run(args);
         assert!(out.status.success(), "{args:?}: {}", stderr(&out));
         String::from_utf8(out.stdout).unwrap()
@@ -66,7 +79,7 @@ fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-fn set(path: &str, value: Value) -> Edit {
+pub(crate) fn set(path: &str, value: Value) -> Edit {
     Edit::Set { path: field::parse(path).unwrap(), value }
 }
 
@@ -74,11 +87,11 @@ fn unset(path: &str) -> Edit {
     Edit::Unset { path: field::parse(path).unwrap() }
 }
 
-fn apply(file: &Path, edit: Edit) {
+pub(crate) fn apply(file: &Path, edit: Edit) {
     Document::read(file).unwrap().edit(&[edit]).unwrap().save().unwrap();
 }
 
-fn every_kind_of_key() -> Vec<(&'static str, Value)> {
+pub(crate) fn every_kind_of_key() -> Vec<(&'static str, Value)> {
     vec![
         ("deny", json!(["t3_project_delete", "t3_thread_interrupt"])),
         ("watcherIntervalSecs", json!(90)),

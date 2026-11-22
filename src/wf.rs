@@ -319,6 +319,10 @@ impl Wf {
         self.config.borrow().clone()
     }
 
+    pub fn config_changes(&self) -> tokio::sync::watch::Receiver<Arc<Config>> {
+        self.config.subscribe()
+    }
+
     pub fn set_config_path(&self, path: PathBuf) {
         *self.config_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
     }

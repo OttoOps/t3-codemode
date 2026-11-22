@@ -292,7 +292,7 @@ enum ConfigCmd {
         /// Dotted path, such as board.pool or 'pools."gpt-6.1".members.0' (quote a name that holds a dot)
         path: Option<String>,
     },
-    /// Change one key and write the file, unless the result is invalid
+    /// Change one key, write the file unless the result is invalid, and reload the running service
     Set {
         /// Dotted path, such as board.pool or 'pools."gpt-6.1".members.0' (quote a name that holds a dot)
         path: String,
@@ -302,14 +302,14 @@ enum ConfigCmd {
         #[command(flatten)]
         check: CheckArgs,
     },
-    /// Remove one key from the file, so its default applies, or one item from a list
+    /// Remove one key from the file, so its default applies, or one item from a list, and reload the service
     Unset {
         /// Dotted path, such as board.pool or deny.1
         path: String,
         #[command(flatten)]
         check: CheckArgs,
     },
-    /// Open a copy of the file in $VISUAL or $EDITOR and keep it only when it is valid
+    /// Open a copy of the file in $VISUAL or $EDITOR, keep it only when it is valid, and reload the service
     Edit {
         #[command(flatten)]
         check: CheckArgs,
@@ -768,11 +768,15 @@ async fn print_update_notice() {
 }
 
 fn spawn_release_checks(app: Arc<App>, state_dir: PathBuf) {
-    if !app.config().update_check || release::check_disabled(true) {
+    if release::check_disabled(true) {
         return;
     }
     tokio::spawn(async move {
         let Ok(releases) = release::releases_url() else { return };
+        let mut changes = app.wf.config_changes();
+        if changes.wait_for(|c| c.update_check).await.is_err() {
+            return;
+        }
         let every = release::SERVICE_EVERY;
         let mut wait = std::time::Duration::from_secs(5);
         if let Some(c) = release::read_cache(&state_dir)
@@ -785,6 +789,9 @@ fn spawn_release_checks(app: Arc<App>, state_dir: PathBuf) {
         }
         loop {
             tokio::time::sleep(wait).await;
+            if changes.wait_for(|c| c.update_check).await.is_err() {
+                return;
+            }
             wait = every;
             match release::latest(&releases).await {
                 Ok(v) => {
@@ -812,19 +819,30 @@ async fn shutdown_signal() {
 
 async fn run_config(cmd: ConfigCmd) -> Result<ExitCode> {
     let file = config::default_path();
-    match cmd {
-        ConfigCmd::Get { path } => config_get(&file, path.as_deref())?,
+    let reload_on = match cmd {
+        ConfigCmd::Get { path } => {
+            config_get(&file, path.as_deref())?;
+            None
+        }
         ConfigCmd::Set { path, value, check } => {
             let value = serde_json::from_str(&value).unwrap_or(Value::String(value));
             let edit = Edit::Set { path: field::parse(&path)?, value };
             config_change(&file, &format!("set {path}"), edit, &check).await?;
+            Some(check.port.port)
         }
         ConfigCmd::Unset { path, check } => {
             let edit = Edit::Unset { path: field::parse(&path)? };
             config_change(&file, &format!("unset {path}"), edit, &check).await?;
+            Some(check.port.port)
         }
-        ConfigCmd::Edit { check } => config_editor(&file, &check).await?,
-        ConfigCmd::Validate { check } => config_validate(&file, &check).await?,
+        ConfigCmd::Edit { check } => config_editor(&file, &check).await?.then_some(check.port.port),
+        ConfigCmd::Validate { check } => {
+            config_validate(&file, &check).await?;
+            None
+        }
+    };
+    if let Some(port) = reload_on {
+        config_reload(&file, port).await?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -854,11 +872,53 @@ fn config_save(file: &Path, draft: Draft<'_>) -> Result<()> {
     draft.save()?;
     if changed {
         println!("Updated config: {}", file.display());
-        println!("Restart the service to apply: {}", platform::SERVICE.restart);
     } else {
         println!("No change to {}", file.display());
     }
     Ok(())
+}
+
+const RELOAD_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn config_reload(file: &Path, port: u16) -> Result<()> {
+    let at = format!("127.0.0.1:{port}");
+    let not_reloaded = |why: String| {
+        eprintln!("warn: not reloaded ({why})");
+        println!("Restart the service to apply: {}", platform::SERVICE.restart);
+        Ok(())
+    };
+    let body = json!({"path": Document::location(file).to_string_lossy()});
+    let client = reqwest::Client::builder().no_proxy().timeout(RELOAD_BUDGET).build()?;
+    let answer = match client.post(format!("http://{at}/reload")).json(&body).send().await {
+        Ok(answer) => answer,
+        Err(e) if e.is_timeout() => return not_reloaded(format!("the service on {at} did not confirm in time")),
+        Err(_) => return not_reloaded(format!("no t3cm service answered on {at}; --port names another port")),
+    };
+    let status = answer.status().as_u16();
+    let reply: Value = answer.json().await.unwrap_or_default();
+    match status {
+        200 if reply["restart"].is_array() => {
+            println!("Reloaded the running service on {at}");
+            let restart = strings(&reply["restart"]);
+            if !restart.is_empty() {
+                println!("These keys need a restart: {}", restart.join(", "));
+                println!("Restart the service to apply: {}", platform::SERVICE.restart);
+            }
+            Ok(())
+        }
+        404 => not_reloaded(format!("the service on {at} has no reload, so it is older than this t3cm")),
+        409 if reply["configPath"].is_string() => {
+            let theirs = reply["configPath"].as_str().unwrap_or_default();
+            eprintln!("warn: not reloaded (the service on {at} reads {theirs}, not {})", file.display());
+            Ok(())
+        }
+        422 if reply["error"].is_string() => bail!(
+            "{} is saved, but the service on {at} kept the config it was running: {}",
+            file.display(),
+            reply["error"].as_str().unwrap_or_default()
+        ),
+        _ => not_reloaded(format!("unexpected answer from {at}, HTTP {status}")),
+    }
 }
 
 async fn config_validate(file: &Path, check: &CheckArgs) -> Result<()> {
@@ -904,7 +964,7 @@ async fn check_pool_members(cfg: &Config, pools: &[&str], check: &CheckArgs) -> 
     Ok(())
 }
 
-async fn config_editor(file: &Path, check: &CheckArgs) -> Result<()> {
+async fn config_editor(file: &Path, check: &CheckArgs) -> Result<bool> {
     let command = editor::command()?;
     let doc = Document::read(file)?;
     let scratch = editor::scratch(file, doc.text())?;
@@ -917,20 +977,26 @@ async fn config_editor(file: &Path, check: &CheckArgs) -> Result<()> {
     result.with_context(|| format!("{} was not written; your edit is kept at {}", file.display(), scratch.display()))
 }
 
-async fn edit_until_valid(file: &Path, doc: &Document, command: &str, scratch: &Path, check: &CheckArgs) -> Result<()> {
+async fn edit_until_valid(
+    file: &Path,
+    doc: &Document,
+    command: &str,
+    scratch: &Path,
+    check: &CheckArgs,
+) -> Result<bool> {
     loop {
         editor::open(command, scratch)?;
         let text = std::fs::read_to_string(scratch).with_context(|| format!("reading {}", scratch.display()))?;
         if text == doc.text() {
             println!("No change to {}", file.display());
-            return Ok(());
+            return Ok(false);
         }
         let checked = match doc.replace(text) {
             Ok(draft) => check_pool_members(draft.config(), &draft.changed_pools(), check).await.map(|()| draft),
             Err(e) => Err(e.into()),
         };
         match checked {
-            Ok(draft) => return config_save(file, draft),
+            Ok(draft) => return config_save(file, draft).map(|()| true),
             Err(e) if std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
                 eprint!("invalid config: {e:#}\nEdit again? [Y/n] ");
                 let mut answer = String::new();

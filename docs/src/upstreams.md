@@ -9,6 +9,10 @@ the limits under [Secret references](#secret-references): tracked values of 4
 or more bytes, in raw or JSON-escaped form. T3 itself stays built in as
 the namespace `t3`, with its own OAuth client.
 
+A change under `upstreams` needs a
+[restart](config.md#restart-only-keys), since a config reload keeps the
+connections the service started with.
+
 ## Config
 
 ```json

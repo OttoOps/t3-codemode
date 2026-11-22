@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::Router;
@@ -13,6 +14,7 @@ use tokio::net::TcpListener;
 
 use crate::app::App;
 use crate::config::parse_host_header;
+use crate::config_edit::Document;
 use crate::wf_slots::Reported;
 use crate::{mcp, web};
 
@@ -167,10 +169,33 @@ async fn healthz(State(app): State<Arc<App>>) -> Response {
     json_response(StatusCode::OK, app.health_async().await)
 }
 
+#[derive(serde::Deserialize)]
+struct ReloadRequest {
+    path: String,
+}
+
+async fn post_reload(State(app): State<Arc<App>>, body: Bytes) -> Response {
+    let Ok(ReloadRequest { path }) = serde_json::from_slice(&body) else {
+        return json_response(StatusCode::BAD_REQUEST, json!({"error": "expected {\"path\": \"<config file>\"}"}));
+    };
+    let own = Document::location(&app.wf.config_path());
+    if own.to_string_lossy() != Document::location(Path::new(&path)).to_string_lossy() {
+        return json_response(
+            StatusCode::CONFLICT,
+            json!({"error": "this service reads another config file", "configPath": own.to_string_lossy()}),
+        );
+    }
+    match app.wf.reload_config().await {
+        Ok(reloaded) => json_response(StatusCode::OK, json!(reloaded)),
+        Err(e) => json_response(StatusCode::UNPROCESSABLE_ENTITY, json!({"error": app.redact(format!("{e:#}"))})),
+    }
+}
+
 pub fn router(app: Arc<App>, port: u16) -> Router {
     let loopback = Router::new()
         .route("/mcp", post(post_mcp).get(not_allowed).delete(not_allowed))
         .route("/healthz", get(healthz))
+        .route("/reload", post(post_reload))
         .route_layer(axum::middleware::from_fn(check_loopback))
         .with_state(app.clone());
     loopback.merge(web::routes(app, port))
