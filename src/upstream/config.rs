@@ -9,6 +9,7 @@ use super::{
     ResolvedTransport, ResolvedUpstream, SECRET_NAME_HINTS, Secret, StdioConfig, ToolFilter, Transport, UpstreamConfig,
     UpstreamError, is_loopback_host,
 };
+use crate::field::{invalid, segment};
 use crate::platform::{executable_variants, has_separator, home_dir, is_executable};
 use crate::types::sanitize_identifier;
 
@@ -17,11 +18,16 @@ const SECRET_HEADERS: &[&str] = &["authorization", "proxy-authorization", "cooki
 
 pub fn validate(upstreams: &[UpstreamConfig]) -> Result<()> {
     if upstreams.len() > MAX_UPSTREAMS {
-        bail!("at most {MAX_UPSTREAMS} upstreams are allowed, got {}", upstreams.len());
+        return Err(invalid(
+            "upstreams",
+            format!("at most {MAX_UPSTREAMS} upstreams are allowed, got {}", upstreams.len()),
+        ));
     }
     let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
     for (i, up) in upstreams.iter().enumerate() {
-        let fail = |field: &str, msg: String| anyhow!("upstreams[{i}] {:?}: {field}: {msg}", up.name);
+        let fail = |field: &str, msg: String| {
+            invalid(format!("upstreams.{i}.{}", dotted(field)), format!("upstreams[{i}] {:?}: {field}: {msg}", up.name))
+        };
         validate_name(&up.name).map_err(|e| fail("name", e.to_string()))?;
         if let Some(j) = seen.insert(&up.name, i) {
             return Err(fail("name", format!("duplicate of upstreams[{j}]")));
@@ -29,6 +35,15 @@ pub fn validate(upstreams: &[UpstreamConfig]) -> Result<()> {
         check_upstream(up).map_err(|(field, msg)| fail(&field, msg))?;
     }
     Ok(())
+}
+
+fn dotted(field: &str) -> String {
+    for section in ["stdio.env.", "http.headers."] {
+        if let Some(name) = field.strip_prefix(section) {
+            return format!("{section}{}", segment(name));
+        }
+    }
+    field.replace('[', ".").replace(']', "")
 }
 
 type FieldError = (String, String);

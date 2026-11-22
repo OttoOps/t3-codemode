@@ -5,6 +5,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::field::{self, invalid, within};
 use crate::pools::PoolConfig;
 use crate::upstream::UpstreamConfig;
 
@@ -28,11 +29,11 @@ impl LinkParams {
     pub fn validate(&self) -> Result<()> {
         for (k, v) in [("down", self.down), ("miss", self.miss), ("stall", self.stall)] {
             if v < 1 {
-                bail!("{k} must be a positive integer, got {v}");
+                return Err(invalid(k, format!("{k} must be a positive integer, got {v}")));
             }
         }
         if self.stall <= self.down {
-            bail!("stall ({}) must exceed down ({})", self.stall, self.down);
+            return Err(invalid("stall", format!("stall ({}) must exceed down ({})", self.stall, self.down)));
         }
         Ok(())
     }
@@ -138,13 +139,17 @@ pub struct BoardRemoteConfig {
 impl BoardRemoteConfig {
     pub fn validate(&self) -> Result<()> {
         if let Some(origin) = &self.origin {
-            RemoteOrigin::parse(origin).context("board.remote.origin")?;
+            RemoteOrigin::parse(origin).map_err(|e| within(e, "board.remote.origin", "board.remote.origin"))?;
         }
         if self.mode != RemoteMode::Off && self.origin.is_none() {
-            bail!("board.remote.origin is required when board.remote.mode is {:?}", self.mode.as_str());
+            return Err(invalid(
+                "board.remote.origin",
+                format!("board.remote.origin is required when board.remote.mode is {:?}", self.mode.as_str()),
+            ));
         }
-        for user in &self.allow_users {
-            crate::tailscale::validate_login(user).context("board.remote.allowUsers")?;
+        for (i, user) in self.allow_users.iter().enumerate() {
+            crate::tailscale::validate_login(user)
+                .map_err(|e| within(e, &format!("board.remote.allowUsers.{i}"), "board.remote.allowUsers"))?;
         }
         Ok(())
     }
@@ -401,12 +406,15 @@ impl Config {
             merge(&mut v, over);
         }
         if let Some(pools) = v.get("pools") {
-            let pools = pools.as_object().ok_or_else(|| anyhow!("pools must be an object of named pools"))?;
+            let pools = pools.as_object().ok_or_else(|| invalid("pools", "pools must be an object of named pools"))?;
             for (name, raw) in pools {
                 crate::pools::check_value(name, raw)?;
             }
         }
-        let mut cfg: Config = serde_json::from_value(v)?;
+        let mut cfg: Config = field::deserialize(v).map_err(|(at, e)| {
+            let message = if at.is_empty() { e.to_string() } else { format!("{at}: {e}") };
+            invalid(at, message)
+        })?;
         cfg.board.legacy_ticket_keys = legacy_ticket_keys;
         cfg.board.ask_configured = ask_configured;
         cfg.validate()?;
@@ -415,61 +423,75 @@ impl Config {
 
     fn validate(&self) -> Result<()> {
         if self.max_concurrent_runs == 0 {
-            bail!("maxConcurrentRuns must be at least 1");
+            return Err(invalid("maxConcurrentRuns", "maxConcurrentRuns must be at least 1"));
         }
-        self.link.validate().context("link")?;
+        self.link.validate().map_err(|e| within(e, "link", "link"))?;
         let (active, idle) = (self.board.reconcile_active_minutes, self.board.reconcile_idle_minutes);
         if idle > 0 && !(1..=idle).contains(&active) {
-            bail!("board.reconcileActiveMinutes must be from 1 to reconcileIdleMinutes ({idle}), got {active}");
+            return Err(invalid(
+                "board.reconcileActiveMinutes",
+                format!("board.reconcileActiveMinutes must be from 1 to reconcileIdleMinutes ({idle}), got {active}"),
+            ));
         }
         if !self.roles.get("overseer").is_some_and(|r| r.children.contains_key("ticket")) {
-            bail!("the board needs the overseer role to open ticket links");
+            return Err(invalid(
+                "roles.overseer.children.ticket",
+                "the board needs the overseer role to open ticket links",
+            ));
         }
-        check_wake(&self.wake).context("wake")?;
+        check_wake(&self.wake).map_err(|e| within(e, "wake", "wake"))?;
         for (role, rc) in &self.roles {
             for child in rc.children.keys() {
+                let at = child_path(role, child);
                 if !self.roles.contains_key(child) {
-                    bail!("role {role} opens links to unknown role {child}");
+                    return Err(invalid(at, format!("role {role} opens links to unknown role {child}")));
                 }
                 self.link_params(role, child)?;
                 if let Some(w) = &rc.children[child].wake {
-                    check_wake(w).with_context(|| format!("{role} -> {child} wake"))?;
+                    check_wake(w).map_err(|e| within(e, &format!("{at}.wake"), &format!("{role} -> {child} wake")))?;
                 }
                 if let Some(c) = rc.children[child].body_cap
                     && c < 200
                 {
-                    bail!("{role} -> {child}: bodyCap must be at least 200");
+                    return Err(invalid(
+                        format!("{at}.bodyCap"),
+                        format!("{role} -> {child}: bodyCap must be at least 200"),
+                    ));
                 }
             }
         }
         crate::upstream::config::validate(&self.upstreams).context("upstreams")?;
         if !(1..=MAX_LIMIT_HOLD_MINUTES).contains(&self.limit_hold_minutes) {
-            bail!("limitHoldMinutes must be between 1 and {MAX_LIMIT_HOLD_MINUTES} (a week)");
+            return Err(invalid(
+                "limitHoldMinutes",
+                format!("limitHoldMinutes must be between 1 and {MAX_LIMIT_HOLD_MINUTES} (a week)"),
+            ));
         }
         for (name, pool) in &self.pools {
+            let at = field::display(&["pools", name]);
             if name.trim().is_empty() {
-                bail!("a pool needs a name");
+                return Err(invalid(at, "a pool needs a name"));
             }
-            pool.validate().with_context(|| format!("pool {name}"))?;
+            pool.validate().map_err(|e| within(e, &at, &format!("pool {name}")))?;
         }
         if let Some(p) = &self.board.pool
             && !self.pools.contains_key(p)
         {
-            bail!("board.pool names {p:?}, which is not in pools");
+            return Err(invalid("board.pool", format!("board.pool names {p:?}, which is not in pools")));
         }
         if let Some(p) = &self.board.ask_pool
             && !self.pools.contains_key(p)
         {
-            bail!("board.askPool names {p:?}, which is not in pools");
+            return Err(invalid("board.askPool", format!("board.askPool names {p:?}, which is not in pools")));
         }
         if self.board.ask_model.trim().is_empty() {
-            bail!("board.askModel must not be empty");
+            return Err(invalid("board.askModel", "board.askModel must not be empty"));
         }
         if self.board.ask_instance_id.as_deref().is_some_and(|s| s.trim().is_empty()) {
-            bail!("board.askInstanceId must not be empty");
+            return Err(invalid("board.askInstanceId", "board.askInstanceId must not be empty"));
         }
         if self.board.ask_effort.as_deref().is_some_and(|s| s.trim().is_empty()) {
-            bail!("board.askEffort must not be empty");
+            return Err(invalid("board.askEffort", "board.askEffort must not be empty"));
         }
         if let Some(remote) = &self.board.remote {
             remote.validate()?;
@@ -501,7 +523,19 @@ impl Config {
             miss: child.miss.unwrap_or(self.link.miss),
             stall: child.stall.unwrap_or(self.link.stall),
         };
-        p.validate().with_context(|| format!("{parent_role} -> {child_role} link numbers"))?;
+        p.validate().map_err(|e| {
+            let key = match field::of(&e) {
+                "stall" if child.stall.is_none() && child.down.is_some() => "down",
+                key => key,
+            };
+            let own = match key {
+                "down" => child.down.is_some(),
+                "miss" => child.miss.is_some(),
+                _ => child.stall.is_some(),
+            };
+            let at = if own { format!("{}.{key}", child_path(parent_role, child_role)) } else { format!("link.{key}") };
+            invalid(at, format!("{parent_role} -> {child_role} link numbers: {e}"))
+        })?;
         Ok(p)
     }
 
@@ -513,13 +547,17 @@ impl Config {
     }
 }
 
+fn child_path(role: &str, child: &str) -> String {
+    field::display(&["roles", role, "children", child])
+}
+
 fn check_wake(kinds: &[String]) -> Result<()> {
-    for k in kinds {
+    for (i, k) in kinds.iter().enumerate() {
         if k == "note" {
-            bail!("a note never wakes its parent; take it out of wake");
+            return Err(invalid(i.to_string(), "a note never wakes its parent; take it out of wake"));
         }
         if !UP_KINDS.contains(&k.as_str()) && !EXTRA_WAKE_KINDS.contains(&k.as_str()) {
-            bail!("unknown wake kind {k:?}");
+            return Err(invalid(i.to_string(), format!("unknown wake kind {k:?}")));
         }
     }
     Ok(())
