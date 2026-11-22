@@ -236,7 +236,8 @@ impl Wf {
     }
 
     pub async fn reconcile_if_due(&self) -> Result<Vec<String>> {
-        let b = &self.config.board;
+        let config = self.config();
+        let b = &config.board;
         if b.reconcile_idle_minutes == 0 {
             return Ok(Vec::new());
         }
@@ -246,7 +247,7 @@ impl Wf {
     }
 
     pub async fn reconcile_soon(&self) -> Result<Vec<String>> {
-        if self.config.board.reconcile_idle_minutes == 0 {
+        if self.config().board.reconcile_idle_minutes == 0 {
             return Ok(Vec::new());
         }
         self.reconcile_after(PAGE_LOAD_GAP_MINS).await

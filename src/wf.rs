@@ -234,7 +234,7 @@ pub struct Wf {
     pub(crate) store: Arc<Store>,
     pub(crate) t3: Arc<dyn T3Client>,
     pub(crate) clock: Arc<dyn Clock>,
-    pub(crate) config: Arc<Config>,
+    pub(crate) config: tokio::sync::watch::Sender<Arc<Config>>,
     pub(crate) lock: tokio::sync::Mutex<()>,
     pub(crate) remotes: Arc<dyn Remotes>,
     pub(crate) github: Arc<dyn GitHub>,
@@ -250,7 +250,6 @@ pub struct Wf {
     pub(crate) skills: crate::drift::Cache,
     pub(crate) slot_folders: Mutex<Option<crate::slots::Folders>>,
     pub(crate) drivers: Mutex<HashMap<String, String>>,
-    pub(crate) ask_config: Mutex<crate::board::AskConfig>,
     pub(crate) config_path: Mutex<Option<PathBuf>>,
     pub(crate) config_lock: tokio::sync::Mutex<()>,
     pub(crate) models_rev: AtomicU64,
@@ -286,13 +285,12 @@ impl Wf {
         if store.meta_get(crate::reconcile::SINCE).ok().flatten().is_none() {
             let _ = store.meta_set(crate::reconcile::SINCE, &iso(clock.now()));
         }
-        let ask_config = crate::board::AskConfig::from_board(&config.board);
         let rev = crate::board::clock_rev(&*clock);
         Wf {
             store,
             t3,
             clock,
-            config,
+            config: tokio::sync::watch::Sender::new(config),
             lock: tokio::sync::Mutex::new(()),
             remotes,
             github,
@@ -308,7 +306,6 @@ impl Wf {
             skills: crate::drift::Cache::default(),
             slot_folders: Mutex::new(None),
             drivers: Mutex::new(HashMap::new()),
-            ask_config: Mutex::new(ask_config),
             config_path: Mutex::new(None),
             config_lock: tokio::sync::Mutex::new(()),
             models_rev: AtomicU64::new(0),
@@ -316,6 +313,10 @@ impl Wf {
             state_rev: AtomicU64::new(rev),
             context_writes: Mutex::new(()),
         }
+    }
+
+    pub fn config(&self) -> Arc<Config> {
+        self.config.borrow().clone()
     }
 
     pub fn set_config_path(&self, path: PathBuf) {
@@ -336,7 +337,7 @@ impl Wf {
 
     pub fn watcher_alive(&self) -> bool {
         let last = self.store.meta_get(LAST_PASS).ok().flatten();
-        let limit = 3.0 * self.config.watcher_interval_secs.max(60) as f64 / 60.0;
+        let limit = 3.0 * self.config().watcher_interval_secs.max(60) as f64 / 60.0;
         self.mins(last.as_deref()).is_some_and(|m| m <= limit)
     }
 
@@ -449,7 +450,7 @@ impl Wf {
             "feed" => {
                 let a: FeedArgs = parse(method, args)?;
                 let filter = self.project_filter(a.context.as_deref(), a.projects)?;
-                return Ok(json!(self.feed_in(a.limit.unwrap_or(self.config.board.feed), filter.as_ref())?));
+                return Ok(json!(self.feed_in(a.limit.unwrap_or(self.config().board.feed), filter.as_ref())?));
             }
             "answer" => {
                 let a: AnswerArgs = parse(method, args)?;
@@ -523,10 +524,11 @@ impl Wf {
     }
 
     async fn init(&self, me: &str, a: InitArgs) -> Result<Value> {
-        self.config.check_role(&a.role)?;
+        let config = self.config();
+        config.check_role(&a.role)?;
         let guard = self.lock.lock().await;
         let open = self.store.link_get(me)?.filter(|l| !l.closed);
-        if !a.root && open.is_none() && self.config.board_oversees(&a.role) {
+        if !a.root && open.is_none() && config.board_oversees(&a.role) {
             drop(guard);
             let thread = self.read_thread(me).await.ok();
             let usable = |l: &str| Some(l.trim().to_string()).filter(|l| !l.is_empty());
@@ -566,7 +568,7 @@ impl Wf {
             .store
             .node_role(me)?
             .ok_or_else(|| anyhow!("call wf.init({{role}}) (no parent) or your brief's wf.join(...) first"))?;
-        let params = self.config.link_params(&my_role, role)?;
+        let params = self.config().link_params(&my_role, role)?;
         self.store.pending_put(&Pending {
             parent: me.into(),
             label: label.into(),
@@ -611,7 +613,7 @@ impl Wf {
     }
 
     async fn join(&self, me: &str, a: JoinArgs) -> Result<Value> {
-        self.config.check_role(&a.role)?;
+        self.config().check_role(&a.role)?;
         let thread = self.read_thread(me).await.ok();
         self.bind(me, a, thread.as_ref(), false).await
     }
@@ -621,8 +623,8 @@ impl Wf {
         let (link_url, project) = (field("link"), field("projectId"));
         let _g = self.lock.lock().await;
         let parent_role = self.store.node_role(&a.parent)?;
-        let base =
-            parent_role.as_deref().and_then(|r| self.config.link_params(r, &a.role).ok()).unwrap_or(self.config.link);
+        let config = self.config();
+        let base = parent_role.as_deref().and_then(|r| config.link_params(r, &a.role).ok()).unwrap_or(config.link);
         let params = LinkParams {
             down: a.down.unwrap_or(base.down),
             miss: a.miss.unwrap_or(base.miss),
@@ -711,7 +713,7 @@ impl Wf {
         ln.last_up = now.clone();
         ln.nudges = 0;
         ln.escalated = false;
-        let (wake_kinds, cap) = self.config.link_policy(ln.parent_role.as_deref(), &ln.role);
+        let (wake_kinds, cap) = self.config().link_policy(ln.parent_role.as_deref(), &ln.role);
         let mut wake = a.wake.unwrap_or_else(|| wake_kinds.contains(&a.kind));
         let closing = CLOSING.contains(&a.kind.as_str());
         if closing {
@@ -754,7 +756,7 @@ impl Wf {
         let text = format!(
             "{}\n{}",
             header("reply", "parent", &handle, None),
-            capped(&a.body, &handle, self.config.reply_cap)
+            capped(&a.body, &handle, self.config().reply_cap)
         );
         self.send_wake(&ln.child, &text, &handle).await
     }
@@ -925,7 +927,7 @@ impl Wf {
                 }
             }
             let Some(last) = unread.last() else { continue };
-            if lines.len() >= self.config.digest_lines {
+            if lines.len() >= self.config().digest_lines {
                 overflow += 1;
                 continue;
             }
@@ -961,7 +963,7 @@ impl Wf {
             }
             if !force && let Ok(th) = self.read_thread(&to).await {
                 let held = self.mins(Some(&items[0].queued)).unwrap_or(0.0);
-                if ACTIVE.contains(&th["status"].as_str().unwrap_or("")) && held < self.config.max_hold_minutes {
+                if ACTIVE.contains(&th["status"].as_str().unwrap_or("")) && held < self.config().max_hold_minutes {
                     continue;
                 }
             }

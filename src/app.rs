@@ -109,7 +109,6 @@ pub struct ToolOutput {
 }
 
 pub struct App {
-    pub config: Arc<Config>,
     pub store: Arc<Store>,
     pub t3: Arc<dyn T3Client>,
     pub clock: Arc<dyn Clock>,
@@ -272,15 +271,13 @@ impl App {
         upstreams: Arc<UpstreamManager>,
         Outside { remotes, github, desktop, tailscale }: Outside,
     ) -> Arc<App> {
-        let config = Arc::new(config);
-        let wf = Arc::new(Wf::new(store.clone(), t3.clone(), clock.clone(), config.clone(), remotes, github));
+        let runs = Arc::new(Semaphore::new(config.max_concurrent_runs));
+        let wf = Arc::new(Wf::new(store.clone(), t3.clone(), clock.clone(), Arc::new(config), remotes, github));
         let cached: Vec<Value> =
             store.meta_get(TOOLS_CACHE).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let generation = upstreams.generation();
         let catalog = Arc::new(Catalog::build_with(&cached, &upstreams.cached_tools()));
-        let runs = Arc::new(Semaphore::new(config.max_concurrent_runs));
         Arc::new(App {
-            config,
             store,
             t3,
             clock,
@@ -301,8 +298,12 @@ impl App {
 
     pub async fn open_link(&self, link: &str) -> anyhow::Result<Value> {
         let url = app_link(link).ok_or_else(|| anyhow::anyhow!("not a T3 thread link: {link:?}"))?;
-        let opened = self.config.board.open_links == OpenLinks::Desktop && self.desktop.open(&url).await;
+        let opened = self.config().board.open_links == OpenLinks::Desktop && self.desktop.open(&url).await;
         Ok(json!({"opened": opened}))
+    }
+
+    pub fn config(&self) -> Arc<Config> {
+        self.wf.config()
     }
 
     pub fn catalog(&self) -> Arc<Catalog> {
@@ -383,10 +384,11 @@ impl App {
     }
 
     fn limits(&self, timeout_ms: Option<u64>) -> Limits {
-        let ms = timeout_ms.unwrap_or(self.config.default_timeout_ms).clamp(100, self.config.max_timeout_ms);
+        let config = self.config();
+        let ms = timeout_ms.unwrap_or(config.default_timeout_ms).clamp(100, config.max_timeout_ms);
         Limits {
             memory: sandbox::MEMORY_LIMIT,
-            cpu: Duration::from_millis(self.config.cpu_budget_ms),
+            cpu: Duration::from_millis(config.cpu_budget_ms),
             wall: Duration::from_millis(ms),
         }
     }
@@ -396,14 +398,15 @@ impl App {
             return Ok(p);
         }
         self.queued.fetch_add(1, Ordering::Relaxed);
-        let wait = Duration::from_millis(self.config.run_queue_ms);
+        let config = self.config();
+        let wait = Duration::from_millis(config.run_queue_ms);
         let got = tokio::time::timeout(wait, self.runs.clone().acquire_owned()).await;
         self.queued.fetch_sub(1, Ordering::Relaxed);
         match got {
             Ok(Ok(p)) => Ok(p),
             _ => Err(format!(
                 "t3cm is busy: {} runs are in progress and none finished within {} ms; retry shortly",
-                self.config.max_concurrent_runs, self.config.run_queue_ms
+                config.max_concurrent_runs, config.run_queue_ms
             )),
         }
     }
@@ -493,8 +496,9 @@ impl App {
         let v = self.wf.ask(question).await?;
         let seq = v["seq"].as_i64().unwrap_or_default();
         let app = self.clone();
-        let every = Duration::from_secs(self.config.board.ask_poll_secs.max(1));
-        let until = Instant::now() + Duration::from_secs(self.config.board.ask_timeout_minutes.max(1) * 60 + 60);
+        let config = self.config();
+        let every = Duration::from_secs(config.board.ask_poll_secs.max(1));
+        let until = Instant::now() + Duration::from_secs(config.board.ask_timeout_minutes.max(1) * 60 + 60);
         tokio::spawn(async move {
             while Instant::now() < until {
                 tokio::time::sleep(every).await;
@@ -550,7 +554,8 @@ impl App {
 
     fn remote_health_with(&self, ts_login: Option<Result<Option<String>, String>>) -> Value {
         let active_sessions = self.store.board_sessions_active(&iso(self.clock.now())).map(|s| s.len()).unwrap_or(0);
-        let Some((cfg, origin)) = self.config.board.active_remote_config() else {
+        let config = self.config();
+        let Some((cfg, origin)) = config.board.active_remote_config() else {
             return json!({
                 "mode": "off",
                 "enabled": false,
@@ -631,6 +636,7 @@ impl App {
 
     fn health_with_remote(&self, remote: Value) -> Value {
         let last_pass = self.store.meta_get(LAST_PASS).ok().flatten();
+        let config = self.config();
         json!({
             "version": env!("CARGO_PKG_VERSION"),
             "uptimeSecs": self.started.elapsed().as_secs(),
@@ -639,12 +645,12 @@ impl App {
             "watcher": {
                 "lastPass": last_pass,
                 "alive": self.wf.watcher_alive(),
-                "intervalSecs": self.config.watcher_interval_secs,
+                "intervalSecs": config.watcher_interval_secs,
             },
             "runs": {
-                "running": self.config.max_concurrent_runs - self.runs.available_permits(),
+                "running": config.max_concurrent_runs - self.runs.available_permits(),
                 "queued": self.queued.load(Ordering::Relaxed),
-                "max": self.config.max_concurrent_runs,
+                "max": config.max_concurrent_runs,
             },
             "store": self.store.path().display().to_string(),
             "upstreams": self.upstreams.status(),
@@ -660,7 +666,7 @@ impl App {
 
     pub async fn health_async(self: &Arc<Self>) -> Value {
         let ts_login = if self
-            .config
+            .config()
             .board
             .active_remote_config()
             .is_some_and(|(cfg, _)| cfg.mode == RemoteMode::Tailscale && cfg.allow_users.is_empty())
@@ -770,7 +776,7 @@ impl App {
         } else {
             return Err(format!("unknown T3 tool {name:?}; use the search tool to find the right name"));
         };
-        if self.config.deny.contains(&resolved) {
+        if self.config().deny.contains(&resolved) {
             return Err(format!("{resolved} is denied by the t3-codemode deny list; do not retry it"));
         }
         let input = object_input(&format!("t3.{resolved}"), input)?;

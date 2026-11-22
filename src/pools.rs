@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::clock::{iso, local_clock, parse_ts, plus_minutes};
+use crate::config::Config;
 use crate::field::{self, invalid, within};
 use crate::store::{Limit, LimitStop, PickRecord};
 use crate::usage::{Usage, UsageSource};
@@ -557,9 +558,10 @@ fn later(a: &str, b: &str) -> bool {
 }
 
 impl Wf {
-    pub(crate) fn pool(&self, name: &str) -> Result<&PoolConfig> {
-        self.config.pools.get(name).ok_or_else(|| {
-            let known: Vec<&str> = self.config.pools.keys().map(String::as_str).collect();
+    pub(crate) fn pool(&self, name: &str) -> Result<PoolConfig> {
+        let config = self.config();
+        config.pools.get(name).cloned().ok_or_else(|| {
+            let known: Vec<&str> = config.pools.keys().map(String::as_str).collect();
             anyhow!(
                 "no pool {name:?}; configured pools: {}",
                 if known.is_empty() { "none".into() } else { known.join(", ") }
@@ -647,7 +649,8 @@ impl Wf {
     }
 
     pub async fn check_pools(&self) -> Result<()> {
-        if self.config.pools.is_empty() {
+        let config = self.config();
+        if config.pools.is_empty() {
             return Ok(());
         }
         let caps = match self.capabilities(None).await {
@@ -660,7 +663,7 @@ impl Wf {
                 return Ok(());
             }
         };
-        for (name, pool) in &self.config.pools {
+        for (name, pool) in &config.pools {
             check_members(name, pool, &caps)?;
         }
         Ok(())
@@ -671,7 +674,7 @@ impl Wf {
     }
 
     pub(crate) async fn pick_avoiding(&self, name: &str, avoid: Option<(&str, &str)>) -> Result<Picked> {
-        let mut pool = self.pool(name)?.clone();
+        let mut pool = self.pool(name)?;
         let caps = self.pool_capabilities(&pool).await?;
         check_members(name, &pool, &caps)?;
         let mut avoided = Vec::new();
@@ -769,8 +772,8 @@ impl Wf {
         Ok(json!({"pick": seq, "pool": p.pool, "instanceId": p.instance_id, "thread": thread}))
     }
 
-    fn members(&self) -> BTreeSet<String> {
-        self.config.pools.values().flat_map(|p| p.members.iter().map(|m| m.instance_id.clone())).collect()
+    fn members(config: &Config) -> BTreeSet<String> {
+        config.pools.values().flat_map(|p| p.members.iter().map(|m| m.instance_id.clone())).collect()
     }
 
     async fn stopped_on_limit(&self, t: &Value, thread: &str, run: &str) -> Result<bool> {
@@ -802,7 +805,7 @@ impl Wf {
             Some(s) => s,
             None => {
                 let limit = self.stopped_on_limit(t, thread, run).await?;
-                let hold = self.config.limit_hold_minutes;
+                let hold = self.config().limit_hold_minutes;
                 let (until, how) = match snooze_until(t) {
                     _ if !limit => (None, None),
                     Some(u) => (Some(u), Some("reset time from T3's limit snooze".to_string())),
@@ -833,10 +836,11 @@ impl Wf {
     }
 
     pub async fn mark_limits(&self) -> Result<Vec<String>> {
-        if self.config.pools.is_empty() {
+        let config = self.config();
+        if config.pools.is_empty() {
             return Ok(Vec::new());
         }
-        let members = self.members();
+        let members = Self::members(&config);
         let mut want: BTreeMap<String, Limit> = BTreeMap::new();
         let mut keep = |id: String, l: Limit| match want.get(&id) {
             Some(w) if !later(&l.until, &w.until) => {}
@@ -892,9 +896,10 @@ impl Wf {
     pub async fn pools(&self) -> Result<Value> {
         let running = self.running_by_instance().await;
         let limits = self.store.limits()?;
-        let reported = self.usage_of(&self.members().into_iter().collect::<Vec<_>>()).await;
+        let config = self.config();
+        let reported = self.usage_of(&Self::members(&config).into_iter().collect::<Vec<_>>()).await;
         let mut out = Vec::new();
-        for (name, pool) in &self.config.pools {
+        for (name, pool) in &config.pools {
             let caps = match &running {
                 Ok(_) => self.pool_capabilities(pool).await,
                 Err(e) => Err(anyhow!("{e:#}")),

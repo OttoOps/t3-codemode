@@ -1179,7 +1179,7 @@ async fn put_ask_model(State(web): State<Web>, raw: Bytes) -> Response {
 }
 
 pub fn routes(app: Arc<App>, port: u16) -> Router {
-    let remote = app.config.board.active_remote_config().map(|(cfg, origin)| (cfg.clone(), origin));
+    let remote = app.config().board.active_remote_config().map(|(cfg, origin)| (cfg.clone(), origin));
     let web = Web { app, port, remote };
     let board = Router::new()
         .route("/", get(page))

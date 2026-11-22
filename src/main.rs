@@ -768,7 +768,7 @@ async fn print_update_notice() {
 }
 
 fn spawn_release_checks(app: Arc<App>, state_dir: PathBuf) {
-    if !app.config.update_check || release::check_disabled(true) {
+    if !app.config().update_check || release::check_disabled(true) {
         return;
     }
     tokio::spawn(async move {

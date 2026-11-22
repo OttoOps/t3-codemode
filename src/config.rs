@@ -95,6 +95,14 @@ impl BoardConfig {
         self.legacy_ticket_keys.iter().any(|k| k == key)
     }
 
+    pub(crate) fn copy_ask_from(&mut self, other: &BoardConfig) {
+        self.ask_instance_id.clone_from(&other.ask_instance_id);
+        self.ask_pool.clone_from(&other.ask_pool);
+        self.ask_model.clone_from(&other.ask_model);
+        self.ask_effort.clone_from(&other.ask_effort);
+        self.ask_configured = other.ask_configured;
+    }
+
     pub fn active_remote(&self) -> Option<(RemoteMode, RemoteOrigin)> {
         self.remote.as_ref().and_then(BoardRemoteConfig::active)
     }
