@@ -140,7 +140,7 @@ that copy and prints its path.
 | `deny` | `["t3_project_delete", "t3_environment_unlink"]` | T3 tools scripts may not call. The host refuses them; see [Security model](security.md). |
 | `cpuBudgetMs` | `2000` | JavaScript CPU time per run. Time spent awaiting host calls does not count. |
 | `defaultTimeoutMs` | `60000` | Wall-clock limit when a call gives no `timeout_ms` |
-| `maxTimeoutMs` | `600000` | The largest `timeout_ms` a call may ask for |
+| `maxTimeoutMs` | `600000` | The largest `timeout_ms` a call may ask for, at least 100 |
 | `maxConcurrentRuns` | `16` | `execute` and `search` runs allowed at once |
 | `runQueueMs` | `10000` | How long a run waits for a free slot before it fails with a retryable busy error |
 
