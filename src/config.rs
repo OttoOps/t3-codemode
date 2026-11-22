@@ -355,6 +355,14 @@ fn merge(base: &mut Value, over: Value) {
     }
 }
 
+pub(crate) fn with_defaults(over: Value) -> Value {
+    let mut v = builtin_defaults();
+    if !over.is_null() {
+        merge(&mut v, over);
+    }
+    v
+}
+
 pub fn default_path() -> PathBuf {
     if let Ok(p) = std::env::var("T3CM_CONFIG") {
         return PathBuf::from(p);
@@ -401,10 +409,7 @@ impl Config {
                 None => false,
             })
         });
-        let mut v = builtin_defaults();
-        if !over.is_null() {
-            merge(&mut v, over);
-        }
+        let v = with_defaults(over);
         if let Some(pools) = v.get("pools") {
             let pools = pools.as_object().ok_or_else(|| invalid("pools", "pools must be an object of named pools"))?;
             for (name, raw) in pools {
