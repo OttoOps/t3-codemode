@@ -122,10 +122,10 @@ records why.
 A write replaces the file in one step. It keeps the file's permissions, a
 symlink to it, and the formatting of the values it does not change. t3cm
 refuses to write when the file changed after it read it, and you run the
-command again. Two `t3cm config` writes take turns through a lock file beside
-the config, `.config.json.t3cm-lock` for the default name. The board,
-`t3cm board expose` and your editor do not take that lock, so a save from one
-of them during a write can still be lost.
+command again. `t3cm config`, the board, `t3cm board expose` and
+`t3cm board unexpose` take turns through a lock file beside the config,
+`.config.json.t3cm-lock` for the default name. Your editor does not take that
+lock, so its save during a write can still be lost.
 
 When the copy from `edit` is invalid and t3cm runs in a terminal, it offers to
 open the copy again. If t3cm does not save a copy that you changed, it keeps

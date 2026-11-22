@@ -11,6 +11,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::config::{Config, RemoteMode, RemoteOrigin, parse_host_header};
+use crate::config_edit::{Document, Edit};
 use crate::platform;
 
 pub const DEFAULT_HTTPS_PORT: u16 = 47732;
@@ -650,32 +651,12 @@ pub struct UnexposeReport {
     pub config_path: String,
 }
 
-fn read_config_object(path: &Path) -> Result<(Map<String, Value>, bool)> {
-    match std::fs::read_to_string(path) {
-        Ok(s) => match serde_json::from_str::<Value>(&s) {
-            Ok(Value::Object(o)) => Ok((o, true)),
-            Ok(_) => bail!("{}: top level must be a JSON object", path.display()),
-            Err(e) => bail!("{} is not valid JSON: {e}", path.display()),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((Map::new(), false)),
-        Err(e) => bail!("reading {}: {e}", path.display()),
-    }
-}
-
-fn write_board_remote(path: &Path, remote_val: Value) -> Result<()> {
-    let (mut root, _) = read_config_object(path)?;
-    let mut board = match root.get("board") {
-        None | Some(Value::Null) => Map::new(),
-        Some(Value::Object(o)) => o.clone(),
-        Some(_) => bail!("{}: board must be a JSON object", path.display()),
-    };
-    board.insert("remote".into(), remote_val);
-    root.insert("board".into(), Value::Object(board));
-    let merged = Value::Object(root);
-    Config::from_value(merged.clone()).with_context(|| format!("{} would be invalid after update", path.display()))?;
-    let mut text = serde_json::to_string_pretty(&merged)?;
-    text.push('\n');
-    crate::skills::write_atomic(path, text.as_bytes())
+fn write_board_remote(path: &Path, remote: Value) -> Result<()> {
+    let file = Document::read(path)?;
+    let edit = Edit::Set { path: vec!["board".into(), "remote".into()], value: remote };
+    let draft = file.edit(&[edit]).with_context(|| format!("{} would be invalid after update", path.display()))?;
+    draft.save()?;
+    Ok(())
 }
 
 pub fn expose_tailscale(ts: &dyn TailscaleRunner, cfg_path: &Path, opts: &ExposeOptions) -> Result<ExposeReport> {
@@ -888,9 +869,9 @@ pub fn unexpose_board(
         }
     }
 
-    let (root, exists) = read_config_object(cfg_path)?;
-    let had_remote = root.get("board").and_then(Value::as_object).and_then(|b| b.get("remote")).is_some();
-    let config_updated = if exists && (had_remote || previous_mode != RemoteMode::Off) {
+    let file = Document::read(cfg_path)?;
+    let had_remote = file.value()?.pointer("/board/remote").is_some();
+    let config_updated = if file.exists() && (had_remote || previous_mode != RemoteMode::Off) {
         write_board_remote(cfg_path, json!({"mode": "off"}))?;
         true
     } else {

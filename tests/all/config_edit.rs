@@ -4,7 +4,8 @@ use std::process::{Command, Output};
 use serde_json::{Value, json};
 use t3_codemode::config::Config;
 use t3_codemode::config_edit::{Document, Edit, Rejected, Stale, effective, lookup};
-use t3_codemode::fake::provider;
+use t3_codemode::fake::{FakeTailscale, provider};
+use t3_codemode::tailscale::{ExposeOptions, expose_tailscale, unexpose_board};
 use t3_codemode::{field, server};
 
 use crate::common::H;
@@ -427,6 +428,98 @@ fn saving_returns_the_next_revision() {
     let c = Cfg::absent();
     let saved = Document::read(&c.file).unwrap().edit(&[set("board.feed", json!(9))]).unwrap().save().unwrap();
     assert_eq!(*Document::read(&c.file).unwrap().revision(), saved);
+}
+
+fn hold_lock(file: &Path) -> std::fs::File {
+    let name = format!(".{}.t3cm-lock", file.file_name().unwrap().to_string_lossy());
+    let path = file.with_file_name(name);
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).unwrap();
+    lock.lock().unwrap();
+    lock
+}
+
+fn loses_nothing_saved_under_the_lock(file: &Path, write: impl FnOnce() + Send) {
+    let before = std::fs::read_to_string(file).unwrap();
+    let lock = hold_lock(file);
+    let during = std::thread::scope(|s| {
+        s.spawn(write);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let during = std::fs::read_to_string(file).unwrap();
+        std::fs::write(file, before.replace("900", "901")).unwrap();
+        drop(lock);
+        during
+    });
+    assert_eq!(during, before, "wrote while another writer held the lock");
+    assert_eq!(Config::load(file).unwrap().body_cap, 901, "lost the other writer's save");
+}
+
+#[test]
+fn saving_the_ask_model_takes_the_config_lock() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let h = rt.block_on(async { H::new() });
+    let file = h.dir.path().join("t3cm-config.json");
+    std::fs::write(&file, r#"{"bodyCap": 900}"#).unwrap();
+    let body = json!({"mode": "model", "provider": "claudeAgent", "model": "claude-opus-5-5"});
+    loses_nothing_saved_under_the_lock(&file, || {
+        let _ = rt.block_on(h.app.wf.set_ask_model(serde_json::from_value(body).unwrap()));
+    });
+}
+
+#[test]
+fn board_expose_takes_the_config_lock() {
+    let c = Cfg::with(r#"{"bodyCap": 900}"#);
+    let ts = FakeTailscale::default();
+    ts.set_host_login("alice@acme.example");
+    let opts = ExposeOptions { https_port: 47732, local_port: 47731, allow_users: vec![], require_pairing: false };
+    loses_nothing_saved_under_the_lock(&c.file, || {
+        let _ = expose_tailscale(&ts, &c.file, &opts);
+    });
+}
+
+#[test]
+fn board_unexpose_takes_the_config_lock() {
+    let remote = r#"{"bodyCap": 900, "board": {"remote": {"mode": "pairing", "origin": "https://board.example.com"}}}"#;
+    let c = Cfg::with(remote);
+    let ts = FakeTailscale::default();
+    loses_nothing_saved_under_the_lock(&c.file, || {
+        let _ = unexpose_board(&ts, &c.file, None, 47731);
+    });
+}
+
+#[test]
+fn the_ask_and_remote_writers_keep_the_files_layout() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let h = rt.block_on(async { H::new() });
+    let file = h.dir.path().join("t3cm-config.json");
+    let deny = "\"deny\":  [\"t3_project_delete\"]";
+    std::fs::write(&file, format!("{{\n    {deny},\n    \"board\": null\n}}\n")).unwrap();
+    let ts = FakeTailscale::default();
+    ts.set_host_login("alice@acme.example");
+    let opts = ExposeOptions { https_port: 47732, local_port: 47731, allow_users: vec![], require_pairing: false };
+    expose_tailscale(&ts, &file, &opts).unwrap();
+    let body = json!({"mode": "model", "provider": "claudeAgent", "model": "claude-opus-5-5"});
+    rt.block_on(h.app.wf.set_ask_model(serde_json::from_value(body).unwrap())).unwrap();
+
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains(deny), "{text}");
+    let saved = Config::load(&file).unwrap().board;
+    assert_eq!(saved.ask_model, "claude-opus-5-5");
+    assert!(saved.active_remote().is_some(), "{text}");
+}
+
+#[test]
+fn a_rejected_ask_save_does_not_repeat_the_files_values() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let h = rt.block_on(async { H::new() });
+    let file = h.dir.path().join("t3cm-config.json");
+    let body = json!({"mode": "model", "provider": "claudeAgent", "model": "claude-opus-5-5"});
+    for text in [r#"{"board": "private-value"}"#, r#""private-value""#, r#"{"board": ["private-value"]}"#] {
+        std::fs::write(&file, text).unwrap();
+        let body = serde_json::from_value(body.clone()).unwrap();
+        let err = format!("{:#}", rt.block_on(h.app.wf.set_ask_model(body)).unwrap_err());
+        assert!(!err.contains("private-value"), "a remote board sees this error: {err}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+    }
 }
 
 #[cfg(unix)]

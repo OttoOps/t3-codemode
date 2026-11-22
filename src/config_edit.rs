@@ -301,8 +301,8 @@ fn set(slot: &mut Value, current: Option<&Value>, path: &[String], at: usize, va
             }
             &mut items[i]
         }
-        other => {
-            let message = format!("is {other}, so it has no {}", field::segment(key));
+        _ => {
+            let message = format!("must be a JSON object to hold {}", field::segment(key));
             return Err(Rejected::at(field::display(&path[..at]), message));
         }
     };
