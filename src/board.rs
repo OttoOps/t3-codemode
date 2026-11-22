@@ -1,4 +1,5 @@
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::clock::{local_clock, parse_ts};
+use crate::config::Config;
 use crate::contexts::ProjectFilter;
 use crate::issues::issue_key;
 use crate::moves::Offer;
@@ -757,7 +759,7 @@ impl Wf {
         let mut out = self.tree()?;
         out.extend(settled);
         out.extend(self.cards_in(false, None)?);
-        out.extend(self.feed(self.config.board.feed)?);
+        out.extend(self.feed(self.config().board.feed)?);
         Ok(out)
     }
 
@@ -876,7 +878,7 @@ impl Wf {
         let body = format!("The user says {} about {id}: {}", json!(text), card.text);
         let handle = self.store.msg_new(BOARD, &ticket, "reply", &body, &self.now())?;
         let msg =
-            format!("{}\n{}", header("reply", BOARD, &handle, None), capped(&body, &handle, self.config.reply_cap));
+            format!("{}\n{}", header("reply", BOARD, &handle, None), capped(&body, &handle, self.config().reply_cap));
         let mut out = self.send_wake(&ticket, &msg, &handle).await?;
         self.store.waiting_resolve_seq(BOARD, card.seq, Some(&format!("answered: {text}")), &self.now())?;
         self.changed();
@@ -1016,7 +1018,7 @@ impl Wf {
     }
 
     async fn resolve_ask_model(&self) -> Result<ResolvedLaunch> {
-        let ask = self.ask_config.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let ask = AskConfig::from_board(&self.config().board);
         if let Some(pool) = ask.pool {
             let p = self.pick(&pool).await?;
             return Ok(ResolvedLaunch {
@@ -1101,6 +1103,7 @@ impl Wf {
             }
         }
 
+        let config = self.config();
         let ticket_slot = resolved.models.iter().find(|m| m.role == "ticket");
         let base = match ticket_slot {
             Some(slot) if slot.source != "default" => match &slot.spec {
@@ -1136,7 +1139,7 @@ impl Wf {
                 None => bail!("models.ticket ({}) names no model or pool", slot.source),
             },
             _ => {
-                let b = &self.config.board;
+                let b = &config.board;
                 if let Some(pool) = &b.pool {
                     BaseSpec::Pool { pool: pool.clone(), source: "board".into() }
                 } else if b.has_legacy_ticket_keys() {
@@ -1179,7 +1182,7 @@ impl Wf {
                 }
                 BaseSpec::Model { provider, model, effort, source, exact_instance } => {
                     let hint = if !exact_instance && source == "board" {
-                        Some(self.config.board.instance_id.clone())
+                        Some(config.board.instance_id.clone())
                     } else {
                         None
                     };
@@ -1240,7 +1243,7 @@ impl Wf {
             (None, Some(effort)) => match base {
                 BaseSpec::Model { provider, model, exact_instance, source, .. } => {
                     let hint = if !exact_instance && source == "board" {
-                        Some(self.config.board.instance_id.clone())
+                        Some(config.board.instance_id.clone())
                     } else {
                         None
                     };
@@ -1369,7 +1372,8 @@ impl Wf {
                 Ok(r) => r,
                 Err(e) => return self.launch_failed(&label, &format!("Cannot launch {label}: {e:#}")),
             };
-        let params = self.config.link_params("overseer", "ticket")?;
+        let config = self.config();
+        let params = config.link_params("overseer", "ticket")?;
         {
             let _g = self.lock.lock().await;
             self.ensure_not_on_board(&label)?;
@@ -1385,7 +1389,7 @@ impl Wf {
             })?;
         }
         self.changed();
-        let b = &self.config.board;
+        let b = &config.board;
         let title = format!("{label}: {}", nonempty(a.title).unwrap_or_else(|| issue.url()));
         let mut input = json!({
             "projectId": project_id,
@@ -1461,7 +1465,8 @@ impl Wf {
         if q.chars().count() > MAX_TEXT {
             bail!("the question is over {MAX_TEXT} chars");
         }
-        let b = &self.config.board;
+        let config = self.config();
+        let b = &config.board;
         let resolved = match self.resolve_ask_model().await {
             Ok(r) => r,
             Err(e) => {
@@ -1548,7 +1553,7 @@ impl Wf {
             };
             let status = th["status"].as_str().unwrap_or("");
             let busy = ACTIVE.contains(&status) || status == "waiting";
-            let timeout = age >= self.config.board.ask_timeout_minutes as f64;
+            let timeout = age >= self.config().board.ask_timeout_minutes as f64;
             let close = match (&answer, busy) {
                 (Some(text), false) => {
                     data["status"] = json!("answered");
@@ -1616,7 +1621,7 @@ impl Wf {
         if let Err(e) = self.learn_projects().await {
             tracing::debug!("board projects not refreshed: {e:#}");
         }
-        let hours = self.config.board.settle_after_hours;
+        let hours = self.config().board.settle_after_hours;
         if hours > 0 {
             self.settle_closed(Some(hours as f64 * 60.0)).await?;
         }
@@ -1868,7 +1873,7 @@ impl Wf {
         let rev = self.revision();
         let cards: Vec<Value> = self.cards()?.iter().map(|c| self.placed(json!(c), c.ticket.as_deref())).collect();
         let tree = self.tree()?;
-        let feed = self.feed(self.config.board.feed)?;
+        let feed = self.feed(self.config().board.feed)?;
         let asks = self.asks()?;
         let (settled, settled_total) = self.settled()?;
         let contexts = self.contexts()?;
@@ -1899,7 +1904,7 @@ impl Wf {
             "t3": {"connected": t3.connected, "lastError": t3.last_error},
             "tokenExpiresAt": t3.token_expires_at.as_deref().map(local_clock_date),
             "watcher": {"lastPass": last.as_deref().map(local_clock), "lastPassAt": last, "alive": self.watcher_alive()},
-            "openLinks": self.config.board.open_links,
+            "openLinks": self.config().board.open_links,
             "update": self.update_view(),
             "skills": self.skills_view(),
             "modelsRev": self.models_rev.load(Ordering::Acquire),
@@ -1942,7 +1947,7 @@ impl Wf {
                     .call("orchestrator_capabilities", json!({}))
                     .await
                     .map_err(|e| anyhow!("T3 capabilities unreachable: {}", self.t3.redact(e.to_string())))?;
-                crate::pools::check_members(&pool, cfg, &caps)?;
+                crate::pools::check_members(&pool, &cfg, &caps)?;
                 Ok(ValidatedModelSetting::Pool { pool })
             }
             other => bail!("unknown mode {other:?}; use \"model\" or \"pool\""),
@@ -2053,7 +2058,7 @@ impl Wf {
             }),
             Ok(cfg) => {
                 let error = caps_base
-                    .and_then(|c| crate::pools::check_members(pool_name, cfg, c).err())
+                    .and_then(|c| crate::pools::check_members(pool_name, &cfg, c).err())
                     .map(|e| format!("{e:#}"));
                 json!({
                     "mode": "pool",
@@ -2145,15 +2150,18 @@ impl Wf {
         })
     }
 
-    async fn inspect_base_spec(&self, base: BaseSpec, caps_base: Option<&mut Value>, caps_err: Option<&str>) -> Value {
+    async fn inspect_base_spec(
+        &self,
+        config: &Config,
+        base: BaseSpec,
+        caps_base: Option<&mut Value>,
+        caps_err: Option<&str>,
+    ) -> Value {
         match base {
             BaseSpec::Pool { pool, source } => self.inspect_pool(caps_base.as_deref(), &pool, &source),
             BaseSpec::Model { provider, model, effort, source, exact_instance } => {
-                let hint = if !exact_instance && source == "board" {
-                    Some(self.config.board.instance_id.as_str())
-                } else {
-                    None
-                };
+                let hint =
+                    if !exact_instance && source == "board" { Some(config.board.instance_id.as_str()) } else { None };
                 self.inspect_specific_model(
                     caps_base,
                     caps_err,
@@ -2203,8 +2211,8 @@ impl Wf {
         }
     }
 
-    fn legacy_ticket_base(&self) -> BaseSpec {
-        let b = &self.config.board;
+    fn legacy_ticket_base(config: &Config) -> BaseSpec {
+        let b = &config.board;
         if let Some(pool) = &b.pool {
             BaseSpec::Pool { pool: pool.clone(), source: "board".into() }
         } else if b.has_legacy_ticket_keys() {
@@ -2256,33 +2264,6 @@ impl Wf {
             Ok(v) => (Some(v), None),
             Err(e) => (None, Some(self.t3.redact(e.to_string()))),
         };
-        let pools: Vec<Value> = self
-            .config
-            .pools
-            .iter()
-            .map(|(name, cfg)| {
-                let members: Vec<Value> = cfg
-                    .members
-                    .iter()
-                    .map(|m| {
-                        json!({
-                            "instanceId": m.instance_id,
-                            "model": cfg.model_of(m),
-                            "effort": cfg.effort_of(m),
-                        })
-                    })
-                    .collect();
-                json!({
-                    "name": name,
-                    "mixed": cfg.mixed,
-                    "driver": cfg.driver,
-                    "model": cfg.model,
-                    "effort": cfg.effort,
-                    "strategy": cfg.strategy,
-                    "members": members,
-                })
-            })
-            .collect();
         let (projects_list, projects_err) = match self.projects().await {
             Ok(ps) => (Some(ps), None),
             Err(e) => (None, Some(self.t3.redact(e.to_string()))),
@@ -2290,15 +2271,41 @@ impl Wf {
 
         let mut attempt = 0usize;
         loop {
-            let (rev, folders, user_resolved, ask_cfg) = {
+            let (rev, config, folders, user_resolved) = {
                 let _g = self.config_lock.lock().await;
                 let rev = self.models_rev.load(Ordering::Acquire);
                 let folders = self.base_folders()?;
                 let user_resolved = self.resolve_project_slots(None).await?;
-                let ask_cfg = self.ask_config.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                (rev, folders, user_resolved, ask_cfg)
+                (rev, self.config(), folders, user_resolved)
             };
+            let ask_cfg = AskConfig::from_board(&config.board);
 
+            let pools: Vec<Value> = config
+                .pools
+                .iter()
+                .map(|(name, cfg)| {
+                    let members: Vec<Value> = cfg
+                        .members
+                        .iter()
+                        .map(|m| {
+                            json!({
+                                "instanceId": m.instance_id,
+                                "model": cfg.model_of(m),
+                                "effort": cfg.effort_of(m),
+                            })
+                        })
+                        .collect();
+                    json!({
+                        "name": name,
+                        "mixed": cfg.mixed,
+                        "driver": cfg.driver,
+                        "model": cfg.model,
+                        "effort": cfg.effort,
+                        "strategy": cfg.strategy,
+                        "members": members,
+                    })
+                })
+                .collect();
             let mut ticket = if !user_resolved.config_problems.is_empty() {
                 json!({
                     "mode": "model",
@@ -2316,10 +2323,10 @@ impl Wf {
                         Ok(b) => Ok(b),
                         Err(e) => Err((slot.source.clone(), e)),
                     },
-                    _ => Ok(self.legacy_ticket_base()),
+                    _ => Ok(Self::legacy_ticket_base(&config)),
                 };
                 match base {
-                    Ok(b) => self.inspect_base_spec(b, caps_base.as_mut(), caps_err.as_deref()).await,
+                    Ok(b) => self.inspect_base_spec(&config, b, caps_base.as_mut(), caps_err.as_deref()).await,
                     Err((src, err)) => json!({
                         "mode": "model",
                         "source": src,
@@ -2400,7 +2407,7 @@ impl Wf {
                         })
                     } else if let Some(slot) = ticket_slot {
                         match Self::base_spec_from_slot(slot) {
-                            Ok(b) => self.inspect_base_spec(b, caps_base.as_mut(), caps_err.as_deref()).await,
+                            Ok(b) => self.inspect_base_spec(&config, b, caps_base.as_mut(), caps_err.as_deref()).await,
                             Err(err) => json!({
                                 "mode": "model",
                                 "source": slot.source,
@@ -2562,7 +2569,7 @@ impl Wf {
                 Some(Value::Object(o)) => o.clone(),
                 Some(_) => bail!("{}: board must be a JSON object", path.display()),
             };
-            let next_ask = match validated {
+            match validated {
                 ValidatedModelSetting::Model { provider, model, effort } => {
                     board.insert("askInstanceId".into(), json!(provider));
                     board.insert("askModel".into(), json!(model));
@@ -2575,39 +2582,36 @@ impl Wf {
                         }
                     }
                     board.remove("askPool");
-                    AskConfig { pool: None, instance_id: Some(provider), model, effort, explicit: true }
                 }
                 ValidatedModelSetting::Pool { pool } => {
                     board.insert("askPool".into(), json!(pool));
                     board.remove("askInstanceId");
                     board.remove("askModel");
                     board.remove("askEffort");
-                    AskConfig {
-                        pool: Some(pool),
-                        instance_id: None,
-                        model: self.config.board.ask_model.clone(),
-                        effort: None,
-                        explicit: true,
-                    }
                 }
-            };
+            }
             root.insert("board".into(), Value::Object(board));
             let merged = Value::Object(root);
-            if let Err(e) = crate::config::Config::from_value(merged.clone()) {
-                if let Some(pool) = chosen_pool.as_deref()
-                    && merged.get("pools").and_then(Value::as_object).is_none_or(|p| !p.contains_key(pool))
-                {
-                    bail!(
-                        "pool {pool:?} is no longer defined in {}; restart t3cm to reload the configuration",
-                        path.display()
-                    );
+            let saved = match Config::from_value(merged.clone()) {
+                Ok(saved) => saved,
+                Err(e) => {
+                    if let Some(pool) = chosen_pool.as_deref()
+                        && merged.get("pools").and_then(Value::as_object).is_none_or(|p| !p.contains_key(pool))
+                    {
+                        bail!(
+                            "pool {pool:?} is no longer defined in {}; restart t3cm to reload the configuration",
+                            path.display()
+                        );
+                    }
+                    bail!("{} would be invalid after update: {e:#}", path.display());
                 }
-                bail!("{} would be invalid after update: {e:#}", path.display());
-            }
+            };
             let mut text = serde_json::to_string_pretty(&merged)?;
             text.push('\n');
             crate::skills::write_atomic(&path, text.as_bytes())?;
-            *self.ask_config.lock().unwrap_or_else(|e| e.into_inner()) = next_ask;
+            let mut next = (*self.config()).clone();
+            next.board.copy_ask_from(&saved.board);
+            self.config.send_replace(Arc::new(next));
             self.models_rev.fetch_add(1, Ordering::AcqRel);
         }
         self.changed();

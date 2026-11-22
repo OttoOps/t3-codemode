@@ -71,7 +71,7 @@ impl Wf {
         if self.store.ask_thread(thread)? {
             return Ok(None);
         }
-        let Some(policy) = self.config.pools.get(&pick.pool).map(|p| p.move_on_limit) else { return Ok(None) };
+        let Some(policy) = self.config().pools.get(&pick.pool).map(|p| p.move_on_limit) else { return Ok(None) };
         if policy == MoveOnLimit::Never {
             return Ok(None);
         }

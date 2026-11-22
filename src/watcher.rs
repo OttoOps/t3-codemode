@@ -6,7 +6,7 @@ use crate::app::App;
 const CATALOG_EVERY: Duration = Duration::from_secs(600);
 
 pub fn spawn(app: Arc<App>) -> tokio::task::JoinHandle<()> {
-    let every = Duration::from_secs(app.config.watcher_interval_secs.max(5));
+    let every = Duration::from_secs(app.config().watcher_interval_secs.max(5));
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(every);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
