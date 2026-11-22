@@ -1422,6 +1422,63 @@ async fn a_held_card_resolves_when_the_pr_is_queued_outside_the_board() {
     assert_eq!(wait_status(&h), ["sent"]);
 }
 
+async fn held_on_a_failing_check(h: &H) {
+    ticket_with_worker(h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+    assert_eq!(wf_merge(h, 7, HEAD).await["status"], "waiting");
+    h.github.update_pr(REPO, 7, json!({"mergeStateStatus": "UNSTABLE"}));
+    h.github.set_checks(REPO, 7, json!([check_run("lint", "FAILURE")]));
+    check(h, 2).await;
+    assert!(cards(h, false)[0]["text"].as_str().unwrap().contains("has a failing check"));
+}
+
+fn push_with_a_pending_check(h: &H, head: &str) {
+    h.github.update_pr(REPO, 7, json!({"headRefOid": head}));
+    let running = json!({"__typename": "CheckRun", "name": "lint", "status": "IN_PROGRESS"});
+    h.github.set_checks(REPO, 7, json!([running]));
+}
+
+#[tokio::test]
+async fn a_push_from_a_held_head_to_a_pending_head_resolves_the_held_card() {
+    let h = H::new();
+    held_on_a_failing_check(&h).await;
+
+    push_with_a_pending_check(&h, MOVED);
+    check(&h, 4).await;
+
+    let open = cards(&h, false);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0]["kind"], "gate");
+    assert!(open[0]["text"].as_str().unwrap().contains("moved to head 2222222"), "{open:?}");
+    let all = cards(&h, true);
+    let held = all.iter().find(|c| c["kind"] == "report").unwrap();
+    assert!(held["resolution"].as_str().unwrap().starts_with("head moved to 2222222"), "{held}");
+}
+
+#[tokio::test]
+async fn a_new_approval_at_a_pushed_head_resolves_the_old_held_card() {
+    let h = H::new();
+    held_on_a_failing_check(&h).await;
+
+    push_with_a_pending_check(&h, MOVED);
+    assert_eq!(wf_merge(&h, 7, MOVED).await["status"], "waiting");
+    check(&h, 4).await;
+
+    assert!(cards(&h, false).is_empty(), "{:?}", cards(&h, false));
+    assert_eq!(wait_status(&h), ["waiting"]);
+}
+
+#[tokio::test]
+async fn a_held_card_stays_while_its_check_reruns_at_the_same_head() {
+    let h = H::new();
+    held_on_a_failing_check(&h).await;
+
+    push_with_a_pending_check(&h, HEAD);
+    check(&h, 4).await;
+
+    assert_eq!(cards(&h, false).len(), 1);
+}
+
 #[tokio::test]
 async fn a_reconcile_card_carries_its_approvals_id_and_unrelated_cards_do_not() {
     let h = H::new();
