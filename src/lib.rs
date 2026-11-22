@@ -10,6 +10,7 @@ pub mod desktop;
 pub mod doctor;
 pub mod drift;
 pub mod fake;
+pub mod field;
 pub mod github;
 pub mod issues;
 pub mod js;

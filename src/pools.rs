@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::clock::{iso, local_clock, parse_ts, plus_minutes};
+use crate::field::{self, invalid, within};
 use crate::store::{Limit, LimitStop, PickRecord};
 use crate::usage::{Usage, UsageSource};
 use crate::wf::{ACTIVE, Wf};
@@ -86,73 +87,89 @@ fn blank(v: &Option<String>) -> bool {
 
 impl PoolConfig {
     pub fn validate(&self) -> Result<()> {
+        let fail = |key: &str, message: String| Err(invalid(key, message));
         if self.mixed {
             for (key, set) in [("driver", &self.driver), ("model", &self.model), ("effort", &self.effort)] {
                 if set.is_some() {
-                    bail!("a mixed pool has no pool-level {key}; set model and effort on each member");
+                    return fail(
+                        key,
+                        format!("a mixed pool has no pool-level {key}; set model and effort on each member"),
+                    );
                 }
             }
         } else {
             match self.driver.as_deref() {
-                None => bail!("driver is missing; set it, or set \"mixed\": true for members of several drivers"),
-                Some(d) if d.trim().is_empty() => bail!("driver is empty"),
+                None => {
+                    return fail(
+                        "driver",
+                        "driver is missing; set it, or set \"mixed\": true for members of several drivers".into(),
+                    );
+                }
+                Some(d) if d.trim().is_empty() => return fail("driver", "driver is empty".into()),
                 Some(_) => {}
             }
             match self.model.as_deref() {
-                None => bail!("model is missing"),
-                Some(m) if m.trim().is_empty() => bail!("model is empty"),
+                None => return fail("model", "model is missing".into()),
+                Some(m) if m.trim().is_empty() => return fail("model", "model is empty".into()),
                 Some(_) => {}
             }
             if blank(&self.effort) {
-                bail!("effort is empty");
+                return fail("effort", "effort is empty".into());
             }
         }
         match self.strategy.as_str() {
             s if STRATEGIES.contains(&s) => {}
             "headroom" => {
-                bail!(
-                    "strategy headroom needs a usage source, which t3cm does not have yet; use one of {}",
-                    STRATEGIES.join(", ")
-                )
+                return fail(
+                    "strategy",
+                    format!(
+                        "strategy headroom needs a usage source, which t3cm does not have yet; use one of {}",
+                        STRATEGIES.join(", ")
+                    ),
+                );
             }
-            s => bail!("unknown strategy {s:?}; use one of {}", STRATEGIES.join(", ")),
+            s => return fail("strategy", format!("unknown strategy {s:?}; use one of {}", STRATEGIES.join(", "))),
         }
         if self.members.is_empty() {
-            bail!("a pool needs at least one member");
+            return fail("members", "a pool needs at least one member".into());
         }
         for (i, m) in self.members.iter().enumerate() {
-            if m.instance_id.trim().is_empty() {
-                bail!("member {} has an empty instanceId", i + 1);
+            let fail = |key: &str, message: String| Err(invalid(format!("members.{i}.{key}"), message));
+            let id = &m.instance_id;
+            if id.trim().is_empty() {
+                return fail("instanceId", format!("member {} has an empty instanceId", i + 1));
             }
-            if self.members[..i].iter().any(|o| o.instance_id == m.instance_id) {
-                bail!("member {} is listed twice", m.instance_id);
+            if self.members[..i].iter().any(|o| o.instance_id == *id) {
+                return fail("instanceId", format!("member {id} is listed twice"));
             }
             if m.weight == 0 {
-                bail!("member {}: weight must be at least 1", m.instance_id);
+                return fail("weight", format!("member {id}: weight must be at least 1"));
             }
             if !(0.0..=100.0).contains(&m.reserve) {
-                bail!("member {}: reserve must be between 0 and 100, got {}", m.instance_id, m.reserve);
+                return fail("reserve", format!("member {id}: reserve must be between 0 and 100, got {}", m.reserve));
             }
             if !m.cost.is_finite() || m.cost < 0.0 {
-                bail!("member {}: cost must be a finite number of 0 or more, got {}", m.instance_id, m.cost);
+                return fail("cost", format!("member {id}: cost must be a finite number of 0 or more, got {}", m.cost));
             }
             if !self.mixed {
                 for (key, set) in [("model", &m.model), ("effort", &m.effort)] {
                     if set.is_some() {
-                        bail!(
-                            "member {}: only a mixed pool's members set their own {key}; set it on the pool, or set \"mixed\": true",
-                            m.instance_id
+                        return fail(
+                            key,
+                            format!(
+                                "member {id}: only a mixed pool's members set their own {key}; set it on the pool, or set \"mixed\": true"
+                            ),
                         );
                     }
                 }
             } else {
                 match m.model.as_deref() {
-                    None => bail!("member {}: a mixed pool's member needs a model", m.instance_id),
-                    Some(s) if s.trim().is_empty() => bail!("member {}: model is empty", m.instance_id),
+                    None => return fail("model", format!("member {id}: a mixed pool's member needs a model")),
+                    Some(s) if s.trim().is_empty() => return fail("model", format!("member {id}: model is empty")),
                     Some(_) => {}
                 }
                 if blank(&m.effort) {
-                    bail!("member {}: effort is empty", m.instance_id);
+                    return fail("effort", format!("member {id}: effort is empty"));
                 }
             }
         }
@@ -169,8 +186,11 @@ impl PoolConfig {
 }
 
 pub fn check_value(name: &str, raw: &Value) -> Result<PoolConfig> {
-    let pool: PoolConfig = serde_json::from_value(raw.clone()).with_context(|| format!("pool {name}"))?;
-    pool.validate().with_context(|| format!("pool {name}"))?;
+    let at = field::display(&["pools", name]);
+    let label = format!("pool {name}");
+    let pool: PoolConfig =
+        field::deserialize(raw.clone()).map_err(|(key, e)| invalid(field::join(&at, &key), format!("{label}: {e}")))?;
+    pool.validate().map_err(|e| within(e, &at, &label))?;
     Ok(pool)
 }
 
@@ -183,21 +203,29 @@ fn provider<'a>(caps: &'a Value, id: &str) -> Option<&'a Value> {
 }
 
 pub fn check_members(name: &str, pool: &PoolConfig, caps: &Value) -> Result<()> {
-    for m in &pool.members {
+    for (i, m) in pool.members.iter().enumerate() {
+        let index = i.to_string();
+        let at = field::display(&["pools", name, "members", &index, "instanceId"]);
         let Some(p) = provider(caps, &m.instance_id) else {
             let known: Vec<&str> = providers(caps).iter().filter_map(|p| p["providerInstanceId"].as_str()).collect();
-            bail!(
-                "pool {name}: member {} is not a T3 provider instance; the instances are {}",
-                m.instance_id,
-                if known.is_empty() { "none".into() } else { known.join(", ") }
-            );
+            return Err(invalid(
+                at,
+                format!(
+                    "pool {name}: member {} is not a T3 provider instance; the instances are {}",
+                    m.instance_id,
+                    if known.is_empty() { "none".into() } else { known.join(", ") }
+                ),
+            ));
         };
         let driver = p["driverKind"].as_str().unwrap_or_default();
         if let Some(want) = pool.driver.as_deref().filter(|w| *w != driver) {
-            bail!(
-                "pool {name}: member {} is a {driver} instance, not {want}; set \"mixed\": true to mix drivers",
-                m.instance_id
-            );
+            return Err(invalid(
+                at,
+                format!(
+                    "pool {name}: member {} is a {driver} instance, not {want}; set \"mixed\": true to mix drivers",
+                    m.instance_id
+                ),
+            ));
         }
     }
     Ok(())
