@@ -162,6 +162,33 @@ pub fn exe_name(stem: &str) -> String {
     format!("{stem}{}", std::env::consts::EXE_SUFFIX)
 }
 
+pub const GIT_REPO_ENV: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+];
+
+pub fn git() -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    for var in GIT_REPO_ENV {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
 #[cfg(target_os = "linux")]
 pub fn process_exe(pid: u32) -> Option<PathBuf> {
     std::fs::canonicalize(format!("/proc/{pid}/exe")).ok()
@@ -334,5 +361,21 @@ fn resume_threads(pid: u32) -> std::io::Result<()> {
         }
         CloseHandle(snap);
         if resumed { Ok(()) } else { Err(std::io::Error::other("could not resume the suspended child")) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn git_repo_env_covers_every_local_env_var_git_names() {
+        let Ok(out) = super::git().args(["rev-parse", "--local-env-vars"]).output() else {
+            return;
+        };
+        let missing: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|v| !v.is_empty() && !super::GIT_REPO_ENV.contains(v))
+            .map(str::to_string)
+            .collect();
+        assert!(missing.is_empty(), "add to GIT_REPO_ENV: {missing:?}");
     }
 }

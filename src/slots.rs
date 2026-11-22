@@ -2875,7 +2875,7 @@ pub fn fingerprint(i: &Inputs) -> String {
 
 pub fn git_root(start: &Path) -> PathBuf {
     let start = std::path::absolute(start).unwrap_or_else(|_| start.to_path_buf());
-    let out = std::process::Command::new("git")
+    let out = crate::platform::git()
         .arg("-C")
         .arg(&start)
         .args(["rev-parse", "--show-toplevel"])
@@ -3013,11 +3013,36 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo ");
         std::fs::create_dir_all(repo.join("sub")).unwrap();
-        let ok = std::process::Command::new("git").arg("init").arg("-q").arg(&repo).status().is_ok_and(|s| s.success());
+        let ok = crate::platform::git().arg("init").arg("-q").arg(&repo).status().is_ok_and(|s| s.success());
         if !ok {
             return;
         }
         assert_eq!(realpath(&git_root(&repo.join("sub"))), realpath(&repo));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_root_ignores_an_inherited_git_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let decoy = dir.path().join("decoy");
+        if !crate::platform::git().args(["init", "-q"]).arg(&decoy).status().is_ok_and(|s| s.success()) {
+            return;
+        }
+        let config = decoy.join(".git").join("config");
+        let before = std::fs::read(&config).unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "slots::tests::git_root_preserves_trailing_space_in_worktree_path", "--test-threads=1"])
+            .env("GIT_DIR", decoy.join(".git"))
+            .env("GIT_WORK_TREE", &decoy)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(std::fs::read(&config).unwrap(), before);
     }
 
     #[test]
