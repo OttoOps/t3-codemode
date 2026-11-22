@@ -1094,13 +1094,39 @@ impl Store {
     }
 
     pub fn waiting_resolve_seq(&self, owner: &str, seq: i64, note: Option<&str>, at: &str) -> Result<bool> {
-        self.with(|c| {
-            c.execute(
-                "UPDATE waiting SET resolved_at = ?3, note = ?4 WHERE owner = ?1 AND seq = ?2 AND resolved_at IS NULL",
-                params![owner, seq, at, note],
-            )
-        })
-        .map(|n| n > 0)
+        self.with(|c| Self::resolve_seq(c, owner, seq, note, at)).map(|n| n > 0)
+    }
+
+    fn resolve_seq(c: &Connection, owner: &str, seq: i64, note: Option<&str>, at: &str) -> rusqlite::Result<usize> {
+        c.execute(
+            "UPDATE waiting SET resolved_at = ?3, note = ?4 WHERE owner = ?1 AND seq = ?2 AND resolved_at IS NULL",
+            params![owner, seq, at, note],
+        )
+    }
+
+    pub fn waiting_resolve_releasing(
+        &self,
+        owner: &str,
+        seqs: &[i64],
+        tickets: &[&str],
+        note: &str,
+        at: &str,
+    ) -> Result<usize> {
+        let release = "UPDATE links SET data = json_set(data, '$.gate', NULL, '$.gateSince', NULL) \
+                       WHERE child = ?1 AND closed = 0 AND json_extract(data, '$.gate') = 'merge' \
+                       AND NOT EXISTS (SELECT 1 FROM waiting w WHERE w.owner = ?2 AND w.resolved_at IS NULL \
+                       AND json_extract(w.data, '$.kind') = 'gate' AND json_extract(w.data, '$.ticket') = ?1)";
+        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut resolved = 0;
+        for seq in seqs {
+            resolved += Self::resolve_seq(&tx, owner, *seq, Some(note), at)?;
+        }
+        for ticket in tickets {
+            tx.execute(release, params![ticket, owner])?;
+        }
+        tx.commit()?;
+        Ok(resolved)
     }
 
     pub fn waiting_resolve(&self, owner: &str, id: &str, note: Option<&str>, at: &str) -> Result<Option<String>> {

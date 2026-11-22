@@ -219,6 +219,104 @@ async fn a_merge_gate_whose_head_moved_is_replaced_once() {
     assert_eq!(cards(&h, true).len(), 2);
 }
 
+async fn crash_while_clearing_the_merge_gate(h: &mut H, minutes: i64) {
+    let db = rusqlite::Connection::open(h.app.store.path()).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER crash_on_insert BEFORE INSERT ON links WHEN json_extract(NEW.data, '$.gate') IS NULL
+           BEGIN SELECT RAISE(ABORT, 'crashed clearing the gate'); END;
+         CREATE TRIGGER crash_on_update BEFORE UPDATE ON links WHEN json_extract(NEW.data, '$.gate') IS NULL
+           BEGIN SELECT RAISE(ABORT, 'crashed clearing the gate'); END;",
+    )
+    .unwrap();
+    h.clock.set(&at(minutes));
+    let err = h.app.wf.reconcile().await.unwrap_err();
+    assert!(format!("{err:#}").contains("crashed clearing the gate"), "{err:#}");
+    db.execute_batch("DROP TRIGGER crash_on_insert; DROP TRIGGER crash_on_update;").unwrap();
+    h.reopen();
+}
+
+fn open_gate_cards(h: &H) -> usize {
+    cards(h, false).iter().filter(|c| c["kind"] == "gate").count()
+}
+
+#[tokio::test]
+async fn a_crash_while_clearing_a_merged_prs_gate_leaves_no_gate_without_a_card() {
+    let mut h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+    merge_gate(&h, Some(HEAD)).await;
+    check(&h, 0).await;
+    h.github.update_pr(REPO, 7, json!({"state": "MERGED", "mergeCommit": {"oid": MERGED}, "mergedAt": at(4)}));
+
+    crash_while_clearing_the_merge_gate(&mut h, 5).await;
+
+    assert_eq!(h.app.store.link_get(TICKET).unwrap().unwrap().gate.as_deref(), Some("merge"));
+    assert_eq!(open_gate_cards(&h), 1, "the gate is still set, so its card is still open");
+    check(&h, 7).await;
+    let link = h.app.store.link_get(TICKET).unwrap().unwrap();
+    assert_eq!((link.gate, link.gate_since), (None, None));
+    assert!(cards(&h, false).is_empty());
+    assert_eq!(github_events(&h).len(), 1);
+}
+
+#[tokio::test]
+async fn a_crash_while_clearing_a_moved_prs_gate_leaves_no_gate_without_a_card() {
+    let mut h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+    merge_gate(&h, Some(HEAD)).await;
+    check(&h, 0).await;
+    h.github.update_pr(
+        REPO,
+        7,
+        json!({"headRefOid": MOVED, "isInMergeQueue": true, "mergeQueueEntry": {"position": 1}}),
+    );
+
+    crash_while_clearing_the_merge_gate(&mut h, 5).await;
+
+    assert_eq!(h.app.store.link_get(TICKET).unwrap().unwrap().gate.as_deref(), Some("merge"));
+    assert_eq!(open_gate_cards(&h), 1, "the gate is still set, so its card is still open");
+    check(&h, 7).await;
+    let link = h.app.store.link_get(TICKET).unwrap().unwrap();
+    assert_eq!((link.gate, link.gate_since), (None, None));
+    assert_eq!(open_gate_cards(&h), 0);
+    assert!(!cards(&h, false).is_empty(), "the moved report stays");
+}
+
+#[tokio::test]
+async fn a_merge_keeps_the_gate_while_another_prs_gate_card_is_open() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+    h.github.set_pr(REPO, 8, github_pr(HEAD, "BLOCKED", true));
+    merge_gate(&h, Some(HEAD)).await;
+    assert_eq!(wf_merge(&h, 8, HEAD).await["status"], "waiting");
+    h.github.update_pr(REPO, 8, json!({"headRefOid": MOVED}));
+    check(&h, 2).await;
+    assert_eq!(open_gate_cards(&h), 2);
+
+    h.github.update_pr(REPO, 7, json!({"state": "MERGED", "mergeCommit": {"oid": MERGED}, "mergedAt": at(4)}));
+    check(&h, 5).await;
+
+    assert_eq!(open_gate_cards(&h), 1);
+    assert_eq!(h.app.store.link_get(TICKET).unwrap().unwrap().gate.as_deref(), Some("merge"));
+}
+
+#[tokio::test]
+async fn a_merge_leaves_a_delivery_gate_alone() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+    let body = format!("**ACTION NEEDED:** reply \"deploy\" to deploy #7, here: {URL}");
+    h.wf(TICKET, "send", json!({"kind": "gate", "gate": "delivery:deploy", "body": body})).await;
+    check(&h, 0).await;
+
+    h.github.update_pr(REPO, 7, json!({"state": "MERGED", "mergeCommit": {"oid": MERGED}, "mergedAt": at(4)}));
+    check(&h, 5).await;
+
+    assert_eq!(h.app.store.link_get(TICKET).unwrap().unwrap().gate.as_deref(), Some("delivery:deploy"));
+}
+
 #[tokio::test]
 async fn a_gate_that_names_no_head_is_held_to_the_head_first_seen() {
     let h = H::new();

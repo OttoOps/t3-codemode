@@ -507,38 +507,28 @@ impl Wf {
             && (wait.is_some() || !stale.is_empty())
             && self.store.pr_event_mark(&t.repo, t.number, &event, BOARD, &self.now())?;
         let seqs: Vec<i64> = stale.iter().map(|c| c.seq).collect();
-        let resolved = self.resolve_cards(|c| seqs.contains(&c.seq), &note)?;
-        if !resolved.is_empty() {
-            self.release_gates(stale.iter().filter(|c| c.kind == "gate").filter_map(|c| c.ticket.as_deref()))?;
-        }
+        let gated: Vec<&str> = stale.iter().filter(|c| c.kind == "gate").filter_map(|c| c.ticket.as_deref()).collect();
+        let resolved = self.resolve_releasing(&seqs, &gated, &note)?;
         if let Some(w) = wait {
             self.store.merge_wait_retire(w)?;
         }
         if on_feed {
             self.feed_note(None, &body)?;
-        } else if told == 0 && !resolved.is_empty() {
+        } else if told == 0 && resolved > 0 {
             self.feed_note(t.tickets.first().map(|(x, _)| x.as_str()), &format!("{}: {note}", t.label()))?;
         }
-        if told > 0 || on_feed || !resolved.is_empty() {
+        if told > 0 || on_feed || resolved > 0 {
             pass.actions.push(format!("{} {note}", t.label()));
         }
         Ok(())
     }
 
-    fn release_gates<'a>(&self, tickets: impl Iterator<Item = &'a str>) -> Result<()> {
-        let open = self.cards()?;
-        for ticket in tickets {
-            if let Some(mut l) = self.store.link_get(ticket)?
-                && !l.closed
-                && l.gate.as_deref() == Some("merge")
-                && !open.iter().any(|c| c.kind == "gate" && c.ticket.as_deref() == Some(ticket))
-            {
-                l.gate = None;
-                l.gate_since = None;
-                self.store.link_save(&l)?;
-            }
+    fn resolve_releasing(&self, seqs: &[i64], tickets: &[&str], note: &str) -> Result<usize> {
+        let resolved = self.store.waiting_resolve_releasing(BOARD, seqs, tickets, note, &self.now())?;
+        if resolved > 0 {
+            self.changed();
         }
-        Ok(())
+        Ok(resolved)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -776,10 +766,8 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         };
         self.raise(t, ticket, kind, &ask, &o.head, None, approval, pass)?;
         let note = format!("head moved to {} after this approval; replaced by a new card", short(&o.head));
-        self.resolve_cards(|c| old.contains(&c.seq), &note)?;
-        if kind == "report" {
-            self.release_gates(ticket.into_iter())?;
-        }
+        let release = ticket.filter(|_| kind == "report");
+        self.resolve_releasing(old, release.as_slice(), &note)?;
         self.feed_note(ticket, &format!("{label} merge approval replaced: the head moved to {}", short(&o.head)))?;
         pass.actions.push(format!("{label} merge approval replaced: head moved to {}", short(&o.head)));
         Ok(())
