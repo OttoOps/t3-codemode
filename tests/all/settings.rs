@@ -414,6 +414,19 @@ async fn a_changed_pool_has_its_members_checked() {
 }
 
 #[tokio::test]
+async fn repairing_another_field_leaves_an_unchanged_pool_unchecked() {
+    let b = Board::start(H::new()).await;
+    let pools = |id: &str| json!({"p": {"mixed": true, "members": [{"instanceId": id, "model": "m"}]}});
+    let broken = json!({"board": {"feed": "lots"}, "pools": pools("retired")}).to_string();
+    b.write(&broken);
+    let (status, body) = b.save(json!({"board": {"feed": 9}, "pools": pools("ghost")})).await;
+    assert_eq!(status, 422, "a changed pool is still checked: {body}");
+    assert_eq!(body["errors"][0]["field"], "pools.p.members.0.instanceId");
+    assert_eq!(b.text().unwrap(), broken);
+    assert_eq!(b.saved(json!({"board": {"feed": 9}, "pools": pools("retired")})).await["warnings"], json!([]));
+}
+
+#[tokio::test]
 async fn pool_member_state_is_live_and_separate_from_the_file() {
     let b = Board::start(H::new()).await;
     b.h.fake.set_providers(vec![
