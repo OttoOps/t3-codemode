@@ -935,8 +935,6 @@ async fn config_validate(file: &Path, check: &CheckArgs) -> Result<()> {
     Ok(())
 }
 
-const MEMBER_CHECK_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
-
 // The service cuts a long answer, so this asks only for the two provider keys the check reads.
 const MEMBER_CAPS_CODE: &str = "async () => ({ providers: (await t3.orchestrator_capabilities({})).providers\
     .map(p => ({ providerInstanceId: p.providerInstanceId, driverKind: p.driverKind })) })";
@@ -948,8 +946,11 @@ async fn check_pool_members(cfg: &Config, pools: &[&str], check: &CheckArgs) -> 
     let caps = if check.no_t3 {
         Err("skipped with --no-t3".to_string())
     } else {
-        match tokio::time::timeout(MEMBER_CHECK_BUDGET, exec_value(check.port.port, MEMBER_CAPS_CODE.into(), None))
-            .await
+        match tokio::time::timeout(
+            config_edit::MEMBER_CHECK_BUDGET,
+            exec_value(check.port.port, MEMBER_CAPS_CODE.into(), None),
+        )
+        .await
         {
             Ok(Ok(caps)) if caps["providers"].is_array() => Ok(caps),
             Ok(Ok(_)) => Err("the service listed no providers".to_string()),

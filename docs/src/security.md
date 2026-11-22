@@ -26,6 +26,29 @@ The HTTP server splits `/mcp`, `/healthz` and `/reload` from the web board (`/`,
 See [ADR 0008](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0008-remote-board-trust-boundary.md)
 for the split trust boundary and reverse-proxy trust assumptions.
 
+## Board settings
+
+A config write can loosen `deny` immediately. It can also add a stdio upstream,
+which is a command the service runs after a restart, or change who may reach
+the remote board after a restart. The board's
+[settings routes](board.md#settings-api), `/api/settings` and
+`/api/settings/pools`, are therefore loopback-only for reads and writes, and
+refuse an authenticated remote request with 403. A save also needs the CSRF
+token.
+
+The `/api/models` routes still answer an authenticated remote board. They
+write only the ticket and ask model keys, and an ask save applies no other
+change that waits in the file.
+
+`GET /api/settings` returns the file as written, so an `${env:..}` or
+`${file:..}` reference stays unresolved and a credential written literally
+into the file comes back literally.
+
+`execute` has no config global, so sandboxed code cannot clear its own `deny`
+list through `wf`. Code that acts outside the sandbox can still change the
+config as any local process can. That includes an agent thread that a script
+launches, and an upstream tool that can write files or send HTTP to loopback.
+
 ## Config reload
 
 `POST /reload` makes the service read its own config file again. It takes no
@@ -88,6 +111,9 @@ code cannot call the route directly.
       `"off"` or `"pairing"`.
   - Every mutating method (`POST`, `PUT`, `DELETE`) on authenticated board
     routes still requires the per-process `X-T3CM-CSRF` header.
+  - `GET` and `PUT /api/settings` and `GET /api/settings/pools` are strictly
+    loopback-only, as `POST /api/open` is, so authenticated remote requests
+    receive 403.
   - `POST /api/open` is strictly loopback-only: authenticated remote requests
     receive 403, while unauthenticated or disallowed remote requests receive
     the usual 401/403 guard refusal, so remote clients cannot trigger desktop
@@ -115,7 +141,9 @@ code cannot call the route directly.
   overwritten rather than appended, and `X-Forwarded-Proto https`). Raw TCP
   forwarders such as `ssh -L`, `socat`, and `tailscale serve --tcp` are
   indistinguishable from direct loopback and hand out zero-auth board access,
-  so they must never front the board. See [Remote access](board.md#remote-access).
+  so they must never front the board. Through one, a remote client could also
+  use the settings routes to add a command that the host runs. See
+  [Remote access](board.md#remote-access).
 
 ## The sandbox
 

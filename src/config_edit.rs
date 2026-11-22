@@ -9,6 +9,7 @@ use crate::config::{BoardRemoteConfig, Config, with_defaults};
 use crate::{field, json_patch, steps};
 
 const EMPTY_FILE: &str = "{}\n";
+pub const MEMBER_CHECK_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -133,9 +134,16 @@ impl Document {
         check(self.value()?)
     }
 
+    pub fn check_revision(&self, seen: &Revision) -> Result<(), Stale> {
+        if *seen == self.revision { Ok(()) } else { Err(self.stale()) }
+    }
+
+    fn stale(&self) -> Stale {
+        Stale { path: self.path.clone() }
+    }
+
     pub fn edit(&self, edits: &[Edit]) -> Result<Draft<'_>, Rejected> {
-        let old = self.value()?;
-        let mut new = old.clone();
+        let mut new = self.value()?;
         for edit in edits {
             let merged = with_defaults(new.clone());
             // Deserialized without validation, so a reference a later edit resolves keeps serde's defaults.
@@ -150,6 +158,11 @@ impl Document {
                 }
             }
         }
+        self.rewrite(new)
+    }
+
+    pub fn rewrite(&self, new: Value) -> Result<Draft<'_>, Rejected> {
+        let old = self.value()?;
         if new == old {
             return Ok(Draft { document: self, text: self.text.clone(), config: check(new)? });
         }
@@ -183,7 +196,7 @@ impl Draft<'_> {
 
     pub fn save(self) -> Result<Revision> {
         let Document { path, target, text: before, revision } = self.document;
-        let stale = || anyhow::Error::new(Stale { path: path.clone() });
+        let stale = || anyhow::Error::new(self.document.stale());
         if resolve(path)? != *target {
             return Err(stale());
         }

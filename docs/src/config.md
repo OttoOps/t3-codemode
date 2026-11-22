@@ -13,7 +13,8 @@ the built-in defaults, so a file only needs the keys you change:
 | Windows | `%LOCALAPPDATA%\t3-codemode\` for both |
 
 The service reads the file at start, and again when
-[`t3cm config`](#change-the-config) saves a change and asks it to reload. It
+[`t3cm config`](#change-the-config) or the board's
+[settings API](board.md#settings-api) saves a change. It
 does not watch the file, so restart it after you edit the file another way or
 change a [restart-only key](#restart-only-keys):
 
@@ -35,6 +36,10 @@ A deep merge replaces arrays whole, so this `deny` replaces the default list,
 and it has to repeat the two default entries to keep them.
 
 ## Change the config
+
+The board's [settings API](board.md#settings-api) changes the file with the
+same checks and reload as the commands below. It takes whole values in place of
+paths, so a list is always saved whole.
 
 `t3cm config` reads and changes the config file. Before it writes, it checks
 the whole result as config load does, so a rejected change prints the field
