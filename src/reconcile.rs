@@ -547,8 +547,14 @@ impl Wf {
         {
             self.store.merge_wait_retire(&w)?;
         }
+        let this_pr = |c: &Card| c.pr.as_ref().is_some_and(|p| p.repo == t.repo && p.number == t.number);
+        let behind = |c: &Card| {
+            let held_at = c.pr.as_ref().and_then(|p| p.head.as_deref());
+            held_at.is_some_and(|head| !o.head.starts_with(head))
+        };
+        let note = format!("head moved to {} after this hold", short(&o.head));
+        self.resolve_cards(|c| c.kind == "report" && this_pr(c) && c.text.contains(HELD) && behind(c), &note)?;
         if o.queued || o.ready == Ready::Yes {
-            let this_pr = |c: &Card| c.pr.as_ref().is_some_and(|p| p.repo == t.repo && p.number == t.number);
             let note = if o.queued { "it is in the merge queue" } else { "it is ready to merge" };
             let stale = |c: &Card| c.text.contains(HELD) || (o.queued && c.text.contains(NO_REASON));
             self.resolve_cards(|c| c.kind == "report" && this_pr(c) && stale(c), note)?;
