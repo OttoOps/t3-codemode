@@ -397,8 +397,20 @@ impl Wf {
             let _g = self.lock.lock().await;
             let cards: Vec<Card> = self.cards()?.into_iter().filter(|c| t.cards.contains(&c.seq)).collect();
             let wait = self.wait(t)?;
-            let waited = wait.is_some();
+            let sent = wait.as_ref().filter(|w| w.status == WaitStatus::Sent).map(|w| w.at.clone());
+            let status = wait.as_ref().map(|w| w.status);
             let prev = self.store.pr_seen_get(&t.repo, t.number)?;
+            let left = if o.state != "OPEN" || o.queued {
+                None
+            } else if prev.as_ref().is_some_and(|p| p.queued) {
+                Some(self.now())
+            } else {
+                let kept = prev.as_ref().and_then(|p| p.left.clone());
+                match &sent {
+                    Some(approved) => kept.filter(|l| later(l, approved)).or_else(|| Some(self.now())),
+                    None => kept,
+                }
+            };
             let after = match prev.as_ref().and_then(|p| p.queued_at.as_deref()) {
                 Some(q) if later(q, &t.since) => q,
                 _ => t.since.as_str(),
@@ -408,13 +420,7 @@ impl Wf {
                     self.finished(t, &o, &cards, wait.as_ref(), pass)?;
                     None
                 }
-                "OPEN" => self.open(t, &o, &cards, wait, after, pass)?,
-                _ => None,
-            };
-            let out = o.state == "OPEN" && !o.queued && !waited;
-            let left = match &prev {
-                Some(p) if out && p.queued => Some(self.now()),
-                Some(p) if out => p.left.clone(),
+                "OPEN" => self.open(t, &o, &cards, wait, after, left.as_deref(), pass)?,
                 _ => None,
             };
             let queued_at = match &prev {
@@ -423,7 +429,7 @@ impl Wf {
                 None => None,
             };
             let left = match left {
-                Some(l) => self.exited(t, &o, &l, after, pass)?,
+                Some(l) => self.exited(t, &o, &l, after, status, pass)?,
                 None => None,
             };
             if prev.as_ref().map(|p| (p.state.as_str(), p.queued)) != Some((o.state.as_str(), o.queued)) {
@@ -453,7 +459,7 @@ impl Wf {
         let _g = self.lock.lock().await;
         self.store.pr_seen_remove(&t.repo, t.number)?;
         if let Some(w) = self.wait(t)? {
-            self.failed(t, w, why, pass)?;
+            self.failed(t, w, why, None, pass)?;
         }
         Ok(())
     }
@@ -535,6 +541,7 @@ impl Wf {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn open(
         &self,
         t: &Tracked,
@@ -542,6 +549,7 @@ impl Wf {
         cards: &[Card],
         mut wait: Option<MergeWait>,
         after: &str,
+        left: Option<&str>,
         pass: &mut Pass,
     ) -> Result<Option<MergeWait>> {
         if self.dropped(t, o, wait.as_ref(), after, pass)?
@@ -631,7 +639,8 @@ impl Wf {
                 Ok(None)
             }
             (WaitStatus::Sent, false) => {
-                self.failed(t, w, "it left the merge queue and GitHub recorded no reason", pass)?;
+                let event = left.map(|l| format!("left:{l}"));
+                self.failed(t, w, "it left the merge queue and GitHub recorded no reason", event.as_deref(), pass)?;
                 Ok(None)
             }
             _ => Ok(None),
@@ -676,12 +685,23 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         Ok(true)
     }
 
-    fn exited(&self, t: &Tracked, o: &Obs, left: &str, after: &str, pass: &mut Pass) -> Result<Option<String>> {
+    fn exited(
+        &self,
+        t: &Tracked,
+        o: &Obs,
+        left: &str,
+        after: &str,
+        status: Option<WaitStatus>,
+        pass: &mut Pass,
+    ) -> Result<Option<String>> {
         if o.removal.as_ref().is_some_and(|(_, at)| later(at, after)) {
             return Ok(None);
         }
-        if self.mins(Some(left)).is_some_and(|m| m < EXIT_WINDOW_MINS) {
+        if status == Some(WaitStatus::Sent) || self.mins(Some(left)).is_some_and(|m| m < EXIT_WINDOW_MINS) {
             return Ok(Some(left.into()));
+        }
+        if status.is_some() {
+            return Ok(None);
         }
         let what = format!("{} left the merge queue at {}, {NO_REASON}", t.label(), local_clock(left));
         let context = format!("GitHub still showed no removal reason {EXIT_WINDOW_MINS} minutes after the exit.");
@@ -780,7 +800,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
             Ok(r) => errors(r),
         };
         if let Some(e) = failure {
-            return self.failed(t, w, &e, pass);
+            return self.failed(t, w, &e, None, pass);
         }
         let mut sent = w.clone();
         sent.status = WaitStatus::Sent;
@@ -815,7 +835,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         Ok(())
     }
 
-    fn failed(&self, t: &Tracked, w: MergeWait, why: &str, pass: &mut Pass) -> Result<()> {
+    fn failed(&self, t: &Tracked, w: MergeWait, why: &str, event: Option<&str>, pass: &mut Pass) -> Result<()> {
         let mut next = w.clone();
         next.failures += 1;
         next.last_error = Some(why.into());
@@ -829,7 +849,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
             reply: "reply \"merge\" to try again, or \"hold\" to leave it",
             context: format!("It was approved at head {}. GitHub refused {MAX_FAILURES} checks in a row.", w.head),
         };
-        self.raise(t, w.thread.as_deref(), "report", &ask, &w.head, None, Some(&w.approval), pass)?;
+        self.raise(t, w.thread.as_deref(), "report", &ask, &w.head, event, Some(&w.approval), pass)?;
         self.store.merge_wait_retire(&w)?;
         self.feed_note(w.thread.as_deref(), &format!("{} could not be queued: {why}", t.label()))?;
         pass.actions.push(format!("{} could not be queued: {why}", t.label()));
