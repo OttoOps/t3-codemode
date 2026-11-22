@@ -13,6 +13,7 @@ pub const UP_KINDS: &[&str] = &["note", "event", "gate", "blocker", "report", "h
 pub const CLOSING: &[&str] = &["handoff", "closed"];
 const EXTRA_WAKE_KINDS: &[&str] = &["escalate", "reply"];
 
+pub const MIN_TIMEOUT_MS: u64 = 100;
 pub const MAX_LIMIT_HOLD_MINUTES: u64 = 7 * 24 * 60;
 pub const LEGACY_BOARD_TICKET_KEYS: &[&str] = &["instanceId", "ticketModel", "ticketEffort", "pool"];
 const BOARD_ASK_KEYS: &[&str] = &["askInstanceId", "askModel", "askEffort", "askPool"];
@@ -437,6 +438,9 @@ impl Config {
     fn validate(&self) -> Result<()> {
         if self.max_concurrent_runs == 0 {
             return Err(invalid("maxConcurrentRuns", "maxConcurrentRuns must be at least 1"));
+        }
+        if self.max_timeout_ms < MIN_TIMEOUT_MS {
+            return Err(invalid("maxTimeoutMs", format!("maxTimeoutMs must be at least {MIN_TIMEOUT_MS}")));
         }
         self.link.validate().map_err(|e| within(e, "link", "link"))?;
         let (active, idle) = (self.board.reconcile_active_minutes, self.board.reconcile_idle_minutes);

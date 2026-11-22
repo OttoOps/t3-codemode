@@ -8,7 +8,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::board::{GitRemotes, Remotes};
 use crate::catalog::{Catalog, aliases};
 use crate::clock::{Clock, iso};
-use crate::config::{Config, OpenLinks, RemoteMode};
+use crate::config::{Config, MIN_TIMEOUT_MS, OpenLinks, RemoteMode};
 use crate::desktop::{Desktop, WindowsDesktop, app_link};
 use crate::github::{GhCli, GitHub};
 use crate::sandbox::{self, Host, Limits, NoHost, Run};
@@ -385,7 +385,7 @@ impl App {
 
     fn limits(&self, timeout_ms: Option<u64>) -> Limits {
         let config = self.config();
-        let ms = timeout_ms.unwrap_or(config.default_timeout_ms).clamp(100, config.max_timeout_ms);
+        let ms = timeout_ms.unwrap_or(config.default_timeout_ms).clamp(MIN_TIMEOUT_MS, config.max_timeout_ms);
         Limits {
             memory: sandbox::MEMORY_LIMIT,
             cpu: Duration::from_millis(config.cpu_budget_ms),

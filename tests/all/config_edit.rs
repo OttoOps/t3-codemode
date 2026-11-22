@@ -258,6 +258,7 @@ fn an_invalid_edit_names_its_field() {
         (set("board.remote.origin", json!("http://plain.example.com")), "board.remote.origin"),
         (set("board.remote.allowUsers", json!(["not a login"])), "board.remote.allowUsers.0"),
         (set("maxConcurrentRuns", json!(0)), "maxConcurrentRuns"),
+        (set("maxTimeoutMs", json!(99)), "maxTimeoutMs"),
         (set("limitHoldMinutes", json!(0)), "limitHoldMinutes"),
         (set("link.down", json!(0)), "link.down"),
         (set("link.stall", json!(10)), "link.stall"),

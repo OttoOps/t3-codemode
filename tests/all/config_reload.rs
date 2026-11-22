@@ -161,6 +161,7 @@ async fn an_invalid_file_never_replaces_the_running_config() {
         (r#"{"board": {"feed": "lots"}}"#, "board.feed"),
         (r#"{"board": {"feed": 9, "askPool": "gone"}}"#, "board.askPool"),
         (r#"{"board": {"feed": 9}, "maxConcurrentRuns": 0}"#, "maxConcurrentRuns"),
+        (r#"{"board": {"feed": 9}, "maxTimeoutMs": 99}"#, "maxTimeoutMs"),
     ];
     for (text, why) in cases {
         std::fs::write(file(&h), text).unwrap();
