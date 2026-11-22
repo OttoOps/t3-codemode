@@ -14,9 +14,9 @@ the built-in defaults, so a file only needs the keys you change:
 
 The service reads the file at start, and again when
 [`t3cm config`](#change-the-config) or the board's
-[settings API](board.md#settings-api) saves a change. It
-does not watch the file, so restart it after you edit the file another way or
-change a [restart-only key](#restart-only-keys):
+[Settings](board.md#settings) saves a change. It does not watch the file, so
+restart it after you edit the file another way or change a
+[restart-only key](#restart-only-keys):
 
 | OS | Restart |
 |---|---|
@@ -37,9 +37,11 @@ and it has to repeat the two default entries to keep them.
 
 ## Change the config
 
-The board's [settings API](board.md#settings-api) changes the file with the
-same checks and reload as the commands below. It takes whole values in place of
-paths, so a list is always saved whole.
+On a local board, [Settings](board.md#settings) edits every key with the same
+checks and reload as the commands below, apart from the few files it leaves to
+`t3cm config edit`. It uses the
+[settings API](board.md#settings-api), which takes whole values in place of
+paths, so it always saves a list whole.
 
 `t3cm config` reads and changes the config file. Before it writes, it checks
 the whole result as config load does, so a rejected change prints the field

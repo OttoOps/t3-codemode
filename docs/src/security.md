@@ -33,8 +33,9 @@ which is a command the service runs after a restart, or change who may reach
 the remote board after a restart. The board's
 [settings routes](board.md#settings-api), `/api/settings` and
 `/api/settings/pools`, are therefore loopback-only for reads and writes, and
-refuse an authenticated remote request with 403. A save also needs the CSRF
-token.
+refuse an authenticated remote request with 403. The page served to a remote
+request keeps Settings hidden and never starts it. The routes enforce the
+limit. A save also needs the CSRF token.
 
 The `/api/models` routes still answer an authenticated remote board. They
 write only the ticket and ask model keys, and an ask save applies no other
