@@ -365,7 +365,7 @@ async fn repo_overrides_the_project_and_finds_its_git_root() {
     let s = S::new("claudeAgent");
     let other = s.h.dir.path().join("worktree");
     std::fs::create_dir_all(other.join("sub")).unwrap();
-    let git = std::process::Command::new("git").arg("init").arg("-q").arg(&other).status();
+    let git = t3_codemode::platform::git().arg("init").arg("-q").arg(&other).status();
     if !git.is_ok_and(|g| g.success()) {
         return;
     }
@@ -374,6 +374,26 @@ async fn repo_overrides_the_project_and_finds_its_git_root() {
     let d = s.call(&code, own(&s.home.join(".claude"))).await;
     assert_eq!((d["mode"].as_str(), d["source"].as_str()), (Some("tag-deploy"), Some("AGENTS.md")));
     assert_eq!(d["problem"], "tag-deploy names no deploy skill");
+}
+
+#[test]
+fn an_inherited_git_dir_leaves_the_callers_repo_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let decoy = dir.path().join("decoy");
+    if !t3_codemode::platform::git().args(["init", "-q"]).arg(&decoy).status().is_ok_and(|g| g.success()) {
+        return;
+    }
+    let config = decoy.join(".git").join("config");
+    let before = std::fs::read(&config).unwrap();
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "slots::repo_overrides_the_project_and_finds_its_git_root", "--test-threads=1"])
+        .env("GIT_DIR", decoy.join(".git"))
+        .env("GIT_WORK_TREE", &decoy)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(std::fs::read(&config).unwrap(), before);
 }
 
 #[tokio::test]

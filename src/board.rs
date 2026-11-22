@@ -44,7 +44,7 @@ pub struct GitRemotes;
 impl Remotes for GitRemotes {
     fn origin<'a>(&'a self, root: &'a str) -> BoxFut<'a, Option<String>> {
         Box::pin(async move {
-            let run = tokio::process::Command::new("git")
+            let run = tokio::process::Command::from(crate::platform::git())
                 .args(["-C", root, "remote", "get-url", "origin"])
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .stdin(Stdio::null())
