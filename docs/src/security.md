@@ -48,6 +48,11 @@ into the file comes back literally.
 list through `wf`. Code that acts outside the sandbox can still change the
 config as any local process can. That includes an agent thread that a script
 launches, and an upstream tool that can write files or send HTTP to loopback.
+A remote board user can likewise launch a ticket or answer a card, and the
+agent that receives it could edit the file. Both restrictions block direct
+edits only, as
+[ADR 0010](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0010-keep-config-edits-local.md)
+records.
 
 ## Config reload
 
