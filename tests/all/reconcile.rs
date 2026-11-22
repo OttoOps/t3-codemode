@@ -374,6 +374,30 @@ async fn a_waiting_pr_github_refuses_three_times_becomes_a_card() {
 }
 
 #[tokio::test]
+async fn a_refusal_card_keeps_its_lowercase_label_after_a_long_multiline_error() {
+    let long = "Repository rule violations found for this merge. ".repeat(20);
+    for error in [format!("{long}\nRequired status check is expected.\n{long}"), format!("Refused:\n\n{long}")] {
+        let h = H::new();
+        ticket_with_worker(&h, 0).await;
+        h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+        let code = format!("async () => wf.merge({})", json!({"repo": "Acme/Widgets", "pr": 7, "head": HEAD}));
+        assert_eq!(result(&h.exec_as(TICKET, &code).await)["status"], "waiting");
+        h.github.update_pr(REPO, 7, json!({"mergeStateStatus": "CLEAN"}));
+        h.github.fail_operation("enqueuePullRequest", &error);
+
+        check(&h, 2).await;
+        check(&h, 4).await;
+        check(&h, 6).await;
+
+        let open = cards(&h, false);
+        assert_eq!(open.len(), 1, "{open:?}");
+        let text = open[0]["text"].as_str().unwrap();
+        assert!(text.starts_with("GitHub would not queue acme/widgets#7 ("), "{text}");
+        assert!(text.chars().count() <= 403 && !text.contains('\n'), "{text}");
+    }
+}
+
+#[tokio::test]
 async fn github_down_changes_nothing_and_the_board_pass_still_runs() {
     let h = H::new();
     ticket_with_worker(&h, 0).await;
