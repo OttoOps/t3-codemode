@@ -726,9 +726,10 @@ these:
 
 Config validation reports the first error it finds, and the member check
 reports one error for each bad pool. The member check asks T3 about the pools
-that the save adds or changes. When T3 does not answer, the save goes on and
-`warnings` says that t3cm did not check the members. The route refuses to
-replace broken JSON, which `t3cm config edit` can repair.
+that the save adds or changes. It skips a pool the save leaves alone, including
+when the save repairs an error elsewhere in the file. When T3 does not answer,
+the save goes on and `warnings` says that t3cm did not check the members. The
+route refuses to replace broken JSON, which `t3cm config edit` can repair.
 
 `GET /api/settings/pools` returns `{pools}`, which is the list `wf.pools()`
 gives for the running config, with each member's live state. It is a separate

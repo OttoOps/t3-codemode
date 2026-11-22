@@ -315,6 +315,24 @@ fn several_edits_apply_together_or_not_at_all() {
 }
 
 #[test]
+fn a_repair_changes_only_the_pools_it_edits() {
+    let pool = |id: &str| json!({"mixed": true, "members": [{"instanceId": id, "model": "m"}]});
+    let repaired = json!({"board": {"feed": 9}, "pools": {"kept": pool("a"), "moved": pool("b")}}).to_string();
+    let invalid_elsewhere = json!({"board": {"feed": "lots"}, "pools": {"kept": pool("a"), "moved": pool("c")}});
+    let invalid_pool = json!({"pools": {"kept": {"members": "none"}, "moved": pool("b")}});
+    let cases = [
+        (invalid_elsewhere.to_string(), vec!["moved"]),
+        (invalid_pool.to_string(), vec!["kept"]),
+        ("{\"pools\": ".to_string(), vec!["kept", "moved"]),
+    ];
+    for (before, want) in cases {
+        let c = Cfg::with(&before);
+        let doc = Document::read(&c.file).unwrap();
+        assert_eq!(doc.replace(repaired.clone()).unwrap().changed_pools(), want, "{before}");
+    }
+}
+
+#[test]
 fn a_child_roles_inherited_wake_list_is_read_and_edited_by_index() {
     let c = Cfg::with(r#"{"wake": ["event", "gate"]}"#);
     let path = "roles.ticket.children.worker.wake";

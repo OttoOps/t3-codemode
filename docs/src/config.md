@@ -84,10 +84,13 @@ or broken JSON.
 
 When a change adds or alters a pool, t3cm asks the running service whether
 each member of that pool is a T3 provider instance and has the pool's
-`driver`. `validate` asks about every pool. If the service or T3 does not
-answer, or you pass `--no-t3`, t3cm warns that it did not check the members
-and goes on, since each pick checks them again. `--port` names the service's
-port when it is not the default.
+`driver`. A change that repairs another key does not ask about a pool it
+leaves alone. When t3cm cannot read a pool's earlier entry, it counts that
+pool as changed, so an `edit` that repairs broken JSON asks about every pool.
+`validate` asks about every pool. If the service or T3 does not answer, or you
+pass `--no-t3`, t3cm warns that it did not check the members and goes on,
+since each pick checks them again. `--port` names the service's port when it
+is not the default.
 
 ### Reload
 

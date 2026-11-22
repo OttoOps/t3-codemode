@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::config::{BoardRemoteConfig, Config, with_defaults};
+use crate::pools::PoolConfig;
 use crate::{field, json_patch, steps};
 
 const EMPTY_FILE: &str = "{}\n";
@@ -185,11 +186,13 @@ impl Draft<'_> {
     }
 
     pub fn changed_pools(&self) -> Vec<&str> {
-        let before = self.document.config().ok();
+        let before = self.document.value().unwrap_or_default();
         self.config
             .pools
             .iter()
-            .filter(|(name, pool)| before.as_ref().and_then(|c| c.pools.get(*name)) != Some(*pool))
+            .filter(|(name, pool)| {
+                PoolConfig::deserialize(&before["pools"][name.as_str()]).ok().as_ref() != Some(*pool)
+            })
             .map(|(name, _)| name.as_str())
             .collect()
     }
