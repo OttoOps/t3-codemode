@@ -1181,7 +1181,7 @@ impl Wf {
         Ok(id)
     }
 
-    pub(crate) fn resolve_cards(&self, pred: impl Fn(&Card) -> bool, note: &str) -> Result<Vec<String>> {
+    pub(crate) fn resolve_cards(&self, mut pred: impl FnMut(&Card) -> bool, note: &str) -> Result<Vec<String>> {
         let mut done = Vec::new();
         for c in self.cards()?.into_iter().filter(|c| pred(c)) {
             if self.store.waiting_resolve(BOARD, &c.id, Some(note), &self.now())?.is_some() {
@@ -1207,10 +1207,14 @@ impl Wf {
             let from = c.worker.map(|w| w.thread.as_str());
             self.resolve_cards(
                 |o| {
-                    o.kind == "gate"
+                    let same_owner = o.kind == "gate"
                         && o.ticket.as_deref() == Some(t)
-                        && o.worker.as_ref().map(|w| w.thread.as_str()) == from
-                        && !o.pr.as_ref().is_some_and(|p| p.ready)
+                        && o.worker.as_ref().map(|w| w.thread.as_str()) == from;
+                    if same_owner && o.pr.as_ref().is_some_and(|p| p.ready) {
+                        self.reach.hit(crate::reach::ReachPoint::DeliveryGateOverReadyCard);
+                        return false;
+                    }
+                    same_owner
                 },
                 "superseded by a newer gate",
             )?;
@@ -1355,6 +1359,7 @@ impl Wf {
             return Ok(None);
         }
         self.store.waiting_resolve_seq(BOARD, card.seq, Some(&format!("answered: {text}")), &self.now())?;
+        self.reach.hit(crate::reach::ReachPoint::RelayedGateAnswered);
         let note =
             format!("the board's answer {} on card {} went straight to {} ({handle})", json!(text), card.id, w.label);
         let h = self.store.msg_new(WATCHER, &wl.parent, HANDLED, &note, &self.now())?;
@@ -1378,6 +1383,9 @@ impl Wf {
         same_card(&card, id, want)?;
         if !self.store.waiting_resolve_seq(BOARD, card.seq, Some("dismissed"), &self.now())? {
             bail!("no open board card {id:?}");
+        }
+        if want.at.is_some() || want.token.is_some() {
+            self.reach.hit(crate::reach::ReachPoint::DismissAtResolved);
         }
         if card.worker.is_none()
             && let Some(ticket) = card.ticket.as_deref()

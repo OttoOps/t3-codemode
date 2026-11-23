@@ -823,6 +823,7 @@ async fn a_held_reply_to_an_active_worker_is_dropped_when_it_hands_off() {
     let handoff = h.wf(WORKER, "send", json!({"kind": "handoff", "body": "done"})).await;
     assert_eq!(handoff["closed"], true);
     assert!(h.app.store.outbox_all().unwrap().is_empty());
+    assert_eq!(h.app.wf.reach().count(t3_codemode::reach::ReachPoint::OutboxHeldThenClosed), 1);
 
     h.fake.update(WORKER, json!({"status": "idle", "updatedAt": at(1)}));
     h.tick(2).await;
@@ -847,6 +848,7 @@ async fn wf_close_drops_queued_outbox_wakes_for_the_closed_child() {
 
     h.wf(TICKET, "close", json!({"child": WORKER})).await;
     assert!(h.app.store.outbox_all().unwrap().is_empty());
+    assert_eq!(h.app.wf.reach().count(t3_codemode::reach::ReachPoint::OutboxHeldThenClosed), 1);
 
     h.fake.update(WORKER, json!({"status": "idle", "updatedAt": at(1)}));
     h.tick(2).await;
@@ -877,6 +879,7 @@ async fn terminal_tick_closures_drop_queued_outbox_wakes() {
         assert!(link(&h, WORKER).closed);
         assert!(h.sent().is_empty(), "archive={archive}: {:?}", h.sent());
         assert!(h.app.store.outbox_all().unwrap().is_empty());
+        assert_eq!(h.app.wf.reach().count(t3_codemode::reach::ReachPoint::OutboxHeldThenClosed), 1);
     }
 }
 
@@ -897,6 +900,7 @@ async fn flush_outbox_drops_unreopened_wakes_for_closed_links_but_delivers_reope
     h.app.store.outbox_push(WORKER, "[t3cm reply from=t3cm msg=m99]\nstale", "m99", T0).unwrap();
     h.fake.update(WORKER, json!({"status": "idle", "updatedAt": at(1)}));
     h.tick(2).await;
+    assert_eq!(h.app.wf.reach().count(t3_codemode::reach::ReachPoint::OutboxHeldThenClosed), 2);
     let to_worker: Vec<_> = h.sent().into_iter().filter(|s| s["threadId"] == WORKER).collect();
     assert!(to_worker.is_empty(), "stale row delivered to closed worker: {to_worker:?}");
     assert!(h.app.store.outbox_all().unwrap().is_empty());

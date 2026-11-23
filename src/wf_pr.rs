@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use crate::board::{BOARD, Card, NewCard, Tracker, checked_options, gh_name, parse_issue_only};
 use crate::github::errors;
 use crate::merge::{CHECKS, CheckState, check_state};
+use crate::reach::ReachPoint;
 use crate::reconcile::{CardPr, CardStage};
 use crate::slots::{Caps, glob_matches};
 use crate::store::{Link, LinkPr, PrBrief};
@@ -1025,12 +1026,15 @@ impl Wf {
             bail!("the ticket's link closed while t3cm checked the PR");
         };
         let h = self.store.msg_new(me, &t.child, "gate", &body, &self.now())?;
+        let mut other_ready = false;
         self.resolve_cards(
             |c| {
-                c.kind == "gate"
-                    && c.worker.is_none()
-                    && c.ticket.as_deref() == Some(t.child.as_str())
-                    && c.pr.as_ref().is_some_and(|p| p.repo == e.repo && p.number == e.number)
+                let same_ticket =
+                    c.kind == "gate" && c.worker.is_none() && c.ticket.as_deref() == Some(t.child.as_str());
+                if same_ticket && c.pr.as_ref().is_some_and(|p| p.ready && (p.repo != e.repo || p.number != e.number)) {
+                    other_ready = true;
+                }
+                same_ticket && c.pr.as_ref().is_some_and(|p| p.repo == e.repo && p.number == e.number)
             },
             "superseded by a newer merge gate",
         )?;
@@ -1053,6 +1057,9 @@ impl Wf {
             offer: None,
             worker: None,
         })?;
+        if other_ready {
+            self.reach.hit(ReachPoint::TwoReadyCardsOneTicket);
+        }
         if t.gate.as_deref().is_none_or(|g| g == "merge" || g.starts_with("relay:")) {
             let already_merge = t.gate.as_deref() == Some("merge");
             t.gate = Some("merge".into());
