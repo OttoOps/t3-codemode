@@ -253,6 +253,8 @@ async fn the_header_shows_each_members_share_and_marks_a_limited_one() {
         r##"
 emitState(base);
 const btn = document.getElementById("route-btn");
+const opens = routing.open;
+routing.open = null;
 const before = tip().hidden;
 btn.dispatch("click");
 const pinned = !tip().hidden;
@@ -267,7 +269,7 @@ return {
   short: text("route-short"),
   dots: document.querySelectorAll("#route-wide .rdot").map((d) => d.className),
   label: btn.getAttribute("aria-label"),
-  before, pinned, tipText, closed: tip().hidden, hook,
+  before, pinned, tipText, closed: tip().hidden, hook, opens: typeof opens,
 };"##,
     )
     .await;
@@ -291,6 +293,7 @@ return {
     assert!(tip.contains("claude-a · limited · 25% · 0 running"), "{tip}");
     assert!(tip.contains(&format!("Limit resets {reset} (usage limit)")), "{tip}");
     assert_eq!(r["hook"], json!(["pool"]));
+    assert_eq!(r["opens"], "function");
 }
 
 #[tokio::test]
@@ -324,4 +327,273 @@ async fn a_failed_follow_up_capabilities_search_reports_the_instance_as_unknown(
     h.fake.set_search_fail(false);
     h.fake.set_providers(vec![provider("claude-a", "claudeAgent", &[OPUS])]);
     assert_eq!(stats(&h, "").await["members"][0]["status"], "disabled");
+}
+
+const PANEL: &str = r##"
+const q = (sel) => document.querySelector(sel);
+const tick = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+const reply = (status, body) => Promise.resolve({ ok: status < 400, status, json: async () => body });
+const asked = () => fetches.filter((f) => f.url.startsWith("/api/usage-stats")).map((f) => f.url);
+const members = () => document.querySelectorAll("#rp-members li").map((li) => li.textContent);
+const panel = () => ({
+  hidden: q("#p-route").hidden,
+  collapsed: q("#p-route").classList.contains("collapsed"),
+  expanded: q("#rp-fold").getAttribute("aria-expanded"),
+});
+"##;
+
+async fn panel(h: H, prelude: &str, scenario: &str) -> Value {
+    let b = Board::start(h).await;
+    b.h.app.wf.refresh_routing().await.unwrap();
+    let html = b.page().await;
+    let (_, st) = b.get("/api/state").await;
+    let mut views = serde_json::Map::new();
+    for w in ["1h", "24h", "7d", "all"] {
+        views.insert(w.into(), b.get(&format!("/api/usage-stats?window={w}")).await.1);
+    }
+    let views = Value::Object(views);
+    run_page_async_with(
+        &html,
+        prelude,
+        &format!(
+            "async () => {{\n{PANEL}\nconst base = {st};\nconst views = {views};\nfetchReply = (url) => {{ const m = /^\\/api\\/usage-stats\\?window=(\\w+)$/.exec(url); return m ? reply(200, views[m[1]]) : new Promise(() => {{}}); }};\n{scenario}\n}}"
+        ),
+    )
+}
+
+#[tokio::test]
+async fn the_routing_panel_opens_from_the_header_and_shows_shares_reasons_and_resets() {
+    let h = one_to_three();
+    limit(&h, "claude-a");
+    let r = panel(
+        h,
+        "",
+        r##"
+emitState(base);
+await tick();
+const first = { ...panel(), asked: asked() };
+document.getElementById("route-btn").dispatch("click");
+await tick();
+const opened = {
+  ...panel(), asked: asked(), tip: q("#route-tip").hidden, focus: document.activeElement === q("#h-route"),
+  meta: q("#rp-meta").textContent, totals: q("#rp-totals").textContent, members: members(),
+  running: q("#rp-running").textContent, series: q("#rp-series-sec").hidden,
+  pressed: document.querySelectorAll("#rp-windows button").map((b) => [b.textContent, b.getAttribute("aria-pressed")]),
+};
+return { first, opened };
+"##,
+    )
+    .await;
+    assert_eq!(r["first"], json!({"hidden": false, "collapsed": true, "expanded": "false", "asked": []}), "{r}");
+    let o = &r["opened"];
+    assert_eq!(
+        (o["collapsed"].clone(), o["expanded"].clone(), o["tip"].clone(), o["focus"].clone()),
+        (json!(false), json!("true"), json!(true), json!(true)),
+        "{r}"
+    );
+    assert_eq!(o["asked"], json!(["/api/usage-stats?window=24h"]), "{r}");
+    assert_eq!(o["meta"], "pool opus · weighted", "{r}");
+    assert_eq!(o["totals"], "0 picks in the last 24h · share is the configured weight · 0 running", "{r}");
+    let reset = local_clock(RESET);
+    let reset = reset.split(' ').next().unwrap();
+    assert_eq!(
+        o["members"],
+        json!([
+            "claude-b75%ready · 0 picks · 0 running",
+            format!("claude-a25%limited · 0 picks · 0 running · resets {reset} (usage limit)"),
+        ]),
+        "{r}"
+    );
+    assert_eq!(o["running"], "No threads running.", "{r}");
+    assert_eq!(o["series"], true, "{r}");
+    assert_eq!(o["pressed"], json!([["1h", "false"], ["24h", "true"], ["7d", "false"], ["All", "false"]]), "{r}");
+}
+
+#[tokio::test]
+async fn the_routing_panel_counts_picks_over_a_chosen_window_and_follows_live_state() {
+    let h = one_to_three();
+    for n in 1..=4 {
+        launch(&h, n).await;
+    }
+    limit(&h, "claude-a");
+    launch(&h, 5).await;
+    let r = panel(
+        h,
+        r#"globalThis.__storage = {"t3board.routing.window": "7d"};"#,
+        r##"
+emitState(base);
+q("#rp-fold").dispatch("click");
+await tick();
+const week = {
+  asked: asked(), totals: q("#rp-totals").textContent, members: members(), why: q("#rp-why").textContent,
+  running: q("#rp-running").textContent, bars: q("#rp-series").children.length,
+  filled: document.querySelectorAll("#rp-series .rp-col span").map((s) => [s.dataset.id, s.style.height]),
+  key: q("#rp-key").textContent, label: q("#rp-series").getAttribute("aria-label"),
+  recent: document.querySelectorAll("#rp-recent li").length,
+};
+q('#rp-windows [data-win="1h"]').dispatch("click");
+await tick();
+const hour = { asked: asked().slice(1), stored: localStorage.getItem("t3board.routing.window"),
+  pressed: q('#rp-windows [data-win="1h"]').getAttribute("aria-pressed") };
+emitState(base);
+await tick();
+const same = asked().length;
+const moved = JSON.parse(JSON.stringify(base));
+moved.routing.running = [{ instanceId: "claude-b", threads: 2 }];
+moved.routing.members.find((m) => m.instanceId === "claude-b").running = 2;
+emitState(moved);
+await tick();
+const live = { asked: asked().slice(same), running: q("#rp-running").textContent, totals: q("#rp-totals").textContent, top: members()[0] };
+q("#rp-fold").dispatch("click");
+emitState(moved);
+await tick();
+const shut = { ...panel(), asked: asked().length - same - live.asked.length };
+q("#rp-fold").dispatch("click");
+await tick();
+return { week, hour, live, shut, reopened: asked().slice(same + live.asked.length) };
+"##,
+    )
+    .await;
+    let w = &r["week"];
+    assert_eq!(w["asked"], json!(["/api/usage-stats?window=7d"]), "{r}");
+    assert_eq!(w["totals"], "5 picks in the last 7d · 5 running", "{r}");
+    let reset = local_clock(RESET);
+    let reset = reset.split(' ').next().unwrap();
+    assert_eq!(
+        w["members"],
+        json!([
+            "claude-b80%ready · 4 picks · 4 runningpicked by weight 4",
+            format!(
+                "claude-a20%limited · 1 pick · 1 running · resets {reset} (usage limit)picked by weight 1. skipped: limited 1"
+            ),
+        ]),
+        "{r}"
+    );
+    assert_eq!(w["why"], "Picks: weight 5. Skips: limited 1.", "{r}");
+    assert_eq!(w["running"], "claude-a 1 · claude-b 4", "{r}");
+    assert_eq!(w["bars"], 24, "{r}");
+    assert_eq!(w["filled"], json!([["claude-a", "20%"], ["claude-b", "80%"]]), "{r}");
+    assert_eq!(w["key"], "claude-aclaude-b", "{r}");
+    assert!(w["label"].as_str().unwrap().starts_with("5 picks in the last 7d in 24 bars of 7 h"), "{r}");
+    assert_eq!(w["recent"], 5, "{r}");
+    assert_eq!(r["hour"], json!({"asked": ["/api/usage-stats?window=1h"], "stored": "1h", "pressed": "true"}), "{r}");
+    assert_eq!(
+        r["live"],
+        json!({"asked": ["/api/usage-stats?window=1h"], "running": "claude-b 2",
+               "totals": "5 picks in the last 1h · 2 running",
+               "top": "claude-b80%ready · 4 picks · 2 runningpicked by weight 4"}),
+        "{r}"
+    );
+    assert_eq!(r["reopened"], json!(["/api/usage-stats?window=1h"]), "{r}");
+    assert_eq!(r["shut"], json!({"hidden": false, "collapsed": true, "expanded": "false", "asked": 0}), "{r}");
+}
+
+const WIDE: &str = r#"
+globalThis.__storage = { "t3board.layout": JSON.stringify({ cols: [{ w: null, p: ["dec"] }, { w: null, p: ["new", "flow", "tix"] }, { w: null, p: ["act", "cmd"] }], h: {}, c: { act: true } }) };
+const __mq = { wide: false, ls: [] };
+globalThis.matchMedia = (query) => ({
+  get matches() { return /min-width: 1200px/.test(query) ? __mq.wide : false; },
+  addEventListener: (_, f) => __mq.ls.push(f),
+});
+"#;
+
+#[tokio::test]
+async fn in_the_wide_layout_the_routing_panel_starts_collapsed_and_remembers_its_fold() {
+    let r = panel(
+        one_to_three(),
+        WIDE,
+        r##"
+const ph = document.createElement("div"); ph.className = "ph"; q("#p-route").append(ph);
+const saved = () => JSON.parse(localStorage.getItem("t3board.layout") || "null");
+__mq.wide = true; for (const f of __mq.ls) f();
+emitState(base);
+await tick();
+const col = (id) => q("#main").children.filter((c) => c.classList.contains("lcol")).findIndex((c) => c.contains(q("#" + id)));
+const fold = q("#p-route .fold");
+const start = { ...panel(), fold: fold.getAttribute("aria-expanded"), col: col("p-route"), saved: saved(), asked: asked() };
+fold.dispatch("click");
+await tick();
+const open = { ...panel(), fold: fold.getAttribute("aria-expanded"), saved: saved().c, asked: asked(), members: members().length };
+__mq.wide = false; for (const f of __mq.ls) f();
+const narrow = { ...panel(), inTickets: q("#tixcol").contains(q("#p-route")) };
+q("#rp-fold").dispatch("click");
+const folded = { ...panel(), saved: saved().c };
+return { start, open, narrow, folded };
+"##,
+    )
+    .await;
+    assert_eq!(
+        r["start"],
+        json!({"hidden": false, "collapsed": true, "expanded": "false", "fold": "false", "col": 2,
+               "saved": {"cols": [{"w": null, "p": ["dec"]}, {"w": null, "p": ["new", "flow", "tix"]}, {"w": null, "p": ["act", "cmd", "route"]}],
+                         "h": {}, "c": {"act": true, "route": true}},
+               "asked": []}),
+        "{r}"
+    );
+    assert_eq!(
+        r["open"],
+        json!({"hidden": false, "collapsed": false, "expanded": "true", "fold": "true", "saved": {"act": true},
+               "asked": ["/api/usage-stats?window=24h"], "members": 2}),
+        "{r}"
+    );
+    assert_eq!(r["narrow"], json!({"hidden": false, "collapsed": false, "expanded": "true", "inTickets": true}), "{r}");
+    assert_eq!(
+        r["folded"],
+        json!({"hidden": false, "collapsed": true, "expanded": "false", "saved": {"act": true, "route": true}}),
+        "{r}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_read_shows_under_the_routing_panel_and_retry_reads_again() {
+    let r = panel(
+        one_to_three(),
+        "",
+        r##"
+fetchReply = () => reply(502, { error: "T3 said no" });
+emitState(base);
+document.getElementById("route-btn").dispatch("click");
+await tick();
+const failed = { err: q("#rp-err").hidden, text: q("#rp-err-text").textContent, asked: asked().length };
+const busy = JSON.parse(JSON.stringify(views["24h"]));
+busy.members.find((m) => m.instanceId === "claude-b").running = 2;
+fetchReply = (url) => reply(200, busy);
+q("#rp-retry").dispatch("click");
+await tick();
+const retried = { err: q("#rp-err").hidden, asked: asked().length, members: members().length };
+fetchReply = () => reply(502, { error: "T3 said no" });
+const moved = JSON.parse(JSON.stringify(base));
+moved.routing.running = [{ instanceId: "claude-b", threads: 2 }];
+moved.routing.members.find((m) => m.instanceId === "claude-b").running = 2;
+emitState(moved);
+await tick();
+const stale = { err: q("#rp-err").hidden, totals: q("#rp-totals").textContent, top: members()[0], running: q("#rp-running").textContent };
+const gone = JSON.parse(JSON.stringify(moved));
+gone.routing.members = gone.routing.members.filter((m) => m.instanceId !== "claude-b");
+gone.routing.running = [];
+emitState(gone);
+await tick();
+const left = { top: members()[0], totals: q("#rp-totals").textContent };
+return { failed, retried, stale, left };
+"##,
+    )
+    .await;
+    assert_eq!(
+        r["failed"],
+        json!({"err": false, "text": "Could not read launch routing: T3 said no", "asked": 1}),
+        "{r}"
+    );
+    assert_eq!(r["retried"], json!({"err": true, "asked": 2, "members": 2}), "{r}");
+    assert_eq!(
+        r["stale"],
+        json!({"err": false, "totals": "0 picks in the last 24h · share is the configured weight · 2 running",
+               "top": "claude-b75%ready · 0 picks · 2 running", "running": "claude-b 2"}),
+        "{r}"
+    );
+    assert_eq!(
+        r["left"],
+        json!({"top": "claude-b75%ready · 0 picks · 0 running",
+               "totals": "0 picks in the last 24h · share is the configured weight · 0 running"}),
+        "{r}"
+    );
 }

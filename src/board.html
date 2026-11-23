@@ -53,6 +53,10 @@
   --pause: #6941c6;
   --flash: rgb(36 102 61 / 0.2);
   --needs-you-surface: #fbf7ef;
+  --s1: #2a52c4;
+  --s2: #b4560f;
+  --s3: #0f7c74;
+  --s4: #8e3fb0;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
@@ -82,6 +86,10 @@
   --pause: #b9a3f7;
   --flash: rgb(127 207 155 / 0.18);
   --needs-you-surface: #1a1a16;
+  --s1: #86a5f7;
+  --s2: #f0a46a;
+  --s3: #5fd0c4;
+  --s4: #c99bf0;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -235,6 +243,7 @@ a:hover > .spill, a:focus-visible > .spill { border-color: currentColor; }
 .rdot.reserve { background: var(--need-fill); border: 1px solid var(--need); }
 .rdot.limited { background: var(--fail); border-radius: 1px; }
 .rdot.unknown { background: transparent; border: 2px solid var(--fg-3); }
+.route.tip::after { content: ""; position: absolute; top: 100%; left: 0; right: 0; height: 4px; }
 .route-tip { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; width: 340px; display: grid; gap: 8px; padding: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-size: 13px; line-height: 18px; white-space: normal; max-height: calc(100dvh - 64px); overflow-y: auto; overscroll-behavior: contain; }
 .route-tip p { margin: 0; }
 .rrow { display: grid; grid-template-columns: 8px minmax(0, 1fr); gap: 2px 8px; align-items: center; }
@@ -502,6 +511,40 @@ a:hover > .spill, a:focus-visible > .spill { border-color: currentColor; }
 #p-flow .pill { border: 1px solid var(--border); }
 #p-flow .body > .empty, #flow-err { position: static; }
 #p-flow ol, #p-flow ul { list-style: none; margin: 0; padding: 0; }
+#p-route { flex: 0 1 auto; min-height: 48px; max-height: min(40%, 360px); border-bottom: 1px solid var(--border); }
+#p-route.collapsed > .body { display: none; }
+#p-route .ph .meta { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#p-route .ph .btn { height: 28px; font-size: 13px; }
+.lay #rp-fold { display: none; }
+#rp-err { position: static; }
+.rp-bar .md-modes .btn + .btn { border-left: 0; }
+.rp-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 16px; border-bottom: 1px solid var(--border); }
+.rp-mem { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; column-gap: 8px; row-gap: 4px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--border); }
+.rp-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.rp-pct { font-variant-numeric: tabular-nums; font-weight: 600; }
+.rp-meter { grid-column: 2 / span 2; height: 6px; border-radius: 3px; background: var(--surface-2); border: 1px solid var(--border); overflow: hidden; }
+.rp-meter > span { display: block; height: 100%; background: var(--accent); }
+.rp-mem.limited .rp-meter > span { background: var(--fail); }
+.rp-mem.reserve .rp-meter > span { background: var(--need-fill); }
+.rp-mem > .meta { grid-column: 2 / span 2; min-width: 0; overflow-wrap: anywhere; }
+.rp-until { color: var(--fail); font-weight: 600; }
+.rp-sec { display: grid; gap: 4px; padding: 8px 16px; border-bottom: 1px solid var(--border); }
+.rp-sec[hidden] { display: none; }
+.rp-sec h3 { font-size: 13px; line-height: 18px; font-weight: 600; }
+.rp-series { display: flex; align-items: stretch; gap: 2px; height: 64px; border-bottom: 1px solid var(--border); }
+.rp-col { flex: 1 1 0px; min-width: 0; display: flex; flex-direction: column-reverse; }
+.rp-col > span { display: block; flex: none; }
+.rp-axis { display: flex; justify-content: space-between; gap: 8px; }
+.rp-key { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.rp-key li { display: inline-flex; align-items: center; gap: 4px; }
+.rp-sw { width: 8px; height: 8px; border-radius: 2px; flex: none; display: inline-block; }
+.rp-c0 { background: var(--s1); }
+.rp-c1 { background: var(--s2); }
+.rp-c2 { background: var(--s3); }
+.rp-c3 { background: var(--s4); }
+.rp-c4 { background: var(--fg-3); }
+.rp-recent li { display: flex; gap: 8px; min-width: 0; font-size: 13px; line-height: 18px; }
+.rp-recent .tm { color: var(--fg-2); flex: none; }
 .frow { display: grid; grid-template-columns: 24px minmax(0, 1fr); column-gap: 8px; row-gap: 2px; padding: 8px 16px; border-bottom: 1px solid var(--border); }
 .frow .fn { grid-row: 1 / span 2; color: var(--fg-2); font-size: 13px; line-height: 18px; text-align: right; }
 .frow .f1 { display: flex; gap: 8px; align-items: baseline; min-width: 0; line-height: 18px; }
@@ -783,6 +826,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
 #main.lay .lcol > .pane, #main.lay .lcol > #composer { border: 0; flex: 1 1 0px; max-height: none; min-height: 48px; }
 #main.lay .lcol > #p-new { flex: 0 1 auto; max-height: min(40%, 240px); }
 #main.lay .lcol > #p-flow { flex: 0 1 auto; max-height: min(45%, 320px); min-height: 40px; }
+#main.lay .lcol > #p-route { flex: 0 1 auto; max-height: min(55%, 440px); min-height: 40px; }
 #main.lay .lcol > #composer { flex: 0 1 auto; max-height: 70%; }
 #main.lay .lcol > #p-new { min-height: 40px; }
 #main.lay .newslot { min-width: 0; }
@@ -856,7 +900,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   #p-act { grid-area: tix; align-self: end; height: calc(100% - 48px); z-index: 1; border-right: 1px solid var(--border); }
   #p-act .ph { display: none; }
   .app:not([data-tab="activity"]) #p-act { display: none; }
-  .app[data-tab="activity"] #p-new, .app[data-tab="activity"] #p-flow { display: none; }
+  .app[data-tab="activity"] #p-new, .app[data-tab="activity"] #p-flow, .app[data-tab="activity"] #p-route { display: none; }
   #composer { position: relative; border-bottom: 0; border-top: 1px solid var(--border); z-index: 5; overflow: visible; }
   .dock { position: absolute; left: 0; right: 0; bottom: 0; background: var(--surface); }
   .dock:focus-within, .dock.show-out { border-top: 1px solid var(--border); }
@@ -1136,6 +1180,41 @@ kbd { font-family: var(--mono); font-size: 12px; }
         </div>
       </div>
       <div class="err-strip" id="flow-err" hidden><span id="flow-err-text"></span><button class="btn quiet" type="button" id="flow-err-close">Close</button></div>
+    </div>
+  </section>
+  <section class="pane collapsed" id="p-route" aria-labelledby="h-route" hidden>
+    <div class="ph">
+      <h2 id="h-route" tabindex="-1">Launch routing</h2>
+      <span class="meta" id="rp-meta"></span>
+      <button class="btn quiet" type="button" id="rp-fold" aria-expanded="false" aria-controls="rp-body">Show</button>
+    </div>
+    <div class="body" id="rp-body">
+      <div class="scroll" id="rp-scroll">
+        <div class="rp-bar">
+          <div class="md-modes" role="group" aria-label="Time range" id="rp-windows"></div>
+          <span class="meta" id="rp-totals"></span>
+        </div>
+        <ul class="rp-members" id="rp-members" aria-label="Members"></ul>
+        <div class="rp-sec" id="rp-series-sec" hidden>
+          <h3>Picks over time</h3>
+          <div class="rp-series" id="rp-series" role="img"></div>
+          <div class="rp-axis meta"><span id="rp-from"></span><span id="rp-to"></span></div>
+          <ul class="rp-key meta" id="rp-key"></ul>
+        </div>
+        <div class="rp-sec" id="rp-why-sec" hidden>
+          <h3>Pick and skip reasons</h3>
+          <p class="meta" id="rp-why"></p>
+        </div>
+        <div class="rp-sec">
+          <h3>Running now</h3>
+          <p class="meta" id="rp-running"></p>
+        </div>
+        <div class="rp-sec" id="rp-recent-sec" hidden>
+          <h3>Recent picks</h3>
+          <ul class="rp-recent" id="rp-recent"></ul>
+        </div>
+      </div>
+      <div class="err-strip" id="rp-err" hidden><span id="rp-err-text"></span><button class="btn quiet" type="button" id="rp-retry">Retry</button></div>
     </div>
   </section>
   <section class="pane" id="p-tix" aria-labelledby="h-tix">
@@ -4336,8 +4415,8 @@ function paintRouting(s) {
   const r = s && s.routing;
   const wrap = $("route");
   wrap.hidden = !r;
-  if (!r) { routing.key = ""; routing.pinned = false; setRouteTip(false); return; }
-  const key = JSON.stringify([r.mode, r.source, r.pool, r.strategy, r.error, r.picks, r.shareBasis, r.window, r.members, r.runningError]);
+  if (!r) { routing.key = ""; routing.pinned = false; setRouteTip(false); rpShow(false); return; }
+  const key = JSON.stringify([r.mode, r.source, r.pool, r.strategy, r.error, r.picks, r.shareBasis, r.window, r.members, r.running, r.runningError]);
   if (key === routing.key) return;
   routing.key = key;
   const ms = routeMembers(r);
@@ -4345,6 +4424,8 @@ function paintRouting(s) {
   $("route-short").replaceChildren(ms.length ? routeItem(r, ms[0], true) : "?");
   setAttr($("route-btn"), "aria-label", routeSummary(r));
   $("route-tip").replaceChildren(...routeTip(r));
+  rpShow(true);
+  rpLive(r);
 }
 
 function initRouting() {
@@ -4365,9 +4446,226 @@ function initRouting() {
     e.preventDefault();
     e.stopPropagation();
     routing.pinned = false;
-    setRouteTip(false);
     btn.focus();
+    setRouteTip(false);
   });
+  routing.open = () => rpReveal();
+}
+
+const RP_KEY = "t3board.routing.window";
+const RP_WINDOWS = ["1h", "24h", "7d", "all"];
+const RP_PICK = { weighted: "weight", priority: "priority", cheapest: "cheapest", "last-resort": "last resort", moved: "moved" };
+const RP_SKIP = { limited: "limited", reserve: "at reserve", disabled: "disabled", constrained: "constrained", "missing-model": "missing model", "missing-effort": "missing effort", other: "other" };
+const rpanel = { open: false, win: "24h", want: "", seq: 0, data: null };
+
+function rpLoadWin() {
+  try { const w = localStorage.getItem(RP_KEY); if (RP_WINDOWS.includes(w)) return w; } catch (_) {}
+  return "24h";
+}
+
+function rpIsOpen() { return lay.m ? !lay.m.c.route : rpanel.open; }
+
+function rpShow(on) {
+  const pane = $("p-route");
+  if (pane.hidden === !on) return;
+  pane.hidden = !on;
+  if (!on) rpanel.want = "";
+  if (lay.on) layRender();
+  rpSync();
+}
+
+function rpSync() {
+  const open = rpIsOpen();
+  if (!lay.on) $("p-route").classList.toggle("collapsed", !open);
+  const fold = $("rp-fold");
+  setAttr(fold, "aria-expanded", open ? "true" : "false");
+  setText(fold, open ? "Hide" : "Show");
+  setAttr(fold, "aria-label", (open ? "Hide" : "Show") + " launch routing");
+  rpDue();
+}
+
+function rpSetOpen(open) {
+  if (rpIsOpen() === open) { rpSync(); return; }
+  if (lay.on) { layFold("route", open); announce("Launch routing " + (open ? "expanded." : "collapsed.")); return; }
+  if (lay.m) { if (open) delete lay.m.c.route; else lay.m.c.route = true; laySave(); } else rpanel.open = open;
+  rpSync();
+  announce("Launch routing " + (open ? "expanded." : "collapsed."));
+}
+
+function rpReveal() {
+  routing.pinned = false;
+  setRouteTip(false);
+  rpShow(true);
+  rpSetOpen(true);
+  if (!lay.on && phone()) selectPanel("tickets");
+  if (!lay.on && !wide() && !phone() && $("app").dataset.tab === "activity") selectTab("open");
+  const head = $("h-route");
+  if (head.scrollIntoView) head.scrollIntoView({ block: "nearest" });
+  head.focus();
+}
+
+function rpDue(force) {
+  if ($("p-route").hidden || !rpIsOpen()) { rpanel.want = ""; return; }
+  const want = rpanel.win + "|" + routing.key;
+  if (!force && want === rpanel.want) return;
+  rpanel.want = want;
+  rpLoad();
+}
+
+async function rpLoad() {
+  const seq = ++rpanel.seq;
+  const win = rpanel.win;
+  try {
+    const r = await fetch("/api/usage-stats?window=" + encodeURIComponent(win), { credentials: "same-origin", cache: "no-store" });
+    let data = null;
+    try { data = await r.json(); } catch (_) { data = null; }
+    if (seq !== rpanel.seq) return;
+    if (handleAuthFailure(r.status, data, false)) return;
+    if (!r.ok || !data) throw new Error((data && data.error) || "HTTP " + r.status);
+    $("rp-err").hidden = true;
+    rpPaint(data);
+  } catch (e) {
+    if (seq !== rpanel.seq) return;
+    rpanel.want = "";
+    setText($("rp-err-text"), "Could not read launch routing: " + e.message);
+    $("rp-err").hidden = false;
+  }
+}
+
+function rpPickWin(w) {
+  if (!RP_WINDOWS.includes(w) || w === rpanel.win) return;
+  rpanel.win = w;
+  try { if (w === "24h") localStorage.removeItem(RP_KEY); else localStorage.setItem(RP_KEY, w); } catch (_) {}
+  rpWinButtons();
+  rpDue(true);
+}
+
+function rpWinButtons() {
+  for (const b of $("rp-windows").querySelectorAll("[data-win]")) setAttr(b, "aria-pressed", b.dataset.win === rpanel.win ? "true" : "false");
+}
+
+function rpCounts(o, names) {
+  return Object.entries(o || {}).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([k, n]) => (names[k] || k) + " " + n).join(" · ");
+}
+
+function rpSpan(d) {
+  return d.window === "all" ? "in all kept picks" : "in the last " + d.window;
+}
+
+function rpLive(r) {
+  setText($("rp-meta"), r.mode === "pool" ? "pool " + r.pool + (r.strategy ? " · " + r.strategy : "") : "no pool");
+  const run = Array.isArray(r.running) ? r.running.filter((x) => x.threads > 0) : null;
+  setText($("rp-running"), r.runningError ? "Running threads unknown: " + r.runningError
+    : !run ? "Running threads unknown."
+    : run.length ? run.map((x) => x.instanceId + " " + x.threads).join(" · ") : "No threads running.");
+  if (rpanel.data) rpPaint(rpanel.data);
+  rpDue();
+}
+
+function rpMember(d, m) {
+  const pool = d.mode === "pool";
+  const live = state && state.routing;
+  if (live) {
+    const run = Array.isArray(live.running) ? live.running.find((x) => x.instanceId === m.instanceId) : null;
+    m = { ...m, running: Array.isArray(live.running) ? (run ? run.threads : 0) : null };
+  }
+  const pct = typeof m.share === "number" ? Math.round(m.share * 100) : null;
+  const facts = [ROUTE_STATUS[m.status] || m.status];
+  if (pool) facts.push(m.picks + (m.picks === 1 ? " pick" : " picks"));
+  if (typeof m.running === "number") facts.push(m.running + " running");
+  if (typeof m.usageLeft === "number") facts.push(Math.round(m.usageLeft) + "% usage left");
+  if (!pool) facts.push(...[m.model, m.effort && "effort " + m.effort].filter(Boolean));
+  const until = m.limitedUntilLocal
+    ? h("span", { class: "rp-until" }, "resets " + clock(m.limitedUntilLocal) + (m.limitReason ? " (" + m.limitReason + ")" : "")) : null;
+  const picked = rpCounts(m.reasons, RP_PICK);
+  const skipped = rpCounts(m.skips, RP_SKIP);
+  const why = [m.status !== "ready" && m.reason && !/^limited until/.test(m.reason) ? m.reason : null,
+    picked ? "picked by " + picked : null, skipped ? "skipped: " + skipped : null].filter(Boolean).join(". ");
+  return h("li", { class: "rp-mem " + m.status, "data-member": m.instanceId || "" },
+    h("span", { class: "rdot " + m.status, "aria-hidden": "true" }),
+    h("span", { class: "rp-name", title: m.instanceId || null }, m.instanceId || "no instance"),
+    h("span", { class: "rp-pct" }, pct === null ? "" : pct + "%"),
+    pool && pct !== null ? h("span", { class: "rp-meter", "aria-hidden": "true" }, rpBar(pct)) : null,
+    h("span", { class: "meta", "data-part": "facts" }, facts.join(" · "), until ? " · " : null, until),
+    why ? h("span", { class: "meta", "data-part": "why" }, why) : null);
+}
+
+function rpBar(pct) {
+  const b = h("span", {});
+  b.style.width = Math.max(0, Math.min(100, pct)) + "%";
+  return b;
+}
+
+function rpSeries(d, ids) {
+  const sec = $("rp-series-sec");
+  const s = d.series;
+  const buckets = s && Array.isArray(s.buckets) ? s.buckets : [];
+  if (d.mode !== "pool" || !buckets.length || !d.picks) { sec.hidden = true; return; }
+  sec.hidden = false;
+  const sums = buckets.map((b) => Object.values(b.counts || {}).reduce((a, n) => a + n, 0));
+  const peak = Math.max(1, ...sums);
+  const color = (id) => "rp-c" + Math.min(4, Math.max(0, ids.indexOf(id) < 0 ? 4 : ids.indexOf(id)));
+  $("rp-series").replaceChildren(...buckets.map((b, i) => {
+    const col = h("span", { class: "rp-col", title: sums[i] + (sums[i] === 1 ? " pick" : " picks") });
+    for (const id of ids) {
+      const n = (b.counts || {})[id] || 0;
+      if (!n) continue;
+      const seg = h("span", { class: color(id), "data-id": id });
+      seg.style.height = (n / peak * 100) + "%";
+      col.append(seg);
+    }
+    return col;
+  }));
+  const mins = s.bucketMinutes;
+  const width = mins >= 60 ? Math.round(mins / 60 * 10) / 10 + " h" : Math.round(mins) + " min";
+  setAttr($("rp-series"), "aria-label", d.picks + (d.picks === 1 ? " pick" : " picks") + " " + rpSpan(d) + " in " + buckets.length + " bars of " + width + ", at most " + Math.max(...sums) + " in one bar");
+  setText($("rp-from"), d.sinceLocal ? clock(d.sinceLocal) : "first pick");
+  setText($("rp-to"), "now");
+  $("rp-key").replaceChildren(...ids.map((id) => h("li", {}, h("span", { class: "rp-sw " + color(id), "aria-hidden": "true" }), id)));
+}
+
+function rpPaint(d) {
+  rpanel.data = d;
+  const ms = routeMembers(d);
+  const pool = d.mode === "pool";
+  const totals = [];
+  if (pool) {
+    totals.push(d.picks + (d.picks === 1 ? " pick " : " picks ") + rpSpan(d));
+    if (d.shareBasis === "weight") totals.push("share is the configured weight");
+    const gone = (d.former || []).reduce((a, f) => a + (f.picks || 0), 0);
+    if (gone) totals.push(gone + " by former members");
+  } else totals.push("no pool: every launch runs on one instance");
+  const live = state && state.routing;
+  const running = live ? live.running : d.running;
+  const run = (running || []).reduce((a, x) => a + (x.threads || 0), 0);
+  if (Array.isArray(running)) totals.push(run + " running");
+  setText($("rp-totals"), totals.join(" · "));
+  const members = ms.map((m) => rpMember(d, m));
+  if (!ms.length) members.push(h("li", { class: "rp-mem unknown" }, h("span", { class: "rdot unknown", "aria-hidden": "true" }),
+    h("span", { class: "rp-name" }, "Routing unknown"), h("span", {}), d.error ? h("span", { class: "meta" }, d.error) : null));
+  else if (d.error) members.push(h("li", { class: "rp-mem" }, h("span", {}), h("span", { class: "meta" }, d.error)));
+  $("rp-members").replaceChildren(...members);
+  rpSeries(d, (d.members || []).map((m) => m.instanceId).concat((d.former || []).map((f) => f.instanceId)).filter(Boolean));
+  const picks = rpCounts(d.reasons, RP_PICK);
+  const skipTotals = {};
+  for (const m of d.members || []) for (const [k, n] of Object.entries(m.skips || {})) skipTotals[k] = (skipTotals[k] || 0) + n;
+  const skips = rpCounts(skipTotals, RP_SKIP);
+  $("rp-why-sec").hidden = !pool || (!picks && !skips);
+  setText($("rp-why"), [picks ? "Picks: " + picks + "." : null, skips ? "Skips: " + skips + "." : null].filter(Boolean).join(" "));
+  const recent = (d.recent || []).slice(0, 5);
+  $("rp-recent-sec").hidden = !recent.length;
+  $("rp-recent").replaceChildren(...recent.map((p) => h("li", {}, h("span", { class: "tm" }, clock(p.atLocal)),
+    h("span", { class: "clip" }, p.instanceId + " · " + (RP_PICK[p.kind] || p.kind)))));
+}
+
+function initRoutePanel() {
+  rpanel.win = rpLoadWin();
+  $("rp-windows").replaceChildren(...RP_WINDOWS.map((w) => h("button", { class: "btn", type: "button", "data-win": w, "aria-pressed": "false", onclick: () => rpPickWin(w) }, w === "all" ? "All" : w)));
+  rpWinButtons();
+  $("rp-fold").addEventListener("click", () => rpSetOpen(!rpIsOpen()));
+  $("rp-retry").addEventListener("click", () => rpDue(true));
+  rpSync();
 }
 
 function runningIn(tree) {
@@ -5353,8 +5651,8 @@ function openKeys() {
 }
 
 const LAY_KEY = "t3board.layout";
-const LAY_IDS = { dec: "p-dec", new: "p-new", flow: "p-flow", tix: "p-tix", cmd: "composer", act: "p-act" };
-const LAY_NAMES = { dec: "Needs you", new: "New issues", flow: "Up next", tix: "Tickets", cmd: "Launch and Ask", act: "Activity" };
+const LAY_IDS = { dec: "p-dec", new: "p-new", flow: "p-flow", tix: "p-tix", cmd: "composer", route: "p-route", act: "p-act" };
+const LAY_NAMES = { dec: "Needs you", new: "New issues", flow: "Up next", tix: "Tickets", cmd: "Launch and Ask", route: "Launch routing", act: "Activity" };
 const LAY_JUMP = { decisions: "dec", tickets: "tix", activity: "act", launch: "cmd", ask: "cmd" };
 const LAY_MIN_W = 320;
 const LAY_MIN_H = 96;
@@ -5363,7 +5661,7 @@ const LAY_GROWS = new Set(["dec", "tix", "act"]);
 const lay = { on: false, cols: [], m: null, drag: null, scroll: {} };
 
 function layDefault() {
-  return { cols: [{ w: null, p: ["dec"] }, { w: null, p: ["new", "flow", "tix"] }, { w: null, p: ["cmd", "act"] }], h: {}, c: {} };
+  return { cols: [{ w: null, p: ["dec"] }, { w: null, p: ["new", "flow", "tix"] }, { w: null, p: ["cmd", "route", "act"] }], h: {}, c: { route: true } };
 }
 
 function layValid(m) {
@@ -5382,9 +5680,19 @@ function layAddFlow(m) {
   return m;
 }
 
+function layAddRoute(m) {
+  if (!m || !Array.isArray(m.cols) || m.cols.some((c) => !c || !Array.isArray(c.p))) return m;
+  if (m.cols.some((c) => c.p.includes("route"))) return m;
+  const c = m.cols.find((x) => x.p.includes("cmd"));
+  if (!c) return m;
+  c.p.splice(c.p.indexOf("cmd") + 1, 0, "route");
+  m.c = { ...(m.c && typeof m.c === "object" ? m.c : {}), route: true };
+  return m;
+}
+
 function layParse(raw) {
   try {
-    const m = layAddFlow(JSON.parse(raw || "null"));
+    const m = layAddRoute(layAddFlow(JSON.parse(raw || "null")));
     if (!layValid(m)) return layDefault();
     const num = (o) => Object.fromEntries(Object.entries(o && typeof o === "object" ? o : {}).filter(([k, v]) => k in LAY_IDS && typeof v === "number" && v > 0));
     const on = (o) => Object.fromEntries(Object.entries(o && typeof o === "object" ? o : {}).filter(([k, v]) => k in LAY_IDS && v === true));
@@ -5448,6 +5756,7 @@ function layFold(k, open) {
   layRender();
   if (!now && lay.scroll[k]) lists.forEach((el, i) => { el.scrollTop = lay.scroll[k][i] || 0; });
   laySave();
+  if (k === "route") rpSync();
   if (open === undefined) announce(LAY_NAMES[k] + (now ? " collapsed." : " expanded."));
 }
 
@@ -5828,7 +6137,7 @@ function layLeave() {
   for (const s of main.querySelectorAll(".vsplit, .hsplit")) s.remove();
   main.insertBefore($("p-dec"), ref);
   main.insertBefore(tix, ref);
-  tix.append($("p-new"), $("p-flow"), $("p-tix"));
+  tix.append($("p-new"), $("p-flow"), $("p-route"), $("p-tix"));
   main.insertBefore($("p-act"), ref);
   main.insertBefore($("composer"), ref);
   for (const c of lay.cols) c.remove();
@@ -5840,6 +6149,7 @@ function layLeave() {
   main.classList.remove("lay");
   for (const el of document.querySelectorAll(".lay-only, #lay-hint")) el.hidden = true;
   $("lay-reset").hidden = true;
+  rpSync();
   if (active && active.closest && active.closest("#ask, #launch")) setMode(active.closest("#ask") ? "ask" : "launch");
   if (active && active !== document.body && document.activeElement !== active && active.isConnected) active.focus({ preventScroll: true });
 }
@@ -5860,6 +6170,7 @@ function layInit() {
     lay.m = layDefault();
     layRender(true);
     laySave();
+    rpSync();
     announce("Layout reset.");
     $("keys-btn").focus();
   });
@@ -5954,6 +6265,7 @@ function wire() {
   initUpdate();
   initDrift();
   initRouting();
+  initRoutePanel();
   initModels();
   initSettings();
   $("settled-filter").addEventListener("input", () => {

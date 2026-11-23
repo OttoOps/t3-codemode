@@ -4829,15 +4829,23 @@ return {
     );
     assert_eq!(
         r["start"],
-        json!({"where": [["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-act"]], "grips": 5, "reset": true, "saved": null}),
+        json!({"where": [["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-route", "p-act"]], "grips": 5, "reset": true, "saved": null}),
         "{r}"
     );
-    assert_eq!(r["moved"]["where"], json!([[], ["p-dec", "p-new", "p-flow", "p-tix"], ["composer", "p-act"]]), "{r}");
+    assert_eq!(
+        r["moved"]["where"],
+        json!([[], ["p-dec", "p-new", "p-flow", "p-tix"], ["composer", "p-route", "p-act"]]),
+        "{r}"
+    );
     assert_eq!(r["moved"]["focus"], true, "{r}");
     assert_eq!(r["moved"]["said"], "Needs you moved to column 2, position 1 of 3.", "{r}");
-    assert_eq!(r["edge"]["where"], json!([["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-act"]]), "{r}");
+    assert_eq!(
+        r["edge"]["where"],
+        json!([["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-route", "p-act"]]),
+        "{r}"
+    );
     assert_eq!(r["edge"]["said"], "Needs you is already at column 1, position 1 of 1.", "{r}");
-    assert_eq!(r["after"]["up"], json!(["p-act", "composer"]), "{r}");
+    assert_eq!(r["after"]["up"], json!(["p-act", "composer", "p-route"]), "{r}");
     assert_eq!(r["after"]["collapsed"], true, "{r}");
     assert_eq!(r["after"]["expanded"], "false", "{r}");
     assert_eq!(r["after"]["label"], "Expand New issues", "{r}");
@@ -4845,7 +4853,7 @@ return {
     assert_eq!(r["after"]["reset"], false, "{r}");
     assert_eq!(
         r["after"]["saved"],
-        json!({"cols": [{"w": null, "p": ["dec"]}, {"w": null, "p": ["new", "flow", "tix"]}, {"w": null, "p": ["act", "cmd"]}], "h": {}, "c": {"new": true}}),
+        json!({"cols": [{"w": null, "p": ["dec"]}, {"w": null, "p": ["new", "flow", "tix"]}, {"w": null, "p": ["act", "cmd", "route"]}], "h": {}, "c": {"route": true, "new": true}}),
         "{r}"
     );
 }
@@ -4896,13 +4904,13 @@ return { back, reset: { where: where(), act: q("#p-act").classList.contains("col
     );
     assert_eq!(
         r["back"],
-        json!({"where": [[], ["p-new", "p-dec", "p-flow", "p-tix"], ["p-act", "composer"]], "act": true, "tix": false,
+        json!({"where": [[], ["p-new", "p-dec", "p-flow", "p-tix"], ["p-act", "composer", "p-route"]], "act": true, "tix": false,
                "flex": ["500 1 0px", "900 1 0px"], "vacant": true, "reset": false}),
         "{r}"
     );
     assert_eq!(
         r["reset"],
-        json!({"where": [["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-act"]], "act": false, "saved": null, "hidden": true}),
+        json!({"where": [["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-route", "p-act"]], "act": false, "saved": null, "hidden": true}),
         "{r}"
     );
     for bad in [
@@ -4911,7 +4919,7 @@ return { back, reset: { where: where(), act: q("#p-act").classList.contains("col
         r#"{"t3board.layout": "not json"}"#,
     ] {
         let r = layout_scenario(&html, &st, bad, "heads();\nsetWide(true);\nreturn where();");
-        assert_eq!(r, json!([["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-act"]]), "{bad}");
+        assert_eq!(r, json!([["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-route", "p-act"]]), "{bad}");
     }
 }
 
@@ -4942,11 +4950,11 @@ setWide(true);
 return { wide, narrow, again: where(), tix: q("#p-tix").classList.contains("collapsed") };
 "##,
     );
-    assert_eq!(r["wide"], json!([["p-dec"], ["p-new", "p-flow", "p-tix", "p-act"], ["composer"]]), "{r}");
+    assert_eq!(r["wide"], json!([["p-dec"], ["p-new", "p-flow", "p-tix", "p-act"], ["composer", "p-route"]]), "{r}");
     assert_eq!(
         r["narrow"],
-        json!({"cols": 0, "tixcol": ["p-new", "p-flow", "p-tix"], "top": ["p-dec", "tixcol", "p-act", "composer"],
-               "collapsed": 0, "splits": 0, "lay": false, "reset": true}),
+        json!({"cols": 0, "tixcol": ["p-new", "p-flow", "p-route", "p-tix"], "top": ["p-dec", "tixcol", "p-act", "composer"],
+               "collapsed": 1, "splits": 0, "lay": false, "reset": true}),
         "{r}"
     );
     assert_eq!(r["again"], r["wide"], "{r}");
@@ -4993,7 +5001,7 @@ return { shut, open: q("#p-act").classList.contains("collapsed"), splits, flat, 
     assert_eq!(r["flat"], Value::Null, "{r}");
     assert_eq!(
         r["small"],
-        json!({"cols": [{"w": null, "p": ["dec"]}, {"w": null, "p": ["new", "flow", "tix"]}, {"w": null, "p": ["cmd", "act"]}], "h": {"new": 224, "tix": 126}, "c": {}}),
+        json!({"cols": [{"w": null, "p": ["dec"]}, {"w": null, "p": ["new", "flow", "tix"]}, {"w": null, "p": ["cmd", "route", "act"]}], "h": {"new": 224, "tix": 126}, "c": {"route": true}}),
         "{r}"
     );
     assert_eq!(r["sized"], json!({"new": 224, "tix": 476}), "{r}");
@@ -5027,7 +5035,7 @@ return { narrow, emptied, back };
 "##,
     );
     assert_eq!(html.matches(r#"class="lay-only" hidden"#).count(), 8);
-    assert_eq!(r["narrow"], json!({"cols": 0, "collapsed": 0}), "{r}");
+    assert_eq!(r["narrow"], json!({"cols": 0, "collapsed": 1}), "{r}");
     assert_eq!(r["emptied"], json!(["p-flow"]), "{r}");
     assert_eq!(
         r["back"],
