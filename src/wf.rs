@@ -500,6 +500,18 @@ impl Wf {
                 }
                 return Ok(r);
             }
+            "dispatch" => {
+                let a: crate::board::DispatchArgs = parse(method, args)?;
+                let r = self.dispatch_request(caller, a).await?;
+                if r["ok"] == false {
+                    bail!(
+                        "{} (recorded as board card {})",
+                        r["error"].as_str().unwrap_or("dispatch failed"),
+                        r["card"]
+                    );
+                }
+                return Ok(r);
+            }
             _ => {}
         }
         let board_args = if method == "board" { Some(parse::<BoardArgs>(method, args.clone())?) } else { None };

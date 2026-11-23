@@ -360,6 +360,7 @@ inside it. A card outside it still counts toward "N hidden".
 | Call | Does |
 |---|---|
 | `wf.launchTicket({ issue, project?, title?, model?, effort? })` | Launch a ticket thread for a GitHub issue |
+| `wf.dispatch({ project, request, title? })` | Launch a ticket thread in a T3 project to carry out a request |
 | `wf.cards({ all?, context?, projects? })` | The open cards, oldest first, each with its `repo` and `project`; `all` includes resolved ones |
 | `wf.answer(id, text)` | Answer a card for the user, the same as a button on the page |
 | `wf.feed({ limit?, context?, projects? })` | The latest notes and events, each with its `ticket`, `ticketLabel`, `ticketTitle`, `ticketStatus`, `repo` and `project` |
@@ -412,6 +413,22 @@ the `t3-ticket` skill, which lives in this repo's `skills/` folder and is
 installed as an agent skill, apart from the service.
 [The workflow skills](getting-started.md#the-workflow-skills) covers installing
 them. Without the skills installed, launched threads do not know the workflow.
+
+`wf.dispatch` launches a thread for work that has no GitHub issue. `project`
+names a T3 project by its id or title, ignoring case. The launch resolves
+`models.ticket` for that project in the order above, pools included, and
+applies `board.runtimeMode` the way `wf.launchTicket` does. The thread's brief
+is `request` word for word, followed by a board link, so the thread joins the
+board as a ticket. Its label and T3 title are the project title and `title`,
+as in `t3-codemode: release`. Without a `title`, the label uses the first
+words of the request. When a ticket on the board, open or done, or a launch
+still waiting to join already has that label, the label gets ` (2)`, ` (3)`
+and so on. When the scratch thread of a question from Ask calls
+`wf.dispatch`, the question records `dispatched: { thread, link, projectId,
+label }`. The result has
+the same fields as `wf.launchTicket`'s. An unknown project or an empty request
+throws and launches nothing. A model that does not resolve or a failed launch
+throws and leaves an error card.
 
 ## New issues
 

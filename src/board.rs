@@ -33,6 +33,7 @@ const MAX_OPTION_CHARS: usize = 60;
 const NO_BUTTONS: &str = "this gate's card has no reply buttons, so the user must type an answer; \
     send it again with options: [\"<answer>\", ...], or quote each answer after reply on its **ACTION NEEDED:** line";
 const MAX_TEXT: usize = 2000;
+const DISPATCH_TOPIC: usize = 40;
 const ANSWER_CAP: usize = 1500;
 const PROJECT_RETRY_MINS: f64 = 30.0;
 
@@ -345,6 +346,14 @@ pub struct LaunchArgs {
     pub effort: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchArgs {
+    pub project: String,
+    pub request: String,
+    pub title: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AskConfig {
     pub pool: Option<String>,
@@ -433,10 +442,9 @@ fn nonempty(s: Option<String>) -> Option<String> {
     s.map(|x| x.trim().to_string()).filter(|x| !x.is_empty())
 }
 
-pub fn ticket_brief(url: &str, label: &str) -> String {
+fn board_link(label: &str) -> String {
     format!(
-        "Work {url} with the t3-ticket skill.\n\n\
-         ## t3-codemode link\n\
+        "## t3-codemode link\n\
          This thread reports to the t3-codemode board, not to a parent thread. Before anything else, call \
          mcp__t3cm__execute with:\n\
          async () => {{ await wf.join({{ parent: \"board\", label: {}, role: \"ticket\" }}); return \"joined\"; }}\n\
@@ -444,6 +452,19 @@ pub fn ticket_brief(url: &str, label: &str) -> String {
          arrives here as a [t3cm reply]. Progress is wf.send({{ kind: \"note\" }}).",
         json!(label)
     )
+}
+
+pub fn ticket_brief(url: &str, label: &str) -> String {
+    format!("Work {url} with the t3-ticket skill.\n\n{}", board_link(label))
+}
+
+pub fn dispatch_brief(request: &str, label: &str) -> String {
+    format!("{request}\n\n{}", board_link(label))
+}
+
+fn dispatch_topic(request: &str) -> String {
+    let words: Vec<&str> = request.split_whitespace().take(6).collect();
+    truncate_chars(&words.join(" "), DISPATCH_TOPIC)
 }
 
 pub fn ask_brief(question: &str) -> String {
@@ -1386,28 +1407,123 @@ impl Wf {
                 Ok(r) => r,
                 Err(e) => return self.launch_failed(&label, &format!("Cannot launch {label}: {e:#}")),
             };
-        let params = self.config().link_params("overseer", "ticket")?;
-        {
-            let _g = self.lock.lock().await;
-            self.ensure_not_on_board(&label)?;
-            self.store.pending_put(&Pending {
-                parent: BOARD.into(),
-                label: label.clone(),
-                role: "ticket".into(),
-                params,
-                at: self.now(),
-                reported: false,
-                thread: None,
-                link: None,
-            })?;
-        }
-        self.changed();
+        self.reserve_label(&label, false).await?;
         let title = format!("{label}: {}", nonempty(a.title).unwrap_or_else(|| issue.url()));
+        let message = ticket_brief(&issue.url(), &label);
+        let out = match self.launch_reserved(&label, &title, &project_id, message, &resolved).await? {
+            Ok(out) => out,
+            Err(failed) => return Ok(failed),
+        };
+        if let Err(e) = self.store.new_issue_remove(&issue_key(&issue)) {
+            tracing::warn!("{label} launched, but taking it off the new issues failed: {e:#}");
+        }
+        Ok(out)
+    }
+
+    pub async fn dispatch_request(&self, caller: Option<&str>, a: DispatchArgs) -> Result<Value> {
+        let request = a.request.as_str();
+        if request.trim().is_empty() {
+            bail!("wf.dispatch: request must not be empty");
+        }
+        let wanted = a.project.trim();
+        if wanted.is_empty() {
+            bail!("wf.dispatch: project must not be empty");
+        }
+        let project = self
+            .projects()
+            .await?
+            .into_iter()
+            .find(|p| p["id"] == wanted || p["title"].as_str().is_some_and(|t| t.eq_ignore_ascii_case(wanted)))
+            .ok_or_else(|| anyhow!("wf.dispatch: no T3 project with id or title {wanted:?}; nothing was launched"))?;
+        let project_id = project["id"].as_str().unwrap_or_default().to_string();
+        let name = project["title"].as_str().filter(|t| !t.trim().is_empty()).unwrap_or(&project_id).trim().to_string();
+        let topic = nonempty(a.title).map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "));
+        let base = format!("{name}: {}", topic.unwrap_or_else(|| dispatch_topic(request)));
+        let workspace_root = project["workspaceRoot"].as_str().filter(|s| !s.is_empty());
+        let repo = match identity_repo(&project) {
+            Some(r) => Some(r),
+            None => self.origin_repo(&project).await,
+        };
+        if let Some(repo) = repo {
+            self.remember_project(&project_id, &project["title"], Some(repo));
+        }
+        let resolved = match self.resolve_ticket_model(workspace_root, None, None).await {
+            Ok(r) => r,
+            Err(e) => return self.launch_failed(&base, &format!("Cannot dispatch {base}: {e:#}")),
+        };
+        let label = self.reserve_label(&base, true).await?;
+        let message = dispatch_brief(request, &label);
+        let out = match self.launch_reserved(&label, &label, &project_id, message, &resolved).await? {
+            Ok(out) => out,
+            Err(failed) => return Ok(failed),
+        };
+        if let Some(me) = caller.filter(|c| !c.is_empty()) {
+            let dispatched =
+                json!({"thread": out["thread"], "link": out["link"], "projectId": project_id, "label": label});
+            if let Err(e) = self.note_dispatched(me, dispatched).await {
+                tracing::warn!("{label} dispatched, but recording it on the ask failed: {e:#}");
+            }
+        }
+        Ok(out)
+    }
+
+    async fn note_dispatched(&self, ask_thread: &str, dispatched: Value) -> Result<()> {
+        let _g = self.asks_lock.lock().await;
+        let Some((seq, open, mut data)) = self.store.ask_of_thread(ask_thread)? else {
+            return Ok(());
+        };
+        data["dispatched"] = dispatched;
+        self.store.ask_update(seq, open, &data)
+    }
+
+    fn board_labels(&self) -> Result<std::collections::HashSet<String>> {
+        let mut taken: std::collections::HashSet<String> =
+            self.store.children(BOARD, false)?.into_iter().map(|l| l.label).collect();
+        taken.extend(self.store.pending_all()?.into_iter().filter(|p| p.parent == BOARD).map(|p| p.label));
+        Ok(taken)
+    }
+
+    async fn reserve_label(&self, wanted: &str, suffix: bool) -> Result<String> {
+        let params = self.config().link_params("overseer", "ticket")?;
+        let _g = self.lock.lock().await;
+        let label = if suffix {
+            let taken = self.board_labels()?;
+            (1..)
+                .map(|n| if n == 1 { wanted.to_string() } else { format!("{wanted} ({n})") })
+                .find(|l| !taken.contains(l))
+                .unwrap_or_default()
+        } else {
+            self.ensure_not_on_board(wanted)?;
+            wanted.to_string()
+        };
+        self.store.pending_put(&Pending {
+            parent: BOARD.into(),
+            label: label.clone(),
+            role: "ticket".into(),
+            params,
+            at: self.now(),
+            reported: false,
+            thread: None,
+            link: None,
+        })?;
+        drop(_g);
+        self.changed();
+        Ok(label)
+    }
+
+    async fn launch_reserved(
+        &self,
+        label: &str,
+        title: &str,
+        project_id: &str,
+        message: String,
+        resolved: &ResolvedLaunch,
+    ) -> Result<std::result::Result<Value, Value>> {
         let mut input = json!({
             "projectId": project_id,
             "title": title,
             "modelSelection": resolved.selection,
-            "message": ticket_brief(&issue.url(), &label),
+            "message": message,
             "clientRequestId": format!("t3cm-board-{}", random_id()),
         });
         if let Some(m) = &self.config().board.runtime_mode {
@@ -1423,9 +1539,9 @@ impl Wf {
                 };
                 {
                     let _g = self.lock.lock().await;
-                    self.store.pending_remove(BOARD, &label)?;
+                    self.store.pending_remove(BOARD, label)?;
                 }
-                return self.launch_failed(&label, &format!("Launching {label} failed: {why}"));
+                return Ok(Err(self.launch_failed(label, &format!("Launching {label} failed: {why}"))?));
             }
         };
         let thread = r["threadId"].as_str().unwrap_or_default().to_string();
@@ -1434,8 +1550,8 @@ impl Wf {
             let _g = self.lock.lock().await;
             let early = self.store.link_get(&thread)?.filter(|l| l.parent == BOARD);
             if let Some(mut ln) = early {
-                self.store.pending_remove(BOARD, &label)?;
-                ln.label = label.clone();
+                self.store.pending_remove(BOARD, label)?;
+                ln.label = label.to_string();
                 self.store.link_save(&ln)?;
             } else if let Some(mut p) =
                 self.store.pending_all()?.into_iter().find(|p| p.parent == BOARD && p.label == label)
@@ -1446,9 +1562,6 @@ impl Wf {
             }
         }
         self.note_live(&thread, &json!({"status": r["status"], "link": link, "title": title, "projectId": project_id}));
-        if let Err(e) = self.store.new_issue_remove(&issue_key(&issue)) {
-            tracing::warn!("{label} launched, but taking it off the new issues failed: {e:#}");
-        }
         let mut out = json!({
             "ok": true,
             "label": label,
@@ -1463,10 +1576,10 @@ impl Wf {
         });
         if let Some(p) = &resolved.picked {
             out["pool"] = json!(p.pool);
-            self.note_pool_launch(&mut out, p, &label, &thread);
+            self.note_pool_launch(&mut out, p, label, &thread);
         }
         self.changed();
-        Ok(out)
+        Ok(Ok(out))
     }
 
     pub async fn ask(&self, question: &str) -> Result<Value> {

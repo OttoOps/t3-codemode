@@ -29,6 +29,7 @@ struct State {
     pr_page: usize,
     short_list: usize,
     organize_fails: bool,
+    launch_fails: bool,
     delay: Duration,
 }
 
@@ -192,6 +193,10 @@ impl FakeT3 {
         self.st().read_fails = fails;
     }
 
+    pub fn set_launch_fails(&self, fails: bool) {
+        self.st().launch_fails = fails;
+    }
+
     pub fn set_organize_fails(&self, fails: bool) {
         self.st().organize_fails = fails;
     }
@@ -353,6 +358,7 @@ impl FakeT3 {
                     .collect();
                 Ok(json!({"parentThreadId": null, "runtimeMode": "full-access", "providers": providers}))
             }
+            "t3_thread_launch" if st.launch_fails => Err(T3Error::Tool("t3_thread_launch: launch refused".into())),
             "t3_thread_launch" => {
                 st.launched.push(args.clone());
                 let id = format!("launch:{}", st.launched.len());
