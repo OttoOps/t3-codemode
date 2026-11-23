@@ -69,7 +69,7 @@ Run every call below inside `mcp__t3cm__execute`, or pipe the same
 | Root thread starts | `await wf.init({ role: "overseer" })` |
 | Ticket starts with no brief link | `await wf.init({ role: "ticket" })` joins the board under the thread's T3 title, or under `label` when you pass one; `root: true` keeps it off the board |
 | This thread starts with a link block in its brief | the block's `wf.join(...)` call |
-| Before you launch a child | `const { brief } = await wf.openChild({ role: "<child role>", label: "<label>" })`; put `brief` at the end of the launch message. The child binds the link when it joins |
+| Before you launch a child | `const { brief } = await wf.openChild({ role: "<child role>", label: "<label>" })`; put `brief` at the end of the launch message. Optional `issue` and `parentIssue` accept GitHub (`<owner>/<repo>#<n>`), Jira (`KEY-N`, `<host>/KEY-N`, or browse URL), and GitLab (`<host>/<scope>#<n>` or issue URL) refs; optional `part` is `n/N`. The child binds the link when it joins |
 | Progress worth knowing, nothing for the parent to do | `await wf.send({ kind: "note", body: "<one line>" })` |
 | The parent must act or decide | `await wf.send({ kind: "event", body })` (or `blocker`, `report`) |
 | A message to a child | `await wf.reply({ to: "<child id or label>", body })` |

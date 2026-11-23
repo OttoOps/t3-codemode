@@ -85,12 +85,21 @@ action line), an activity feed, and an ask box. No overseer thread runs, so
 no ticket message lands in any model's context.
 
 - **Starting tickets.** From any thread or the page's launch form:
-  `await wf.launchTicket({ issue: "https://github.com/o/r/issues/41" })`.
-  The service picks the T3 project from the issue's repo, launches a
-  t3-ticket thread, and the brief has it join with
-  `wf.join({ parent: "board", label, role: "ticket" })`. A ticket started
-  in a thread instead runs `wf.init({ role: "ticket" })`, which joins it to
-  the board the same way, labeled from the thread's T3 title.
+  `await wf.launchTicket({ issue: "https://github.com/o/r/issues/41" })`
+  (or a Jira key `PROJ-123`, a Jira browse URL, or a GitLab issue URL, with
+  optional `project` by T3 project id or title). The service picks the T3
+  project from the repository's `origin` remote (GitHub or GitLab) or the
+  user config's `trackers` map (`trackers.jira` / `trackers.hosts`), launches
+  a `t3-ticket` thread, and writes the canonical `issue` slug into its
+  `wf.join({ parent: "board", label, role: "ticket", issue })` call:
+  `<owner>/<repo>#<n>` for GitHub, `KEY-N` for a bare Jira key,
+  `<host>/KEY-N` for a standard `https://<host>/browse/KEY-N` URL,
+  `<host>/<scope>#<n>` for a standard `https://<host>/<scope>/-/issues/<n>`
+  GitLab URL, or the canonical URL for non-standard ports, `http://`, or
+  Jira context paths. `wf.openChild`, `wf.join` and `wf.init` accept the
+  same refs and slugs for `issue` and `parentIssue`. A ticket started in a
+  thread instead runs `wf.init({ role: "ticket" })`, which joins it to the
+  board the same way, labeled from the thread's T3 title.
 - **Buttons.** A `gate`, `blocker` or `report` with
   `options: ["merge", "hold"]` gets exactly those buttons, each one line of
   1 to 60 characters, no two the same ignoring case, at most 8; a bad entry
