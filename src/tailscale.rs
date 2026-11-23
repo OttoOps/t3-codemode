@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
-use std::io::Read;
+use std::io::{self, Read};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -18,6 +19,8 @@ pub const DEFAULT_HTTPS_PORT: u16 = 47732;
 pub const ENV_BIN: &str = "T3CM_TAILSCALE_BIN";
 const MACOS_APP_BIN: &str = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
 const CLI_TIMEOUT: Duration = Duration::from_secs(10);
+const TLS_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const LISTENER_BIND_GRACE: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TailscaleStatus {
@@ -25,6 +28,7 @@ pub struct TailscaleStatus {
     pub dns_name: Option<String>,
     pub cert_domains: Vec<String>,
     pub host_login: Option<String>,
+    pub ipv4: Option<Ipv4Addr>,
 }
 
 impl TailscaleStatus {
@@ -219,6 +223,10 @@ pub trait TailscaleRunner: Send + Sync {
     fn serve_enable(&self, https_port: u16, local_port: u16) -> Result<()>;
     fn serve_disable(&self, https_port: u16, mount: &str) -> Result<()>;
 
+    fn listener_owner(&self, _addr: SocketAddrV4) -> Option<ListenerOwner> {
+        None
+    }
+
     fn cache_ttl(&self) -> Duration {
         Duration::from_secs(300)
     }
@@ -374,6 +382,181 @@ impl TailscaleRunner for TailscaleCli {
         self.run(&["serve", &https_arg, &path_arg, "off"])?;
         Ok(())
     }
+
+    fn listener_owner(&self, addr: SocketAddrV4) -> Option<ListenerOwner> {
+        platform_listener_owner(addr)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListenerOwner {
+    pub pid: u32,
+    pub name: String,
+}
+
+impl ListenerOwner {
+    pub fn is_tailscale(&self) -> bool {
+        let name = self.name.to_ascii_lowercase();
+        name.contains("tailscale") || name.contains("ipnextension")
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn platform_listener_owner(addr: SocketAddrV4) -> Option<ListenerOwner> {
+    let table = std::fs::read_to_string("/proc/net/tcp").ok()?;
+    let needle = format!("socket:[{}]", listening_inode(&table, addr)?);
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        if fds.flatten().any(|fd| std::fs::read_link(fd.path()).is_ok_and(|l| l.as_os_str() == needle.as_str())) {
+            let name = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default().trim().to_string();
+            return Some(ListenerOwner { pid, name });
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn platform_listener_owner(addr: SocketAddrV4) -> Option<ListenerOwner> {
+    let filter = format!("-iTCP@{}:{}", addr.ip(), addr.port());
+    let out =
+        run_command_with_timeout(Path::new("/usr/sbin/lsof"), &["-nP", &filter, "-sTCP:LISTEN", "-Fpc"], CLI_TIMEOUT)
+            .ok()?;
+    parse_lsof_owner(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn platform_listener_owner(_addr: SocketAddrV4) -> Option<ListenerOwner> {
+    None
+}
+
+pub fn listening_inode(proc_net_tcp: &str, addr: SocketAddrV4) -> Option<u64> {
+    proc_net_tcp.lines().skip(1).find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let (ip_hex, port_hex) = fields.get(1)?.split_once(':')?;
+        let ip = Ipv4Addr::from(u32::from_str_radix(ip_hex, 16).ok()?.to_ne_bytes());
+        let port = u16::from_str_radix(port_hex, 16).ok()?;
+        let listening = fields.get(3) == Some(&"0A");
+        let matches = port == addr.port() && (ip == *addr.ip() || ip.is_unspecified());
+        (listening && matches).then(|| fields.get(9)?.parse().ok()).flatten()
+    })
+}
+
+pub fn parse_lsof_owner(raw: &str) -> Option<ListenerOwner> {
+    let mut pid = None;
+    for line in raw.lines() {
+        if let Some(p) = line.strip_prefix('p') {
+            pid = p.trim().parse().ok();
+        } else if let (Some(name), Some(pid)) = (line.strip_prefix('c'), pid) {
+            return Some(ListenerOwner { pid, name: name.trim().to_string() });
+        }
+    }
+    None
+}
+
+fn is_local_address(ip: Ipv4Addr) -> bool {
+    TcpListener::bind((ip, 0)).is_ok()
+}
+
+enum HandshakeFailure {
+    Refused,
+    NotTls(String),
+    Closed,
+    TimedOut,
+    Other(String),
+}
+
+fn tls_client_config() -> Result<rustls::ClientConfig, rustls::Error> {
+    let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth())
+}
+
+fn classify_io(e: &io::Error) -> HandshakeFailure {
+    if let Some(tls) = e.get_ref().and_then(|inner| inner.downcast_ref::<rustls::Error>()) {
+        return match tls {
+            rustls::Error::InvalidMessage(_) => HandshakeFailure::NotTls(tls.to_string()),
+            other => HandshakeFailure::Other(other.to_string()),
+        };
+    }
+    match e.kind() {
+        io::ErrorKind::ConnectionRefused => HandshakeFailure::Refused,
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted => {
+            HandshakeFailure::Closed
+        }
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => HandshakeFailure::TimedOut,
+        _ => HandshakeFailure::Other(e.to_string()),
+    }
+}
+
+fn tls_handshake(addr: SocketAddrV4, host: &str, timeout: Duration) -> Result<(), HandshakeFailure> {
+    let deadline = Instant::now() + timeout;
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| HandshakeFailure::Other(format!("invalid TLS server name {host:?}: {e}")))?;
+    let config = tls_client_config().map_err(|e| HandshakeFailure::Other(e.to_string()))?;
+    let mut conn = rustls::ClientConnection::new(Arc::new(config), server_name)
+        .map_err(|e| HandshakeFailure::Other(e.to_string()))?;
+    let mut sock = TcpStream::connect_timeout(&SocketAddr::V4(addr), timeout).map_err(|e| classify_io(&e))?;
+    while conn.is_handshaking() {
+        let remaining = deadline.checked_duration_since(Instant::now()).ok_or(HandshakeFailure::TimedOut)?;
+        sock.set_read_timeout(Some(remaining)).map_err(|e| classify_io(&e))?;
+        sock.set_write_timeout(Some(remaining)).map_err(|e| classify_io(&e))?;
+        conn.complete_io(&mut sock).map_err(|e| classify_io(&e))?;
+    }
+    Ok(())
+}
+
+pub fn check_serve_listener(ts: &dyn TailscaleRunner, ip: Ipv4Addr, host: &str, https_port: u16) -> Result<(), String> {
+    if !is_local_address(ip) {
+        return Ok(());
+    }
+    let addr = SocketAddrV4::new(ip, https_port);
+    let rerun = "rerun `t3cm board expose --tailscale` (same flags) to re-apply Serve so tailscaled binds IPv4 again";
+    let reapply = format!("stop the other process listening on {addr}, then {rerun}");
+    if let Some(owner) = ts.listener_owner(addr)
+        && !owner.is_tailscale()
+    {
+        return Err(format!(
+            "{addr}, the IPv4 listener for Tailscale Serve port {https_port}, belongs to {} (pid {}), not tailscaled; {reapply}",
+            owner.name, owner.pid
+        ));
+    }
+    let grace = Instant::now() + LISTENER_BIND_GRACE;
+    let failure = loop {
+        match tls_handshake(addr, host, TLS_PROBE_TIMEOUT) {
+            Ok(()) => return Ok(()),
+            Err(HandshakeFailure::Refused) if Instant::now() < grace => std::thread::sleep(Duration::from_millis(200)),
+            Err(failure) => break failure,
+        }
+    };
+    let origin = if https_port == 443 { format!("https://{host}") } else { format!("https://{host}:{https_port}") };
+    Err(match failure {
+        HandshakeFailure::Refused => {
+            format!("nothing accepts connections on {addr}, so tailscaled is not serving {origin} over IPv4; {rerun}")
+        }
+        HandshakeFailure::NotTls(detail) => format!(
+            "{addr} answers {origin} with something other than TLS ({detail}), \
+             so another process holds the Serve HTTPS port on IPv4; {reapply}"
+        ),
+        HandshakeFailure::Closed => format!(
+            "{addr} closed the connection during the TLS handshake for {origin}, \
+             so tailscaled may not own the Serve HTTPS port on IPv4; {reapply}"
+        ),
+        HandshakeFailure::TimedOut => {
+            format!(
+                "the TLS handshake for {origin} on {addr} timed out after {}s; check which process listens on {addr}, \
+                 and if it is not tailscaled, {reapply}",
+                TLS_PROBE_TIMEOUT.as_secs()
+            )
+        }
+        HandshakeFailure::Other(detail) => format!("the TLS handshake for {origin} on {addr} failed: {detail}"),
+    })
 }
 
 fn is_wsl() -> bool {
@@ -508,7 +691,11 @@ pub fn parse_status_json(raw: &str) -> Result<TailscaleStatus> {
         })
         .unwrap_or_default();
     let host_login = extract_host_login(&v, self_obj);
-    Ok(TailscaleStatus { backend_state, dns_name, cert_domains, host_login })
+    let ipv4 = self_obj
+        .and_then(|s| s.get("TailscaleIPs"))
+        .and_then(Value::as_array)
+        .and_then(|ips| ips.iter().filter_map(Value::as_str).find_map(|ip| ip.trim().parse::<Ipv4Addr>().ok()));
+    Ok(TailscaleStatus { backend_state, dns_name, cert_domains, host_login, ipv4 })
 }
 
 fn extract_host_login(root: &Value, self_obj: Option<&Map<String, Value>>) -> Option<String> {
@@ -736,10 +923,27 @@ pub fn expose_tailscale(ts: &dyn TailscaleRunner, cfg_path: &Path, opts: &Expose
         );
     }
     let already_serving_board = serve_status.has_board_root_route(&dns_name, opts.https_port, opts.local_port);
+    let enable = || {
+        ts.serve_enable(opts.https_port, opts.local_port)
+            .map_err(|e| explain_root_required(e, &serve_status, opts.https_port, opts.local_port))
+    };
+    let check_listener = || status.ipv4.map_or(Ok(()), |ip| check_serve_listener(ts, ip, &dns_name, opts.https_port));
 
     if !already_serving_board {
-        ts.serve_enable(opts.https_port, opts.local_port)
-            .map_err(|e| explain_root_required(e, &serve_status, opts.https_port, opts.local_port))?;
+        enable()?;
+    }
+    let mut listener = check_listener();
+    if let Err(problem) = &listener
+        && already_serving_board
+    {
+        enable().map_err(|e| anyhow!("{problem}\n\nre-applying Tailscale Serve failed: {e:#}"))?;
+        listener = check_listener();
+    }
+    if let Err(problem) = listener {
+        if !already_serving_board {
+            let _ = ts.serve_disable(opts.https_port, "/");
+        }
+        bail!("Tailscale Serve is not reachable over IPv4: {problem}");
     }
 
     let mut remote_obj = Map::new();
@@ -986,7 +1190,8 @@ mod tests {
             "BackendState": "Running",
             "Self": {
                 "DNSName": "BOX.ACME.TS.NET.",
-                "UserID": 424242
+                "UserID": 424242,
+                "TailscaleIPs": ["fd7a:115c:a1e0::1", "100.64.0.7"]
             },
             "CertDomains": ["box.acme.ts.net."],
             "User": {
@@ -1005,6 +1210,7 @@ mod tests {
         assert!(st.has_cert_for("BOX.ACME.TS.NET"));
         assert!(!st.has_cert_for("other.acme.ts.net"));
         assert_eq!(st.host_login.as_deref(), Some("alice@acme.example"));
+        assert_eq!(st.ipv4, Some(Ipv4Addr::new(100, 64, 0, 7)));
 
         let missing_certs = json!({
             "BackendState": "Stopped",
@@ -1018,6 +1224,50 @@ mod tests {
         assert_eq!(st2.dns_name, None);
         assert!(st2.cert_domains.is_empty());
         assert_eq!(st2.host_login, None);
+        assert_eq!(st2.ipv4, None);
+    }
+
+    #[test]
+    fn listening_inode_matches_the_exact_or_wildcard_ipv4_listener() {
+        let hex = |ip: Ipv4Addr| format!("{:08X}", u32::from_ne_bytes(ip.octets()));
+        let tailnet = Ipv4Addr::new(100, 64, 0, 7);
+        let table = format!(
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+             0: {}:B8A4 00000000:0000 01 00000000:00000000 00:00000000 00000000  1000        0 111 1\n\
+             1: {}:B8A4 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 222 1\n\
+             2: {}:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 333 1\n",
+            hex(tailnet),
+            hex(tailnet),
+            hex(Ipv4Addr::UNSPECIFIED),
+        );
+        assert_eq!(listening_inode(&table, SocketAddrV4::new(tailnet, 47268)), Some(222));
+        assert_eq!(listening_inode(&table, SocketAddrV4::new(tailnet, 8080)), Some(333));
+        assert_eq!(listening_inode(&table, SocketAddrV4::new(tailnet, 443)), None);
+    }
+
+    #[test]
+    fn parse_lsof_owner_reads_the_first_process() {
+        let owner = parse_lsof_owner("p4242\ncpython3\nf7\n").unwrap();
+        assert_eq!(owner, ListenerOwner { pid: 4242, name: "python3".into() });
+        assert!(!owner.is_tailscale());
+        assert!(ListenerOwner { pid: 1, name: "tailscaled".into() }.is_tailscale());
+        assert!(ListenerOwner { pid: 1, name: "io.tailscale.ipn.macsys.network-extension".into() }.is_tailscale());
+        assert_eq!(parse_lsof_owner(""), None);
+    }
+
+    #[test]
+    fn check_serve_listener_reports_a_refused_ipv4_listener() {
+        let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
+        let ts = crate::fake::FakeTailscale::default();
+        let err = check_serve_listener(&ts, Ipv4Addr::LOCALHOST, "box.acme.ts.net", port).unwrap_err();
+        assert!(err.contains("nothing accepts connections"), "{err}");
+        assert!(err.contains("rerun `t3cm board expose --tailscale`"), "{err}");
+    }
+
+    #[test]
+    fn check_serve_listener_skips_an_address_that_is_not_local() {
+        let ts = crate::fake::FakeTailscale::default();
+        assert_eq!(check_serve_listener(&ts, Ipv4Addr::new(192, 0, 2, 1), "box.acme.ts.net", 47732), Ok(()));
     }
 
     #[test]

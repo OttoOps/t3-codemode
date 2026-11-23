@@ -621,6 +621,18 @@ not collide with T3 Code's own `:443` binding.
    `origin: "https://box.acme.ts.net:47732"`. Restart the `t3cm` service so the
    new config takes effect.
 
+   Before it writes `board.remote`, `expose` checks the Serve port on this
+   machine's Tailscale IPv4 address. The listener there must belong to
+   `tailscaled`, and a TLS handshake for the board's origin must succeed. When
+   another process holds that address and port, `tailscaled` may serve the
+   port on IPv6 only, and HTTPS over IPv4 fails. `expose` then names the
+   process when it can, removes the board route it added, and stops. Stop that
+   process and rerun `expose` with the same flags. The rerun applies the Serve
+   route again, so `tailscaled` binds the IPv4 listener. When the Tailscale
+   address is not on this machine, as with Windows' `tailscale.exe` under WSL
+   or `tailscaled` in userspace networking, there is nothing to check locally
+   and `expose` skips the check.
+
    Optional flags:
 
    - `--https-port <PORT>`: serve on a port other than `47732` (refuses to
@@ -678,7 +690,8 @@ not collide with T3 Code's own `:443` binding.
    - `t3cm doctor` verifies that `config.json`, the running service, Tailscale
      status, MagicDNS, HTTPS certificates (`CertDomains`), and
      `tailscale serve status` agree, and flags any drift or accidental Funnel /
-     raw-TCP exposure.
+     raw-TCP exposure. It also runs the IPv4 listener and TLS check that
+     `expose` runs.
    - `t3cm serve` never mutates Tailscale state on start or restart; only
      `t3cm board expose` and `t3cm board unexpose` change `tailscale serve`.
 

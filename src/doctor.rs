@@ -8,7 +8,7 @@ use crate::drift::{self, Home};
 use crate::skills::Bundle;
 use crate::slots::{self, Enabled, Folders, Inputs, Resolved};
 use crate::store::InstanceFolder;
-use crate::tailscale::{TailscaleRunner, proxy_matches_local_port};
+use crate::tailscale::{TailscaleRunner, check_serve_listener, proxy_matches_local_port};
 
 #[derive(Debug, Default)]
 pub struct Findings {
@@ -261,9 +261,11 @@ pub fn remote_board(
                     .push("remote: board.remote.mode is \"tailscale\", but the tailscale CLI was not found".into());
                 return f;
             }
+            let mut ipv4 = None;
             match ts.status() {
                 Err(e) => f.problems.push(format!("remote: tailscale status failed ({e:#})")),
                 Ok(st) => {
+                    ipv4 = st.ipv4;
                     if !st.is_running() {
                         let state = st.backend_state.as_deref().unwrap_or("unknown");
                         f.problems.push(format!("remote: Tailscale is not running (BackendState: {state})"));
@@ -326,7 +328,14 @@ pub fn remote_board(
                                 Some(r)
                                     if r.proxy
                                         .as_deref()
-                                        .is_some_and(|p| proxy_matches_local_port(p, local_port)) => {}
+                                        .is_some_and(|p| proxy_matches_local_port(p, local_port)) =>
+                                {
+                                    if let Some(ip) = ipv4
+                                        && let Err(problem) = check_serve_listener(ts, ip, &origin.host, origin.port)
+                                    {
+                                        f.problems.push(format!("remote: {problem}"));
+                                    }
+                                }
                                 Some(r) => {
                                     let got = r
                                         .proxy

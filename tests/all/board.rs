@@ -6962,6 +6962,7 @@ fn doctor_reports_tailscale_serve_cert_origin_and_config_drift() {
         dns_name: Some("other.acme.ts.net".into()),
         cert_domains: vec![],
         host_login: None,
+        ipv4: None,
     });
     ts.set_serve_status(ServeStatus::default());
     let f = doctor::remote_board(Some(&cfg), 47731, None, &ts);
@@ -7435,6 +7436,132 @@ fn expose_reuses_an_existing_board_root_route_without_a_serve_write() {
     let (remote, origin) = loaded.board.active_remote_config().unwrap();
     assert_eq!(remote.mode, t3_codemode::config::RemoteMode::Tailscale);
     assert_eq!(origin.canonical(), "https://box.acme.ts.net:47732");
+}
+
+fn plain_http_squatter() -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut conn in listener.incoming().flatten() {
+            let mut buf = [0u8; 2048];
+            let _ = conn.read(&mut buf);
+            let _ = conn.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        }
+    });
+    port
+}
+
+#[test]
+fn expose_fails_when_a_plain_http_listener_holds_the_serve_https_port() {
+    use t3_codemode::fake::FakeTailscale;
+    use t3_codemode::tailscale::{ExposeOptions, ListenerOwner, expose_tailscale};
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.json");
+    std::fs::write(&cfg_path, json!({"board": {"settleAfterHours": 48}}).to_string()).unwrap();
+    let port = plain_http_squatter();
+
+    let ts = FakeTailscale::default();
+    ts.set_host_login("alice@acme.example");
+    ts.set_ipv4(Some(std::net::Ipv4Addr::LOCALHOST));
+    let opts = ExposeOptions { https_port: port, local_port: 47731, allow_users: vec![], require_pairing: false };
+
+    let err = format!("{:#}", expose_tailscale(&ts, &cfg_path, &opts).unwrap_err());
+    assert!(err.contains(&format!("127.0.0.1:{port} answers")), "{err}");
+    assert!(err.contains("something other than TLS"), "{err}");
+    assert!(err.contains("stop the other process"), "{err}");
+    assert!(err.contains("rerun `t3cm board expose --tailscale`"), "{err}");
+    assert_eq!(
+        ts.calls().iter().filter(|c| c.starts_with("serve --")).collect::<Vec<_>>(),
+        vec![
+            &format!("serve --bg --https={port} http://127.0.0.1:47731"),
+            &format!("serve --https={port} --set-path=/ off")
+        ]
+    );
+    assert!(Config::load(&cfg_path).unwrap().board.active_remote_config().is_none());
+
+    ts.set_listener_owner(Some(ListenerOwner { pid: 4242, name: "widget-proxy".into() }));
+    let err = format!("{:#}", expose_tailscale(&ts, &cfg_path, &opts).unwrap_err());
+    assert!(err.contains("belongs to widget-proxy (pid 4242), not tailscaled"), "{err}");
+    assert!(err.contains("rerun `t3cm board expose --tailscale`"), "{err}");
+}
+
+#[test]
+fn expose_reapplies_an_existing_board_route_when_its_ipv4_listener_is_not_tailscaled() {
+    use t3_codemode::fake::FakeTailscale;
+    use t3_codemode::tailscale::{ExposeOptions, expose_tailscale, parse_serve_status_json};
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.json");
+    std::fs::write(&cfg_path, json!({"board": {"settleAfterHours": 48}}).to_string()).unwrap();
+    let port = plain_http_squatter();
+
+    let ts = FakeTailscale::default();
+    ts.set_host_login("alice@acme.example");
+    ts.set_ipv4(Some(std::net::Ipv4Addr::LOCALHOST));
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { port.to_string(): { "HTTPS": true } },
+                "Web": {
+                    format!("box.acme.ts.net:{port}"): { "Handlers": { "/": { "Proxy": "http://127.0.0.1:47731" } } }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    let opts = ExposeOptions { https_port: port, local_port: 47731, allow_users: vec![], require_pairing: false };
+
+    let err = format!("{:#}", expose_tailscale(&ts, &cfg_path, &opts).unwrap_err());
+    assert!(err.contains("something other than TLS"), "{err}");
+    assert_eq!(
+        ts.calls().iter().filter(|c| c.starts_with("serve --")).collect::<Vec<_>>(),
+        vec![&format!("serve --bg --https={port} http://127.0.0.1:47731")],
+        "the existing route is re-applied and never removed"
+    );
+    assert!(Config::load(&cfg_path).unwrap().board.active_remote_config().is_none());
+}
+
+#[test]
+fn doctor_reports_a_plain_http_listener_on_the_serve_https_port() {
+    use t3_codemode::doctor;
+    use t3_codemode::fake::FakeTailscale;
+    use t3_codemode::tailscale::parse_serve_status_json;
+
+    let port = plain_http_squatter();
+    let cfg = Config::from_value(json!({
+        "board": {"remote": {"mode": "tailscale", "origin": format!("https://box.acme.ts.net:{port}")}}
+    }))
+    .unwrap();
+    let ts = FakeTailscale::default();
+    ts.set_host_login("alice@acme.example");
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { port.to_string(): { "HTTPS": true } },
+                "Web": {
+                    format!("box.acme.ts.net:{port}"): { "Handlers": { "/": { "Proxy": "http://127.0.0.1:47731" } } }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+
+    let f = doctor::remote_board(Some(&cfg), 47731, None, &ts);
+    assert!(f.problems.is_empty(), "no IPv4 address, no probe: {:?}", f.problems);
+
+    ts.set_ipv4(Some(std::net::Ipv4Addr::LOCALHOST));
+    let f = doctor::remote_board(Some(&cfg), 47731, None, &ts);
+    assert!(
+        f.problems.iter().any(|p| p.starts_with("remote: ")
+            && p.contains("something other than TLS")
+            && p.contains("rerun `t3cm board expose --tailscale`")),
+        "{:?}",
+        f.problems
+    );
 }
 
 #[test]
