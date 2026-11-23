@@ -428,8 +428,8 @@ records the composable delivery design.
 ## Filtering the page
 
 The bar under the header narrows the page to the work you pick. Each filter
-applies to the decision cards, the ticket tree, the activity feed and the
-Settled section at once.
+applies to the decision cards, the ticket tree, the activity feed, the
+Settled section and the [Up next](#the-up-next-panel) rows at once.
 
 - **Project, Status and Card kind** are multi-select dropdowns. Type in one to
   narrow its list, and Enter toggles the first value left. A project shows as
@@ -437,11 +437,15 @@ Settled section at once.
   not known. The filter keeps the T3 project id, so a pick still holds once
   the repo arrives, and
   [ADR 0004](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0004-context-projects-by-id.md)
-  has the reasoning. Status is running, needs you, blocked, paused, ready to
-  merge, in review or CI, alert or done. A ticket can hold several: one whose
-  worker runs while its pull request is in CI is both running and in review
-  or CI, and a pick matches a ticket that holds any picked status. Card kind
-  narrows only the cards.
+  has the reasoning. Status is running, ready to launch, needs you, blocked,
+  blocked: external, paused, ready to merge, in review or CI, alert or done.
+  A ticket can hold several: one whose worker runs while its pull request is
+  in CI is both running and in review or CI, and a pick matches a ticket that
+  holds any picked status. Ready to launch matches the Up next queue rows.
+  Blocked: external matches the tickets and Up next rows that wait on
+  something outside the covered repos, as
+  [the dependency graph](#the-dependency-graph) defines it.
+  Card kind narrows only the cards.
 - **Search** narrows the page while you type, with no Enter. Every word must
   appear somewhere in the ticket label, the issue title or number, the repo, or
   the card or feed text. `Esc` clears it, and `/` focuses it when single-key
@@ -463,10 +467,10 @@ count. Hover a slot for its full line.
 
 | Slot | Counts tickets that are | Status it filters by |
 |---|---|---|
-| Active | running: open, with no card, not blocked, and not paused itself. The line says how many threads run and, with a [flow](#the-flow), the open tickets against `maxTickets` and how many are over it | running |
+| Active | running: open, with no card, not blocked, and not paused itself. The line says how many threads run and, with a [flow](#the-flow), the open tickets against `maxTickets`, how many are over it, and how many issues are ready to launch | running |
 | Ready to merge | holding a pull request that is ready to merge or queued | ready to merge |
 | In review or CI | holding a pull request still in review or CI | in review or CI |
-| Paused or blocked | paused, or with a paused worker, or failed or blocked. A paused link counts while its thread runs, waits or fails too | paused and blocked |
+| Paused or blocked | paused, or with a paused worker, or failed or blocked, or blocked: external. A paused link counts while its thread runs, waits or fails too. The line also counts the Up next issues that are blocked: external | paused, blocked and blocked: external |
 | Alerts | holding an approved pull request with a failing check | alert |
 
 A slot sets its statuses in the Status filter, so it composes with the
@@ -735,11 +739,73 @@ a skip, raises a card or launches anything.
 - **Skipped** folds the issues the flow skipped ([skip memory](#the-flow)),
   each with the same details as a ready row.
 
+A ready row carries a **ready** pill, and a blocked row that waits on
+something outside the covered repos carries an **external** pill. The filter
+bar narrows these rows like the rest of the page, and while it is on, each
+heading count reads visible/total.
+
 The panel reads the queue when the page loads, when a ticket opens or
 finishes, when a launch card opens or closes, and once a minute while the tab
 is open. Refresh reads it again now. A GitHub error shows under the panel. The
 panel is gone while the config has no `flow` block, and the page then reads
 nothing for it.
+
+### The dependency graph
+
+`GET /api/flow` also returns `graph`, the issues the flow and the board know
+about and the links between them. The graph covers each open opt-in issue and
+each active board ticket, including a ticket launched by hand outside the
+flow. Each of these is a node with `tracked: true`. An issue they link to,
+such as a closed blocker or a parent epic, is also a node, with
+`tracked: false` and only what the link carries: `repo`, `number`, `label`,
+`url`, `title` and `state`.
+
+The graph makes no GitHub call per issue. The flow's read of each covered repo
+asks for each issue's sub-issues next to its blockers and parent, and the
+batched query that checks whether the open tickets' issues are closed reads
+their blockers, parent and sub-issues too. That query also reads a ticket in
+a repository the flow does not cover, once the board knows the ticket's
+repository. Without a `flow` block, the graph holds only the active tickets
+the board can place in a repository, with no GitHub data and no edges, and
+the board reads nothing from GitHub.
+
+`edges` lists each link once, from the issue that has it:
+
+| `kind` | From, to | Read the other way |
+|---|---|---|
+| `blockedBy` | the blocked issue, its blocker | the blocker unlocks the issue |
+| `parent` | the sub-issue, its parent | the parent's sub-issue |
+
+Each node's `id` is `owner/name#N`, and its lists use those ids:
+
+| Field | Holds |
+|---|---|
+| `blockedBy`, `unlocks` | Its blockers, open and closed, and the issues it blocks. `moreBlockers` is `true` when GitHub lists more than 100 blockers. |
+| `parent`, `subIssues` | Its parent's id or `null`, and its sub-issues. `moreSubIssues` is `true` past 100. |
+| `state` | `open` or `closed`, or `null` when nothing read it. |
+| `labels`, `priority`, `milestone` | As GitHub gives them, with `priority` read from a `priority:` label. |
+| `track`, `trackBy` | The lane it belongs to, by the rules below. |
+| `flowList` | `queue`, `blocked` or `skipped` when it is in that list, else `null`. |
+| `ready` | `true` while it is in the ready queue: opted in, no open blocker, no ticket. |
+| `external` | `true` when it is labelled `blocked: external`, or when it has open blockers, GitHub listed all of them, and none is in a covered repo. |
+| `ticket` | Its board ticket's `thread`, `link` and `status`, or `null`. |
+
+`external` here is wider than a `blocked` issue's `external`, which reports
+the label alone.
+
+A node's track follows the first rule that applies:
+
+1. Its `track:` label. A `track: board` label puts it in track `board`. When
+   it has several, the first in alphabetical order counts. `trackBy` is
+   `label`.
+2. Its milestone's title. `trackBy` is `milestone`.
+3. The track of its connected component, the nodes that any chain of edges
+   joins it to. The component takes the track of its member with the lowest
+   repo and number that has a label or milestone track, or else that member's
+   label, such as `widgets#3`. `trackBy` is `component`.
+
+Ticket rows on the board carry an **external** pill when their node is
+external, and the inspector shows the same pill.
 
 ## GitHub reconcile
 
@@ -1318,12 +1384,12 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `POST /api/links/{thread}/pause`, `/resume` | [Pause](#pausing) an open ticket or worker link, or resume it; returns `{thread, paused}` (404 for a thread that is neither, 400 for a done one) |
 | `POST /api/asks/{id}/settle`, `/restore` | The same for a closed ask; `id` is `q<n>` |
 | `GET /api/new-issues` | `{issues, dismissed}`, newest first; an issue that has a board ticket is in neither |
-| `GET /api/flow` | What `wf.flow()` returns: `{enabled, launch, maxTickets, free, running, queue, blocked, skipped}`, read-only ([The up-next panel](#the-up-next-panel)); 502 with `error` when GitHub fails |
+| `GET /api/flow` | What `wf.flow({ graph: true })` returns: `{enabled, launch, maxTickets, free, running, queue, blocked, skipped, graph}`, read-only ([The up-next panel](#the-up-next-panel), [the dependency graph](#the-dependency-graph)); 502 with `error` when GitHub fails |
 | `POST /api/new-issues/{id}/launch` | Launch a ticket for the entry, as `POST /api/launch` does for one issue; the result adds `id` (404 for no such entry) |
 | `POST /api/new-issues/{id}/dismiss`, `/restore` | Dismiss the entry, or bring a dismissed one back (400 if already dismissed, or not dismissed) |
 | `POST /api/settle-done` | Settle every done ticket and closed ask; returns `{tickets, asks}` counts |
 | `GET /api/contexts` | `{contexts: [...]}`, sorted by name; each is `{id, name, spec, createdAt, updatedAt}`, and `spec` is `{projects, statuses, kinds, q?}`. Each project is a T3 project id, or, for an item with no project id, its lowercased `owner/repo` or title. A context saved before project ids holds an `owner/repo` or a project title instead, and an item matches it ignoring case |
-| `PUT /api/contexts/{id}` `{name, spec}` | Create the context (201) or replace its name and filter (200), answering `{context, rev}`. Leave out `spec` to rename an existing context, or `name` to change only its filter; either form needs the context to exist (404 if it does not). `id` is 1 to 64 letters, digits, `-` or `_`. Names are unique ignoring case (409), at most 60 characters, and never "All". Statuses are `running`, `waiting`, `blocked`, `done`, `paused`, `pr-green`, `pr-review` and `alert`, and kinds are the card kinds. The board keeps at most 100 contexts |
+| `PUT /api/contexts/{id}` `{name, spec}` | Create the context (201) or replace its name and filter (200), answering `{context, rev}`. Leave out `spec` to rename an existing context, or `name` to change only its filter; either form needs the context to exist (404 if it does not). `id` is 1 to 64 letters, digits, `-` or `_`. Names are unique ignoring case (409), at most 60 characters, and never "All". Statuses are `running`, `waiting`, `blocked`, `done`, `paused`, `pr-green`, `pr-review`, `alert`, `ready` and `external`, and kinds are the card kinds. The board keeps at most 100 contexts |
 | `DELETE /api/contexts/{id}` | Delete the context (404 if there is none), answering `{deleted, rev}` |
 | `POST /api/open` `{link}` | Loopback-only: open a T3 thread link in the running Windows desktop app (on Windows, or from WSL); returns `{opened}`, and the page opens a new tab when it is `false` (400 for a link that is not a T3 thread; 403 for authenticated remote requests, or the usual 401/403 guard refusal otherwise) |
 

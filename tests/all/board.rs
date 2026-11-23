@@ -2445,10 +2445,14 @@ async fn state_carries_the_flow_cap_only_when_a_flow_is_configured() {
 async fn contexts_save_the_execution_statuses() {
     use reqwest::Method;
     let s = start(H::new()).await;
-    let spec = json!({"statuses": ["alert", "pr-review", "paused", "pr-green", "running"]});
+    let spec = json!({"statuses": ["external", "alert", "pr-review", "paused", "ready", "pr-green", "running"]});
     let (code, r) = s.context(Method::PUT, "c1", json!({"name": "Shipping", "spec": spec}), Some(&s.csrf())).await;
     assert_eq!(code, 201, "{r}");
-    assert_eq!(r["context"]["spec"]["statuses"], json!(["running", "paused", "pr-green", "pr-review", "alert"]), "{r}");
+    assert_eq!(
+        r["context"]["spec"]["statuses"],
+        json!(["running", "paused", "pr-green", "pr-review", "alert", "ready", "external"]),
+        "{r}"
+    );
 }
 
 const PULSE_TREE: &str = r##"

@@ -336,6 +336,13 @@ issues that block it, and `external`, which is `true` when it carries
 read stays in `blocked` with `moreBlockers: true`. When `gh` can't read a
 covered repo, the call throws and names the repo.
 
+`wf.flow({ graph: true })` also returns `graph`, the dependency graph the
+board reads from `GET /api/flow`. It makes no GitHub call per issue. It
+reuses the flow's reads and the batched tickets query, which then also reads
+tickets in repositories the flow does not cover. `wf.flow()` leaves it out by
+default because it can be large. [The dependency
+graph](board.md#the-dependency-graph) describes its nodes and edges.
+
 ```js
 async () => {
   const f = await wf.flow();

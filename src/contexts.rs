@@ -10,7 +10,8 @@ use crate::store::{BoardContext, ContextPut, ContextSpec};
 use crate::wf::Wf;
 
 pub const MAX_CONTEXTS: usize = 100;
-pub const STATUSES: &[&str] = &["running", "waiting", "blocked", "done", "paused", "pr-green", "pr-review", "alert"];
+pub const STATUSES: &[&str] =
+    &["running", "waiting", "blocked", "done", "paused", "pr-green", "pr-review", "alert", "ready", "external"];
 const MAX_ID: usize = 64;
 const MAX_NAME: usize = 60;
 const MAX_PROJECTS: usize = 100;

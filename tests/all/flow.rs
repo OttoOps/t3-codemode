@@ -809,6 +809,26 @@ async fn an_auto_pick_does_not_launch_a_sub_issue_after_launching_its_parent() {
 }
 
 #[tokio::test]
+async fn an_auto_pick_launches_a_sub_issue_when_only_a_fork_ticket_shares_its_parent_label() {
+    let h = flowing_with(1, "auto");
+    issue(&h, REPO, 1, &[], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    h.github.set_parent(REPO, 2, (REPO, 1));
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets"), project("p-other", "/src/other")]);
+    h.remotes.set("/src/other", "git@github.com:other/widgets.git");
+    let mut th = t3_codemode::fake::thread("mcp:o1", "running", T0);
+    th["projectId"] = json!("p-other");
+    h.fake.put(th);
+    h.wf("mcp:o1", "join", json!({"parent": BOARD, "label": "widgets#1", "role": "ticket"})).await;
+    h.app.wf.board_tick().await.unwrap();
+
+    reconcile(&h).await;
+
+    let launched: Vec<String> = h.fake.launched().iter().map(|l| l["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(launched, ["widgets#2: Issue 2"]);
+}
+
+#[tokio::test]
 async fn an_auto_pick_launches_an_issue_whose_label_a_fork_ticket_holds_and_refuses_it_twice() {
     let h = flowing_with(2, "auto");
     issue(&h, REPO, 5, &[FLOW], 1);
@@ -1051,4 +1071,109 @@ return { off, failed, gone: { hidden: q("#p-flow").hidden, err: q("#flow-err").h
         "{r}"
     );
     assert_eq!(r["gone"], json!({"hidden": true, "err": true}), "{r}");
+}
+
+#[tokio::test]
+async fn rows_pills_and_the_pulse_strip_show_ready_and_external_work() {
+    let h = flowing(3);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    issue(&h, REPO, 2, &[FLOW, "blocked: external"], 2);
+    issue(&h, REPO, 3, &[], 3);
+    issue(&h, REPO, 4, &[], 4);
+    h.github.set_blockers(REPO, 3, &[("acme/outside", 9)]);
+    ticket(&h, "mcp:t3", "widgets#3").await;
+    ticket(&h, "mcp:t4", "widgets#4").await;
+    let (html, st, view) = panel_page(h).await;
+
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        r##"
+fetchReply = (url) => url === "/api/flow" ? reply(200, view) : new Promise(() => {});
+const slot = (k) => q('#pslots [data-slot="' + k + '"]');
+const pill = (thread) => { const p = q('#open [data-thread="' + thread + '"] [data-part="ext"]'); return p ? !p.hidden : false; };
+const open = () => [...document.getElementById("open").children].filter((e) => e.dataset.thread && !e.classList.contains("gone")).map((e) => e.dataset.thread);
+const flowRows = (id) => [...document.querySelectorAll("#" + id + " li")].map((li) => ({
+  label: li.querySelector(".tl").textContent, hidden: li.hidden,
+  pill: li.querySelector(".spill") ? li.querySelector(".spill").textContent : null }));
+emitState(base);
+await tick();
+const before = {
+  pills: [pill("mcp:t3"), pill("mcp:t4")],
+  active: slot("active").querySelector(".pd").textContent,
+  held: [slot("held").querySelector(".pn").textContent, slot("held").querySelector(".pd").textContent],
+  queue: flowRows("flow-q"), blocked: flowRows("flow-b"),
+};
+setFilter({ statuses: ["external"] });
+await tick();
+const external = { open: open(), queue: flowRows("flow-q"), blocked: flowRows("flow-b"), n: q("#n-flow").textContent };
+setFilter({ statuses: ["ready"] });
+await tick();
+const ready = { open: open(), queue: flowRows("flow-q"), n: q("#n-flow").textContent, nb: q("#n-flow-b").textContent };
+setFilter({});
+slot("held").dispatch("click");
+const held = open();
+setFilter({});
+emitState({ ...base, flow: false });
+const off = { pill: pill("mcp:t3"), held: slot("held").querySelector(".pd").textContent };
+return { before, external, ready, held, off };
+"##,
+    );
+
+    let b = &r["before"];
+    assert_eq!(b["pills"], json!([true, false]), "{r}");
+    assert_eq!(b["active"], "2 threads running, 2 of 3 tickets, 1 ready to launch", "{r}");
+    assert_eq!(b["held"], json!(["1", "2 external"]), "{r}");
+    assert_eq!(b["queue"], json!([{"label": "widgets#1", "hidden": false, "pill": "ready"}]), "{r}");
+    assert_eq!(b["blocked"], json!([{"label": "widgets#2", "hidden": false, "pill": "external"}]), "{r}");
+    let e = &r["external"];
+    assert_eq!(e["open"], json!(["mcp:t3"]), "{r}");
+    assert_eq!(e["queue"][0]["hidden"], true, "{r}");
+    assert_eq!(e["blocked"][0]["hidden"], false, "{r}");
+    assert_eq!(e["n"], "0/1", "{r}");
+    let rd = &r["ready"];
+    assert_eq!(rd["open"], json!([]), "{r}");
+    assert_eq!(rd["queue"][0]["hidden"], false, "{r}");
+    assert_eq!((rd["n"].as_str(), rd["nb"].as_str()), (Some("1/1"), Some("0/1")), "{r}");
+    assert_eq!(r["held"], json!(["mcp:t3"]), "{r}");
+    assert_eq!(r["off"], json!({"pill": false, "held": "Nothing parked"}), "{r}");
+}
+
+#[tokio::test]
+async fn a_ticket_whose_repo_the_board_knows_is_read_there_and_picks_read_only_state() {
+    let h = flowing(3);
+    issue(&h, REPO, 5, &[FLOW], 1);
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets"), project("p-other", "/src/other")]);
+    h.remotes.set("/src/other", "git@github.com:other/widgets.git");
+    h.github.set_issue("other/widgets", github_issue(5, "Fork work", &[], "2026-10-20T09:00:00Z"));
+    let mut th = t3_codemode::fake::thread("mcp:o5", "running", T0);
+    th["projectId"] = json!("p-other");
+    h.fake.put(th);
+    h.wf("mcp:o5", "join", json!({"parent": BOARD, "label": "widgets#5", "role": "ticket"})).await;
+    h.app.wf.board_tick().await.unwrap();
+    issue(&h, REPO, 6, &[], 2);
+    ticket(&h, "mcp:t6", "widgets#6").await;
+
+    let f = graph(&h).await;
+
+    assert_eq!(node(&f, "other/widgets#5")["ticket"]["thread"], "mcp:o5");
+    assert_eq!(node(&f, "other/widgets#5")["title"], "Fork work");
+    assert_eq!(node(&f, "acme/widgets#5")["ticket"], Value::Null);
+    assert_eq!(labels(&f["running"]), ["widgets#6"]);
+    assert_eq!(f["free"], 2);
+    assert_eq!(labels(&f["queue"]), ["widgets#5"]);
+    assert_eq!(node(&f, "acme/widgets#5")["ready"], true);
+    h.github.close_issue(REPO, 6);
+    let f = graph(&h).await;
+    assert_eq!(f["running"], json!([]));
+    assert_eq!(f["free"], 3);
+    h.github.update_issue(REPO, 6, json!({"state": "OPEN"}));
+    let before = h.github.calls().len();
+    next(&h).await;
+    let reads: Vec<Value> =
+        h.github.calls()[before..].iter().filter(|c| c["operation"] == "flowTickets").cloned().collect();
+    assert_eq!(reads.len(), 1);
+    assert!(!reads[0]["query"].as_str().unwrap().contains("blockedBy"), "{}", reads[0]["query"]);
+    assert_eq!(reads[0]["variables"]["o0"], "acme");
 }
