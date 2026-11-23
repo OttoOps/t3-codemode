@@ -712,7 +712,13 @@ pub(crate) async fn start(h: H) -> Srv {
 }
 
 impl Srv {
-    async fn post(&self, path: &str, body: Value, csrf: Option<&str>, origin: Option<&str>) -> reqwest::Response {
+    pub(crate) async fn post(
+        &self,
+        path: &str,
+        body: Value,
+        csrf: Option<&str>,
+        origin: Option<&str>,
+    ) -> reqwest::Response {
         let mut req = self.http.post(format!("{}{path}", self.base)).json(&body);
         if let Some(c) = csrf {
             req = req.header("X-T3CM-CSRF", c);
@@ -731,7 +737,7 @@ impl Srv {
         req.send().await.unwrap()
     }
 
-    fn csrf(&self) -> String {
+    pub(crate) fn csrf(&self) -> String {
         self.h.app.csrf.clone()
     }
 

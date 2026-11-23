@@ -729,6 +729,25 @@ a:hover > .spill, a:focus-visible > .spill { border-color: currentColor; }
 .form .hint { grid-column: 1 / -1; }
 #issues { height: 52px; }
 #launch .btn, #ask .btn { height: 32px; padding: 0 12px; }
+.launch-picks {
+  display: grid; gap: 6px; padding: 8px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2);
+}
+.launch-picks[hidden] { display: none; }
+.lp-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  font-size: 12px; line-height: 16px; color: var(--fg-2);
+}
+.lp-head .linkish { font-size: 12px; line-height: 16px; flex: none; }
+.lp-list { display: grid; gap: 6px; max-height: 180px; overflow-y: auto; }
+.lp-row {
+  display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 8px; align-items: center;
+}
+.lp-row label { font-weight: 600; color: var(--fg); }
+.lp-row select { height: 28px; }
+.lp-row select[aria-invalid="true"] { border-color: var(--fail); }
+.lp-msg { font-size: 12px; line-height: 16px; color: var(--fg-2); overflow-wrap: anywhere; }
+.lp-msg.bad { color: var(--fail); }
 #out { max-height: 40vh; overflow-y: auto; border-top: 1px solid var(--border); padding: 8px 16px; display: grid; align-content: start; gap: 8px; background: var(--surface-2); }
 #composer:not(.has-out) #out { display: none; }
 #out .oh { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--fg-2); }
@@ -846,7 +865,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
 #main.lay .form .ph { min-height: 0; }
 #main.lay .lcol > .collapsed { flex: 0 0 auto !important; }
 .lay .collapsed > .body, .lay #composer.collapsed #out, .lay #composer.collapsed #ask,
-.lay #composer.collapsed #launch .row, .lay #composer.collapsed #launch .model-line { display: none; }
+.lay #composer.collapsed #launch .row, .lay #composer.collapsed #launch #launch-projects, .lay #composer.collapsed #launch .model-line { display: none; }
 #main.lay .lcol > * > .ph, #main.lay #launch .ph { cursor: grab; }
 .lay .lctl { display: flex; align-items: center; gap: 4px; flex: none; margin-left: 4px; }
 .lay #launch .lctl { margin-left: auto; }
@@ -922,9 +941,11 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .mode .btn:last-child { border-radius: 0 6px 6px 0; border-left: 0; }
   .mode .btn[aria-pressed="true"] { background: var(--surface-2); color: var(--fg); font-weight: 600; }
   .forms { display: flex; align-items: flex-end; gap: 8px; padding: 12px; }
+  .forms:has(#launch-projects:not([hidden])) { align-items: flex-start; }
   .form { padding: 0; flex: 1 1 auto; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
   .form .ph, .form .hint, .form .model-line { display: none; }
   .form .row { display: contents; }
+  #launch-projects { grid-column: 1 / -1; }
   #composer[data-mode="launch"] #ask, #composer[data-mode="ask"] #launch { display: none; }
   #issues { height: 32px; padding-top: 4px; }
   #issues:focus { height: 128px; }
@@ -1021,7 +1042,12 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .auth-acts .btn { min-height: 44px; width: 100%; }
   #ask input[type=text] { height: 44px; }
   #issues { height: 44px; padding-top: 8px; }
+  .lp-row { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .lp-row label { max-width: none; }
+  .lp-row select { height: 44px; }
   .forms { padding: 4px 12px; align-items: center; }
+  .forms:has(#launch-projects:not([hidden])) { flex-wrap: wrap; align-items: flex-start; padding: 8px 12px; }
+  .forms:has(#launch-projects:not([hidden])) .mode { flex-basis: 100%; }
   #issues:not(:focus) { white-space: nowrap; overflow: hidden; }
   .app.kb .mtabs { visibility: hidden; }
   .app.kb .dock { position: fixed; left: 0; right: 0; bottom: var(--kb, 0px); }
@@ -1365,12 +1391,13 @@ kbd { font-family: var(--mono); font-size: 12px; }
         </div>
         <form class="form" id="launch" aria-labelledby="h-launch">
           <div class="ph"><h2 id="h-launch">Launch tickets</h2></div>
-          <label class="sr" for="issues">GitHub issues to launch, one per line</label>
+          <label class="sr" for="issues">Issues to launch, one per line</label>
           <div class="row">
-            <textarea id="issues" placeholder="owner/repo#41 or an issue URL, one per line" aria-describedby="launch-hint"></textarea>
+            <textarea id="issues" placeholder="owner/repo#41, PROJ-123, or an issue URL" aria-describedby="launch-hint"></textarea>
             <button class="btn go" type="submit" id="launch-btn">Launch</button>
             <span class="meta hint" id="launch-hint">Ctrl+Enter launches.</span>
           </div>
+          <div class="launch-picks" id="launch-projects" hidden></div>
           <div class="model-line" id="launch-model">
             <span id="launch-model-text">Model: loading...</span>
             <button class="linkish" type="button" id="launch-model-edit">Change</button>
@@ -7227,27 +7254,304 @@ function formatModelChoice(m) {
   return [m.instanceId || m.provider, m.model, m.effort].filter(Boolean).join(" · ") || "unset";
 }
 
-function parseIssueRepo(raw) {
-  let s = String(raw || "").trim().replace(/\/+$/, "");
-  if (!s) return null;
-  if (!s.includes("://") && !/^github\.com\//i.test(s)) {
+const launchProjectPicks = new Map();
+let launchProjectsErr = "";
+let launchProjectsSig = "";
+
+function isGhName(s) {
+  return !!s && /^[A-Za-z0-9._-]+$/.test(s);
+}
+
+function isPathSeg(s) {
+  return isGhName(s) && s !== "." && s !== "..";
+}
+
+function isTrackerHost(s) {
+  if (!s) return false;
+  if (s[0] === "[" && s[s.length - 1] === "]") return /^\[[0-9a-fA-F:]+\]$/.test(s);
+  return s.split(".").every((lbl) => /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(lbl));
+}
+
+function parsePositiveInt(s) {
+  return /^\d+$/.test(s) && /[1-9]/.test(s) ? s.replace(/^0+/, "") : null;
+}
+
+function parseJiraKey(raw, ignoreCase) {
+  const i = raw.indexOf("-");
+  if (i < 2) return null;
+  const proj = raw.slice(0, i);
+  const num = raw.slice(i + 1);
+  const projOk = ignoreCase ? /^[A-Za-z][A-Za-z0-9_]+$/.test(proj) : /^[A-Z][A-Z0-9_]+$/.test(proj);
+  if (!projOk || !/^[1-9]\d*$/.test(num)) return null;
+  const scope = proj.toUpperCase();
+  return { scope, key: scope + "-" + num };
+}
+
+function parseUrlAuthority(auth) {
+  if (!auth || auth.includes("@")) return null;
+  const m = auth[0] === "[" ? /^(\[[0-9a-fA-F:]+\])(?::(\d+))?$/.exec(auth) : /^([^:]+)(?::(\d+))?$/.exec(auth);
+  if (!m) return null;
+  const host = m[1].toLowerCase();
+  if (!isTrackerHost(host)) return null;
+  const port = m[2] !== undefined ? Number(m[2]) : null;
+  if (port !== null && (!Number.isInteger(port) || port < 1 || port > 65535)) return null;
+  return { host, port };
+}
+
+function parseIssueRef(raw) {
+  const s = String(raw || "").trim().replace(/\/+$/, "");
+  if (!s || /\s/.test(s)) return null;
+  if (!s.includes("://") && !/^github\.com\//i.test(s) && s.includes("#")) {
     const i = s.indexOf("#");
-    if (i > 0) {
-      const path = s.slice(0, i);
-      const parts = path.split("/");
-      if (parts.length === 2 && parts[0] && parts[1] && /^\d+$/.test(s.slice(i + 1))) {
-        return (parts[0] + "/" + parts[1]).toLowerCase();
+    const n = parsePositiveInt(s.slice(i + 1));
+    if (!n) return null;
+    const parts = s.slice(0, i).split("/");
+    if (parts.length === 2 && isGhName(parts[0]) && isGhName(parts[1])) {
+      return { tracker: "github", host: "github.com", scope: parts[0] + "/" + parts[1], key: n, port: null, label: parts[1] + "#" + n };
+    }
+    if (parts.length >= 3 && isTrackerHost(parts[0]) && parts[0].toLowerCase() !== "github.com" && parts.slice(1).every(isPathSeg)) {
+      return { tracker: "gitlab", host: parts[0].toLowerCase(), scope: parts.slice(1).join("/"), key: n, port: 443, label: parts[parts.length - 1] + "#" + n };
+    }
+    return null;
+  }
+  const noScheme = s.replace(/^https?:\/\//i, "");
+  const noWww = noScheme.replace(/^www\./i, "");
+  if (/^github\.com\//i.test(noWww)) {
+    const parts = noWww.slice("github.com/".length).split(/[?#]/)[0].split("/").filter(Boolean);
+    if (parts.length >= 4 && (parts[2] === "issues" || parts[2] === "pull") && isGhName(parts[0]) && isGhName(parts[1])) {
+      const n = parsePositiveInt(parts[3]);
+      if (n) {
+        const port = /^http:\/\//i.test(s) ? 80 : 443;
+        return { tracker: "github", host: "github.com", scope: parts[0] + "/" + parts[1], key: n, port, label: parts[1] + "#" + n };
       }
     }
     return null;
   }
-  s = s.replace(/^https?:\/\//i, "").replace(/^www\./i, "");
-  if (!/^github\.com\//i.test(s)) return null;
-  const parts = s.slice("github.com/".length).split(/[?#]/)[0].split("/").filter(Boolean);
-  if (parts.length >= 4 && (parts[2] === "issues" || parts[2] === "pull") && /^\d+$/.test(parts[3])) {
-    return (parts[0] + "/" + parts[1]).toLowerCase();
+  const um = /^(https?):\/\/([^/?#]+)(\/[^?#]*)?(?:[?#].*)?$/i.exec(s);
+  if (um) {
+    const scheme = um[1].toLowerCase();
+    const auth = parseUrlAuthority(um[2]);
+    if (!auth || auth.host === "github.com" || auth.host === "www.github.com") return null;
+    const webPort = auth.port !== null ? auth.port : (scheme === "https" ? 443 : 80);
+    const parts = (um[3] || "").split("/").filter(Boolean);
+    const dash = parts.indexOf("-");
+    if (dash >= 2 && parts[dash + 1] === "issues" && parts[dash + 2] && parts.slice(0, dash).every(isPathSeg)) {
+      const n = parsePositiveInt(parts[dash + 2]);
+      if (n) return { tracker: "gitlab", host: auth.host, scope: parts.slice(0, dash).join("/"), key: n, port: webPort, label: parts[dash - 1] + "#" + n };
+    }
+    if (parts.length >= 2 && parts[parts.length - 2] === "browse") {
+      const j = parseJiraKey(parts[parts.length - 1], true);
+      if (j) return { tracker: "jira", host: auth.host, scope: j.scope, key: j.key, port: webPort, label: j.key };
+    }
+    return null;
+  }
+  if (!s.includes("://") && !s.includes("#") && s.includes("/")) {
+    const i = s.indexOf("/");
+    const host = s.slice(0, i);
+    const key = s.slice(i + 1);
+    if (!key.includes("/") && isTrackerHost(host) && host.toLowerCase() !== "github.com") {
+      const j = parseJiraKey(key, false);
+      if (j) return { tracker: "jira", host: host.toLowerCase(), scope: j.scope, key: j.key, port: 443, label: j.key };
+    }
+    return null;
+  }
+  if (!s.includes("/") && !s.includes("#") && !s.includes("://")) {
+    const j = parseJiraKey(s, false);
+    if (j) return { tracker: "jira", host: null, scope: j.scope, key: j.key, port: null, label: j.key };
   }
   return null;
+}
+
+function pickProject(projects, wanted) {
+  if (!wanted) return null;
+  const w = String(wanted).trim();
+  if (!w) return null;
+  const byId = projects.find((p) => p.id === w);
+  if (byId) return byId;
+  const wl = w.toLowerCase();
+  return projects.find((p) => p.title && p.title.toLowerCase() === wl) || null;
+}
+
+function findMapValueCI(map, key) {
+  if (!map || !key) return null;
+  const kl = String(key).toLowerCase();
+  for (const [k, v] of Object.entries(map)) {
+    if (k.toLowerCase() === kl) return v;
+  }
+  return null;
+}
+
+function resolveIssueProject(issue, d) {
+  if (!issue || !d) return null;
+  const projects = d.projects || [];
+  if ((issue.tracker === "github" || issue.tracker === "gitlab") && issue.host) {
+    const hl = issue.host.toLowerCase();
+    const sl = issue.scope.toLowerCase();
+    for (const p of projects) {
+      const r = p.remote;
+      if (!r || !r.host || !r.path) continue;
+      const portOk = issue.port != null && r.port != null ? issue.port === r.port : true;
+      if (portOk && r.host.toLowerCase() === hl && r.path.toLowerCase() === sl) return p;
+    }
+  }
+  const trackers = d.trackers || {};
+  let mapped = null;
+  if (issue.tracker === "jira") {
+    mapped = findMapValueCI(trackers.jira, issue.scope)
+      || (issue.host ? findMapValueCI(trackers.hosts, issue.host) : null);
+  } else if (issue.tracker === "gitlab" && issue.host) {
+    mapped = findMapValueCI(trackers.hosts, issue.host);
+  }
+  return mapped ? pickProject(projects, mapped) : null;
+}
+
+function typedLaunchRefs() {
+  return ($("issues").value || "").split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
+}
+
+function unresolvedLaunchRefs(d) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of typedLaunchRefs()) {
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    const parsed = parseIssueRef(raw);
+    if (!parsed || parsed.tracker === "github") continue;
+    if (!d || !resolveIssueProject(parsed, d)) out.push({ raw, parsed });
+  }
+  return out;
+}
+
+function launchProjectOptions(projects) {
+  const titleCounts = new Map();
+  for (const p of projects) {
+    const k = String(p.title || p.id).toLowerCase();
+    titleCounts.set(k, (titleCounts.get(k) || 0) + 1);
+  }
+  const prelim = projects.map((p) => {
+    const title = p.title || p.id;
+    const dup = (titleCounts.get(title.toLowerCase()) || 0) > 1;
+    const base = dup ? title + " (" + ((p.remote && p.remote.path) || p.id) + ")" : title;
+    return { value: p.id, label: base, id: p.id, title };
+  });
+  const labelCounts = new Map();
+  for (const o of prelim) {
+    const k = o.label.toLowerCase();
+    labelCounts.set(k, (labelCounts.get(k) || 0) + 1);
+  }
+  return [
+    { value: "", label: "Choose a project..." },
+    ...prelim.map((o) => ({
+      value: o.value,
+      label: (labelCounts.get(o.label.toLowerCase()) || 0) > 1 ? o.title + " (" + o.id + ")" : o.label,
+    })),
+  ];
+}
+
+function paintLaunchProjects() {
+  const box = $("launch-projects");
+  const d = modelsState.data;
+  const rawRefs = typedLaunchRefs();
+  const refSet = new Set(rawRefs);
+  const activeProjects = (d && !d.projectsError && Array.isArray(d.projects)) ? d.projects : null;
+  const activeIds = activeProjects ? new Set(activeProjects.map((p) => p.id)) : null;
+  for (const [k, pid] of [...launchProjectPicks.entries()]) {
+    if (!refSet.has(k)) { launchProjectPicks.delete(k); continue; }
+    if (activeIds && !activeIds.has(pid)) { launchProjectPicks.delete(k); continue; }
+    const parsed = parseIssueRef(k);
+    if (d && parsed && resolveIssueProject(parsed, d)) launchProjectPicks.delete(k);
+  }
+  const need = unresolvedLaunchRefs(d);
+  if (!need.length) {
+    launchProjectsErr = "";
+    launchProjectsSig = "";
+    box.hidden = true;
+    if (box.firstChild) box.replaceChildren();
+    return;
+  }
+  box.hidden = false;
+  if (!d) {
+    const mode = modelsState.refreshErr ? "err:" + modelsState.refreshErr : "loading";
+    if (launchProjectsSig !== mode) {
+      launchProjectsSig = mode;
+      box.replaceChildren(
+        h("div", { class: "lp-head" },
+          h("span", { class: modelsState.refreshErr ? "lp-msg bad" : "lp-msg" },
+            modelsState.refreshErr || "Loading T3 projects..."),
+          modelsState.refreshErr ? h("button", { class: "linkish", type: "button", id: "launch-projects-refresh", onclick: () => refreshModels(false) }, "Retry") : null));
+    }
+    return;
+  }
+  if (d.projectsError) {
+    const mode = "perr:" + d.projectsError;
+    if (launchProjectsSig !== mode) {
+      launchProjectsSig = mode;
+      box.replaceChildren(
+        h("div", { class: "lp-head" },
+          h("span", { class: "lp-msg bad" }, "Could not load T3 projects: " + d.projectsError),
+          h("button", { class: "linkish", type: "button", id: "launch-projects-refresh", onclick: () => refreshModels(false) }, "Retry")));
+    }
+    return;
+  }
+  const projects = d.projects || [];
+  if (!projects.length) {
+    const mode = "empty";
+    if (launchProjectsSig !== mode) {
+      launchProjectsSig = mode;
+      box.replaceChildren(
+        h("div", { class: "lp-head" },
+          h("span", { class: "lp-msg" }, "No active T3 projects found."),
+          h("button", { class: "linkish", type: "button", id: "launch-projects-refresh", onclick: () => refreshModels(false) }, "Refresh")));
+    }
+    return;
+  }
+  const opts = launchProjectOptions(projects);
+  const sig = "pick:" + need.map((x) => x.raw).join("\x1f") + "\x1e" + opts.map((o) => o.value + "=" + o.label).join("\x1f");
+  if (launchProjectsSig !== sig) {
+    launchProjectsSig = sig;
+    const lblCounts = new Map();
+    for (const x of need) lblCounts.set(x.parsed.label, (lblCounts.get(x.parsed.label) || 0) + 1);
+    const list = h("div", { class: "lp-list" }, ...need.map((x, idx) => {
+      const id = "lp-sel-" + idx;
+      const shown = (lblCounts.get(x.parsed.label) || 0) > 1 ? x.raw : x.parsed.label;
+      const sel = h("select", { id, "data-ref": x.raw, "aria-label": "Project for " + shown });
+      populateOptions(sel, opts, launchProjectPicks.get(x.raw) || "");
+      sel.addEventListener("change", () => {
+        if (sel.value) launchProjectPicks.set(x.raw, sel.value);
+        else launchProjectPicks.delete(x.raw);
+        launchProjectsErr = "";
+        syncLaunchProjectErrors();
+        paintLaunchModelLine();
+      });
+      return h("div", { class: "lp-row" },
+        h("label", { class: "mono clip", for: id, title: shown !== x.raw ? x.raw : null }, shown),
+        sel);
+    }));
+    box.replaceChildren(
+      h("div", { class: "lp-head" },
+        h("span", {}, need.length === 1 ? "Choose a T3 project" : "Choose a T3 project for each ref"),
+        h("button", { class: "linkish", type: "button", id: "launch-projects-refresh", onclick: () => refreshModels(false) }, "Refresh")),
+      list,
+      h("p", { class: "lp-msg bad", id: "launch-projects-err", hidden: true }));
+  } else {
+    for (const sel of box.querySelectorAll("select[data-ref]")) {
+      const want = launchProjectPicks.get(sel.dataset.ref) || "";
+      if (sel.value !== want) sel.value = want;
+    }
+  }
+  syncLaunchProjectErrors();
+}
+
+function syncLaunchProjectErrors() {
+  const box = $("launch-projects");
+  const errEl = box.querySelector("#launch-projects-err");
+  if (!errEl) return;
+  const show = !!launchProjectsErr;
+  errEl.hidden = !show;
+  setText(errEl, launchProjectsErr);
+  for (const sel of box.querySelectorAll("select[data-ref]")) {
+    setAttr(sel, "aria-invalid", show && !sel.value ? "true" : null);
+  }
 }
 
 function paintLaunchModelLine() {
@@ -7263,11 +7567,25 @@ function paintLaunchModelLine() {
   }
   const t = d.ticket || {};
   const ovrs = d.repoOverrides || [];
-  const typed = ($("issues").value || "").split(/[\s,]+/).map(parseIssueRepo).filter(Boolean);
+  const typed = typedLaunchRefs();
   const matched = [];
   let hasDefaultRepo = false;
-  for (const repo of typed) {
-    const o = ovrs.find((x) => x.repo && x.repo.toLowerCase() === repo);
+  for (const raw of typed) {
+    const parsed = parseIssueRef(raw);
+    if (!parsed) continue;
+    let o = null;
+    const pickedId = launchProjectPicks.get(raw);
+    if (pickedId) {
+      o = ovrs.find((x) => x.projectId === pickedId) || null;
+    } else {
+      const resolved = resolveIssueProject(parsed, d);
+      if (resolved) {
+        o = ovrs.find((x) => x.projectId === resolved.id) || null;
+      } else if (parsed.tracker === "github") {
+        const repo = parsed.scope.toLowerCase();
+        o = ovrs.find((x) => x.repo && x.repo.toLowerCase() === repo) || null;
+      }
+    }
     if (o) {
       if (!matched.includes(o)) matched.push(o);
     } else {
@@ -7494,6 +7812,7 @@ function paintRepoOverrides() {
 }
 
 function paintModels(forceForm) {
+  paintLaunchProjects();
   paintLaunchModelLine();
   paintAskModelLine();
   const d = modelsState.data;
@@ -7651,7 +7970,11 @@ function closeDialog(dlg) {
 function initModels() {
   $("launch-model-edit").addEventListener("click", () => openSettings("ticket"));
   $("ask-model-edit").addEventListener("click", () => openSettings("ask"));
-  $("issues").addEventListener("input", paintLaunchModelLine);
+  $("issues").addEventListener("input", () => {
+    launchProjectsErr = "";
+    paintLaunchProjects();
+    paintLaunchModelLine();
+  });
   for (const which of ["ticket", "ask"]) {
     const p = pickerPrefix(which);
     $(p + "-mode-model").addEventListener("click", () => setPickerMode(which, "model", true));
@@ -9144,11 +9467,27 @@ async function onLaunch(e) {
   const draft = ta.value;
   const issues = draft.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
   if (!issues.length || btn.disabled) return;
+  const d = modelsState.data;
+  if (d && !d.projectsError && Array.isArray(d.projects) && d.projects.length) {
+    const missing = unresolvedLaunchRefs(d).filter((x) => !launchProjectPicks.get(x.raw));
+    if (missing.length) {
+      launchProjectsErr = "Choose a project for " + missing.map((x) => x.parsed.label).join(", ") + " before launching.";
+      paintLaunchProjects();
+      const firstBad = $("launch-projects").querySelector('select[aria-invalid="true"]');
+      if (firstBad) firstBad.focus();
+      announce(launchProjectsErr, true);
+      return;
+    }
+  }
+  const payload = issues.map((ref) => {
+    const project = launchProjectPicks.get(ref);
+    return project ? { issue: ref, project } : ref;
+  });
   btn.disabled = true;
   setText(btn, "Launching...");
   $("dock").classList.add("show-out");
   try {
-    const r = await post("/api/launch", { issues });
+    const r = await post("/api/launch", { issues: payload });
     out.replaceChildren(h("li", { class: "oh" }, "Launch results"), ...r.results.map((x) => {
       if (!x.ok) return h("li", { class: "bad" }, h("span", {}, x.issue + ": " + x.error + (x.card ? " (card " + x.card + ")" : "")));
       const via = [x.instanceId, x.model, x.effort].filter(Boolean).join(" · ");
@@ -9159,7 +9498,12 @@ async function onLaunch(e) {
     const bad = r.results.filter((x) => !x.ok);
     if (ok.length) announce("Launched " + ok.map((x) => x.label).join(", ") + ".");
     if (bad.length) announce(bad.map((x) => x.issue + ": " + x.error).join(". "), true);
-    if (!bad.length && ta.value === draft) ta.value = "";
+    if (!bad.length && ta.value === draft) {
+      ta.value = "";
+      launchProjectPicks.clear();
+      launchProjectsErr = "";
+    }
+    paintLaunchProjects();
     paintLaunchModelLine();
   } catch (err) {
     out.replaceChildren(h("li", { class: "oh" }, "Launch results"), h("li", { class: "bad" }, err.message));

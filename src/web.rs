@@ -980,8 +980,24 @@ async fn dismiss(State(web): State<Web>, Path(id): Path<String>, raw: Bytes) -> 
 }
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum LaunchItem {
+    Ref(String),
+    WithProject(LaunchItemObj),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LaunchItemObj {
+    issue: String,
+    #[serde(default)]
+    project: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LaunchBody {
-    issues: Vec<String>,
+    issues: Vec<LaunchItem>,
 }
 
 async fn launch(State(web): State<Web>, raw: Bytes) -> Response {
@@ -989,7 +1005,22 @@ async fn launch(State(web): State<Web>, raw: Bytes) -> Response {
         Ok(b) => b,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
-    let issues: Vec<String> = b.issues.into_iter().map(|i| i.trim().to_string()).filter(|i| !i.is_empty()).collect();
+    let issues: Vec<(String, Option<String>)> = b
+        .issues
+        .into_iter()
+        .filter_map(|item| {
+            let (issue, project) = match item {
+                LaunchItem::Ref(issue) => (issue, None),
+                LaunchItem::WithProject(LaunchItemObj { issue, project }) => (issue, project),
+            };
+            let issue = issue.trim().to_string();
+            if issue.is_empty() {
+                return None;
+            }
+            let project = project.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+            Some((issue, project))
+        })
+        .collect();
     if issues.is_empty() {
         return error(StatusCode::BAD_REQUEST, "no issues given");
     }
@@ -997,12 +1028,12 @@ async fn launch(State(web): State<Web>, raw: Bytes) -> Response {
         return error(StatusCode::BAD_REQUEST, format!("at most {MAX_LAUNCH} issues at a time"));
     }
     let mut results = Vec::new();
-    for issue in issues {
+    for (issue, project) in issues {
         let args = LaunchArgs {
             issue: issue.clone(),
             parent_issue: None,
             part: None,
-            project: None,
+            project,
             title: None,
             model: None,
             effort: None,
