@@ -577,6 +577,11 @@ impl FakeGitHub {
         let mut st = self.st();
         let mut pr = pr;
         pr["id"] = json!(format!("PR_{repo}_{number}"));
+        if pr.get("headRefName").is_none() {
+            pr["headRefName"] = json!(format!("feat/{number}"));
+            pr["headRef"] = json!({"id": format!("REF_{repo}_{number}")});
+            pr["isCrossRepository"] = json!(false);
+        }
         st.repos.entry(repo.into()).or_insert_with(|| json!({"viewerDefaultMergeMethod": "MERGE"}));
         st.prs.insert((repo.into(), number), pr);
     }
@@ -713,7 +718,7 @@ fn operation(query: &str) -> &'static str {
     if query.starts_with(crate::flow::FLOW_TICKETS) {
         return "flowTickets";
     }
-    for op in ["enqueuePullRequest", "mergePullRequest", "enablePullRequestAutoMerge"] {
+    for op in ["enqueuePullRequest", "mergePullRequest", "enablePullRequestAutoMerge", "deleteRef"] {
         if query.contains(op) {
             return op;
         }
@@ -880,9 +885,20 @@ impl crate::github::GitHub for FakeGitHub {
                     st.unknown_reads -= 1;
                     pr["mergeStateStatus"] = json!("UNKNOWN");
                 }
+                if pr["headRef"].is_object() && pr["headRef"]["target"].is_null() {
+                    pr["headRef"]["target"] = json!({"oid": pr["headRefOid"]});
+                }
                 let mut repository = meta;
                 repository["pullRequest"] = pr;
                 return Ok(json!({"data": {"repository": repository}}));
+            }
+            if op == "deleteRef" {
+                let wanted = variables["ref"].as_str().unwrap_or_default().to_string();
+                let Some(pr) = st.prs.values_mut().find(|p| p["headRef"]["id"] == wanted.as_str()) else {
+                    return Ok(gh_error("Could not resolve to a node"));
+                };
+                pr["headRef"] = Value::Null;
+                return Ok(json!({"data": {"deleteRef": {"clientMutationId": null}}}));
             }
             let id = variables["id"].as_str().unwrap().to_string();
             let head = variables["head"].as_str().unwrap().to_string();

@@ -21,6 +21,7 @@ pub mod js;
 mod json_patch;
 pub mod mcp;
 pub mod merge;
+mod merge_answer;
 pub mod moves;
 pub mod pairing;
 pub mod platform;

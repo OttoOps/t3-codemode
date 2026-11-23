@@ -13,6 +13,7 @@ mod live_github;
 mod mcp_http;
 mod memory;
 mod merge;
+mod merge_answer;
 mod pools;
 mod pr_chaos;
 mod pr_events;

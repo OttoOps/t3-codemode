@@ -133,6 +133,8 @@ pub struct PrBrief {
     pub passes: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub merge_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

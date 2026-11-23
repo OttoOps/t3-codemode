@@ -11,6 +11,7 @@ use crate::wf::Wf;
 
 const SETTLED: &[&str] = &["SUCCESS", "CANCELLED", "SKIPPED", "NEUTRAL"];
 const METHODS: &[&str] = &["MERGE", "SQUASH", "REBASE"];
+const REFUSED: &[&str] = &["BEHIND", "DIRTY"];
 const UNKNOWN_READS: usize = 3;
 const UNKNOWN_WAIT: Duration = Duration::from_secs(1);
 
@@ -75,7 +76,15 @@ fn tally(pr: &Value) -> Option<Tally> {
 pub fn ready(pr: &Value) -> Ready {
     let state = pr["mergeStateStatus"].as_str().unwrap_or("UNKNOWN");
     match state {
-        "CLEAN" | "HAS_HOOKS" => return Ready::Yes,
+        "CLEAN" | "HAS_HOOKS" => {
+            return match tally(pr) {
+                Some(t) if !t.failing.is_empty() => Ready::Failing(t.failing.join(", ")),
+                Some(t) if !t.pending.is_empty() => {
+                    Ready::Not(format!("merge state {state}, checks still running: {}", t.pending.join(", ")))
+                }
+                _ => Ready::Yes,
+            };
+        }
         "UNSTABLE" => {}
         s => return Ready::Not(format!("merge state {s}")),
     }
@@ -129,10 +138,10 @@ pub fn checks(pr: &Value) -> Option<&'static str> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MergeArgs {
-    repo: String,
-    pr: u64,
-    head: String,
-    method: Option<String>,
+    pub(crate) repo: String,
+    pub(crate) pr: u64,
+    pub(crate) head: String,
+    pub(crate) method: Option<String>,
 }
 
 struct Outcome {
@@ -278,6 +287,10 @@ impl Wf {
         match &ready {
             Ready::Yes => {}
             Ready::Failing(f) => return Ok(failing(f)),
+            Ready::Not(_) if !REFUSED.contains(&state) && check_state(pr) != CheckState::Unread => {
+                let approval = record(WaitStatus::Waiting)?;
+                return Ok(out.with("waiting", json!({"mergeState": state, "approval": approval})));
+            }
             Ready::Not(why) => return Ok(out.refused(format!("not mergeable yet ({why})"))),
         }
         let method = method

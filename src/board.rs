@@ -1288,6 +1288,13 @@ impl Wf {
             .ticket
             .clone()
             .ok_or_else(|| anyhow!("card {id} has no ticket thread to answer; dismiss it instead"))?;
+        if let Some(job) = self.merge_job(&card, &ticket, text)? {
+            drop(g);
+            return match job {
+                crate::merge_answer::Job::Done(v) => Ok(v),
+                crate::merge_answer::Job::Merge(rec) => self.run_merge(rec, text, &card.text).await,
+            };
+        }
         if let Some(w) = card.worker.clone()
             && let Some(out) = self.answer_relayed(&card, &w, text).await?
         {
