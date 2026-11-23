@@ -172,6 +172,18 @@ parent and a child, and the service keeps every link and message in its store.
     instances no longer in the pool.
   - **`mode: "single"`.** `members` holds the one instance, model and effort
     that launches use, with `share` 1 and no pick history.
+  - **Tokens.** `tokens` totals the input and output tokens of the runs that
+    ended in the window, as `{input, output, runs}`. It also holds
+    `byInstance`, and `byProvider`, which groups the totals by driver. Each
+    member carries its own `tokens`, and `tokenSeries` splits the window
+    into the same 24 buckets as `series`, each with `input` and `output` per
+    instance. These
+    fields are `null` while no token source reports counts, and T3 sends
+    none over MCP today, so they stay `null` against a real T3. The
+    watcher reads each run's counts once, within a day of the run ending,
+    counts them on the instance that ran it, and keeps them for 400 days.
+    [ADR 0012](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0012-token-counts-per-run.md)
+    has the reasoning.
 
   `running` lists the active threads of every provider instance, counted the
   way `wf.pools()` and the pool picker count them, so queued and starting
