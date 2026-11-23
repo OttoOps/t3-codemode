@@ -618,7 +618,7 @@ impl Wf {
         merged.ok_or_else(|| anyhow!("pool has no members"))
     }
 
-    async fn threads_with(&self, statuses: &[&str]) -> Result<Vec<Value>> {
+    pub(crate) async fn threads_with(&self, statuses: &[&str]) -> Result<Vec<Value>> {
         let mut out = Vec::new();
         let mut cursor: Option<u64> = None;
         loop {

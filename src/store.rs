@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::LinkParams;
+use crate::tokens::RunTokens;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS kv (
@@ -49,6 +50,10 @@ CREATE INDEX IF NOT EXISTS pool_picks_pool ON pool_picks (pool, seq);
 CREATE INDEX IF NOT EXISTS pool_picks_handle ON pool_picks (handle) WHERE handle IS NOT NULL;
 CREATE TABLE IF NOT EXISTS limit_stops (
   thread TEXT NOT NULL, run TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (thread, run));
+CREATE TABLE IF NOT EXISTS run_tokens (
+  thread TEXT NOT NULL, run TEXT NOT NULL, instance TEXT NOT NULL, driver TEXT, at TEXT NOT NULL,
+  input INTEGER, output INTEGER, PRIMARY KEY (thread, run));
+CREATE INDEX IF NOT EXISTS run_tokens_at ON run_tokens (at);
 CREATE TABLE IF NOT EXISTS new_issues (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS pr_seen (
@@ -116,6 +121,16 @@ impl Link {
             (c, _) => c,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunTokenRecord {
+    pub thread: String,
+    pub run: String,
+    pub instance: String,
+    pub driver: Option<String>,
+    pub at: String,
+    pub tokens: Option<RunTokens>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1335,6 +1350,59 @@ impl Store {
             )
         })?;
         Ok(())
+    }
+
+    pub fn run_tokens_seen(&self, thread: &str, run: &str) -> Result<bool> {
+        let n: i64 = self.with(|c| {
+            c.query_row("SELECT COUNT(*) FROM run_tokens WHERE thread = ?1 AND run = ?2", [thread, run], |r| r.get(0))
+        })?;
+        Ok(n > 0)
+    }
+
+    pub fn run_tokens_prune(&self, before: &str) -> Result<()> {
+        self.with(|c| c.execute("DELETE FROM run_tokens WHERE at < ?1", [before]))?;
+        Ok(())
+    }
+
+    pub fn run_tokens_first_at(&self) -> Result<Option<String>> {
+        self.with(|c| c.query_row("SELECT MIN(at) FROM run_tokens WHERE input IS NOT NULL", [], |r| r.get(0)))
+    }
+
+    pub fn run_tokens_put(&self, r: &RunTokenRecord) -> Result<()> {
+        let (input, output) = r.tokens.map_or((None, None), |t| (Some(t.input as i64), Some(t.output as i64)));
+        self.with(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO run_tokens (thread, run, instance, driver, at, input, output)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![r.thread, r.run, r.instance, r.driver, r.at, input, output],
+            )
+        })?;
+        Ok(())
+    }
+
+    pub fn run_tokens(&self, since: Option<&str>) -> Result<Vec<RunTokenRecord>> {
+        type Row = (String, String, String, Option<String>, String, Option<i64>, Option<i64>);
+        let rows: Vec<Row> = self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT thread, run, instance, driver, at, input, output FROM run_tokens
+                 WHERE ?1 IS NULL OR at >= ?1 ORDER BY at",
+            )?;
+            st.query_map([since], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            })?
+            .collect()
+        })?;
+        Ok(rows
+            .into_iter()
+            .map(|(thread, run, instance, driver, at, input, output)| RunTokenRecord {
+                thread,
+                run,
+                instance,
+                driver,
+                at,
+                tokens: input.zip(output).map(|(i, o)| RunTokens { input: i.max(0) as u64, output: o.max(0) as u64 }),
+            })
+            .collect())
     }
 
     pub fn pool_credits(&self, pool: &str) -> Result<BTreeMap<String, i64>> {

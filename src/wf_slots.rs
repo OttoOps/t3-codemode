@@ -144,7 +144,7 @@ impl Wf {
         Folders::from_env()
     }
 
-    async fn driver_of(&self, instance: &str) -> Option<String> {
+    pub(crate) async fn driver_of(&self, instance: &str) -> Option<String> {
         if let Some(d) = self.drivers.lock().unwrap_or_else(|e| e.into_inner()).get(instance) {
             return Some(d.clone());
         }
