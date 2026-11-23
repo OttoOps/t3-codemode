@@ -287,7 +287,7 @@ itself. Each step lands in the ticket's digest as a "handled for you" line.
 | `opened`, with `publishing` | Checks that the Publishing line names the format and each pass, and that the description on GitHub has every heading, element and `Refs #<n>` line the format sets | `open`, or `rewrite` with the rewrite request in `message` and the gaps in `missing` |
 | `updated` | Records the new head and drops any merge card for an older head | `recorded`, with the `dropped` card ids |
 | `ready` | Reads the PR on GitHub, resolves the [delivery slot](config.md#workflow-layer) for its changed files, and opens the ticket's merge card with the answers the slot calls for | `gated` with the `card` and its `options` |
-| `ready`, checks still running | Marks the PR; GitHub reconcile opens the card once they finish | `waiting` |
+| `ready`, any check still running, required or not, such as CodeRabbit's | Marks the PR; GitHub reconcile opens the card once every check finishes | `waiting` |
 | `ready`, a check failed | Nothing on the board; a failure reconcile finds later comes back as a reply | `failing` with the `checks` |
 | `ready`, draft, moved head or merge conflict | Nothing | `refused` with a `reason` |
 
@@ -295,7 +295,9 @@ The format comes from the ticket's `wf.openChild({..., pr})`. `format: "pr"`
 requires the `pr` skill's Summary, Evidence and Merge Danger sections with
 their elements, and `sections` maps more headings to the text each must
 hold. A PR whose merge state is `BLOCKED` or `BEHIND` with every check passed
-still gets its card, and the card names the block.
+still gets its card, and the card names the block. For each reviewer whose
+latest review requests changes, it names the reviewer and the commit that
+review is on, as the current head or an earlier head.
 
 Where the service cannot decide, it sends the ticket the message a worker
 sent before `wf.pr`, with a line saying why, and returns `status: "ticket"`
