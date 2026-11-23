@@ -515,10 +515,12 @@ gets the hover shade, so you can find it on the board.
 
 The inspector follows its item while the board updates. If the item leaves the
 board, the inspector says so, keeps the last details it had and disables its
-buttons. Opening another item replaces what it shows. `Esc` or the close button
-closes the inspector and puts focus back on the item that opened it. The next
-`Esc` clears an active search. While the inspector covers Launch and Ask, `l`
-and `a` close it first.
+buttons. Opening another item replaces what it shows. Enter on a row that has
+left the board but still holds focus opens nothing and announces that the item
+is gone. `Esc` or the close button closes the inspector and puts focus
+back on the item that opened it. The next `Esc` clears an active search. While
+the inspector covers Launch and Ask, `l` and `a` close it first, and `g d`,
+`g t` and `g a` close it when it covers the item they focus.
 
 ## From a thread
 

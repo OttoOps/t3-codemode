@@ -2816,6 +2816,159 @@ async fn the_inspector_is_a_non_modal_aside_documented_on_the_board_page() {
 }
 
 #[tokio::test]
+async fn g_t_and_g_d_close_a_full_width_drawer_over_the_row_they_focus() {
+    let (html, st) = two_gate_page().await;
+    let r = drawer_scenario(
+        &html,
+        &st,
+        r##"
+emitState({ ...base, tree });
+selectTab("open");
+const phone = { left: 0, right: 390, top: 100, bottom: 160, width: 390, height: 60 };
+const go = (key) => {
+  click(row("acme/a#2").querySelector('[data-part="title"]'));
+  dr().rect = { left: 0, right: 390, top: 48, bottom: 800, width: 390, height: 752 };
+  for (const id of ["open", "cards"]) for (const el of document.getElementById(id).children) el.rect = phone;
+  press(document.activeElement, "g");
+  press(document.activeElement, key);
+  const f = document.activeElement;
+  return { open: dr().classList.contains("open"), list: f.parentNode && f.parentNode.id };
+};
+return { tickets: go("t"), decisions: go("d") };
+"##,
+    );
+    assert_eq!(r["tickets"], json!({"open": false, "list": "open"}), "g t uncovers the ticket row it focuses: {r}");
+    assert_eq!(r["decisions"], json!({"open": false, "list": "cards"}), "g d uncovers the card it focuses: {r}");
+}
+
+#[tokio::test]
+async fn a_card_link_off_github_is_not_labelled_as_on_github() {
+    let (html, st) = two_gate_page().await;
+    let r = drawer_scenario(
+        &html,
+        &st,
+        r##"
+const mk = (id, url) => ({ ...base.cards[0], id, ticket: null, label: null, text: "**ACTION NEEDED:** approve the deploy, here: " + url });
+emitState({ ...base, cards: [mk("c1", "https://ci.example.com/runs/5"), mk("c2", "https://github.com/acme/a/actions/runs/5"), mk("c3", "https://github.com/acme/a/pull/3")] });
+const link = (id) => {
+  click(card(id).querySelector('[data-part="ask"]'));
+  return [dp("id").textContent, dp("gh-issue").textContent, dp("gh-issue").getAttribute("aria-label")];
+};
+return { off: link("c1"), runs: link("c2"), pr: link("c3") };
+"##,
+    );
+    assert_eq!(r["off"], json!(["Card c1", "Open link", "Open link for card c1"]), "{r}");
+    assert_eq!(r["runs"], json!(["Card c2", "Open link on GitHub", "Open link for card c2"]), "{r}");
+    assert_eq!(r["pr"], json!(["Card c3", "Review #3 on GitHub", "Review #3 for card c3"]), "{r}");
+}
+
+#[tokio::test]
+async fn enter_on_a_removed_row_that_kept_focus_opens_nothing() {
+    let (html, st) = two_gate_page().await;
+    let r = drawer_scenario(
+        &html,
+        &st,
+        r##"
+emitState({ ...base, cards: [], tree });
+const leave = (label) => {
+  row(label).focus();
+  emitState({ ...base, cards: [], tree: tree.filter((t) => t.label !== label) });
+  const stale = row(label);
+  press(stale, "Enter");
+  advance(100);
+  const out = { stale: stale.classList.contains("stale-item"), ...view(), gone: shown("gone"), said: document.getElementById("live").textContent };
+  emitState({ ...base, cards: [], tree });
+  return out;
+};
+const closed = leave("acme/a#8");
+click(row("acme/a#2").querySelector('[data-part="title"]'));
+const kept = leave("acme/a#7");
+return { closed, open: kept };
+"##,
+    );
+    assert_eq!(
+        (&r["closed"]["stale"], &r["closed"]["open"], &r["closed"]["said"]),
+        (&json!(true), &json!(false), &json!("This ticket is no longer on the board.")),
+        "a closed drawer stays closed: {r}"
+    );
+    assert_eq!(
+        (&r["open"]["open"], &r["open"]["id"], &r["open"]["gone"], &r["open"]["said"]),
+        (&json!(true), &json!("acme/a#2"), &json!(null), &json!("This ticket is no longer on the board.")),
+        "an open drawer keeps its subject, with no gone note over it: {r}"
+    );
+}
+
+#[tokio::test]
+async fn a_late_message_load_never_overwrites_a_newer_one_or_grows_the_cache() {
+    let (html, _) = two_gate_page().await;
+    let r = run_page_async(
+        &html,
+        r##"async () => {
+const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+const waits = {};
+fetchReply = (url) => new Promise((ok, fail) => { (waits[url] ||= []).push({ ok, fail }); });
+const body = (b) => ({ ok: true, status: 200, json: async () => ({ body: b }) });
+const fill = (p) => { for (let i = 1; i <= 64; i++) loadMsg(p + i); };
+loadMsg("m0");
+fill("a");
+const evicted = !dr.msgs.has("m0");
+waits["/api/msg/m0"][0].fail(new Error("slow"));
+await flush();
+const late = { evicted, size: dr.msgs.size, has: dr.msgs.has("m0") };
+loadMsg("m1");
+fill("b");
+loadMsg("m1");
+waits["/api/msg/m1"][1].ok(body("fresh"));
+await flush();
+waits["/api/msg/m1"][0].fail(new Error("slow"));
+await flush();
+return { late, newer: dr.msgs.get("m1"), size: dr.msgs.size };
+}"##,
+    );
+    assert_eq!(r["late"], json!({"evicted": true, "size": 64, "has": false}), "an evicted load stays evicted: {r}");
+    assert_eq!(r["newer"], json!({"body": "fresh"}), "a late failure leaves the newer result: {r}");
+    assert_eq!(r["size"], 64, "{r}");
+}
+
+#[tokio::test]
+async fn a_pending_drawer_action_does_not_disable_the_next_subjects_button() {
+    let (html, st) = two_gate_page().await;
+    let r = drawer_scenario(
+        &html,
+        &st,
+        r##"
+emitState({ ...base, cards: [], tree });
+const waits = [];
+fetchReply = () => new Promise((ok) => waits.push(ok));
+const done = { ok: true, status: 200, json: async () => ({}) };
+const pick = (label) => { click(row(label).querySelector('[data-part="title"]')); return dp("pause").getAttribute("aria-disabled"); };
+pick("acme/a#2");
+dp("pause").dispatch("click");
+const first = dp("pause").getAttribute("aria-disabled");
+const other = pick("acme/a#8");
+dp("pause").dispatch("click");
+const second = dp("pause").getAttribute("aria-disabled");
+const bothA = pick("acme/a#2");
+dp("pause").dispatch("click");
+waits[0](done);
+await flush();
+const doneA = dp("pause").getAttribute("aria-disabled");
+const againB = pick("acme/a#8");
+if (waits[1]) waits[1](done);
+await flush();
+return { first, other, second, bothA, doneA, againB, settled: dp("pause").getAttribute("aria-disabled"),
+  posts: fetches.filter((f) => f.method === "POST").map((f) => f.url) };
+"##,
+    );
+    assert_eq!(
+        r,
+        json!({"first": "true", "other": null, "second": "true", "bothA": "true", "doneA": null, "againB": "true", "settled": null,
+               "posts": ["/api/links/t-acme%2Fa%232/pause", "/api/links/t-acme%2Fa%238/pause"]}),
+        "a pending action disables the button only for its own subject: {r}"
+    );
+}
+
+#[tokio::test]
 async fn a_needs_you_row_links_to_its_card() {
     let (html, st) = two_gate_page().await;
     let r = page_scenario(
