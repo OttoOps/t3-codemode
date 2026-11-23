@@ -103,8 +103,12 @@ to filter the board to its tickets, and click it again to clear that filter.
   `Publishing:` tails, and shortens hashes to 7 characters and GitHub links to
   `#65`. When a launch picks from a pool in `models.ticket` or `board.pool`,
   each launch adds an entry that names the instance it went to and why.
-- **Launch and Ask,** pinned above Activity. Launch takes GitHub issue URLs and
-  makes each one a ticket thread. Before you launch, the board shows which model
+- **Launch and Ask,** pinned above Activity. Launch takes GitHub, GitLab, and
+  Jira issue references (`owner/repo#41`, `PROJ-123`, or an issue URL) and
+  makes each one a ticket thread. When a non-GitHub reference does not resolve
+  to a T3 project through an origin remote or [`trackers`](config.md#trackers)
+  mapping, Launch shows a project picker for that reference so you can choose
+  its T3 project before launching. Before you launch, the board shows which model
   and source (`.t3-workflow.json`, `AGENTS.md`, `user config`, `board setting`,
   or `default`) the launch will use; when an issue's repository overrides
   `models.ticket` in its `.t3-workflow.json` or `AGENTS.md`, the board says so.
@@ -1439,10 +1443,10 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it; a flow launch card takes `launch` or `skip` instead ([The flow](#the-flow)) |
 | `POST /api/cards/{id}/dismiss` | Resolve without messaging |
-| `POST /api/launch` `{issues: [...]}` | `wf.launchTicket` for each (at most 20) |
+| `POST /api/launch` `{issues: [...]}` | `wf.launchTicket` for each (at most 20); each entry is an issue reference string or `{issue, project?}` with an explicit T3 project id or title |
 | `POST /api/ask` `{question}` | Ask a scratch thread about the board, or for work it launches with `wf.dispatch`, using `board.askPool` or `board.askInstanceId`/`askModel`/`askEffort`; returns the ask view with `instanceId`, `model`, `effort`, `modelSource` (and `pool`, `reason` for pools) |
 | `GET /api/usage-stats?window=` | The `wf.usageStats({ window })` view of [launch routing](#launch-routing), computed fresh, which the [routing panel](#the-routing-panel) reads. `window` is optional: `all`, or a count of `m`, `h` or `d` such as `24h` (the default), and may be percent-encoded. Any other query parameter, a repeated `window`, or a bad duration is a 400 |
-| `GET /api/models` | Current ticket and ask model resolution (`ticket`, `ask`), enabled providers/models/efforts from `orchestrator_capabilities` (`providers`), configured pools (`pools`), and per-project repo overrides (`repoOverrides`) |
+| `GET /api/models` | Current ticket and ask model resolution (`ticket`, `ask`), enabled providers/models/efforts from `orchestrator_capabilities` (`providers`), configured pools (`pools`), active T3 projects with parsed origin remotes (`projects`), `trackers` mappings (`trackers`), and per-project repo overrides (`repoOverrides`) |
 | `PUT /api/models/ticket` `{mode, ...}` | Persist `models.ticket` to the user workflow config (`mode: "model"` with `provider`, `model`, `effort?`, or `mode: "pool"` with `pool`) after validating against live capabilities or configured pools; returns the updated `/api/models` view |
 | `PUT /api/models/ask` `{mode, ...}` | Persist the ask box mode to t3cm's `config.json` (`board.askInstanceId`/`askModel`/`askEffort` or `board.askPool`) and apply it live with no restart; returns the updated `/api/models` view |
 | `GET /api/settings` | Loopback or the Tailscale owner: the config file, its revision, the saved, default and running values, the keys that need a restart, and any errors. See [Settings API](#settings-api) |

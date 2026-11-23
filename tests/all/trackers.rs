@@ -608,3 +608,275 @@ async fn closed_gitlab_ticket_alone_does_not_skip_github_flow_issue() {
     assert_eq!(queued, ["widgets#41"], "{f}");
     assert!(f["skipped"].as_array().unwrap().is_empty(), "{f}");
 }
+
+#[tokio::test]
+async fn api_launch_accepts_optional_project_per_ref_and_keeps_string_refs() {
+    let h = with_trackers(json!({ "jira": { "ENG": "p-eng" } }));
+    let s = crate::board::start(h).await;
+    let mut fe = project("p-fe", "/src/fe");
+    fe["title"] = json!("Frontend");
+    s.h.fake.set_projects(vec![
+        project("p-gh", "/src/gh-widgets"),
+        project("p-gl", "/src/gl-service"),
+        project("p-eng", "/src/eng"),
+        fe,
+    ]);
+    s.h.remotes.set("/src/gh-widgets", "git@github.com:acme/widgets.git");
+    s.h.remotes.set("/src/gl-service", "git@gitlab.acme.example:team/service.git");
+
+    let r = s
+        .post(
+            "/api/launch",
+            json!({
+                "issues": [
+                    "acme/widgets#1",
+                    { "issue": "PROJ-123", "project": "p-gl" },
+                    { "issue": "OPS-9", "project": "Frontend" },
+                    { "issue": "ENG-5", "project": null },
+                    { "issue": "  ", "project": "p-gl" }
+                ]
+            }),
+            Some(&s.csrf()),
+            None,
+        )
+        .await;
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 4, "{body}");
+    assert_eq!(
+        (&results[0]["ok"], &results[0]["projectId"], &results[0]["issue"]),
+        (&json!(true), &json!("p-gh"), &json!("acme/widgets#1"))
+    );
+    assert_eq!(
+        (&results[1]["ok"], &results[1]["projectId"], &results[1]["label"]),
+        (&json!(true), &json!("p-gl"), &json!("PROJ-123"))
+    );
+    assert_eq!(
+        (&results[2]["ok"], &results[2]["projectId"], &results[2]["label"]),
+        (&json!(true), &json!("p-fe"), &json!("OPS-9"))
+    );
+    assert_eq!(
+        (&results[3]["ok"], &results[3]["projectId"], &results[3]["label"]),
+        (&json!(true), &json!("p-eng"), &json!("ENG-5"))
+    );
+
+    // Unknown fields inside an item or on the body are rejected with 400
+    let bad_item = s
+        .post("/api/launch", json!({"issues": [{"issue": "PROJ-2", "projectId": "p-gl"}]}), Some(&s.csrf()), None)
+        .await;
+    assert_eq!(bad_item.status(), 400);
+    let bad_body = s.post("/api/launch", json!({"issues": ["PROJ-2"], "extra": true}), Some(&s.csrf()), None).await;
+    assert_eq!(bad_body.status(), 400);
+    let empty = s.post("/api/launch", json!({"issues": [{"issue": "   "}]}), Some(&s.csrf()), None).await;
+    assert_eq!(empty.status(), 400);
+    let too_many: Vec<Value> = (1..=21).map(|n| json!({"issue": format!("PROJ-{n}"), "project": "p-gl"})).collect();
+    let over = s.post("/api/launch", json!({"issues": too_many}), Some(&s.csrf()), None).await;
+    assert_eq!(over.status(), 400);
+}
+
+#[tokio::test]
+async fn api_models_exposes_active_projects_remotes_and_trackers() {
+    let h = with_trackers(json!({
+        "jira": { "MAPPED": "p-api" },
+        "hosts": { "jira.acme.example": "p-web" }
+    }));
+    let s = crate::board::start(h).await;
+    let mut p_web = project("p-web", "/src/web");
+    p_web["title"] = json!("Web App");
+    let mut p_api = project("p-api", "/src/api");
+    p_api["title"] = json!("API Service");
+    let mut p_plain = project("p-plain", "/src/plain");
+    p_plain["title"] = json!("Scratch");
+    let mut p_arch = project("p-arch", "/src/arch");
+    p_arch["title"] = json!("Archived");
+    p_arch["archivedAt"] = json!("2026-11-02T00:00:00Z");
+    let mut p_del = project("p-del", "/src/del");
+    p_del["title"] = json!("Deleted");
+    p_del["deletedAt"] = json!("2026-11-02T00:00:00Z");
+    s.h.fake.set_projects(vec![p_web, p_api, p_plain, p_arch, p_del]);
+    s.h.remotes.set("/src/web", "git@github.com:acme/web.git");
+    s.h.remotes.set("/src/api", "https://token:secret@gitlab.acme.example:8443/team/api.git");
+
+    let body = s.get("/api/models").await;
+    assert_eq!(
+        body["projects"],
+        json!([
+            { "id": "p-api", "title": "API Service", "remote": { "host": "gitlab.acme.example", "path": "team/api", "port": 8443 } },
+            { "id": "p-plain", "title": "Scratch", "remote": null },
+            { "id": "p-web", "title": "Web App", "remote": { "host": "github.com", "path": "acme/web", "port": null } }
+        ]),
+        "{body}"
+    );
+    assert_eq!(
+        body["trackers"],
+        json!({ "jira": { "MAPPED": "p-api" }, "hosts": { "jira.acme.example": "p-web" } }),
+        "{body}"
+    );
+    let raw = body.to_string();
+    assert!(!raw.contains("/src/"), "workspace paths must not be exposed: {raw}");
+    assert!(!raw.contains("secret"), "remote credentials must not be exposed: {raw}");
+}
+
+#[tokio::test]
+async fn launch_form_shows_project_picker_for_unresolved_non_github_refs_and_submits_picks() {
+    let h = with_trackers(json!({ "jira": { "MAPPED": "API Service" } }));
+    let s = crate::board::start(h).await;
+    let lms_dir = s.h.dir.path().join("lms");
+    std::fs::create_dir_all(&lms_dir).unwrap();
+    std::fs::write(lms_dir.join("AGENTS.md"), "## Agent workflow\n\n- Ticket model: claude-opus-5-5, low effort\n")
+        .unwrap();
+    let mut p_gh = project("p-gh", "/src/gh");
+    p_gh["title"] = json!("Widgets");
+    let mut p_api = project("p-api", "/src/api");
+    p_api["title"] = json!("API Service");
+    let mut p_lms = project("p-lms", &lms_dir.to_string_lossy());
+    p_lms["title"] = json!("LMS");
+    s.h.fake.set_projects(vec![p_gh, p_api, p_lms]);
+    s.h.remotes.set("/src/gh", "git@github.com:acme/widgets.git");
+    s.h.remotes.set("/src/api", "https://gitlab.acme.example:8443/team/api.git");
+    s.h.remotes.set(&lms_dir.to_string_lossy(), "git@gitlab.internal:team/lms.git");
+
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st: Value = s.get("/api/state").await;
+    let models: Value = s.get("/api/models").await;
+    let models_err = json!({
+        "ticket": models["ticket"],
+        "ask": models["ask"],
+        "providers": models["providers"],
+        "pools": models["pools"],
+        "projects": [],
+        "trackers": models["trackers"],
+        "repoOverrides": [],
+        "capabilitiesError": null,
+        "projectsError": "t3 down",
+        "modelsRev": 1,
+        "modelsSession": models["modelsSession"],
+    });
+
+    let r = crate::board::run_page_async_with(
+        &html,
+        "",
+        &format!(
+            r##"async () => {{
+const base = {st};
+let curModels = {models};
+const errModels = {models_err};
+const tick = async () => {{ for (let i = 0; i < 8; i++) await Promise.resolve(); }};
+fetchReply = (url, opts) => {{
+  const m = (opts && opts.method) || "GET";
+  if (url === "/api/models" && m === "GET") return Promise.resolve({{ ok: true, json: async () => curModels }});
+  if (url === "/api/launch" && m === "POST") {{
+    const body = JSON.parse(opts.body);
+    return Promise.resolve({{
+      ok: true,
+      json: async () => ({{
+        results: body.issues.map((item, i) => {{
+          const issue = typeof item === "string" ? item : item.issue;
+          return {{ ok: true, issue, label: issue, link: "https://t3/launch:" + (i + 1), model: "claude-opus-5-5", instanceId: "claudeAgent", modelSource: "default" }};
+        }})
+      }})
+    }});
+  }}
+  return Promise.resolve({{ ok: true, json: async () => ({{}}) }});
+}};
+emitState(base);
+await refreshModels(true);
+
+const ta = document.getElementById("issues");
+const box = document.getElementById("launch-projects");
+const form = document.getElementById("launch");
+
+// 1. GitHub refs (matched or unmatched) never show the project picker and submit plain strings.
+ta.value = "acme/widgets#41\nacme/other#9";
+ta.dispatch("input");
+const ghHidden = box.hidden;
+form.dispatch("submit");
+await tick();
+const ghPost = JSON.parse(fetches.filter((f) => f.url === "/api/launch")[0].body);
+
+// 2. Mapped Jira key and origin-matched GitLab URL resolve automatically with no picker.
+ta.value = "MAPPED-7\nhttps://gitlab.acme.example:8443/team/api/-/issues/9";
+ta.dispatch("input");
+const mappedHidden = box.hidden;
+
+// 3. Unmapped Jira key + unmapped GitLab URL + GitHub ref: picker shows only the two unresolved refs.
+ta.value = "acme/widgets#41\nPROJ-123\nhttps://gitlab.other.example/org/app/-/issues/4";
+ta.dispatch("input");
+const shownForUnmapped = !box.hidden;
+const refsShown = [...box.querySelectorAll("select[data-ref]")].map((s) => s.dataset.ref);
+const optsFirst = [...box.querySelectorAll("select[data-ref]")[0].children].map((o) => [o.getAttribute("value"), o.textContent]);
+
+// Submitting before picking blocks POST, shows inline error, and marks selects invalid.
+const postsBefore = fetches.filter((f) => f.url === "/api/launch").length;
+form.dispatch("submit");
+await tick();
+const postsBlocked = fetches.filter((f) => f.url === "/api/launch").length;
+const blockErr = box.querySelector("#launch-projects-err").textContent;
+const firstInvalid = box.querySelectorAll("select[data-ref]")[0].getAttribute("aria-invalid");
+
+// Picking LMS for PROJ-123 updates the launch model preview with LMS's AGENTS.md override.
+const sels = box.querySelectorAll("select[data-ref]");
+sels[0].value = "p-lms";
+sels[0].dispatch("change");
+const modelAfterPick = document.getElementById("launch-model-text").textContent;
+sels[1].value = "p-api";
+sels[1].dispatch("change");
+
+// Submit succeeds with per-ref projects and clears the form + hides the picker.
+form.dispatch("submit");
+await tick();
+const launchPosts = fetches.filter((f) => f.url === "/api/launch").map((f) => JSON.parse(f.body));
+const clearedAfter = ta.value === "" && box.hidden;
+
+// 4. Projects error state shows message and Retry button re-fetches /api/models.
+curModels = errModels;
+await refreshModels(true);
+ta.value = "PROJ-55";
+ta.dispatch("input");
+const errText = box.textContent;
+const modelGetsBefore = fetches.filter((f) => f.url === "/api/models").length;
+box.querySelector("#launch-projects-refresh").dispatch("click");
+await tick();
+const modelGetsAfter = fetches.filter((f) => f.url === "/api/models").length;
+
+return {{
+  ghHidden, ghPost, mappedHidden, shownForUnmapped, refsShown, optsFirst,
+  postsBefore, postsBlocked, blockErr, firstInvalid, modelAfterPick,
+  mixedPost: launchPosts[1], clearedAfter, errText,
+  retried: modelGetsAfter > modelGetsBefore
+}};
+}}"##
+        ),
+    );
+
+    assert_eq!(r["ghHidden"], true, "{r}");
+    assert_eq!(r["ghPost"], json!({"issues": ["acme/widgets#41", "acme/other#9"]}), "{r}");
+    assert_eq!(r["mappedHidden"], true, "{r}");
+    assert_eq!(r["shownForUnmapped"], true, "{r}");
+    assert_eq!(r["refsShown"], json!(["PROJ-123", "https://gitlab.other.example/org/app/-/issues/4"]), "{r}");
+    assert_eq!(
+        r["optsFirst"],
+        json!([["", "Choose a project..."], ["p-api", "API Service"], ["p-lms", "LMS"], ["p-gh", "Widgets"]]),
+        "{r}"
+    );
+    assert_eq!(r["postsBefore"], r["postsBlocked"], "must not POST while picks are missing: {r}");
+    assert!(r["blockErr"].as_str().unwrap().contains("PROJ-123"), "{r}");
+    assert!(r["blockErr"].as_str().unwrap().contains("app#4"), "{r}");
+    assert_eq!(r["firstInvalid"], "true", "{r}");
+    assert!(r["modelAfterPick"].as_str().unwrap().contains("LMS"), "{r}");
+    assert_eq!(
+        r["mixedPost"],
+        json!({
+            "issues": [
+                "acme/widgets#41",
+                { "issue": "PROJ-123", "project": "p-lms" },
+                { "issue": "https://gitlab.other.example/org/app/-/issues/4", "project": "p-api" }
+            ]
+        }),
+        "{r}"
+    );
+    assert_eq!(r["clearedAfter"], true, "{r}");
+    assert!(r["errText"].as_str().unwrap().contains("Could not load T3 projects: t3 down"), "{r}");
+    assert_eq!(r["retried"], true, "{r}");
+}

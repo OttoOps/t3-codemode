@@ -3110,6 +3110,38 @@ impl Wf {
             Ok(ps) => (Some(ps), None),
             Err(e) => (None, Some(self.t3.redact(e.to_string()))),
         };
+        let mut project_origins: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+        let mut projects_out: Vec<Value> = Vec::new();
+        if let Some(projects) = &projects_list {
+            let origins = futures_util::future::join_all(projects.iter().map(|p| async move {
+                match p["workspaceRoot"].as_str().filter(|s| !s.is_empty()) {
+                    Some(root) => self.remotes.origin(root).await,
+                    None => None,
+                }
+            }))
+            .await;
+            for (p, origin) in projects.iter().zip(origins) {
+                let Some(pid) = p["id"].as_str().filter(|s| !s.is_empty()) else { continue };
+                let title = p["title"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or(pid);
+                let remote = origin.as_deref().and_then(|u| {
+                    let r = parse_remote(u)?;
+                    Some(json!({ "host": r.host, "path": r.path, "port": web_port(u) }))
+                });
+                project_origins.insert(pid.to_string(), origin);
+                projects_out.push(json!({ "id": pid, "title": title, "remote": remote }));
+            }
+            projects_out.sort_by(|a, b| {
+                let ka = (
+                    a["title"].as_str().unwrap_or_default().to_lowercase(),
+                    a["id"].as_str().unwrap_or_default().to_string(),
+                );
+                let kb = (
+                    b["title"].as_str().unwrap_or_default().to_lowercase(),
+                    b["id"].as_str().unwrap_or_default().to_string(),
+                );
+                ka.cmp(&kb)
+            });
+        }
 
         let mut attempt = 0usize;
         loop {
@@ -3197,7 +3229,11 @@ impl Wf {
                         None => match self.known_project(&pid).and_then(|k| k["repo"].as_str().map(String::from)) {
                             Some(r) => Some(r),
                             None => {
-                                let r = self.origin_repo(p).await;
+                                let r = project_origins
+                                    .get(&pid)
+                                    .and_then(|o| o.as_deref())
+                                    .and_then(parse_remote)
+                                    .map(|r| r.path);
                                 if r.is_some() {
                                     self.remember_project(&pid, &p["title"], r.clone());
                                 }
@@ -3301,6 +3337,8 @@ impl Wf {
                 "ask": ask,
                 "providers": providers,
                 "pools": pools,
+                "projects": projects_out,
+                "trackers": config.trackers,
                 "repoOverrides": repo_overrides,
                 "capabilitiesError": caps_err,
                 "projectsError": projects_err,
