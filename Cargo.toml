@@ -1,6 +1,6 @@
 [package]
 name = "t3-codemode"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Code Mode MCP server over T3 Code and other MCP servers: search + execute, with memory and a thread-workflow layer"
