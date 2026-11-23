@@ -136,13 +136,16 @@ impl Remote {
         let allowed = self.send(route, "GET", "/api/models").send().await.unwrap();
         assert_eq!(allowed.status(), 200, "the request must be authenticated");
         let page = self.send(route, "GET", "/").send().await.unwrap().text().await.unwrap();
-        assert!(page.contains(r#"id="models-btn""#), "the Models control stays");
-        let gear = &page[page.find(r#"<button class="btn" type="button" id="settings-btn""#).unwrap()..];
-        assert!(gear[..gear.find('>').unwrap()].ends_with(" hidden"), "the gear starts hidden on a remote page");
+        assert!(!page.contains(r#"id="models-btn""#), "one Settings button, no Models button");
+        assert!(!page.contains(r#"id="models-dlg""#), "one Settings dialog, no Models dialog");
+        let dialog = &page[page.find(r#"<dialog id="settings-dlg""#).unwrap()..];
+        let dialog = &dialog[..dialog.find("</dialog>").unwrap()];
+        for picker in [r#"id="tm-save""#, r#"id="am-save""#] {
+            assert!(dialog.contains(picker), "the Settings dialog holds the model pickers");
+        }
         let prelude = format!(
             r#"globalThis.__fetchReply = (url) => {{
   if (url !== "/api/settings") return new Promise(() => {{}});
-  $("settings-btn").hidden = true;
   return Promise.resolve({{ ok: {settings} < 300, status: {settings}, json: () => Promise.resolve({{}}) }});
 }};"#
         );
@@ -150,19 +153,28 @@ impl Remote {
             &page,
             &prelude,
             "async () => { for (let i = 0; i < 5; i++) await null; \
-             return { local: LOCAL, settings: SETTINGS, sections: conf.panels.size, gear: $(\"settings-btn\").hidden === false }; }",
+             const dlg = $(\"settings-dlg\"); \
+             $(\"settings-btn\").dispatch(\"click\"); \
+             return { local: LOCAL, settings: SETTINGS, sections: conf.panels.size, gear: $(\"settings-btn\").hidden === false, \
+               open: !!dlg.open, modelsOnly: dlg.classList.contains(\"models-only\") }; }",
         )
     }
 
     async fn refused(&self, remote: &Value, why: &str) {
         let revision = self.b.settings().await["revision"].clone();
+        self.b.h.fake.set_providers(vec![provider("claudeAgent", "claudeAgent", &["claude-opus-5-5"])]);
         for route in Remote::routes() {
             let opened = self.page(&route, 403).await;
             assert_eq!(
                 opened,
-                json!({"local": false, "settings": false, "sections": 0, "gear": false}),
-                "a refused board builds no settings: {remote}"
+                json!({"local": false, "settings": false, "sections": 0, "gear": true, "open": true, "modelsOnly": true}),
+                "a refused board opens Settings with only the model pickers: {remote}"
             );
+            let pick =
+                json!({"mode": "model", "provider": "claudeAgent", "model": "claude-opus-5-5", "effort": "high"});
+            let req = self.send(&route, "PUT", "/api/models/ticket").header("X-T3CM-CSRF", &self.b.h.app.csrf);
+            let saved = req.json(&pick).send().await.unwrap();
+            assert_eq!(saved.status(), 200, "a refused board still saves its ticket model: {remote}");
             for (method, path) in ROUTES {
                 let body = json!({"revision": revision, "file": {"deny": []}});
                 let req = self.send(&route, method, path).header("X-T3CM-CSRF", &self.b.h.app.csrf);
@@ -183,6 +195,7 @@ impl Remote {
             let opened = self.page(&route, 200).await;
             assert_eq!(opened["settings"], true, "{opened}");
             assert_eq!(opened["gear"], true, "the owner's board shows the gear: {opened}");
+            assert_eq!(opened["modelsOnly"], false, "the owner's Settings shows every section: {opened}");
             assert!(opened["sections"].as_u64().unwrap() > 0, "{opened}");
             for (method, path) in ROUTES.iter().filter(|(m, _)| *m != "PUT") {
                 let r = self.send(&route, method, path).send().await.unwrap();
@@ -275,6 +288,32 @@ async fn a_loopback_board_builds_settings_without_asking() {
         "async () => ({ local: LOCAL, settings: SETTINGS, built: conf.panels.size > 0, gear: $(\"settings-btn\").hidden === false })",
     );
     assert_eq!(opened, json!({"local": true, "settings": true, "built": true, "gear": true}));
+}
+
+#[tokio::test]
+async fn a_change_link_opens_settings_at_its_picker() {
+    let b = Board::start(H::new()).await;
+    let page = b.page().await;
+    assert_eq!(page.matches(r#"id="tm-save""#).count(), 1, "one ticket picker");
+    assert!(!page.contains(r#"id="models-dlg""#));
+    let r = run_page_async_with(
+        &page,
+        "globalThis.__fetchReply = () => new Promise(() => {});",
+        r#"async () => {
+  const dlg = $("settings-dlg");
+  showSection("board");
+  closeDialog(dlg);
+  $("ask-model-edit").dispatch("click");
+  return {
+    open: !!dlg.open, modelsOnly: dlg.classList.contains("models-only"), tab: conf.tab,
+    focus: document.activeElement.id, home: $("md-sec-ask").parentNode.id,
+  };
+}"#,
+    );
+    assert_eq!(
+        r,
+        json!({"open": true, "modelsOnly": false, "tab": "launches", "focus": "am-mode-model", "home": "settings-pickers"})
+    );
 }
 
 #[test]
@@ -1443,7 +1482,7 @@ async fn saving_one_picker_keeps_the_other_pickers_choice() {
         r#"async () => {{
 {DIALOG_HELPERS}
   await settle();
-  openModelsDlg("ticket");
+  openSettings("ticket");
   setPickerMode("ask", "pool", true);
   await settle();
   const opened = modelsState.ask.mode;
@@ -1472,7 +1511,7 @@ globalThis.__fetchReply = (url) => url === "/api/models" && ++modelReads === {re
         let scenario = format!(
             r#"async () => {{
 {DIALOG_HELPERS}
-  openModelsDlg("ticket");
+  openSettings("ticket");
   setPickerMode("ticket", "pool", true);
   await settle();
   return {{ mode: modelsState.ticket.mode, pool: $("tm-pool").value, off: $("tm-save").disabled }};

@@ -6224,7 +6224,6 @@ emitState(base);
 await refreshModels(true);
 const beforeLaunch = document.getElementById("launch-model-text").textContent;
 const beforeAsk = document.getElementById("ask-model-text").textContent;
-const beforeBtn = document.getElementById("models-btn-text").textContent;
 
 // Typing an issue from an overridden repo previews that repo's override before launch.
 const issues = document.getElementById("issues");
@@ -6235,28 +6234,26 @@ issues.value = "";
 issues.dispatch("input");
 
 // Open picker dialog, check repo overrides list and save ticket pool mode + ask pool mode.
-document.getElementById("models-btn").dispatch("click");
+document.getElementById("launch-model-edit").dispatch("click");
 await tick();
 const ovrList = document.getElementById("md-repo-list").textContent;
 document.getElementById("tm-mode-pool").dispatch("click");
 document.getElementById("tm-save").dispatch("click");
 await tick();
 const afterTicketLine = document.getElementById("launch-model-text").textContent;
-const afterTicketBtn = document.getElementById("models-btn-text").textContent;
 
 document.getElementById("am-mode-pool").dispatch("click");
 document.getElementById("am-save").dispatch("click");
 await tick();
 const afterAskLine = document.getElementById("ask-model-text").textContent;
 const puts = fetches.filter((f) => f.method === "PUT").map((f) => [f.url, JSON.parse(f.body)]);
-return { beforeLaunch, beforeAsk, beforeBtn, withOverride, ovrList, afterTicketLine, afterTicketBtn, afterAskLine, puts };
+return { beforeLaunch, beforeAsk, withOverride, ovrList, afterTicketLine, afterAskLine, puts };
 "##
         ),
     );
     assert!(r["beforeLaunch"].as_str().unwrap().contains("claude-2 · claude-opus-5-5 · high (user config)"), "{r}");
     assert!(r["beforeLaunch"].as_str().unwrap().contains("lms overrides via AGENTS.md"), "{r}");
     assert!(r["beforeAsk"].as_str().unwrap().contains("claudeAgent · claude-haiku-5-5 (default)"), "{r}");
-    assert_eq!(r["beforeBtn"], "claude-opus-5-5 · high");
     assert!(
         r["withOverride"]
             .as_str()
@@ -6269,7 +6266,6 @@ return { beforeLaunch, beforeAsk, beforeBtn, withOverride, ovrList, afterTicketL
         "{r}"
     );
     assert!(r["afterTicketLine"].as_str().unwrap().contains("pool opus (claude-opus-5-5 · high) (user config)"), "{r}");
-    assert_eq!(r["afterTicketBtn"], "Pool: opus");
     assert!(r["afterAskLine"].as_str().unwrap().contains("pool opus (claude-opus-5-5 · high) (board setting)"), "{r}");
     assert_eq!(
         r["puts"],
@@ -6491,7 +6487,7 @@ await tick();
 resolveLateGet();
 await lateP;
 await tick();
-const afterLateBtn = document.getElementById("models-btn-text").textContent;
+const afterLateLine = document.getElementById("launch-model-text").textContent;
 const afterLateRev = modelsState.appliedRev;
 
 // 2. Revision moves to 3, GET fails -> error is surfaced and rev stays at 2.
@@ -6506,7 +6502,7 @@ const revDuringFail = modelsState.appliedRev;
 mode = "rev3";
 emitState(stateWith(3, "sess-a"));
 await tick();
-const afterRetryBtn = document.getElementById("models-btn-text").textContent;
+const afterRetryLine = document.getElementById("launch-model-text").textContent;
 const afterRetryErr = document.getElementById("models-cap-err").textContent;
 const afterRetryRev = modelsState.appliedRev;
 
@@ -6523,27 +6519,27 @@ const boundedAttempts = getCount - beforeBound;
 mode = "newSession";
 emitState(stateWith(0, "sess-b"));
 await tick();
-const afterRestartBtn = document.getElementById("models-btn-text").textContent;
+const afterRestartLine = document.getElementById("launch-model-text").textContent;
 const afterRestartRev = modelsState.appliedRev;
 
 return {
-  afterLateBtn, afterLateRev, errBanner, errLine, revDuringFail,
-  afterRetryBtn, afterRetryErr, afterRetryRev, boundedAttempts,
-  afterRestartBtn, afterRestartRev
+  afterLateLine, afterLateRev, errBanner, errLine, revDuringFail,
+  afterRetryLine, afterRetryErr, afterRetryRev, boundedAttempts,
+  afterRestartLine, afterRestartRev
 };
 "##
         ),
     );
-    assert_eq!(r["afterLateBtn"], "Pool: opus", "{r}");
+    assert!(r["afterLateLine"].as_str().unwrap().contains("pool opus"), "{r}");
     assert_eq!(r["afterLateRev"], 2, "{r}");
     assert!(r["errBanner"].as_str().unwrap().contains("Could not refresh models"), "{r}");
     assert!(r["errLine"].as_str().unwrap().contains("Could not refresh models"), "{r}");
     assert_eq!(r["revDuringFail"], 2, "{r}");
-    assert_eq!(r["afterRetryBtn"], "claude-opus-5-5 · high", "{r}");
+    assert!(r["afterRetryLine"].as_str().unwrap().contains("claudeAgent · claude-opus-5-5 · high"), "{r}");
     assert_eq!(r["afterRetryErr"], "", "{r}");
     assert_eq!(r["afterRetryRev"], 3, "{r}");
     assert_eq!(r["boundedAttempts"], 4, "1 initial + 3 bounded retries: {r}");
-    assert_eq!(r["afterRestartBtn"], "Pool: opus", "{r}");
+    assert!(r["afterRestartLine"].as_str().unwrap().contains("pool opus"), "{r}");
     assert_eq!(r["afterRestartRev"], 0, "{r}");
 }
 
