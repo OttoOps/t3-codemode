@@ -600,6 +600,13 @@ not collide with T3 Code's own `:443` binding.
    `T3CM_TAILSCALE_BIN`. Under WSL with no Linux `tailscale`, it uses Windows'
    `tailscale.exe` through interop, and the operator step does not apply.
 
+   While any Serve handler on the node serves a local path or a Unix socket,
+   `tailscaled` refuses every Serve change from anyone but root, operator
+   included. `expose` then names that handler and prints the
+   `sudo tailscale serve ...` command that adds the board route as root. Run
+   it and rerun `expose`, which reuses the board route it finds and writes
+   `board.remote` without another Serve change.
+
 2. Expose the board and write `board.remote` in `config.json`:
 
    ```sh

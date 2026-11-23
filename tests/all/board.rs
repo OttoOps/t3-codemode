@@ -7381,6 +7381,102 @@ fn expose_and_unexpose_drive_tailscale_serve_and_config() {
     );
 }
 
+#[test]
+fn expose_reuses_an_existing_board_root_route_without_a_serve_write() {
+    use t3_codemode::fake::FakeTailscale;
+    use t3_codemode::tailscale::{DEFAULT_HTTPS_PORT, ExposeOptions, expose_tailscale, parse_serve_status_json};
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.json");
+    std::fs::write(&cfg_path, json!({"board": {"settleAfterHours": 48}}).to_string()).unwrap();
+
+    let ts = FakeTailscale::default();
+    ts.set_host_login("alice@acme.example");
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "8443": { "HTTPS": true }, "47732": { "HTTPS": true } },
+                "Web": {
+                    "box.acme.ts.net:8443": { "Handlers": { "/": { "Path": "/srv/widgets" } } },
+                    "box.acme.ts.net:47732": { "Handlers": { "/": { "Proxy": "http://127.0.0.1:47731" } } }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    ts.set_enable_error(Some(
+        "`tailscale serve --bg --https=47732 http://127.0.0.1:47731` failed: 401 Unauthorized: must be root, \
+         or be an operator and able to run 'sudo tailscale' to serve a path or Unix socket",
+    ));
+
+    let report = expose_tailscale(
+        &ts,
+        &cfg_path,
+        &ExposeOptions {
+            https_port: DEFAULT_HTTPS_PORT,
+            local_port: 47731,
+            allow_users: vec![],
+            require_pairing: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(report.origin, "https://box.acme.ts.net:47732");
+    assert!(!ts.calls().iter().any(|c| c.starts_with("serve --")), "no serve write expected: {:?}", ts.calls());
+
+    let loaded = Config::load(&cfg_path).unwrap();
+    assert_eq!(loaded.board.settle_after_hours, 48);
+    let (remote, origin) = loaded.board.active_remote_config().unwrap();
+    assert_eq!(remote.mode, t3_codemode::config::RemoteMode::Tailscale);
+    assert_eq!(origin.canonical(), "https://box.acme.ts.net:47732");
+}
+
+#[test]
+fn expose_explains_a_root_only_serve_handler_when_the_write_is_refused() {
+    use t3_codemode::fake::FakeTailscale;
+    use t3_codemode::tailscale::{DEFAULT_HTTPS_PORT, ExposeOptions, expose_tailscale, parse_serve_status_json};
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.json");
+    std::fs::write(&cfg_path, json!({"board": {"settleAfterHours": 48}}).to_string()).unwrap();
+
+    let ts = FakeTailscale::default();
+    ts.set_host_login("alice@acme.example");
+    ts.set_serve_status(
+        parse_serve_status_json(
+            &json!({
+                "TCP": { "8443": { "HTTPS": true } },
+                "Web": { "box.acme.ts.net:8443": { "Handlers": { "/": { "Path": "/srv/widgets" } } } }
+            })
+            .to_string(),
+        )
+        .unwrap(),
+    );
+    ts.set_enable_error(Some(
+        "`tailscale serve --bg --https=47732 http://127.0.0.1:47731` failed: 401 Unauthorized: must be root, \
+         or be an operator and able to run 'sudo tailscale' to serve a path or Unix socket",
+    ));
+
+    let err = expose_tailscale(
+        &ts,
+        &cfg_path,
+        &ExposeOptions {
+            https_port: DEFAULT_HTTPS_PORT,
+            local_port: 47731,
+            allow_users: vec![],
+            require_pairing: false,
+        },
+    )
+    .unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(ts.calls().iter().any(|c| c == "serve --bg --https=47732 http://127.0.0.1:47731"));
+    assert!(msg.contains("box.acme.ts.net:8443/ -> path /srv/widgets"), "{msg}");
+    assert!(msg.contains("sudo tailscale serve --bg --https=47732 http://127.0.0.1:47731"), "{msg}");
+    assert!(msg.contains("rerun the same `t3cm board expose --tailscale` command"), "{msg}");
+    assert!(!msg.contains("set --operator"), "{msg}");
+    assert!(Config::load(&cfg_path).unwrap().board.active_remote().is_none());
+}
+
 #[tokio::test]
 async fn remote_open_endpoint_is_refused_server_side_in_both_pairing_and_tailscale_modes() {
     use t3_codemode::clock::Clock;
