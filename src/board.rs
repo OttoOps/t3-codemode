@@ -2079,6 +2079,7 @@ impl Wf {
             "contexts": contexts,
             "newIssues": new_issues,
             "dismissedIssues": dismissed_issues,
+            "flow": self.config().flow.is_some(),
             "counts": {"cards": cards.len(), "tickets": open, "running": running, "settled": settled_total,
                        "newIssues": new_issues.len()},
             "service": self.service_view(),
