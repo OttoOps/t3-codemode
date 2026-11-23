@@ -77,7 +77,9 @@ You do not bump the version or push tags. On every push to `main`,
 [release-plz](https://release-plz.dev) opens or updates a
 `chore: release vX.Y.Z` pull request that bumps `Cargo.toml` and adds the
 release to `CHANGELOG.md`, from the Conventional Commit subjects since the
-last tag: `feat` bumps the minor version, anything else the patch. Merging
+last tag. While the version is `0.x`, `feat` or a breaking change (`!` or a
+`BREAKING CHANGE:` footer) bumps the minor version and anything else the
+patch. From `1.0`, a breaking change bumps the major version. Merging
 that pull request tags the release, and the tag starts the release
 workflow, which builds, signs and publishes it (ADR 0017).
 
