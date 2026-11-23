@@ -77,9 +77,18 @@ and the threads running. Only the lists scroll.
   layer of `models.ticket` (`~/.config/t3-workflow/config.json`); saving the ask
   model writes `board.askInstanceId`, `board.askModel`, `board.askEffort` or
   `board.askPool` in t3cm's `config.json`. Both persist and take effect on the
-  next launch or question with no restart. A question in Ask starts a short-lived
-  scratch thread that reads the board, writes its answer under Ask, and then
-  gets archived.
+  next launch or question with no restart. **Ask your agent** takes a question
+  about the board or a request for work, and starts a short-lived scratch
+  thread on the ask model. The thread gets the list of T3 projects (id, title
+  and `owner/repo`). A question, such as "which tickets wait on me?", gets a
+  read-only answer and launches nothing. A request, such as "cut a new release
+  for t3-codemode", is not done in the scratch thread: it picks the one
+  project the request is about and calls [`wf.dispatch`](#from-a-thread),
+  which launches a thread in that project. The launched thread joins the board
+  and shows under Tickets, and the answer names it and its project. When no
+  project fits, or more than one could, the answer asks which one and nothing
+  is launched. The scratch thread writes its answer under Ask, and then gets
+  archived.
 
 Times show as ages (`36m`, `1h 32m`); hover one for the local time.
 
@@ -425,7 +434,7 @@ words of the request. When a ticket on the board, open or done, or a launch
 still waiting to join already has that label, the label gets ` (2)`, ` (3)`
 and so on. When the scratch thread of a question from Ask calls
 `wf.dispatch`, the question records `dispatched: { thread, link, projectId,
-label }`. The result has
+project, label }`, where `project` is the project title. The result has
 the same fields as `wf.launchTicket`'s. An unknown project or an empty request
 throws and launches nothing. A model that does not resolve or a failed launch
 throws and leaves an error card.
@@ -1069,7 +1078,7 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it; a flow launch card takes `launch` or `skip` instead ([The flow](#the-flow)) |
 | `POST /api/cards/{id}/dismiss` | Resolve without messaging |
 | `POST /api/launch` `{issues: [...]}` | `wf.launchTicket` for each (at most 20) |
-| `POST /api/ask` `{question}` | Ask a scratch thread about the board using `board.askPool` or `board.askInstanceId`/`askModel`/`askEffort`; returns the ask view with `instanceId`, `model`, `effort`, `modelSource` (and `pool`, `reason` for pools) |
+| `POST /api/ask` `{question}` | Ask a scratch thread about the board, or for work it launches with `wf.dispatch`, using `board.askPool` or `board.askInstanceId`/`askModel`/`askEffort`; returns the ask view with `instanceId`, `model`, `effort`, `modelSource` (and `pool`, `reason` for pools) |
 | `GET /api/models` | Current ticket and ask model resolution (`ticket`, `ask`), enabled providers/models/efforts from `orchestrator_capabilities` (`providers`), configured pools (`pools`), and per-project repo overrides (`repoOverrides`) |
 | `PUT /api/models/ticket` `{mode, ...}` | Persist `models.ticket` to the user workflow config (`mode: "model"` with `provider`, `model`, `effort?`, or `mode: "pool"` with `pool`) after validating against live capabilities or configured pools; returns the updated `/api/models` view |
 | `PUT /api/models/ask` `{mode, ...}` | Persist the ask box mode to t3cm's `config.json` (`board.askInstanceId`/`askModel`/`askEffort` or `board.askPool`) and apply it live with no restart; returns the updated `/api/models` view |

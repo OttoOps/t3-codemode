@@ -618,6 +618,8 @@ a:hover > .spill, a:focus-visible > .spill { border-color: currentColor; }
 .md a { color: var(--accent); }
 .ask.open .aa { max-height: none; display: block; }
 .ask .aa.wait { color: var(--fg-2); }
+.ask .ad { margin: 2px 0 0; font-size: 12px; line-height: 16px; overflow-wrap: anywhere; }
+.ask .ad a { color: var(--accent); }
 .ask .btn { height: 24px; }
 .ask:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
 
@@ -1043,9 +1045,9 @@ kbd { font-family: var(--mono); font-size: 12px; }
           </div>
         </form>
         <form class="form" id="ask" aria-labelledby="h-ask">
-          <div class="ph"><h2 id="h-ask">Ask about the board</h2></div>
+          <div class="ph"><h2 id="h-ask">Ask your agent</h2></div>
           <div class="row">
-            <input type="text" id="question" placeholder="Which tickets wait on me, and why?" aria-label="Question about the board" autocomplete="off">
+            <input type="text" id="question" placeholder="Ask about the board, or ask for work: cut a release of t3-codemode" aria-label="Question about the board, or work to launch in a project" autocomplete="off">
             <button class="btn go" type="submit" id="ask-btn">Ask</button>
           </div>
           <div class="model-line" id="ask-model">
@@ -3169,7 +3171,9 @@ function makeAsk() {
       h("span", { "data-part": "th" }),
       h("button", { class: "btn", type: "button", "data-part": "settle", hidden: true }, "Settle")),
     h("div", { class: "aa", "data-part": "a" }),
-    h("button", { class: "linkish meta", type: "button", "data-part": "more", hidden: true }, "Show all"));
+    h("button", { class: "linkish meta", type: "button", "data-part": "more", hidden: true }, "Show all"),
+    h("p", { class: "ad meta", "data-part": "d", hidden: true },
+      "Launched ", h("span", { "data-part": "dl" }), " in ", h("span", { "data-part": "dp" })));
   return el;
 }
 
@@ -3202,6 +3206,16 @@ function patchAsk(el, a) {
     setText(more, o ? "Show less" : "Show all");
   };
   setAttr(more, "aria-label", "Show all of the answer to " + quote(a.question));
+  const d = part(el, "d");
+  const sent = a.dispatched && typeof a.dispatched === "object" ? a.dispatched : null;
+  d.hidden = !sent;
+  if (sent) {
+    const label = sent.label || "a thread";
+    const dl = part(el, "dl");
+    setLink(dl, sent.link, label, "Open the launched thread " + quote(label));
+    if (!dl.firstChild || dl.firstChild.tagName !== "A") setText(dl, label);
+    setText(part(el, "dp"), sent.project || sent.projectId || "its project");
+  }
 }
 
 function paintOut() {
