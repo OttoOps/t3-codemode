@@ -953,12 +953,12 @@ await tick();
 const postsWhileLoading = fetches.filter((f) => f.url === "/api/launch").length;
 const pickerOpenedOnLoad = !box.hidden && !!box.querySelector('select[data-ref="PROJ-123"]');
 
-// 2. HTTP(S) Jira URLs with underscore hostname or trailing DNS dot get pickers.
-ta.value = "https://jira_internal/browse/OPS-1\nhttps://jira.acme.example./browse/OPS-2";
+// 2. HTTP(S) Jira URLs with underscore, trailing DNS dot, or internationalized hostname get pickers.
+ta.value = "https://jira_internal/browse/OPS-1\nhttps://jira.acme.example./browse/OPS-2\nhttps://münchen.example/browse/OPS-3";
 ta.dispatch("input");
 const urlRefsShown = [...box.querySelectorAll("select[data-ref]")].map((s) => s.dataset.ref);
 
-// 3. Mapped project archived after page load: launch fails, refreshModels runs, and picker appears for MAPPED-7.
+// 3. Mapped project archived after page load: launch fails, refreshModels runs without blocking Launch, and picker appears.
 emitState(base);
 ta.value = "MAPPED-7";
 ta.dispatch("input");
@@ -969,7 +969,17 @@ form.dispatch("submit");
 await tick();
 const pickerAfterFailure = !box.hidden && [...box.querySelectorAll("select[data-ref]")].map((s) => s.dataset.ref);
 
-return {{ postsWhileLoading, pickerOpenedOnLoad, urlRefsShown, hiddenBeforeArchive, pickerAfterFailure }};
+// 4. Failed GitHub-only launch re-enables Launch immediately and does not fetch /api/models.
+const modelGetsBeforeGhFail = fetches.filter((f) => f.url === "/api/models").length;
+ta.value = "acme/other#9";
+ta.dispatch("input");
+failNextLaunch = true;
+form.dispatch("submit");
+await tick();
+const ghFailReenabled = !document.getElementById("launch-btn").disabled;
+const ghFailModelGets = fetches.filter((f) => f.url === "/api/models").length - modelGetsBeforeGhFail;
+
+return {{ postsWhileLoading, pickerOpenedOnLoad, urlRefsShown, hiddenBeforeArchive, pickerAfterFailure, ghFailReenabled, ghFailModelGets }};
 }}"##
         ),
     );
@@ -978,9 +988,15 @@ return {{ postsWhileLoading, pickerOpenedOnLoad, urlRefsShown, hiddenBeforeArchi
     assert_eq!(r["pickerOpenedOnLoad"], true, "{r}");
     assert_eq!(
         r["urlRefsShown"],
-        json!(["https://jira_internal/browse/OPS-1", "https://jira.acme.example./browse/OPS-2"]),
+        json!([
+            "https://jira_internal/browse/OPS-1",
+            "https://jira.acme.example./browse/OPS-2",
+            "https://münchen.example/browse/OPS-3"
+        ]),
         "{r}"
     );
     assert_eq!(r["hiddenBeforeArchive"], true, "{r}");
     assert_eq!(r["pickerAfterFailure"], json!(["MAPPED-7"]), "{r}");
+    assert_eq!(r["ghFailReenabled"], true, "{r}");
+    assert_eq!(r["ghFailModelGets"], 0, "{r}");
 }
