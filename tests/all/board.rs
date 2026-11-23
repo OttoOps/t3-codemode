@@ -2244,6 +2244,276 @@ return {{
     assert!(!css(".s-idle {").contains("s-pause"), "idle no longer shares its rule with paused");
 }
 
+const DRAWER: &str = r##"
+const dr = () => document.getElementById("drawer");
+const dp = (name) => dr().querySelector('[data-part="' + name + '"]');
+const shown = (name) => dp(name).hidden ? null : dp(name).textContent;
+const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+const click = (el) => {
+  const ev = { type: "click", target: el, prevented: false, preventDefault() { this.prevented = true; } };
+  for (const f of document.listeners.click) f(ev);
+  return ev.prevented;
+};
+const press = (el, key) => {
+  const ev = el.dispatch("keydown", { key, stopPropagation() { this.stopped = true; } });
+  if (!ev.stopped) for (const f of document.listeners.keydown) f(ev);
+};
+const view = () => ({
+  open: dr().classList.contains("open"), id: dp("id").textContent, part: shown("part"), title: dp("title").textContent,
+  st: dp("st").textContent, pr: dp("pr").textContent, issue: dp("gh-issue").hidden ? null : dp("gh-issue").getAttribute("href"),
+  ghpr: shown("gh-pr"), pause: shown("pause"), focus: document.activeElement === dp("title"),
+});
+const inspected = () => [...document.querySelectorAll("[data-inspected]")].filter((e) => !dr().contains(e)).map((e) => e.dataset.thread || e.dataset.key);
+"##;
+
+fn drawer_scenario(html: &str, st: &Value, body: &str) -> Value {
+    run_page_async(
+        html,
+        &format!("async () => {{\n{PAGE_HELPERS}\nconst base = {st};\n{ROWS}\n{PULSE_TREE}\n{DRAWER}\n{body}\n}}"),
+    )
+}
+
+#[tokio::test]
+async fn the_inspector_opens_from_rows_workers_and_pr_chips_and_esc_returns_focus() {
+    let (html, st) = two_gate_page().await;
+    let r = drawer_scenario(
+        &html,
+        &st,
+        r##"
+emitState({ ...base, cards: [], tree });
+const list = document.getElementById("open");
+list.scrollTop = 120;
+const before = dr().classList.contains("open");
+const fromRow = click(row("acme/a#2").querySelector('[data-part="title"]'));
+const ticket = { ...view(), prevented: fromRow, marked: inspected(), scroll: list.scrollTop };
+dp("body").scrollTop = 40;
+emitState({ ...base, cards: [], tree: tree.map((t) => t.label === "acme/a#2" ? { ...t, status: "running" } : t) });
+const live = { open: dr().classList.contains("open"), st: dp("st").textContent, body: dp("body").scrollTop, scroll: list.scrollTop };
+press(document.activeElement, "Escape");
+const closed = { open: dr().classList.contains("open"), back: document.activeElement === row("acme/a#2"), marked: inspected() };
+const wi = row("acme/a#9").querySelector(".wi");
+click(wi.querySelector(".mark"));
+const worker = { ...view(), key: wi.dataset.key, rows: [...dp("workers-l").children].map((w) => [w.querySelector('[data-part="name"]').textContent, w.hasAttribute("data-inspected")]) };
+const chip = row("acme/a#7").querySelector(".side .pr a");
+const fromChip = click(chip);
+const pill = { ...view(), prevented: fromChip };
+press(document.activeElement, "Escape");
+const chipBack = document.activeElement === chip;
+row("acme/a#5").focus();
+press(row("acme/a#5"), "Enter");
+const entered = view();
+dp("pause").dispatch("click");
+await flush();
+press(document.activeElement, "Escape");
+return { before, ticket, live, closed, worker, pill, chipBack, entered, back: document.activeElement === row("acme/a#5"),
+  posts: fetches.filter((f) => f.method === "POST").map((f) => f.url) };
+"##,
+    );
+    assert_eq!(r["before"], false, "{r}");
+    assert_eq!(
+        r["ticket"],
+        json!({"open": true, "id": "acme/a#2", "part": null, "title": "acme/a#2", "st": "idle", "pr": "#2 ready",
+               "issue": "https://github.com/acme/a/issues/2", "ghpr": "Open PR #2 on GitHub", "pause": "Pause", "focus": true,
+               "prevented": false, "marked": ["t-acme/a#2"], "scroll": 120}),
+        "{r}"
+    );
+    assert_eq!(
+        r["live"],
+        json!({"open": true, "st": "running", "body": 40, "scroll": 120}),
+        "a re-render keeps the drawer: {r}"
+    );
+    assert_eq!(r["closed"], json!({"open": false, "back": true, "marked": []}), "{r}");
+    assert_eq!((&r["worker"]["key"], &r["worker"]["part"]), (&json!("w-#9 PR 2/2"), &json!("PR 2/2")), "{r}");
+    assert_eq!(r["worker"]["rows"], json!([["PR 1/2", false], ["PR 2/2", true]]), "the clicked worker is shaded: {r}");
+    assert_eq!(r["worker"]["pause"], "Resume", "a paused ticket offers Resume: {r}");
+    assert_eq!(
+        (&r["pill"]["prevented"], &r["pill"]["id"], &r["pill"]["ghpr"], &r["pill"]["pr"]),
+        (&json!(true), &json!("acme/a#7"), &json!("Open PR #7 on GitHub"), &json!("#7 failing")),
+        "{r}"
+    );
+    assert_eq!(r["chipBack"], true, "{r}");
+    assert_eq!(
+        (&r["entered"]["id"], &r["entered"]["focus"], &r["entered"]["pause"]),
+        (&json!("acme/a#5"), &json!(true), &json!("Resume")),
+        "{r}"
+    );
+    assert_eq!(r["back"], true, "{r}");
+    assert_eq!(r["posts"], json!(["/api/links/t-acme%2Fa%235/resume"]), "{r}");
+}
+
+#[tokio::test]
+async fn the_inspector_closes_before_search_clears_and_survives_its_subject_leaving() {
+    let (html, st) = two_gate_page().await;
+    let r = drawer_scenario(
+        &html,
+        &st,
+        r##"
+emitState({ ...base, cards: [], tree });
+const sq = document.getElementById("filter-q");
+sq.value = "acme";
+sq.dispatch("input");
+advance(1000);
+click(row("acme/a#8").querySelector('[data-part="title"]'));
+sq.focus();
+press(sq, "Escape");
+const first = { open: dr().classList.contains("open"), q: sq.value, focus: document.activeElement === sq };
+press(sq, "Escape");
+const second = { q: sq.value };
+sq.value = "acme";
+sq.dispatch("input");
+advance(1000);
+click(row("acme/a#8").querySelector('[data-part="title"]'));
+press(document.activeElement, "Escape");
+const fromTitle = { open: dr().classList.contains("open"), q: sq.value, onRow: document.activeElement === row("acme/a#8") };
+press(document.activeElement, "Escape");
+fromTitle.after = sq.value;
+sq.value = "acme";
+sq.dispatch("input");
+advance(1000);
+const chip = row("acme/a#7").querySelector(".side .pr a");
+click(chip);
+press(document.activeElement, "Escape");
+fromTitle.chip = document.activeElement === chip;
+press(document.activeElement, "Escape");
+fromTitle.chipAfter = sq.value;
+let fail;
+fetchReply = () => new Promise((_, reject) => { fail = reject; });
+click(row("acme/a#2").querySelector('[data-part="title"]'));
+dp("pause").dispatch("click");
+click(row("acme/a#8").querySelector('[data-part="title"]'));
+fail(new Error("store is busy"));
+await flush();
+const stray = { strip: document.getElementById("dr-err").hidden, said: document.getElementById("alert").textContent };
+advance(100);
+stray.said = document.getElementById("alert").textContent;
+fetchReply = () => Promise.reject(new Error("store is busy"));
+dp("pause").dispatch("click");
+await flush();
+stray.own = document.getElementById("dr-err-text").textContent;
+document.getElementById("dr-err-close").dispatch("click");
+stray.back = document.activeElement === dp("pause");
+fetchReply = null;
+click(row("acme/a#8").querySelector('[data-part="title"]'));
+emitState({ ...base, cards: [], tree: tree.filter((t) => t.label !== "acme/a#8") });
+const gone = { open: dr().classList.contains("open"), note: shown("gone"), pause: dp("pause").getAttribute("aria-disabled"), id: dp("id").textContent };
+emitState({ ...base, cards: [], tree });
+const back = { note: shown("gone"), pause: dp("pause").getAttribute("aria-disabled") };
+dp("close").dispatch("click");
+const closed = dr().classList.contains("open"), focus = document.activeElement === row("acme/a#8");
+const st = T("acme/s#1", { done: true, settledIso: "2026-11-18T10:00:00Z", settledAt: "03:00 MST" });
+emitState({ ...base, cards: [], tree, settled: { tickets: [st], asks: [] } });
+for (const t of ["open", "done", "settled"]) document.getElementById("tp-" + t).append(document.getElementById(t));
+selectTab("settled");
+click(document.getElementById("settled").firstChild.querySelector('[data-part="label"]'));
+const settled = { restore: shown("restore"), settle: shown("settle") };
+emitState({ ...base, cards: [], tree: [...tree, { ...st, settledIso: undefined }], settled: { tickets: [], asks: [] } });
+press(document.activeElement, "Escape");
+const hiddenRow = document.querySelector('#done [data-thread="t-acme/s#1"]');
+settled.focusHidden = document.activeElement === hiddenRow;
+settled.focusSettled = document.activeElement === document.getElementById("settled");
+return { first, second, fromTitle, stray, gone, back, closed, focus, settled };
+"##,
+    );
+    assert_eq!(r["first"], json!({"open": false, "q": "acme", "focus": true}), "Esc closes the drawer first: {r}");
+    assert_eq!(r["second"], json!({"q": ""}), "a second Esc clears search: {r}");
+    assert_eq!(
+        r["fromTitle"],
+        json!({"open": false, "q": "acme", "onRow": true, "after": "", "chip": true, "chipAfter": ""}),
+        "from the drawer, Esc goes back to the row, then clears search: {r}"
+    );
+    assert_eq!(
+        r["stray"],
+        json!({"strip": true, "said": "Pause acme/a#2: store is busy", "own": "Pause acme/a#8: store is busy", "back": true}),
+        "a failure for another ticket is announced under its own name, not shown under this one: {r}"
+    );
+    assert_eq!(
+        r["gone"],
+        json!({"open": true, "note": "This ticket is no longer on the board. Its last known state is below.", "pause": "true", "id": "acme/a#8"}),
+        "{r}"
+    );
+    assert_eq!(r["back"], json!({"note": null, "pause": null}), "{r}");
+    assert_eq!((&r["closed"], &r["focus"]), (&json!(false), &json!(true)), "{r}");
+    assert_eq!(
+        r["settled"],
+        json!({"restore": "Restore", "settle": null, "focusHidden": false, "focusSettled": true}),
+        "a restored ticket's hidden row does not take focus: {r}"
+    );
+}
+
+#[tokio::test]
+async fn the_inspector_shows_cards_new_issues_and_the_full_latest_message() {
+    let (html, st) = two_gate_page().await;
+    let r = drawer_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"
+fetchReply = async (url) => url === "/api/msg/m9"
+  ? {{ ok: true, status: 200, json: async () => ({{ body: "Full **gate** text, here: https://github.com/acme/a/pull/3" }}) }}
+  : {{ ok: true, status: 200, json: async () => ({{}}) }};
+const ticket = base.tree.find((t) => t.thread === "{TICKET}");
+const last = {{ handle: "m9", kind: "gate", head: "x".repeat(140) + "...", at: "10:00 MST" }};
+const nis = [{{ id: "n1", label: "acme/a#30", repo: "acme/a", number: 30, title: "Flaky test", note: "Seen **twice**",
+  url: "https://github.com/acme/a/issues/30", threadTitle: "Release", threadLink: "https://app.t3.codes/threads/p/t", at: "2026-11-18T10:00:00Z" }}];
+const s1 = {{ ...base, tree: base.tree.map((t) => t.thread === ticket.thread ? {{ ...t, last }} : t), newIssues: nis }};
+emitState(s1);
+const cid = s1.cards.find((c) => c.ticket === ticket.thread).id;
+click(card(cid).querySelector('[data-part="ask"]'));
+const fromCard = {{ id: dp("id").textContent, needs: [...dp("needs-l").children].map((c) => [c.querySelector('[data-part="go"]').textContent, c.hasAttribute("data-inspected")]),
+  marked: inspected(), loading: dp("latest-m").textContent, latest: dp("latest-h").textContent }};
+await flush();
+emitState(s1);
+await flush();
+const full = {{ body: dp("latest-b").textContent, loads: fetches.filter((f) => f.url === "/api/msg/m9").length, meta: dp("latest-m").textContent }};
+dp("needs-l").firstChild.querySelector('[data-part="go"]').dispatch("click");
+const jumped = document.activeElement === card(cid);
+click(document.getElementById("nis").firstChild.querySelector('[data-part="title"]'));
+const issue = {{ ...view(), note: dp("note-b").textContent, meta: dp("note-m").textContent, launch: shown("launch"), flip: shown("nisflip"),
+  t3: dp("t3").textContent, workers: dp("workers").hidden }};
+dp("launch").dispatch("click");
+await flush();
+return {{ fromCard, full, jumped, issue, posts: fetches.filter((f) => f.method === "POST").map((f) => f.url) }};
+"##
+        ),
+    );
+    assert_eq!(r["fromCard"]["id"], "widgets#41", "a card with a ticket opens its ticket: {r}");
+    assert_eq!(r["fromCard"]["needs"].as_array().unwrap().iter().filter(|c| c[1] == true).count(), 1, "{r}");
+    assert_eq!(r["fromCard"]["marked"].as_array().unwrap().len(), 2, "the row and the card are marked: {r}");
+    assert!(r["fromCard"]["loading"].as_str().unwrap().contains("Loading the full message."), "{r}");
+    assert_eq!(r["fromCard"]["latest"], "Latest gate", "{r}");
+    assert_eq!(
+        r["full"],
+        json!({"body": "Full gate text, here: https://github.com/acme/a/pull/3", "loads": 1, "meta": "10:00"}),
+        "the full body replaces the cut head once: {r}"
+    );
+    assert_eq!(r["jumped"], true, "{r}");
+    assert_eq!(
+        r["issue"],
+        json!({"open": true, "id": "acme/a#30", "part": null, "title": "Flaky test", "st": "new issue", "pr": "",
+               "issue": "https://github.com/acme/a/issues/30", "ghpr": null, "pause": null, "focus": true,
+               "note": "Seen twice", "meta": format!("Filed by Release · {}", r["issue"]["meta"].as_str().unwrap().rsplit(" · ").next().unwrap()),
+               "launch": "Launch", "flip": "Dismiss", "t3": "Open filing thread", "workers": true}),
+        "{r}"
+    );
+    assert_eq!(r["posts"], json!(["/api/new-issues/n1/launch"]), "{r}");
+}
+
+#[tokio::test]
+async fn the_inspector_is_a_non_modal_aside_documented_on_the_board_page() {
+    let (html, _) = two_gate_page().await;
+    for needle in [
+        ".drawer {",
+        "width: 400px; max-width: 94vw;",
+        "transform: translateX(100%); visibility: hidden;",
+        "@media (max-width: 599px) {\n  .drawer { width: 100vw; max-width: none; border-left: 0; }",
+        "<dt>Enter</dt><dd>Open the focused card's or row's details</dd>",
+    ] {
+        assert!(html.contains(needle), "missing {needle:?}");
+    }
+    let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/board.md")).unwrap();
+    assert!(doc.contains("## The inspector"), "docs/src/board.md documents the drawer");
+}
+
 #[tokio::test]
 async fn a_needs_you_row_links_to_its_card() {
     let (html, st) = two_gate_page().await;
