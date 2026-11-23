@@ -66,7 +66,15 @@ to filter the board to its tickets, and click it again to clear that filter.
   ticket that needs you, a `Reply "merge"` link to its card. Other rows show
   the last message, and a gate already answered reads "Answered: ...", or "Dismissed: ..." when you dismissed its card. The
   workers sit at the end of the row, with finished ones folded into a count
-  that expands. A pull request shows as an outlined pill with its number, and
+  that expands. A worker whose link carries an issue identity
+  ([`wf`](globals.md#wf)) shows it as `#115 · PR #136 · of #105`: its
+  sub-issue, its pull request and the parent issue, each a chip that opens on
+  GitHub. The ticket's row shows the same chips after its title for its
+  active worker: of the workers with an identity, the one on the ticket's own
+  pull request, else the last open one, else the last finished one. A ticket
+  with no such worker shows its own issue and parent, and a row with no
+  identity shows no chips.
+  A pull request shows as an outlined pill with its number, and
   on the ticket's own row its state: open, queued, merged or closed. Once a
   [GitHub reconcile](#github-reconcile) has read an open pull request's
   readiness, the pill says where it stands instead:
@@ -496,7 +504,9 @@ left. Below 600 px the inspector takes the full width. The row or card it shows
 gets the hover shade, so you can find it on the board.
 
 - **Header.** The ticket or issue as `repo#N`, the PR part such as `PR 2/5`
-  when a worker names one, the title, and a close button.
+  when a worker's label or `part` names one, the same issue, pull request and
+  parent chips as the row (or the worker's own when opened from a worker), the
+  title, and a close button.
 - **Pills.** The live state, the pull request pill with the same readiness word
   as the [ticket list](#what-the-page-shows), `paused`, and the repository and
   project when `/api/state` knows them.

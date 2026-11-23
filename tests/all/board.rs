@@ -2693,6 +2693,64 @@ return { before, ticket, live, closed, worker, pill, chipBack, entered, back: do
 }
 
 #[tokio::test]
+async fn rows_workers_and_the_inspector_show_issue_pr_and_parent_chips() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#105").await;
+    join_board(&s.h, BOSS, "widgets#50").await;
+    let identity = json!({"parent": TICKET, "label": "#105 worker", "role": "worker",
+        "issue": "acme/widgets#115", "parentIssue": "acme/widgets#105", "part": "2/3"});
+    s.h.wf(WORKER, "join", identity).await;
+    s.h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 136, "open")]);
+    s.h.fake.set_prs(BOSS, vec![pull_request("acme/widgets", 51, "open")]);
+    s.h.tick(1).await;
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    let r = drawer_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+const tk = (label) => [...document.getElementById("open").children].find((e) => e.getAttribute("aria-label") && e.getAttribute("aria-label").startsWith(label + ","));
+const chipsOf = (slot) => slot.hidden ? null : [...slot.querySelectorAll("a")].map((a) => [a.textContent, a.getAttribute("href")]);
+const text = (slot) => slot.hidden ? null : slot.textContent;
+const rowIds = tk("widgets#105").querySelector('.tr [data-part="ids"]');
+const wids = tk("widgets#105").querySelector('[data-part="wids"]');
+const plainRow = tk("widgets#50");
+const first = { row: chipsOf(rowIds), rowText: text(rowIds), worker: chipsOf(wids), workerText: text(wids) };
+const navigated = !click(rowIds.querySelector("a"));
+const closedAfterChip = !dr().classList.contains("open");
+click(tk("widgets#105").querySelector('[data-part="title"]'));
+const head = { ids: chipsOf(dp("ids")), part: shown("part") };
+press(document.activeElement, "Escape");
+click(plainRow.querySelector('[data-part="title"]'));
+const plainHead = chipsOf(dp("ids"));
+press(document.activeElement, "Escape");
+const other = { number: 99, url: "https://github.com/acme/widgets/pull/99", state: "merged" };
+emitState({ ...base, tree: base.tree.map((t) => t.label === "widgets#105" ? { ...t, pr: other, workers: t.workers.map((w) => ({ ...w, pr: null })) } : t) });
+const noPr = chipsOf(tk("widgets#105").querySelector('.tr [data-part="ids"]'));
+return {
+  ...first,
+  plain: chipsOf(plainRow.querySelector('.tr [data-part="ids"]')), plainPr: plainRow.querySelector(".side .pr").textContent,
+  navigated, closedAfterChip, head, plainHead, noPr,
+};
+"##,
+    );
+    let chips = json!([
+        ["#115", "https://github.com/acme/widgets/issues/115"],
+        ["PR #136", "https://github.com/acme/widgets/pull/136"],
+        ["of #105", "https://github.com/acme/widgets/issues/105"],
+    ]);
+    assert_eq!(r["row"], chips, "{r}");
+    assert_eq!(r["rowText"], "#115·PR #136·of #105", "{r}");
+    assert_eq!(r["worker"], chips, "{r}");
+    assert_eq!(r["head"], json!({"ids": chips, "part": "PR 2/3"}), "{r}");
+    assert_eq!((&r["navigated"], &r["closedAfterChip"]), (&json!(true), &json!(true)), "an id chip opens GitHub: {r}");
+    assert_eq!((&r["plain"], &r["plainHead"]), (&Value::Null, &Value::Null), "{r}");
+    assert_eq!(r["plainPr"], "#51 open", "a row with no identity keeps its PR pill: {r}");
+    assert_eq!(r["noPr"], json!([chips[0], chips[2]]), "a worker without a PR shows no other worker's PR: {r}");
+}
+
+#[tokio::test]
 async fn the_inspector_closes_before_search_clears_and_survives_its_subject_leaving() {
     let (html, st) = two_gate_page().await;
     let r = drawer_scenario(
