@@ -89,9 +89,10 @@ to filter the board to its tickets, and click it again to clear that filter.
   makes each one a ticket thread. Before you launch, the board shows which model
   and source (`.t3-workflow.json`, `AGENTS.md`, `user config`, `board setting`,
   or `default`) the launch will use; when an issue's repository overrides
-  `models.ticket` in its `.t3-workflow.json` or `AGENTS.md`, the board says so. The **Models** control
-  in the header (and the **Change** links beside Launch and Ask) offers two
-  modes for both ticket launches and the ask box: a **specific model** (provider
+  `models.ticket` in its `.t3-workflow.json` or `AGENTS.md`, the board says so.
+  The model pickers in [Settings](#settings), which the **Change** links
+  beside Launch and Ask open, offer two modes for both ticket launches and the
+  ask box: a **specific model** (provider
   instance, model and effort from T3's `orchestrator_capabilities`) or a **pool**
   (only pools configured in t3cm). Saving the ticket model writes the user-config
   layer of `models.ticket` (`~/.config/t3-workflow/config.json`); saving the ask
@@ -122,17 +123,17 @@ focuses Ask, `l` focuses Launch, `j` and `k` move between cards and rows, and
 `?` lists the rest. The list has a switch that turns them off. Enter on a
 focused card or row opens it in [the inspector](#the-inspector).
 
-On a local board, and on a remote board opened by its Tailscale owner, the gear
-button in the header opens [Settings](#settings).
+The gear button in the header opens [Settings](#settings). What it shows
+depends on who opened the board.
 
 A `handoff` or `closed` message marks a ticket done.
 
 ## Settings
 
 On a board you open at a loopback address, the gear button in the header opens
-Settings, which edits all of t3cm's `config.json`. A remote board shows the
-gear only when its own `GET /api/settings` answers 200, which needs all of
-these:
+Settings, which edits all of t3cm's `config.json`. A remote board gets the
+full dialog only when its own `GET /api/settings` answers 200, which needs all
+of these:
 
 - `board.remote.mode` is `"tailscale"`.
 - The Tailscale login is in `board.remote.settingsUsers` or, when that list is
@@ -141,14 +142,15 @@ these:
   Tailscale Serve sends it.
 
 Any other remote board, including a pairing-mode session and an allowed
-Tailscale user who is not a settings user, shows no gear and gets 403 from the
-[settings API](#settings-api). Its **Models** control still works. See
+Tailscale user who is not a settings user, gets 403 from the
+[settings API](#settings-api). Its gear opens Settings with only the ticket
+and ask model pickers, which save as usual. See
 [Board settings](security.md#board-settings) for why, and for what a remote
 read returns.
 
 | Section | Holds |
 |---|---|
-| Launches | The same ticket and ask pickers as **Models**, and `board.runtimeMode` |
+| Launches | The ticket and ask model pickers, and `board.runtimeMode` |
 | Pools | Each [pool](config.md#pools) and its members, with each member's live state |
 | Board | The other `board` keys, such as `feed`, the GitHub check intervals, `openLinks` and `remote` |
 | Workflow links | `link`, `wake`, the body and reply caps, `digestLines`, and a JSON editor for `roles` |
@@ -202,8 +204,8 @@ after you save. They refresh every 20 seconds while Pools is open. Member order
 matters to the `priority` strategy, so each member has Up and Down buttons.
 
 Esc closes the dialog, and it asks before it drops unsaved changes to the
-file. A model picker's unsaved choice doesn't count: opening Settings or
-**Models** again discards it. The arrow keys move between sections, and a
+file. A model picker's unsaved choice doesn't count: opening Settings again
+discards it. The arrow keys move between sections, and a
 narrow window shows the sections as a menu.
 
 The dialog holds an edit it can't save as shown:
@@ -1025,10 +1027,10 @@ without changing direct loopback behavior:
   401/403 guard refusal.
 - **Settings open for the Tailscale owner only.** In `"tailscale"` mode, the
   host's own login, or each login in `board.remote.settingsUsers`, sees the
-  [Settings](#settings) button over HTTPS. Every other remote board shows
-  none, and the [settings API](#settings-api) refuses its requests with 403,
-  reads included. The board's guard refuses an unauthenticated remote request
-  with its usual 401 or 403. The **Models** control still works remotely.
+  full [Settings](#settings) dialog over HTTPS. Every other remote board sees
+  only the model pickers there, and the [settings API](#settings-api) refuses
+  its requests with 403, reads included. The board's guard refuses an
+  unauthenticated remote request with its usual 401 or 403.
 - **Add to Home Screen.** The board serves an embedded `/manifest.webmanifest`
   and icons (`/icon.svg`, `/icon-192.png`, `/icon-512.png`) behind the same
   authentication guards and zero-external-request CSP. On iOS Safari, open the
