@@ -52,6 +52,9 @@ pub fn spawn(app: Arc<App>) -> tokio::task::JoinHandle<()> {
                 Ok(actions) => tracing::info!(?actions, "pool limits"),
                 Err(e) => tracing::warn!("pool limit pass failed: {}", app.t3.redact(format!("{e:#}"))),
             }
+            if let Err(e) = app.wf.refresh_routing().await {
+                tracing::warn!("routing view not refreshed: {}", app.t3.redact(format!("{e:#}")));
+            }
             if catalog_at.is_none_or(|t| t.elapsed() >= CATALOG_EVERY) {
                 catalog_at = Some(Instant::now());
                 if upstreams.as_ref().is_none_or(|h| h.is_finished()) {

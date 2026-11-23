@@ -1232,6 +1232,49 @@ async fn get_models(State(web): State<Web>) -> Response {
     }
 }
 
+fn percent_decoded(v: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut bytes = v.bytes();
+    while let Some(b) = bytes.next() {
+        let b = match b {
+            b'%' => {
+                let hex = [bytes.next()?, bytes.next()?];
+                u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?
+            }
+            b => b,
+        };
+        let c = char::from(b);
+        if !c.is_ascii_alphanumeric() {
+            return None;
+        }
+        out.push(c);
+    }
+    Some(out)
+}
+
+fn window_query(query: Option<&str>) -> Result<Option<String>, String> {
+    let mut window = None;
+    for pair in query.unwrap_or_default().split('&').filter(|p| !p.is_empty()) {
+        match pair.split_once('=').map(|(k, v)| (k, percent_decoded(v))) {
+            Some(("window", Some(v))) if window.is_none() => window = Some(v),
+            _ => return Err("the only query parameter is window, once, such as ?window=24h".into()),
+        }
+    }
+    Ok(window)
+}
+
+async fn get_usage_stats(State(web): State<Web>, uri: axum::http::Uri) -> Response {
+    let window = match window_query(uri.query()) {
+        Ok(w) => w,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    match web.app.wf.usage_stats(window.as_deref()).await {
+        Ok(v) => json_ok(StatusCode::OK, web.app.redact_value(v)),
+        Err(e) if e.to_string().starts_with("wf.usageStats:") => error(StatusCode::BAD_REQUEST, format!("{e:#}")),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, web.app.t3.redact(format!("{e:#}"))),
+    }
+}
+
 async fn put_ticket_model(State(web): State<Web>, raw: Bytes) -> Response {
     let b: ModelSettingBody = match body(&raw) {
         Ok(b) => b,
@@ -1314,6 +1357,7 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/launch", post(launch))
         .route("/api/ask", post(ask))
         .route("/api/models", get(get_models))
+        .route("/api/usage-stats", get(get_usage_stats))
         .route("/api/models/ticket", put(put_ticket_model))
         .route("/api/models/ask", put(put_ask_model))
         .route("/api/tickets/{thread}/settle", post(settle_ticket))

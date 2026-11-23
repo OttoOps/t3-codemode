@@ -27,6 +27,7 @@ pub mod platform;
 pub mod pools;
 pub mod reconcile;
 pub mod release;
+pub mod routing;
 pub mod sandbox;
 pub mod server;
 pub mod settings;

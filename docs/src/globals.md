@@ -148,6 +148,36 @@ parent and a child, and the service keeps every link and message in its store.
   flags a member that is the only one that can run the pool's model, or in a
   mixed pool the only one of its driver that can run its model, as
   [Sole members](config.md#sole-members) describes.
+- `wf.usageStats({ window })` reports how board ticket launches are routed,
+  the view the board header shows as
+  [Launch routing](board.md#launch-routing). `window` is `"all"` or a count
+  of `m`, `h` or `d`, such as `30m`, `24h` or `7d`, and defaults to `24h`.
+  The result has `window`, `since`, `at`, `mode`, `source`, `pool`,
+  `strategy`, `error`, `warnings` and `members`. `since` is `null` for
+  `all`, and `source` names where the ticket model came from.
+  - **`mode: "pool"`.** Each member carries what `wf.pools()` reports, plus
+    `status`: `ready`, `reserve` when it is held at its reserve, `limited`,
+    `disabled` when it cannot run, or `unknown` when T3 did not answer. It
+    also carries `picks` in the window, `share` and `weightShare`.
+    `shareBasis` says what `share` counts: `picks`, the fraction of every
+    pick in the window, former members' picks included, or `weight`, the
+    configured weight when the window has no picks. A member's `reasons`
+    counts its picks by kind, which is `weighted`, `priority`, `cheapest`,
+    `last-resort` or `moved`. Its `skips` counts the window's picks that
+    passed it over, by kind: `limited`, `reserve`, `disabled`,
+    `constrained`, `missing-model`, `missing-effort` or `other`. At the top
+    level, `picks` and `reasons` cover every pick in the window, `series`
+    splits the window into 24 buckets of picks per member, `recent` lists
+    the latest 20 picks with their reasons, and `former` counts picks of
+    instances no longer in the pool.
+  - **`mode: "single"`.** `members` holds the one instance, model and effort
+    that launches use, with `share` 1 and no pick history.
+
+  `running` lists the active threads of every provider instance, counted the
+  way `wf.pools()` and the pool picker count them, so queued and starting
+  threads count too. It is `null`, with `runningError`, when T3 did not
+  answer. The pick history keeps the latest 2000 picks, and a bad window
+  throws.
 - `wf.status()` returns the service's state as the board header shows it:
   `version`, `t3`, `tokenExpiresAt`, `watcher`, `openLinks`, `update` and
   `skills`, the check of the installed T3 workflow skills and setup steps
