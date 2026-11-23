@@ -5,12 +5,14 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::t3::{BoxFut, T3Client, T3Error};
+use crate::tokens::{RunTokens, TokenSource};
 use crate::usage::{Usage, UsageSource};
 
 #[derive(Default)]
 struct State {
     threads: BTreeMap<String, Value>,
     items: BTreeMap<String, Vec<Value>>,
+    runs: BTreeMap<String, Vec<Value>>,
     prs: BTreeMap<String, Vec<Value>>,
     prs_before_list: BTreeMap<String, Vec<Value>>,
     projects: Vec<Value>,
@@ -23,6 +25,7 @@ struct State {
     calls: Vec<String>,
     send_fails: bool,
     prs_fail: bool,
+    list_fails: bool,
     projects_fail: bool,
     read_fails: bool,
     caps_fail: bool,
@@ -136,6 +139,53 @@ impl UsageSource for FakeUsage {
     }
 }
 
+#[derive(Default)]
+pub struct FakeTokens {
+    runs: Mutex<BTreeMap<String, RunTokens>>,
+    reads: Mutex<Vec<String>>,
+    fails: Mutex<bool>,
+    failing: Mutex<Vec<String>>,
+}
+
+impl FakeTokens {
+    pub fn set(&self, run: &str, input: u64, output: u64) {
+        self.runs.lock().unwrap().insert(run.into(), RunTokens { input, output });
+    }
+
+    pub fn set_fails(&self, fails: bool) {
+        *self.fails.lock().unwrap() = fails;
+    }
+
+    pub fn set_run_fails(&self, run: &str, fails: bool) {
+        let mut failing = self.failing.lock().unwrap();
+        failing.retain(|r| r != run);
+        if fails {
+            failing.push(run.into());
+        }
+    }
+
+    pub fn reads(&self) -> Vec<String> {
+        self.reads.lock().unwrap().clone()
+    }
+}
+
+impl TokenSource for FakeTokens {
+    fn reports(&self) -> bool {
+        true
+    }
+
+    fn tokens<'a>(&'a self, _thread: &'a str, run: &'a Value) -> BoxFut<'a, anyhow::Result<Option<RunTokens>>> {
+        Box::pin(async move {
+            let run = run["runId"].as_str().unwrap_or_default();
+            self.reads.lock().unwrap().push(run.to_string());
+            if *self.fails.lock().unwrap() || self.failing.lock().unwrap().iter().any(|r| r == run) {
+                anyhow::bail!("token source unreachable (fake)");
+            }
+            Ok(self.runs.lock().unwrap().get(run).copied())
+        })
+    }
+}
+
 pub fn thread(id: &str, status: &str, updated: &str) -> Value {
     json!({
         "threadId": id, "status": status, "updatedAt": updated, "link": format!("https://t3/{id}"),
@@ -178,6 +228,10 @@ impl FakeT3 {
         self.st().send_fails = fails;
     }
 
+    pub fn set_list_fails(&self, fails: bool) {
+        self.st().list_fails = fails;
+    }
+
     pub fn set_prs_fail(&self, fails: bool) {
         self.st().prs_fail = fails;
     }
@@ -208,6 +262,10 @@ impl FakeT3 {
 
     pub fn set_items(&self, id: &str, items: Vec<Value>) {
         self.st().items.insert(id.into(), items);
+    }
+
+    pub fn set_runs(&self, id: &str, runs: Vec<Value>) {
+        self.st().runs.insert(id.into(), runs);
     }
 
     pub fn set_prs(&self, id: &str, prs: Vec<Value>) {
@@ -272,6 +330,7 @@ impl FakeT3 {
                 }
                 let id = args["threadId"].as_str().unwrap_or_default();
                 let items = st.items.get(id).cloned().unwrap_or_default();
+                let runs = st.runs.get(id).cloned().unwrap_or_default();
                 match st.threads.get(id) {
                     Some(th) => {
                         let mut th = th.clone();
@@ -281,7 +340,7 @@ impl FakeT3 {
                             th["pullRequestCount"] = json!(prs.len());
                             th["pullRequests"] = json!(open);
                         }
-                        Ok(json!({"thread": th, "items": items, "earlierPosition": null}))
+                        Ok(json!({"thread": th, "recentRuns": runs, "items": items, "earlierPosition": null}))
                     }
                     None => Err(T3Error::Tool(format!("t3_thread_read: thread {id} not found"))),
                 }
@@ -295,6 +354,7 @@ impl FakeT3 {
                 Ok(json!({"threadId": args["threadId"], "messageId": format!("msg:{n}"),
                           "runId": format!("run:{n}"), "status": "queued", "delivery": "queued"}))
             }
+            "t3_thread_list" if st.list_fails => Err(T3Error::Unavailable("T3 unreachable (fake)".into())),
             "t3_thread_list" => {
                 let wanted: Option<Vec<&str>> =
                     args["statuses"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect());

@@ -16,6 +16,7 @@ use crate::issues::IssueArgs;
 use crate::merge::MergeArgs;
 use crate::store::{Bind, Link, Pending, Store};
 use crate::t3::{T3Client, T3Error};
+use crate::tokens::{T3Tokens, TokenSource};
 use crate::usage::UsageSource;
 
 pub const ACTIVE: &[&str] = &["preparing", "queued", "starting", "running"];
@@ -262,6 +263,8 @@ pub struct Wf {
     pub(crate) flow_lock: tokio::sync::Mutex<()>,
     pub(crate) flow_due: std::sync::atomic::AtomicBool,
     pub(crate) usage: Mutex<Option<Arc<dyn UsageSource>>>,
+    pub(crate) tokens: Mutex<Arc<dyn TokenSource>>,
+    pub(crate) token_retry: Mutex<std::collections::HashSet<String>>,
     pub(crate) release: Mutex<Option<crate::release::Version>>,
     pub(crate) skills: crate::drift::Cache,
     pub(crate) slot_folders: Mutex<Option<crate::slots::Folders>>,
@@ -322,6 +325,8 @@ impl Wf {
             flow_lock: tokio::sync::Mutex::new(()),
             flow_due: std::sync::atomic::AtomicBool::new(false),
             usage: Mutex::new(None),
+            tokens: Mutex::new(Arc::new(T3Tokens)),
+            token_retry: Mutex::new(std::collections::HashSet::new()),
             release: Mutex::new(None),
             skills: crate::drift::Cache::default(),
             slot_folders: Mutex::new(None),

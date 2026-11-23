@@ -1,7 +1,9 @@
 use serde_json::{Value, json};
+use std::sync::Arc;
 use t3_codemode::clock::local_clock;
 use t3_codemode::config::Config;
-use t3_codemode::fake::{disabled_provider, project, provider, thread};
+
+use t3_codemode::fake::{FakeTokens, disabled_provider, project, provider, thread};
 use t3_codemode::server;
 use t3_codemode::store::{Limit, PickRecord};
 
@@ -171,6 +173,167 @@ async fn usage_stats_without_a_pool_reports_the_single_launch_selection() {
     assert_eq!((m["status"].clone(), m["share"].clone(), m["running"].clone()), (json!("ready"), json!(1), json!(1)));
     assert_eq!(m["driver"], "claudeAgent");
     assert_eq!(v["running"], json!([{"instanceId": "claudeAgent", "threads": 1}]));
+}
+
+fn run(id: &str, n: u64, instance: &str, completed: &str) -> Value {
+    json!({"runId": format!("run:{id}:{n}"), "ordinal": n, "status": "completed", "providerInstanceId": instance,
+           "model": OPUS, "executedModel": OPUS, "requestedAt": completed, "startedAt": completed,
+           "completedAt": completed})
+}
+
+fn ended(h: &H, id: &str, instance: &str, updated: &str) -> String {
+    let mut t = thread(id, "completed", updated);
+    t["providerInstanceId"] = json!(instance);
+    h.fake.put(t);
+    h.fake.set_runs(id, vec![run(id, 1, instance, updated)]);
+    format!("run:{id}:1")
+}
+
+fn tokens(h: &H) -> Arc<FakeTokens> {
+    let t = Arc::new(FakeTokens::default());
+    h.app.wf.set_token_source(t.clone());
+    t
+}
+
+#[tokio::test]
+async fn usage_stats_totals_tokens_per_instance_and_provider() {
+    let h = one_to_three();
+    let t = tokens(&h);
+    let a1 = ended(&h, "a:1", "claude-a", &at(-30));
+    let a2 = ended(&h, "a:2", "claude-a", &at(-90));
+    let b1 = ended(&h, "b:1", "claude-b", &at(-10));
+    t.set(&a1, 1000, 200);
+    t.set(&a2, 500, 50);
+    t.set(&b1, 300, 30);
+    let actions = h.app.wf.record_tokens().await.unwrap();
+    assert_eq!(actions.len(), 3, "{actions:?}");
+    let v = stats(&h, "").await;
+    assert_eq!(member(&v, "claude-a")["tokens"], json!({"input": 1500, "output": 250, "runs": 2}));
+    assert_eq!(member(&v, "claude-b")["tokens"], json!({"input": 300, "output": 30, "runs": 1}));
+    assert_eq!((v["tokens"]["input"].clone(), v["tokens"]["output"].clone()), (json!(1800), json!(280)));
+    assert_eq!(v["tokens"]["byProvider"], json!({"claudeAgent": {"input": 1800, "output": 280, "runs": 3}}));
+    let buckets = v["tokenSeries"]["buckets"].as_array().unwrap();
+    assert_eq!(buckets.len(), 24);
+    assert_eq!(v["tokenSeries"]["start"], v["series"]["start"]);
+    assert_eq!(v["tokenSeries"]["bucketMinutes"], v["series"]["bucketMinutes"]);
+    assert_eq!(buckets[23]["input"], json!({"claude-a": 1000, "claude-b": 300}));
+    assert_eq!(buckets[22]["output"], json!({"claude-a": 50, "claude-b": 0}));
+    let hour = stats(&h, "{ window: '1h' }").await;
+    assert_eq!(member(&hour, "claude-a")["tokens"], json!({"input": 1000, "output": 200, "runs": 1}));
+    assert!(h.app.wf.record_tokens().await.unwrap().is_empty());
+    assert_eq!(t.reads().len(), 3);
+}
+
+#[tokio::test]
+async fn token_counts_skip_running_old_and_failed_reads() {
+    let h = one_to_three();
+    let t = tokens(&h);
+    let mut busy = thread("busy:1", "running", T0);
+    busy["providerInstanceId"] = json!("claude-a");
+    h.fake.put(busy);
+    ended(&h, "old:1", "claude-a", "2026-11-15T12:00:00Z");
+    let run = ended(&h, "a:1", "claude-a", &at(-5));
+    t.set(&run, 40, 4);
+    t.set_fails(true);
+    assert!(h.app.wf.record_tokens().await.unwrap().is_empty());
+    assert_eq!(member(&stats(&h, "").await, "claude-a")["tokens"]["runs"], json!(0));
+    t.set_fails(false);
+    assert_eq!(h.app.wf.record_tokens().await.unwrap().len(), 1);
+    assert_eq!(member(&stats(&h, "").await, "claude-a")["tokens"], json!({"input": 40, "output": 4, "runs": 1}));
+    assert!(!t.reads().iter().any(|r| r.contains("busy") || r.contains("old")), "{:?}", t.reads());
+}
+
+#[tokio::test]
+async fn token_counts_follow_each_runs_own_instance_and_end() {
+    let h = one_to_three();
+    let t = tokens(&h);
+    let mut moved = thread("m:1", "running", T0);
+    moved["providerInstanceId"] = json!("claude-b");
+    moved["latestRunId"] = json!("run:m:1:3");
+    h.fake.put(moved);
+    let mut running = run("m:1", 3, "claude-b", T0);
+    running["status"] = json!("running");
+    running["completedAt"] = Value::Null;
+    h.fake.set_runs("m:1", vec![running, run("m:1", 2, "claude-b", &at(-20)), run("m:1", 1, "claude-a", &at(-90))]);
+    t.set("run:m:1:1", 100, 10);
+    t.set("run:m:1:2", 200, 20);
+    assert_eq!(h.app.wf.record_tokens().await.unwrap().len(), 2);
+    let hour = stats(&h, "{ window: '1h' }").await;
+    assert_eq!(member(&hour, "claude-a")["tokens"]["runs"], json!(0));
+    assert_eq!(member(&hour, "claude-b")["tokens"], json!({"input": 200, "output": 20, "runs": 1}));
+    let day = stats(&h, "").await;
+    assert_eq!(member(&day, "claude-a")["tokens"], json!({"input": 100, "output": 10, "runs": 1}));
+    assert_eq!(t.reads(), vec!["run:m:1:2", "run:m:1:1"]);
+}
+
+#[tokio::test]
+async fn a_failed_read_of_one_run_is_retried_and_does_not_hold_back_later_runs() {
+    let h = one_to_three();
+    let t = tokens(&h);
+    let mut th = thread("r:1", "completed", &at(-5));
+    th["providerInstanceId"] = json!("claude-a");
+    th["latestRunId"] = json!("run:r:1:2");
+    h.fake.put(th);
+    h.fake.set_runs("r:1", vec![run("r:1", 2, "claude-a", &at(-5)), run("r:1", 1, "claude-a", &at(-30))]);
+    t.set("run:r:1:1", 100, 10);
+    t.set("run:r:1:2", 200, 20);
+    t.set_run_fails("run:r:1:1", true);
+    assert_eq!(h.app.wf.record_tokens().await.unwrap().len(), 1);
+    assert_eq!(h.app.wf.record_tokens().await.unwrap().len(), 0);
+    assert_eq!(member(&stats(&h, "").await, "claude-a")["tokens"]["runs"], json!(1));
+    h.fake.set_list_fails(true);
+    assert!(h.app.wf.record_tokens().await.is_err());
+    h.fake.set_list_fails(false);
+    t.set_run_fails("run:r:1:1", false);
+    assert_eq!(h.app.wf.record_tokens().await.unwrap().len(), 1);
+    assert_eq!(member(&stats(&h, "").await, "claude-a")["tokens"], json!({"input": 300, "output": 30, "runs": 2}));
+    assert!(h.app.wf.record_tokens().await.unwrap().is_empty());
+    assert_eq!(t.reads().iter().filter(|r| *r == "run:r:1:1").count(), 3);
+}
+
+#[tokio::test]
+async fn token_series_for_all_starts_at_the_earliest_run_without_picks() {
+    let h = one_to_three();
+    let t = tokens(&h);
+    t.set(&ended(&h, "a:1", "claude-a", &at(-600)), 10, 1);
+    t.set(&ended(&h, "a:2", "claude-a", &at(-5)), 20, 2);
+    h.app.wf.record_tokens().await.unwrap();
+    let all = stats(&h, "{ window: 'all' }").await;
+    assert_eq!(all["series"]["start"], at(-600));
+    assert_eq!(all["tokenSeries"]["start"], at(-600));
+    let buckets = all["tokenSeries"]["buckets"].as_array().unwrap();
+    assert_eq!(
+        (buckets[0]["input"]["claude-a"].clone(), buckets[23]["input"]["claude-a"].clone()),
+        (json!(10), json!(20))
+    );
+}
+
+#[tokio::test]
+async fn usage_stats_reports_null_tokens_when_t3_sends_none() {
+    let h = one_to_three();
+    ended(&h, "a:1", "claude-a", &at(-5));
+    let calls = h.fake.calls().len();
+    assert!(h.app.wf.record_tokens().await.unwrap().is_empty());
+    assert_eq!(h.fake.calls().len(), calls);
+    let v = stats(&h, "").await;
+    assert_eq!((v["tokens"].clone(), v["tokenSeries"].clone()), (Value::Null, Value::Null));
+    assert_eq!(member(&v, "claude-a")["tokens"], Value::Null);
+    let single = stats(&H::new(), "").await;
+    assert_eq!((single["tokens"].clone(), single["members"][0]["tokens"].clone()), (Value::Null, Value::Null));
+}
+
+#[tokio::test]
+async fn usage_stats_without_a_pool_totals_the_single_instance_tokens() {
+    let h = H::new();
+    let t = tokens(&h);
+    let run = ended(&h, "c:1", "claudeAgent", &at(-5));
+    t.set(&run, 70, 7);
+    h.app.wf.record_tokens().await.unwrap();
+    let v = stats(&h, "").await;
+    assert_eq!(v["members"][0]["tokens"], json!({"input": 70, "output": 7, "runs": 1}));
+    assert_eq!(v["tokens"]["byInstance"], json!({"claudeAgent": {"input": 70, "output": 7, "runs": 1}}));
+    assert_eq!(v["tokenSeries"]["start"], v["since"]);
+    assert_eq!(v["tokenSeries"]["buckets"][23]["input"], json!({"claudeAgent": 70}));
 }
 
 struct Board {

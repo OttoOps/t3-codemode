@@ -52,6 +52,11 @@ pub fn spawn(app: Arc<App>) -> tokio::task::JoinHandle<()> {
                 Ok(actions) => tracing::info!(?actions, "pool limits"),
                 Err(e) => tracing::warn!("pool limit pass failed: {}", app.t3.redact(format!("{e:#}"))),
             }
+            match app.wf.record_tokens().await {
+                Ok(actions) if actions.is_empty() => {}
+                Ok(actions) => tracing::debug!(?actions, "token counts"),
+                Err(e) => tracing::warn!("token count pass failed: {}", app.t3.redact(format!("{e:#}"))),
+            }
             if let Err(e) = app.wf.refresh_routing().await {
                 tracing::warn!("routing view not refreshed: {}", app.t3.redact(format!("{e:#}")));
             }

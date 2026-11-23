@@ -7,7 +7,8 @@ use serde_json::{Map, Value, json};
 use crate::board::BaseSpec;
 use crate::clock::{iso, local_clock, parse_ts, plus_minutes};
 use crate::config::Config;
-use crate::store::{KEEP_PICKS, PickRecord};
+use crate::store::{KEEP_PICKS, PickRecord, RunTokenRecord};
+use crate::tokens::RunTokens;
 use crate::wf::Wf;
 
 pub const DEFAULT_WINDOW: &str = "24h";
@@ -104,15 +105,65 @@ fn since_of(window: &Window, now: Timestamp) -> Option<Timestamp> {
     window.minutes.map(|m| plus_minutes(now, -(m as f64)))
 }
 
+fn bucket_width(start: Timestamp, now: Timestamp) -> f64 {
+    (now.as_second() - start.as_second()).max(60) as f64 / 60.0 / BUCKETS as f64
+}
+
+fn bucket_of(at: &str, start: Timestamp, width: f64) -> Option<usize> {
+    let mins = (parse_ts(at)?.as_second() - start.as_second()) as f64 / 60.0;
+    Some(((mins / width).floor().max(0.0) as usize).min(BUCKETS - 1))
+}
+
+#[derive(Clone, Copy, Default)]
+struct Totals {
+    input: u64,
+    output: u64,
+    runs: u64,
+}
+
+impl Totals {
+    fn add(&mut self, t: RunTokens) {
+        self.input += t.input;
+        self.output += t.output;
+        self.runs += 1;
+    }
+
+    fn json(&self) -> Value {
+        json!({"input": self.input, "output": self.output, "runs": self.runs})
+    }
+}
+
+fn token_series(rows: &[RunTokenRecord], ids: &[String], start: Timestamp, now: Timestamp) -> Value {
+    let width = bucket_width(start, now);
+    let zero: Map<String, Value> = ids.iter().map(|id| (id.clone(), json!(0))).collect();
+    let mut input = vec![zero.clone(); BUCKETS];
+    let mut output = vec![zero; BUCKETS];
+    for r in rows {
+        let (Some(t), Some(i)) = (r.tokens, bucket_of(&r.at, start, width)) else { continue };
+        let add = |m: &mut Map<String, Value>, n: u64| {
+            let had = m.get(&r.instance).and_then(Value::as_u64).unwrap_or(0);
+            m.insert(r.instance.clone(), json!(had + n));
+        };
+        add(&mut input[i], t.input);
+        add(&mut output[i], t.output);
+    }
+    let buckets: Vec<Value> = input
+        .into_iter()
+        .zip(output)
+        .enumerate()
+        .map(
+            |(i, (inp, out))| json!({"start": iso(plus_minutes(start, width * i as f64)), "input": inp, "output": out}),
+        )
+        .collect();
+    json!({"start": iso(start), "bucketMinutes": (width * 1000.0).round() / 1000.0, "buckets": buckets})
+}
+
 fn series(picks: &[PickRecord], ids: &[String], start: Timestamp, now: Timestamp) -> Value {
-    let span = (now.as_second() - start.as_second()).max(60) as f64 / 60.0;
-    let width = span / BUCKETS as f64;
+    let width = bucket_width(start, now);
     let zero: Map<String, Value> = ids.iter().map(|id| (id.clone(), json!(0))).collect();
     let mut counts = vec![zero; BUCKETS];
     for p in picks {
-        let Some(at) = parse_ts(&p.at) else { continue };
-        let mins = (at.as_second() - start.as_second()) as f64 / 60.0;
-        let i = ((mins / width).floor().max(0.0) as usize).min(BUCKETS - 1);
+        let Some(i) = bucket_of(&p.at, start, width) else { continue };
         bump(&mut counts[i], &p.instance_id);
     }
     let buckets: Vec<Value> = counts
@@ -155,7 +206,8 @@ pub fn fingerprint(v: &Value) -> Value {
         members,
         v["running"],
         v["runningError"],
-        v["window"]
+        v["window"],
+        v["tokens"]
     ])
 }
 
@@ -191,6 +243,7 @@ impl Wf {
                 };
             }
         }
+        self.add_tokens(&mut out, since, now)?;
         match &running {
             Ok(r) => {
                 out["running"] =
@@ -265,7 +318,12 @@ impl Wf {
                 m["skips"] = Value::Object(skips.remove(id).unwrap_or_default());
             }
         }
-        let start = since.unwrap_or_else(|| picks.last().and_then(|p| parse_ts(&p.at)).unwrap_or(now));
+        let first_tokens = match since {
+            None if self.token_source().reports() => self.store.run_tokens_first_at()?.as_deref().and_then(parse_ts),
+            _ => None,
+        };
+        let first_pick = picks.last().and_then(|p| parse_ts(&p.at));
+        let start = since.unwrap_or_else(|| first_pick.into_iter().chain(first_tokens).min().unwrap_or(now));
         let recent: Vec<Value> = picks
             .iter()
             .take(RECENT)
@@ -337,6 +395,50 @@ impl Wf {
         });
         Ok(json!({"mode": "single", "source": t["source"], "pool": null, "strategy": null, "error": error,
                   "warnings": [], "members": [member]}))
+    }
+
+    fn add_tokens(&self, out: &mut Value, since: Option<Timestamp>, now: Timestamp) -> Result<()> {
+        if !self.token_source().reports() {
+            out["tokens"] = Value::Null;
+            out["tokenSeries"] = Value::Null;
+            for m in out["members"].as_array_mut().into_iter().flatten() {
+                m["tokens"] = Value::Null;
+            }
+            return Ok(());
+        }
+        let rows: Vec<RunTokenRecord> =
+            self.store.run_tokens(since.map(iso).as_deref())?.into_iter().filter(|r| r.tokens.is_some()).collect();
+        let ids: Vec<String> = out["members"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| m["instanceId"].as_str().map(String::from))
+            .collect();
+        let mut by_instance: BTreeMap<String, Totals> = ids.iter().map(|id| (id.clone(), Totals::default())).collect();
+        let mut by_provider: BTreeMap<String, Totals> = BTreeMap::new();
+        let mut all = Totals::default();
+        for r in &rows {
+            let t = r.tokens.unwrap_or_default();
+            all.add(t);
+            by_instance.entry(r.instance.clone()).or_default().add(t);
+            by_provider.entry(r.driver.clone().unwrap_or_else(|| "unknown".into())).or_default().add(t);
+        }
+        for m in out["members"].as_array_mut().into_iter().flatten() {
+            m["tokens"] = m["instanceId"].as_str().and_then(|id| by_instance.get(id)).map_or(Value::Null, Totals::json);
+        }
+        let start = out["series"]["start"]
+            .as_str()
+            .and_then(parse_ts)
+            .or(since)
+            .or_else(|| rows.first().and_then(|r| parse_ts(&r.at)))
+            .unwrap_or(now);
+        let series_ids: Vec<String> = by_instance.keys().cloned().collect();
+        out["tokenSeries"] = token_series(&rows, &series_ids, start, now);
+        let mut tokens = all.json();
+        tokens["byInstance"] = Value::Object(by_instance.iter().map(|(k, t)| (k.clone(), t.json())).collect());
+        tokens["byProvider"] = Value::Object(by_provider.iter().map(|(k, t)| (k.clone(), t.json())).collect());
+        out["tokens"] = tokens;
+        Ok(())
     }
 
     pub fn routing_view(&self) -> Value {
