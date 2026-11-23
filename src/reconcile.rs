@@ -671,14 +671,15 @@ impl Wf {
         pass: &mut Pass,
     ) -> Result<Option<crate::merge_answer::Answered>> {
         let merged = o.state == "MERGED";
+        let end = o.ended.clone().unwrap_or_else(|| self.now());
         let code = match merged {
-            true => self.code_merged(&t.repo, t.number, &o.head, cards)?,
+            true if later(&end, since) => self.code_merged(&t.repo, t.number, &o.head, cards)?,
+            true => None,
             false => {
                 self.answered_drop(&t.repo, t.number)?;
                 None
             }
         };
-        let end = o.ended.clone().unwrap_or_else(|| self.now());
         let when = local_clock(&end);
         let note = if merged {
             format!("merged on GitHub at {}, {when}", short(&o.commit))
