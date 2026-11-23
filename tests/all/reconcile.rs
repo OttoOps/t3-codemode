@@ -1798,3 +1798,53 @@ async fn a_queue_drop_between_worker_open_and_ready_card_is_idempotent_on_first_
     let after_second: Vec<String> = cards(&h, false).into_iter().map(|c| c["id"].as_str().unwrap().into()).collect();
     assert_eq!(after_second, after_first, "second reconcile must be idempotent");
 }
+
+#[tokio::test]
+async fn a_pre_tracking_merge_with_a_later_ready_card_does_not_trigger_after_merge() {
+    let h = H::new();
+    let repo = h.dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    h.fake.set_projects(vec![project("proj:widgets", &repo.to_string_lossy())]);
+    h.fake.update(TICKET, json!({"projectId": "proj:widgets"}));
+    h.fake.update(WORKER, json!({"projectId": "proj:widgets"}));
+    h.wf(TICKET, "join", json!({"parent": BOARD, "label": "widgets#41", "role": "ticket"})).await;
+    h.wf(
+        WORKER,
+        "join",
+        json!({"parent": TICKET, "label": "#41 PR 1/1", "role": "worker", "issue": "acme/widgets#41", "part": "1/1"}),
+    )
+    .await;
+
+    let mut pr = github_pr(HEAD, "CLEAN", false);
+    pr["body"] = json!("## Summary\n\ntest\n\nRefs #41\n");
+    h.github.set_pr(REPO, 7, pr);
+    h.github.set_checks(REPO, 7, json!([check_run("ci", "SUCCESS")]));
+
+    h.clock.set(&at(5));
+    let r = h.wf(WORKER, "pr", json!({"event": "ready", "repo": REPO, "pr": 7, "head": HEAD})).await;
+    assert_eq!(r["status"], "gated", "{r}");
+
+    h.github.update_pr(
+        REPO,
+        7,
+        json!({
+            "state": "MERGED",
+            "mergeCommit": {"oid": MERGED},
+            "mergedAt": at(-10),
+            "headRef": {"id": "REF_acme/widgets_7", "target": {"oid": HEAD}}
+        }),
+    );
+
+    let actions = check(&h, 6).await;
+    assert!(
+        actions.iter().all(|a| !a.contains("merged on GitHub")),
+        "pre-tracking merge must not be reported: {actions:?}"
+    );
+    assert!(
+        !h.github.operations().iter().any(|op| op == "deleteRef"),
+        "pre-tracking merge must not delete the branch: {:?}",
+        h.github.operations()
+    );
+    assert!(h.sent().is_empty(), "pre-tracking merge must not wake worker or ticket: {:?}", h.sent());
+    assert_eq!(cards(&h, false).len(), 1, "ready card created after the pre-tracking merge must stay untouched");
+}
