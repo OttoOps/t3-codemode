@@ -103,9 +103,13 @@ parent and a child, and the service keeps every link and message in its store.
   when unset. A worker link with no `issue` takes one from its pull request's
   closing references (`Closes #N`) at the next
   [GitHub reconcile](board.md#github-reconcile).
-- `wf.openChild` also takes `pr: { format?, sections?, passes?, mergeOnly? }`,
+- `wf.openChild` also takes `pr: { format?, sections?, passes?, mergeOnly?, method? }`,
   the PR description format a worker's [`wf.pr`](#wfpr) `opened` event is
   checked against. It is stored on the child's link when the child joins.
+  `method` is the repo's merge method, `merge`, `squash` or `rebase`, and a
+  brief may give it with no `format`. With it,
+  the service merges the PR on the board's answer to its merge card
+  ([The board's merge answer](#the-boards-merge-answer)).
 - `wf.send({kind, body, gate?, wake?, options?})`, kinds `note | event | gate |
   blocker | report | handoff | closed`, to the caller's parent. Returns
   `{handle, delivery}`: `noted`, `sent`, `queued` (the parent is mid-turn, or
@@ -325,17 +329,21 @@ GitHub computes the merge state lazily, so while an open pull request reports
 | Is already in the merge queue | Nothing | `queued` with its position and `approval` id |
 | Has a merge queue and is mergeable | `enqueuePullRequest` with `expectedHeadOid = head` | `queued` with its position and `approval` id |
 | Has a merge queue and is not mergeable yet | Records it as waiting to be queued | `waiting` with its `mergeState` and `approval` id |
+| Is `CLEAN` or `HAS_HOOKS` with a check on its head still running | Records it as waiting | `waiting` with its `mergeState` and `approval` id |
 | Has no merge queue and is mergeable | `mergePullRequest` with `method`, else the repo's default, and `expectedHeadOid = head` | `merged` with the commit |
-| Has no merge queue and is not mergeable | Nothing | `refused` |
+| Has no merge queue, and is `BLOCKED`, `UNKNOWN`, or `UNSTABLE` with a check still running | Records it as waiting to be merged | `waiting` with its `mergeState` and `approval` id |
+| Has no merge queue and is `BEHIND`, `DIRTY` or otherwise not mergeable | Nothing | `refused` |
 | Has a check on its head that failed | Nothing | `refused`, naming the check |
 
-Mergeable means a `mergeStateStatus` of `CLEAN` or `HAS_HOOKS`, or `UNSTABLE`
-when every check on the head that did not pass ended `CANCELLED`, `SKIPPED` or
+Mergeable means a `mergeStateStatus` of `CLEAN` or `HAS_HOOKS` with no check
+on the head running or failed, or `UNSTABLE` when every check on the head that did not pass ended `CANCELLED`, `SKIPPED` or
 `NEUTRAL`. GitHub's own merge button accepts any `UNSTABLE` pull request, but
 `UNSTABLE` also covers a failed optional check, so `wf.merge` reads the
 checks. A check that ended `FAILURE`, `ERROR`, `TIMED_OUT`, `ACTION_REQUIRED`,
 `STALE` or any other outcome makes it refuse, and a check still running makes
-the pull request not mergeable yet. [ADR 0003](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0003-unstable-merge-state.md)
+the pull request not mergeable yet, so `wf.merge` records it as waiting.
+[ADR 0016](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0016-merge-on-the-boards-answer.md)
+moved that case from `refused` to `waiting` on a repo with no merge queue. [ADR 0003](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0003-unstable-merge-state.md)
 has the reasoning. `wf.merge` never turns on
 auto-merge: on a merge-queue repo, auto-merge set on an already mergeable pull
 request never joins the queue. Every result carries `status`, `repo`, `pr` and
@@ -347,8 +355,11 @@ asked (`thread` and `label`), and the merge state it saw. A `queued` result
 keeps the record too, marked as sent, so the board follows the pull request
 until it merges or leaves the queue. The board's
 [GitHub reconcile](board.md#github-reconcile) queues a waiting pull request
-once GitHub shows it mergeable at the approved head, and opens a new merge gate
-if the head moves first. A merge, here or on GitHub, drops the record. A
+once GitHub shows it mergeable at the approved head, or merges it on a repo
+with no merge queue, and opens a new merge gate if the head moves first. It
+never merges over a review that requests changes: GitHub reports such a pull
+request `BLOCKED`, and the record waits until the block clears or an admin
+merges the pull request on GitHub. A merge, here or on GitHub, drops the record. A
 repeat call replaces the record, and the board acts only on the latest one.
 
 The service runs `gh api graphql` with the `gh` login of the user it runs as,
@@ -358,6 +369,39 @@ reaches `gh` or the network itself; see [Security](security.md#github).
 ```js
 async () => wf.merge({ repo: "acme/widgets", pr: 81, head: "d4db97c0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70" })
 ```
+
+### The board's merge answer
+
+When the user answers a merge card that [`wf.pr`](#wfpr) `ready` opened
+with one of its buttons, such as `merge` or `merge and deploy`, the service
+runs the merge itself, with no ticket turn:
+
+1. It calls `wf.merge` for the ticket at the card's head, with the `method`
+   from the worker's `wf.openChild` brief. A `queued` or `waiting` result
+   holds the approval in the merge wait, and GitHub reconcile follows it.
+2. Once GitHub shows the pull request merged, it deletes the head branch
+   through the API, unless GitHub already did, the branch is on a fork, or
+   the branch's tip is no longer the merged head.
+3. It resolves the ticket's merge cards for the pull request.
+4. When no `pr`-scoped delivery stage remains after `merge`, it sends the
+   worker `Merged #<n> at <merge commit>. Hand off.`
+5. It wakes the ticket only when stages remain to run: a `pr`-scoped stage,
+   or on the ticket's last PR a `ticket`-scoped one. The wake names the
+   remaining stages and the ones the answer approved. Otherwise the ticket
+   reads the merge in its digest.
+
+A pull request merged on GitHub while its merge card is still open counts as
+`merge` alone. On a card GitHub reconcile opened after the approval, `requeue`
+and `merge` run `wf.merge` again at the card's head, and `ok` accepts the
+queued head and keeps waiting. Any other answer goes to the ticket, and
+drops the service's approval and its merge wait.
+
+The ticket gets the answer as before when the service cannot decide: the
+brief gave no `method`, the reconcile is off, no open worker link holds the
+pull request, or the card predates this behavior. A `refused` result, or a
+`wf.merge` call that throws, also goes to the ticket, with the outcome.
+[ADR 0016](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0016-merge-on-the-boards-answer.md)
+records the rules.
 
 ### wf.flow
 
