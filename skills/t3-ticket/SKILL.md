@@ -58,7 +58,9 @@ the root and talks to the user itself.
   only after the last worker has settled.
 - Every human gate surfaces here, as an action line (below). With a
   parent, this thread also sends each one up with
-  `wf.send({ kind: "gate", gate, body, options })`.
+  `wf.send({ kind: "gate", gate, body, options })`. A worker's blockers and
+  gates on the board are the exception: t3cm sends them up itself,
+  as "Between workers" says.
 - Text published under the user's name (the split comment, issue comments)
   follows the Publishing section of the `t3-worker` procedure, at
   `../t3-worker/procedure.md` relative to this skill's base directory.
@@ -317,21 +319,40 @@ such as Antigravity, read `~/.agents/skills/t3-worker/SKILL.md` and the
 
 Every worker message opens with a `[t3cm` header and needs no command
 before you act. A message about a closed link no longer arrives. The body
-says which part below handles it: a blocker or gate is the next two
-paragraphs, "PR opened", "ready to merge" and "updated" are their sections,
-and the `handoff` is "The handoff". A `note` never wakes this thread; it
-shows in the digest.
+says which part below handles it: a blocker or a worker's own gate is the
+next three paragraphs, "PR opened", "ready to merge" and "updated" are their
+sections, and the `handoff` is "The handoff". A `note` never wakes this
+thread; it shows in the digest.
 
-When a worker reports a blocker, relay it to the user as an action line
-with the command or link the worker named. When the user reports it
-cleared, tell the worker, then end the turn.
+On the board, t3cm handles a worker's blocker, and every gate it opens
+other than `merge` and `delivery:<id>`, without this thread. It puts each
+on the board as a card tagged with the worker, and sends the user's answer
+straight to the worker when it is one of the card's buttons or "hold".
+Each step shows up as a "handled for you" line in the digest of this
+thread's next wake. Any other answer arrives here as a `[t3cm reply]`
+saying the worker still waits on it: decide what it asks of the worker,
+send that with `wf.reply`, then end the turn. An answer that starts with
+"merge" arrives here too. When it answers a worker's "ready to merge" sent
+under a gate of its own, treat that card as the worker's "ready to merge":
+run "Ready to merge" for its PR, taking the head the card names, or the
+PR's current `headRefOid` when it names none. That opens the proper merge
+gate with the answers the delivery slot calls for, and the earlier answer
+does not count as approval. Treat any other "merge" answer like the
+free-text answers above.
+
+Under an overseer thread, or with `relay` set to `false` for workers in
+t3cm's roles config, the worker's blocker or gate wakes this thread
+instead.
+Relay a blocker to the user as an action line with the command or link
+the worker named. When the user reports it cleared, tell the worker, then
+end the turn.
 
 Before it opens a PR, the worker runs the `review` slot's reviewer. When
 that review gets stuck, or the reviewer cannot run, the worker sends the
-open findings with both sides. Relay them under the action line "decide
-each open review finding: fix it, or ship as is", or for a reviewer that
-cannot run, "open the PR without the independent review, or fix the
-reviewer's route". Send the user's answer
+open findings with both sides. When they wake this thread, relay them
+under the action line "decide each open review finding: fix it, or ship
+as is", or for a reviewer that cannot run, "open the PR without the
+independent review, or fix the reviewer's route". Send the user's answer
 to the worker, then end the turn.
 
 ### PR opened
