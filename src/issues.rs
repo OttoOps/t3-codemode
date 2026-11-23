@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::board::{BOARD, Issue, LaunchArgs, parse_issue_only};
+use crate::board::{BOARD, Issue, LaunchArgs, parse_github_issue_only};
 use crate::clock::local_clock;
 use crate::store::NewIssue;
 use crate::wf::Wf;
@@ -21,7 +21,7 @@ pub struct IssueArgs {
 }
 
 pub fn issue_key(i: &Issue) -> String {
-    format!("{}/{}#{}", i.owner, i.repo, i.number).to_ascii_lowercase()
+    i.slug().to_ascii_lowercase()
 }
 
 fn text(s: Option<String>, what: &str, max: usize) -> Result<Option<String>> {
@@ -47,9 +47,28 @@ pub fn issue_view(seq: i64, i: &NewIssue) -> Value {
     v
 }
 
+fn matches_github_ticket(ticket_issue: Option<&str>, ticket_label: &str, issue: &Issue) -> bool {
+    match ticket_issue {
+        Some(raw) => parse_github_issue_only(raw).is_some_and(|gh| gh.slug().eq_ignore_ascii_case(&issue.slug())),
+        None => ticket_label.eq_ignore_ascii_case(&issue.label()),
+    }
+}
+
+fn github_ticket_key(ticket_issue: Option<&str>, ticket_label: &str) -> Option<String> {
+    match ticket_issue {
+        Some(raw) => parse_github_issue_only(raw).map(|gh| gh.slug().to_ascii_lowercase()),
+        None => Some(ticket_label.to_ascii_lowercase()),
+    }
+}
+
 impl Wf {
-    fn ticket_for(&self, label: &str) -> Result<Option<Value>> {
-        if let Some(l) = self.store.children(BOARD, false)?.into_iter().find(|l| l.label.eq_ignore_ascii_case(label)) {
+    fn ticket_for(&self, issue: &Issue) -> Result<Option<Value>> {
+        if let Some(l) = self
+            .store
+            .children(BOARD, false)?
+            .into_iter()
+            .find(|l| matches_github_ticket(l.identity.issue.as_deref(), &l.label, issue))
+        {
             let link = l.link.clone().or_else(|| self.live_of(&l.child)?["link"].as_str().map(String::from));
             return Ok(Some(json!({"label": l.label, "thread": l.child, "link": link, "done": l.closed})));
         }
@@ -57,22 +76,30 @@ impl Wf {
             .store
             .pending_all()?
             .into_iter()
-            .find(|p| p.parent == BOARD && p.label.eq_ignore_ascii_case(label))
+            .find(|p| p.parent == BOARD && matches_github_ticket(p.identity.issue.as_deref(), &p.label, issue))
             .map(|p| json!({"label": p.label, "thread": p.thread, "link": p.link, "done": false})))
     }
 
-    fn ticket_labels(&self) -> Result<HashSet<String>> {
-        let mut out: HashSet<String> =
-            self.store.children(BOARD, false)?.into_iter().map(|l| l.label.to_ascii_lowercase()).collect();
+    fn ticket_keys(&self) -> Result<HashSet<String>> {
+        let mut out: HashSet<String> = self
+            .store
+            .children(BOARD, false)?
+            .into_iter()
+            .filter_map(|l| github_ticket_key(l.identity.issue.as_deref(), &l.label))
+            .collect();
         out.extend(
-            self.store.pending_all()?.into_iter().filter(|p| p.parent == BOARD).map(|p| p.label.to_ascii_lowercase()),
+            self.store
+                .pending_all()?
+                .into_iter()
+                .filter(|p| p.parent == BOARD)
+                .filter_map(|p| github_ticket_key(p.identity.issue.as_deref(), &p.label)),
         );
         Ok(out)
     }
 
     fn already_known(&self, issue: &Issue) -> Result<Option<Value>> {
-        let url = issue.url();
-        if let Some(t) = self.ticket_for(&issue.label())? {
+        let url = issue.reference();
+        if let Some(t) = self.ticket_for(issue)? {
             let message = format!("{url} already has a ticket on the board ({}); nothing added", t["label"]);
             return Ok(Some(json!({"added": false, "reason": "ticket", "ticket": t, "message": message})));
         }
@@ -114,12 +141,13 @@ impl Wf {
     }
 
     pub async fn report_issue(&self, me: &str, a: IssueArgs) -> Result<Value> {
-        let issue = parse_issue_only(&a.url).ok_or_else(|| {
+        let issue = parse_github_issue_only(&a.url).ok_or_else(|| {
             anyhow!(
                 "wf.issue: {:?} is not a GitHub issue; use https://github.com/<owner>/<repo>/issues/<n> or <owner>/<repo>#<n>",
                 a.url
             )
         })?;
+        let (owner, repo, number) = issue.github_parts().expect("GitHub issue has owner, repo and number");
         self.backfill_thread(&issue_key(&issue)).await?;
         if let Some(v) = self.already_known(&issue)? {
             return Ok(v);
@@ -128,9 +156,9 @@ impl Wf {
         let note = text(a.note, "note", MAX_NOTE)?;
         let (thread_link, thread_title) = self.thread_meta(me).await;
         let entry = NewIssue {
-            url: issue.url(),
-            repo: format!("{}/{}", issue.owner, issue.repo),
-            number: issue.number,
+            url: issue.reference().to_string(),
+            repo: format!("{owner}/{repo}"),
+            number,
             label: issue.label(),
             title,
             note,
@@ -154,10 +182,11 @@ impl Wf {
     }
 
     pub fn new_issues(&self) -> Result<(Vec<Value>, Vec<Value>)> {
-        let tickets = self.ticket_labels()?;
+        let tickets = self.ticket_keys()?;
         let (mut open, mut dismissed) = (Vec::new(), Vec::new());
         for (seq, i) in self.store.new_issues()?.into_iter().rev() {
-            if tickets.contains(&i.label.to_ascii_lowercase()) {
+            let slug = format!("{}#{}", i.repo, i.number).to_ascii_lowercase();
+            if tickets.contains(&slug) || tickets.contains(&i.label.to_ascii_lowercase()) {
                 continue;
             }
             let v = issue_view(seq, &i);

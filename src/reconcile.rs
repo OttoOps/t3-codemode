@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::board::{BOARD, Card, NewCard, gh_name, parse_issue_only};
+use crate::board::{BOARD, Card, NewCard, gh_name, parse_github_issue_only};
 use crate::clock::{local_clock, parse_ts};
 use crate::github::errors;
 use crate::merge::{CHECKS, ENQUEUE_PR, MERGE_PR, Ready, checks, ready};
@@ -71,7 +71,7 @@ fn at_host_start(before: &str) -> bool {
 fn closing_issue(repo: &Value) -> Option<String> {
     repo["pullRequest"]["closingIssuesReferences"]["nodes"].as_array()?.iter().find_map(|n| {
         let repo = n["repository"]["nameWithOwner"].as_str()?;
-        parse_issue_only(&format!("{repo}#{}", n["number"].as_u64()?)).map(|i| i.slug())
+        parse_github_issue_only(&format!("{repo}#{}", n["number"].as_u64()?)).map(|i| i.slug())
     })
 }
 

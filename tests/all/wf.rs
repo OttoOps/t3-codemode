@@ -613,6 +613,7 @@ async fn init_leaves_another_launchs_pending_row_alone() {
                 reported: false,
                 thread: thread.map(String::from),
                 link: thread.map(|t| format!("https://t3/{t}")),
+                project: None,
                 identity: t3_codemode::store::Identity { issue: Some("acme/widgets#41".into()), ..Default::default() },
             })
             .unwrap();
@@ -775,7 +776,7 @@ async fn a_malformed_issue_or_part_is_refused() {
     let h = H::new();
     h.wf(TICKET, "init", json!({"role": "ticket", "root": true})).await;
     let e = h.wf_err(TICKET, "openChild", json!({"role": "worker", "label": "w", "issue": "widgets 115"})).await;
-    assert!(e.contains("issue \"widgets 115\" is not a GitHub issue"), "{e}");
+    assert!(e.contains("issue \"widgets 115\" is not a supported issue reference"), "{e}");
     let e = h.wf_err(TICKET, "openChild", json!({"role": "worker", "label": "w", "part": "0/4"})).await;
     assert!(e.contains("part \"0/4\" must be n/N"), "{e}");
     let e = h

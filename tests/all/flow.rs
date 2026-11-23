@@ -148,6 +148,7 @@ async fn a_launch_not_yet_joined_takes_a_slot_and_free_slots_never_go_below_zero
         reported: false,
         thread: None,
         link: None,
+        project: None,
         identity: Default::default(),
     };
     h.app.store.pending_put(&pending).unwrap();

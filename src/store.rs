@@ -175,6 +175,8 @@ pub struct Pending {
     pub thread: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     #[serde(flatten)]
     pub identity: Identity,
 }

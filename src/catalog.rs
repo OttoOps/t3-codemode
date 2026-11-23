@@ -53,8 +53,10 @@ fn obj(props: Value, required: &[&str]) -> Value {
 }
 
 fn with_identity(mut props: Value) -> Value {
-    let issue =
-        json!({"type": "string", "description": "<owner>/<repo>#<n> or https://github.com/<owner>/<repo>/issues/<n>"});
+    let issue = json!({
+        "type": "string",
+        "description": "GitHub issue (<owner>/<repo>#<n> or URL), GitLab issue URL (https://<host>/<group>/<project>/-/issues/<n>), or Jira key/URL (PROJ-123 or https://<host>/browse/PROJ-123)"
+    });
     props["issue"] = issue.clone();
     props["parentIssue"] = issue;
     props["part"] = json!({"type": "string", "description": "n/N, such as \"1/4\""});
@@ -126,7 +128,7 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.openChild",
             "wf",
-            "Prepare a link to a child thread you are about to launch. Paste the returned brief, verbatim, at the end of the child's launch brief; the child binds the link with wf.join, whose call in the brief carries any issue, parentIssue and part given here. issue and parentIssue (each <owner>/<repo>#<n> or its issue URL) name the GitHub issue the child works and the epic it belongs to, and part (n/N, such as \"1/4\") says which of the epic's PRs it is; wf.board() and the board return all three.",
+            "Prepare a link to a child thread you are about to launch. Paste the returned brief, verbatim, at the end of the child's launch brief; the child binds the link with wf.join, whose call in the brief carries any issue, parentIssue and part given here. issue and parentIssue (a GitHub issue ref, GitLab issue URL, or Jira key/URL) name the issue the child works and the epic it belongs to, and part (n/N, such as \"1/4\") says which of the epic's PRs it is; wf.board() and the board return all three.",
             "wf.openChild(input: { role: string; label: string; issue?: string; parentIssue?: string; part?: string }): Promise<{ brief: string; params: { down: number; miss: number; stall: number } }>;",
             obj(with_identity(json!({"role": {"type": "string"}, "label": {"type": "string"}})), &["role", "label"]),
         ),
@@ -219,11 +221,11 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.launchTicket",
             "wf",
-            "Launch a t3-ticket thread for a GitHub issue that reports to the t3-codemode board (the root overseer). The T3 project is the one whose workspace origin remote is the issue's repo, unless project (id or title) is given. The model resolves through the models.ticket slot for the issue's project in this order: launch arguments (model/effort), the repo's .t3-workflow.json and AGENTS.md, the user config's models.ticket, legacy board.* ticket keys, and the built-in default. A pool value picks through that pool (as wf.pick does) and adds pool and reason to the result. The result always carries instanceId, model, effort and modelSource. An unmapped repo, an invalid or unavailable model/instance/effort/pool, or a failed launch throws and leaves an error card on the board, never falling back to the built-in default. The ticket's link stores issue as <owner>/<repo>#<n>, with the optional parentIssue and part. The ticket is labeled <repo>#<n>, or <owner>/<repo>#<n> when another issue's ticket already holds that label, and an issue that already has a ticket or a pending launch throws.",
+            "Launch a t3-ticket thread for a GitHub, GitLab, or Jira issue that reports to the t3-codemode board (the root overseer). When project (id or title) is given it selects the T3 project directly; otherwise GitHub and GitLab refs match the T3 project whose workspace origin remote has that host and repo path, and Jira keys or unmatched GitLab/Jira hosts fall back to the user config's trackers mappings. The model resolves through the models.ticket slot for the issue's project in this order: launch arguments (model/effort), the repo's .t3-workflow.json and AGENTS.md, the user config's models.ticket, legacy board.* ticket keys, and the built-in default. A pool value picks through that pool (as wf.pick does) and adds pool and reason to the result. The result always carries instanceId, model, effort and modelSource. An unmapped ref, an invalid or unavailable model/instance/effort/pool, or a failed launch throws and leaves an error card on the board, never falling back to the built-in default. The ticket's link stores the canonical issue slug (GitHub <owner>/<repo>#<n>, GitLab <host>/<group/...>/<project>#<n>, or Jira KEY-N or <host>/KEY-N), with the optional parentIssue and part. The ticket is labeled <repo>#<n> for GitHub/GitLab or KEY-N for Jira (falling back to the slug if that label is already open), and an issue that already has a ticket or a pending launch throws.",
             "wf.launchTicket(input: { issue: string; parentIssue?: string; part?: string; project?: string; title?: string; model?: string; effort?: string }): Promise<{ ok: true; label: string; thread: string; link: string | null; projectId: string; title: string; instanceId: string; model: string; effort: string | null; modelSource: \"argument\" | \".t3-workflow.json\" | \"AGENTS.md\" | \"user\" | \"board\" | \"default\"; pool?: string; reason?: string }>;",
             obj(
-                json!({"issue": {"type": "string", "description": "https://github.com/<owner>/<repo>/issues/<n> or <owner>/<repo>#<n>"},
-                       "parentIssue": {"type": "string", "description": "<owner>/<repo>#<n> or https://github.com/<owner>/<repo>/issues/<n>"},
+                json!({"issue": {"type": "string", "description": "GitHub issue (<owner>/<repo>#<n> or URL), GitLab issue URL (https://<host>/<group>/<project>/-/issues/<n>), or Jira key/URL (PROJ-123 or https://<host>/browse/PROJ-123)"},
+                       "parentIssue": {"type": "string", "description": "GitHub issue ref, GitLab issue URL, or Jira key/URL"},
                        "part": {"type": "string", "description": "n/N, such as \"1/4\""},
                        "project": {"type": "string"}, "title": {"type": "string"}, "model": {"type": "string"}, "effort": {"type": "string"}}),
                 &["issue"],

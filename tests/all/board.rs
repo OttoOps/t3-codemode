@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::common::*;
 use serde_json::{Value, json};
-use t3_codemode::board::{BOARD, card_text, parse_issue, parse_remote, reply_options};
+use t3_codemode::board::{BOARD, Tracker, card_text, parse_issue, parse_remote, reply_options};
 use t3_codemode::config::Config;
 use t3_codemode::fake::{project, pull_request, thread};
 use t3_codemode::server;
@@ -25,10 +25,14 @@ fn sent_to(h: &H, id: &str) -> Vec<Value> {
 #[test]
 fn parsing_issues_remotes_and_options() {
     let i = parse_issue("https://github.com/Acme/widgets/issues/41#issuecomment-1").unwrap();
-    assert_eq!((i.owner.as_str(), i.repo.as_str(), i.number), ("Acme", "widgets", 41));
+    assert_eq!(i.tracker, Tracker::Github);
+    assert_eq!(i.host.as_deref(), Some("github.com"));
+    assert_eq!((i.scope.as_str(), i.key.as_str()), ("Acme/widgets", "41"));
+    assert_eq!(i.url(), Some("https://github.com/Acme/widgets/issues/41"));
     assert_eq!(i.label(), "widgets#41");
-    assert_eq!(parse_issue("Acme/widgets#7").unwrap().number, 7);
-    assert_eq!(parse_issue("github.com/o/r/issues/3").unwrap().repo, "r");
+    assert_eq!(i.slug(), "Acme/widgets#41");
+    assert_eq!(parse_issue("Acme/widgets#7").unwrap().key, "7");
+    assert_eq!(parse_issue("github.com/o/r/issues/3").unwrap().scope, "o/r");
     assert!(parse_issue("https://gitlab.com/o/r/issues/3").is_none());
     assert!(parse_issue("o/r#0").is_none());
     for url in [
@@ -37,10 +41,12 @@ fn parsing_issues_remotes_and_options() {
         "https://x-access-token:abc@github.com/Acme/widgets.git",
         "ssh://git@github.com:22/Acme/widgets.git",
     ] {
-        let (o, r) = parse_remote(url).unwrap_or_else(|| panic!("{url}"));
-        assert!(o.eq_ignore_ascii_case("acme") && r.eq_ignore_ascii_case("widgets"), "{url}");
+        let remote = parse_remote(url).unwrap_or_else(|| panic!("{url}"));
+        assert_eq!(remote.host, "github.com", "{url}");
+        assert!(remote.path.eq_ignore_ascii_case("acme/widgets"), "{url}: {}", remote.path);
     }
-    assert!(parse_remote("git@gitlab.com:o/r.git").is_none());
+    let gl = parse_remote("git@gitlab.com:o/r.git").unwrap();
+    assert_eq!((gl.host.as_str(), gl.path.as_str()), ("gitlab.com", "o/r"));
     assert_eq!(reply_options(GATE), ["merge", "merge and deploy"]);
     assert_eq!(reply_options("Reply 'yes' or reply \u{201c}no\u{201d}; prereply \"x\""), ["yes", "no"]);
     assert!(card_text(GATE).starts_with("reply \"merge\" to merge #81"));

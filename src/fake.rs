@@ -431,6 +431,9 @@ impl FakeT3 {
                 let id = format!("launch:{}", st.launched.len());
                 let mut th = thread(&id, "running", "2026-11-17T12:00:00Z");
                 th["title"] = args["title"].clone();
+                if let Some(p) = args.get("projectId").filter(|v| !v.is_null()) {
+                    th["projectId"] = p.clone();
+                }
                 th["providerInstanceId"] = args["modelSelection"]["instanceId"].clone();
                 th["model"] = args["modelSelection"]["model"].clone();
                 st.threads.insert(id.clone(), th);

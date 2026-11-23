@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::clock::{local_clock, parse_ts};
-use crate::config::Config;
+use crate::config::{Config, parse_host_header};
 use crate::config_edit::{Document, Edit};
 use crate::contexts::ProjectFilter;
+use crate::field;
 use crate::flow::FlowPick;
 use crate::issues::issue_key;
 use crate::moves::Offer;
@@ -71,24 +72,64 @@ impl Remotes for GitRemotes {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tracker {
+    Github,
+    Gitlab,
+    Jira,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issue {
-    pub owner: String,
-    pub repo: String,
-    pub number: u64,
+    pub tracker: Tracker,
+    pub host: Option<String>,
+    pub scope: String,
+    pub key: String,
+    pub url: Option<String>,
 }
 
 impl Issue {
-    pub fn url(&self) -> String {
-        format!("https://github.com/{}/{}/issues/{}", self.owner, self.repo, self.number)
+    pub fn url(&self) -> Option<&str> {
+        self.url.as_deref()
+    }
+
+    pub fn reference(&self) -> &str {
+        self.url.as_deref().unwrap_or(&self.key)
     }
 
     pub fn label(&self) -> String {
-        format!("{}#{}", self.repo, self.number)
+        match self.tracker {
+            Tracker::Github | Tracker::Gitlab => {
+                let repo = self.scope.rsplit('/').next().unwrap_or(&self.scope);
+                format!("{repo}#{}", self.key)
+            }
+            Tracker::Jira => self.key.clone(),
+        }
     }
 
     pub fn slug(&self) -> String {
-        format!("{}/{}#{}", self.owner, self.repo, self.number)
+        match self.tracker {
+            Tracker::Github => format!("{}#{}", self.scope, self.key),
+            Tracker::Gitlab => format!("{}/{}#{}", self.host.as_deref().unwrap_or("gitlab.com"), self.scope, self.key),
+            Tracker::Jira => match (&self.host, &self.url) {
+                (Some(host), Some(url)) if url == &format!("https://{host}/browse/{}", self.key) => {
+                    format!("{host}/{}", self.key)
+                }
+                (_, Some(url)) => url.clone(),
+                (Some(host), None) => format!("{host}/{}", self.key),
+                (None, None) => self.key.clone(),
+            },
+        }
+    }
+
+    pub fn github_parts(&self) -> Option<(&str, &str, u64)> {
+        if self.tracker != Tracker::Github {
+            return None;
+        }
+        let (owner, repo) = self.scope.split_once('/')?;
+        let number = self.key.parse().ok()?;
+        Some((owner, repo, number))
     }
 }
 
@@ -105,7 +146,9 @@ pub fn checked_identity(
         given(v)
             .map(|raw| {
                 parse_issue_only(raw).map(|i| i.slug()).ok_or_else(|| {
-                    anyhow!("wf.{method}: {field} {raw:?} is not a GitHub issue; use <owner>/<repo>#<n> or its URL")
+                    anyhow!(
+                        "wf.{method}: {field} {raw:?} is not a supported issue reference; use a GitHub issue (<owner>/<repo>#<n> or URL), a GitLab issue URL, or a Jira key/URL (PROJ-123)"
+                    )
                 })
             })
             .transpose()
@@ -128,6 +171,25 @@ pub(crate) fn gh_name(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+fn path_segment(s: &str) -> bool {
+    gh_name(s) && s != "." && s != ".."
+}
+
+pub(crate) fn is_jira_project_key(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+}
+
+pub(crate) fn is_tracker_host(s: &str) -> bool {
+    let Some((host, None)) = parse_host_header(s) else {
+        return false;
+    };
+    if host.starts_with('[') {
+        return true;
+    }
+    host.split('.').all(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'))
+}
+
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     let head = s.get(..prefix.len())?;
     head.eq_ignore_ascii_case(prefix).then(|| &s[prefix.len()..])
@@ -141,53 +203,199 @@ pub fn parse_issue_only(raw: &str) -> Option<Issue> {
     parse_ref(raw, false)
 }
 
+pub fn parse_github_issue_only(raw: &str) -> Option<Issue> {
+    parse_ref(raw, false).filter(|i| i.tracker == Tracker::Github)
+}
+
+fn make_github_issue(owner: &str, repo: &str, n: &str) -> Option<Issue> {
+    let number: u64 = n.parse().ok().filter(|n| *n > 0)?;
+    (gh_name(owner) && gh_name(repo)).then(|| Issue {
+        tracker: Tracker::Github,
+        host: Some("github.com".into()),
+        scope: format!("{owner}/{repo}"),
+        key: number.to_string(),
+        url: Some(format!("https://github.com/{owner}/{repo}/issues/{number}")),
+    })
+}
+
+fn parse_jira_key(raw: &str, ignore_case: bool) -> Option<(String, String)> {
+    let (proj, num_str) = raw.split_once('-')?;
+    let b = proj.as_bytes();
+    let proj_ok = b.len() >= 2
+        && if ignore_case {
+            b[0].is_ascii_alphabetic() && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+        } else {
+            b[0].is_ascii_uppercase() && b.iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+        };
+    if !proj_ok || num_str.is_empty() || num_str.starts_with('0') || !num_str.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let number: u64 = num_str.parse().ok().filter(|n| *n > 0)?;
+    let scope = proj.to_ascii_uppercase();
+    let key = format!("{scope}-{number}");
+    Some((scope, key))
+}
+
 fn parse_ref(raw: &str, allow_pull: bool) -> Option<Issue> {
     let s = raw.trim().trim_end_matches('/');
-    let make = |owner: &str, repo: &str, n: &str| {
-        let number: u64 = n.parse().ok().filter(|n| *n > 0)?;
-        (gh_name(owner) && gh_name(repo)).then(|| Issue { owner: owner.into(), repo: repo.into(), number })
-    };
+    if s.is_empty() || s.bytes().any(|b| b.is_ascii_whitespace()) {
+        return None;
+    }
     if !s.contains("://")
         && strip_prefix_ci(s, "github.com/").is_none()
         && let Some((path, n)) = s.split_once('#')
     {
-        let (owner, repo) = path.split_once('/')?;
-        return make(owner, repo, n);
+        let parts: Vec<&str> = path.split('/').collect();
+        return match parts.as_slice() {
+            [owner, repo] => make_github_issue(owner, repo, n),
+            [host, rest @ ..]
+                if rest.len() >= 2
+                    && is_tracker_host(host)
+                    && !host.eq_ignore_ascii_case("github.com")
+                    && rest.iter().all(|p| path_segment(p)) =>
+            {
+                let number: u64 = n.parse().ok().filter(|n| *n > 0)?;
+                let host = host.to_ascii_lowercase();
+                let scope = rest.join("/");
+                Some(Issue {
+                    tracker: Tracker::Gitlab,
+                    url: Some(format!("https://{host}/{scope}/-/issues/{number}")),
+                    host: Some(host),
+                    scope,
+                    key: number.to_string(),
+                })
+            }
+            _ => None,
+        };
     }
-    let rest = strip_prefix_ci(s, "https://").or_else(|| strip_prefix_ci(s, "http://")).unwrap_or(s);
-    let rest = strip_prefix_ci(rest, "www.").unwrap_or(rest);
-    let rest = strip_prefix_ci(rest, "github.com/")?;
-    let rest = rest.split(['?', '#']).next()?;
-    let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
-    match parts.as_slice() {
-        [owner, repo, "issues", n, ..] => make(owner, repo, n),
-        [owner, repo, "pull", n, ..] if allow_pull => make(owner, repo, n),
-        _ => None,
+    let no_scheme = strip_prefix_ci(s, "https://").or_else(|| strip_prefix_ci(s, "http://")).unwrap_or(s);
+    let no_www = strip_prefix_ci(no_scheme, "www.").unwrap_or(no_scheme);
+    if let Some(rest) = strip_prefix_ci(no_www, "github.com/") {
+        let rest = rest.split(['?', '#']).next()?;
+        let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
+        return match parts.as_slice() {
+            [owner, repo, "issues", n, ..] => make_github_issue(owner, repo, n),
+            [owner, repo, "pull", n, ..] if allow_pull => make_github_issue(owner, repo, n),
+            _ => None,
+        };
     }
+    if strip_prefix_ci(s, "https://").is_some() || strip_prefix_ci(s, "http://").is_some() {
+        let url = reqwest::Url::parse(s).ok()?;
+        if !matches!(url.scheme(), "http" | "https") || !url.username().is_empty() || url.password().is_some() {
+            return None;
+        }
+        let host = url.host_str()?.to_ascii_lowercase();
+        if host.is_empty() || host == "github.com" || host == "www.github.com" {
+            return None;
+        }
+        let authority = match url.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.clone(),
+        };
+        let parts: Vec<&str> = url.path_segments()?.filter(|p| !p.is_empty()).collect();
+        if let Some(dash) = parts.iter().position(|p| *p == "-")
+            && dash >= 2
+            && parts.get(dash + 1) == Some(&"issues")
+            && let Some(n) = parts.get(dash + 2)
+            && parts[..dash].iter().all(|p| path_segment(p))
+            && let Some(number) = n.parse::<u64>().ok().filter(|n| *n > 0)
+        {
+            let scope = parts[..dash].join("/");
+            return Some(Issue {
+                tracker: Tracker::Gitlab,
+                url: Some(format!("{}://{authority}/{scope}/-/issues/{number}", url.scheme())),
+                host: Some(host),
+                scope,
+                key: number.to_string(),
+            });
+        }
+        if parts.len() >= 2
+            && parts[parts.len() - 2] == "browse"
+            && let Some((scope, key)) = parse_jira_key(parts[parts.len() - 1], true)
+        {
+            let prefix = &parts[..parts.len() - 2];
+            let canonical = if prefix.is_empty() {
+                format!("{}://{authority}/browse/{key}", url.scheme())
+            } else {
+                format!("{}://{authority}/{}/browse/{key}", url.scheme(), prefix.join("/"))
+            };
+            return Some(Issue { tracker: Tracker::Jira, host: Some(host), scope, key, url: Some(canonical) });
+        }
+        return None;
+    }
+    if !s.contains("://")
+        && !s.contains('#')
+        && let Some((host, key)) = s.split_once('/')
+        && !key.contains('/')
+        && is_tracker_host(host)
+        && !host.eq_ignore_ascii_case("github.com")
+        && let Some((scope, key)) = parse_jira_key(key, false)
+    {
+        let host = host.to_ascii_lowercase();
+        return Some(Issue {
+            tracker: Tracker::Jira,
+            url: Some(format!("https://{host}/browse/{key}")),
+            host: Some(host),
+            scope,
+            key,
+        });
+    }
+    if !s.contains('/')
+        && !s.contains('#')
+        && !s.contains("://")
+        && let Some((scope, key)) = parse_jira_key(s, false)
+    {
+        return Some(Issue { tracker: Tracker::Jira, host: None, scope, key, url: None });
+    }
+    None
 }
 
-pub fn parse_remote(url: &str) -> Option<(String, String)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remote {
+    pub host: String,
+    pub path: String,
+}
+
+pub fn parse_remote(url: &str) -> Option<Remote> {
     let url = url.trim();
+    if url.is_empty() || url.bytes().any(|b| b.is_ascii_whitespace()) {
+        return None;
+    }
     let (host, path) = match url.split_once("://") {
-        Some((_, rest)) => {
+        Some((scheme, rest)) => {
+            if scheme.is_empty()
+                || scheme.eq_ignore_ascii_case("file")
+                || !scheme.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+            {
+                return None;
+            }
             let (authority, path) = rest.split_once('/')?;
-            let host = authority.rsplit('@').next()?;
-            (host.split(':').next()?, path)
+            let host_port = authority.rsplit('@').next()?;
+            let (host, _) = parse_host_header(host_port)?;
+            (host, path)
         }
         None => {
             let (left, path) = url.split_once(':')?;
-            (left.rsplit('@').next()?, path)
+            if left.is_empty() || left.contains('/') {
+                return None;
+            }
+            let raw_host = left.rsplit('@').next()?;
+            let (host, None) = parse_host_header(raw_host)? else {
+                return None;
+            };
+            (host, path)
         }
     };
-    if !host.eq_ignore_ascii_case("github.com") {
+    if !is_tracker_host(&host) {
         return None;
     }
     let path = path.trim_matches('/');
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    match path.split('/').collect::<Vec<_>>().as_slice() {
-        [owner, repo] if gh_name(owner) && gh_name(repo) => Some((owner.to_string(), repo.to_string())),
-        _ => None,
+    let path = path.strip_suffix(".git").unwrap_or(path).trim_end_matches('/');
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() < 2 || (host == "github.com" && parts.len() != 2) || !parts.iter().all(|p| path_segment(p)) {
+        return None;
     }
+    Some(Remote { host, path: parts.join("/") })
 }
 
 const ACTION_MARK: &str = "**ACTION NEEDED:**";
@@ -528,6 +736,38 @@ pub fn ticket_brief(url: &str, label: &str, id: &Identity) -> String {
     format!("Work {url} with the t3-ticket skill.\n\n{}", board_link(label, id))
 }
 
+fn unmapped_project_error(label: &str, issue: &Issue) -> String {
+    match issue.tracker {
+        Tracker::Github => format!(
+            "Cannot launch {label}: no T3 project has github.com/{} as its origin remote. \
+             Add the repository as a T3 project or pass an explicit project, then launch it again.",
+            issue.scope
+        ),
+        Tracker::Gitlab => {
+            let host = issue.host.as_deref().unwrap_or("gitlab.com");
+            format!(
+                "Cannot launch {label}: no T3 project has {host}/{} as its origin remote and no trackers mapping matched. \
+                 Add the repository as a T3 project, map {host} under trackers.hosts in config.json, \
+                 or pass an explicit project.",
+                issue.scope
+            )
+        }
+        Tracker::Jira => match issue.host.as_deref() {
+            Some(host) => format!(
+                "Cannot launch {label}: no T3 project is mapped for Jira key {} or host {host}. \
+                 Map {} under trackers.jira (or {host} under trackers.hosts) in config.json, \
+                 or pass an explicit project.",
+                issue.scope, issue.scope
+            ),
+            None => format!(
+                "Cannot launch {label}: no T3 project is mapped for Jira key {}. \
+                 Map {} under trackers.jira in config.json, or pass an explicit project.",
+                issue.scope, issue.scope
+            ),
+        },
+    }
+}
+
 fn pick_project(projects: Vec<Value>, wanted: &str) -> Option<Value> {
     let by_title = projects.iter().position(|p| p["title"].as_str().is_some_and(|t| t.eq_ignore_ascii_case(wanted)));
     let at = projects.iter().position(|p| p["id"] == wanted).or(by_title)?;
@@ -616,15 +856,18 @@ fn web_link(v: Option<String>) -> Option<String> {
     v.filter(|l| l.starts_with("https://") || l.starts_with("http://"))
 }
 
-fn owner_repo((owner, repo): (String, String)) -> String {
-    format!("{owner}/{repo}")
-}
-
 pub fn identity_repo(project: &Value) -> Option<String> {
     let id = &project["repositoryIdentity"];
     match (id["owner"].as_str(), id["name"].as_str()) {
         (Some(o), Some(n)) if gh_name(o) && gh_name(n) => Some(format!("{o}/{n}")),
-        _ => id["locator"]["remoteUrl"].as_str().and_then(parse_remote).map(owner_repo),
+        _ => id["locator"]["remoteUrl"].as_str().and_then(parse_remote).map(|r| r.path),
+    }
+}
+
+fn same_issue_slug(a: &str, b: &str) -> bool {
+    match (parse_issue_only(a), parse_issue_only(b)) {
+        (Some(ia), Some(ib)) if ia.tracker == Tracker::Jira && ib.tracker == Tracker::Jira => ia.slug() == ib.slug(),
+        _ => a.eq_ignore_ascii_case(b),
     }
 }
 
@@ -748,7 +991,7 @@ impl Wf {
 
     async fn origin_repo(&self, project: &Value) -> Option<String> {
         let root = project["workspaceRoot"].as_str()?;
-        self.remotes.origin(root).await.as_deref().and_then(parse_remote).map(owner_repo)
+        self.remotes.origin(root).await.as_deref().and_then(parse_remote).map(|r| r.path)
     }
 
     async fn hydrate(&self, ln: &Link) -> Result<Option<String>> {
@@ -1165,8 +1408,8 @@ impl Wf {
 
     fn ensure_not_on_board(&self, label: &str, issue: Option<&str>) -> Result<()> {
         let same = |l: &str, i: Option<&str>| match (issue, i) {
-            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
-            _ => l == label || issue.is_some_and(|a| a.eq_ignore_ascii_case(l)),
+            (Some(a), Some(b)) => same_issue_slug(a, b),
+            _ => l == label || issue.is_some_and(|a| same_issue_slug(a, l)),
         };
         if let Some(l) = self.store.children(BOARD, true)?.iter().find(|l| same(&l.label, l.identity.issue.as_deref()))
         {
@@ -1174,6 +1417,39 @@ impl Wf {
         }
         let pending = self.store.pending_all()?;
         if let Some(p) = pending.iter().find(|p| p.parent == BOARD && same(&p.label, p.identity.issue.as_deref())) {
+            bail!("{} was launched and has not joined yet; the board reports it if it never does", p.label);
+        }
+        Ok(())
+    }
+
+    fn ensure_jira_not_in_project(&self, issue: &Issue, project_id: &str) -> Result<()> {
+        if issue.tracker != Tracker::Jira {
+            return Ok(());
+        }
+        let same = |existing: Option<&str>, existing_project: Option<&str>| {
+            existing_project == Some(project_id)
+                && existing.and_then(parse_issue_only).is_some_and(|e| {
+                    e.tracker == Tracker::Jira
+                        && e.key.eq_ignore_ascii_case(&issue.key)
+                        && (issue.host.is_none() || e.host.is_none())
+                })
+        };
+        if let Some(l) = self.store.children(BOARD, true)?.iter().find(|l| {
+            let live = self.live_of(&l.child);
+            let proj = l.project.as_deref().or_else(|| live.as_ref().and_then(|v| v["project"].as_str()));
+            same(l.identity.issue.as_deref(), proj)
+        }) {
+            bail!("{} is already on the board; close or finish it before launching it again", l.label);
+        }
+        let pending = self.store.pending_all()?;
+        if let Some(p) = pending.iter().find(|p| {
+            if p.parent != BOARD {
+                return false;
+            }
+            let live = p.thread.as_deref().and_then(|t| self.live_of(t));
+            let proj = p.project.as_deref().or_else(|| live.as_ref().and_then(|v| v["project"].as_str()));
+            same(p.identity.issue.as_deref(), proj)
+        }) {
             bail!("{} was launched and has not joined yet; the board reports it if it never does", p.label);
         }
         Ok(())
@@ -1207,15 +1483,44 @@ impl Wf {
         if let Some(w) = wanted {
             return pick_project(projects, w).map(Some).ok_or_else(|| anyhow!("no T3 project with id or title {w:?}"));
         }
-        for p in projects {
-            let Some(root) = p["workspaceRoot"].as_str() else { continue };
-            let Some(url) = self.remotes.origin(root).await else { continue };
-            if let Some((owner, repo)) = parse_remote(&url)
-                && owner.eq_ignore_ascii_case(&issue.owner)
-                && repo.eq_ignore_ascii_case(&issue.repo)
-            {
-                return Ok(Some(p));
+        if matches!(issue.tracker, Tracker::Github | Tracker::Gitlab)
+            && let Some(host) = issue.host.as_deref()
+        {
+            for p in &projects {
+                let Some(root) = p["workspaceRoot"].as_str() else { continue };
+                let Some(url) = self.remotes.origin(root).await else { continue };
+                if let Some(remote) = parse_remote(&url)
+                    && remote.host.eq_ignore_ascii_case(host)
+                    && remote.path.eq_ignore_ascii_case(&issue.scope)
+                {
+                    return Ok(Some(p.clone()));
+                }
             }
+        }
+        let cfg = self.config();
+        let mapped = match issue.tracker {
+            Tracker::Jira => cfg
+                .trackers
+                .jira_project(&issue.scope)
+                .map(|(k, target)| (format!("trackers.jira.{k}"), target.to_string()))
+                .or_else(|| {
+                    issue.host.as_deref().and_then(|h| {
+                        cfg.trackers
+                            .host_project(h)
+                            .map(|(k, target)| (format!("trackers.hosts.{}", field::segment(k)), target.to_string()))
+                    })
+                }),
+            Tracker::Github => None,
+            Tracker::Gitlab => issue.host.as_deref().and_then(|h| {
+                cfg.trackers
+                    .host_project(h)
+                    .map(|(k, target)| (format!("trackers.hosts.{}", field::segment(k)), target.to_string()))
+            }),
+        };
+        if let Some((source, target)) = mapped {
+            return pick_project(projects, &target)
+                .map(Some)
+                .ok_or_else(|| anyhow!("{source} maps to T3 project {target:?}, which was not found"));
         }
         Ok(None)
     }
@@ -1543,7 +1848,7 @@ impl Wf {
     pub(crate) async fn launch_unlocked(&self, a: LaunchArgs) -> Result<Value> {
         let issue = parse_issue(&a.issue).ok_or_else(|| {
             anyhow!(
-                "{:?} is not a GitHub issue; use https://github.com/<owner>/<repo>/issues/<n> or <owner>/<repo>#<n>",
+                "{:?} is not a supported issue reference; use a GitHub issue (<owner>/<repo>#<n> or URL), a GitLab issue URL (https://<host>/<group>/<project>/-/issues/<n>), or a Jira key/URL (PROJ-123 or https://<host>/browse/PROJ-123)",
                 a.issue
             )
         })?;
@@ -1563,15 +1868,12 @@ impl Wf {
         let project = match found {
             Some(p) => p,
             None => {
-                let text = format!(
-                    "Cannot launch {label}: no T3 project has github.com/{}/{} as its origin remote. \
-                     Add the repository as a T3 project, then launch it again.",
-                    issue.owner, issue.repo
-                );
+                let text = unmapped_project_error(&label, &issue);
                 return self.launch_failed(&label, &text);
             }
         };
         let project_id = project["id"].as_str().unwrap_or_default().to_string();
+        self.ensure_jira_not_in_project(&issue, &project_id)?;
         let workspace_root = project["workspaceRoot"].as_str().filter(|s| !s.is_empty());
         let repo = match identity_repo(&project) {
             Some(r) => Some(r),
@@ -1585,14 +1887,22 @@ impl Wf {
                 Ok(r) => r,
                 Err(e) => return self.launch_failed(&label, &format!("Cannot launch {label}: {e:#}")),
             };
-        self.reserve_label(&label, false, &identity).await?;
-        let title = format!("{label}: {}", nonempty(a.title).unwrap_or_else(|| issue.url()));
-        let message = ticket_brief(&issue.url(), &label, &identity);
+        self.reserve_label(&label, false, Some(&project_id), &identity).await?;
+        let title = match nonempty(a.title) {
+            Some(t) => format!("{label}: {t}"),
+            None => match issue.url() {
+                Some(u) => format!("{label}: {u}"),
+                None => label.clone(),
+            },
+        };
+        let message = ticket_brief(issue.reference(), &label, &identity);
         let out = match self.launch_reserved(&label, &title, &project_id, message, &resolved).await? {
             Ok(out) => out,
             Err(failed) => return Ok(failed),
         };
-        if let Err(e) = self.store.new_issue_remove(&issue_key(&issue)) {
+        if issue.tracker == Tracker::Github
+            && let Err(e) = self.store.new_issue_remove(&issue_key(&issue))
+        {
             tracing::warn!("{label} launched, but taking it off the new issues failed: {e:#}");
         }
         Ok(out)
@@ -1625,7 +1935,7 @@ impl Wf {
             Ok(r) => r,
             Err(e) => return self.launch_failed(&base, &format!("Cannot dispatch {base}: {e:#}")),
         };
-        let label = self.reserve_label(&base, true, &Identity::default()).await?;
+        let label = self.reserve_label(&base, true, Some(&project_id), &Identity::default()).await?;
         let message = dispatch_brief(request, &label);
         let out = match self.launch_reserved(&label, &label, &project_id, message, &resolved).await? {
             Ok(out) => out,
@@ -1683,7 +1993,13 @@ impl Wf {
         Ok(open)
     }
 
-    async fn reserve_label(&self, wanted: &str, suffix: bool, identity: &Identity) -> Result<String> {
+    async fn reserve_label(
+        &self,
+        wanted: &str,
+        suffix: bool,
+        project: Option<&str>,
+        identity: &Identity,
+    ) -> Result<String> {
         let params = self.config().link_params("overseer", "ticket")?;
         let _g = self.lock.lock().await;
         let label = if suffix {
@@ -1708,6 +2024,7 @@ impl Wf {
             reported: false,
             thread: None,
             link: None,
+            project: project.map(String::from),
             identity: identity.clone(),
         })?;
         drop(_g);
@@ -1757,6 +2074,9 @@ impl Wf {
                 let reserved = self.store.pending_all()?.into_iter().find(|p| p.parent == BOARD && p.label == label);
                 self.store.pending_remove(BOARD, label)?;
                 ln.label = label.to_string();
+                if ln.project.is_none() {
+                    ln.project = Some(project_id.to_string());
+                }
                 if let Some(p) = reserved {
                     ln.identity = ln.identity.clone().or(p.identity);
                 }
