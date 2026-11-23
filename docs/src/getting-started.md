@@ -300,6 +300,7 @@ when `CI` is set.
 | `t3cm skills install\|update\|status` | Install the workflow skills this binary carries, bring them to its release, or check them ([below](#install-the-skills-with-t3cm)) |
 | `t3cm slots [--repo D] [--json] [--no-t3]` | The T3 workflow slots as the service resolves them for this shell's agent and repository ([Slots](#slots)) |
 | `t3cm doctor [--repo D] [--json] [--no-t3] [--resolve NAME]` | Check the whole workflow install; exits 1 on any problem ([Slots](#slots)) |
+| `t3cm board expose\|unexpose\|pair\|sessions\|revoke` | Serve the board over Tailscale Serve or stop serving it, pair browsers behind any HTTPS proxy, and end their sessions ([Remote access](board.md#remote-access)) |
 
 `--port` also reads `T3CM_PORT` (default `47731`), and `--state-dir` reads
 `T3CM_STATE_DIR`. `--log-file` appends the log to a file instead of stderr and
