@@ -403,7 +403,7 @@ struct SpecificModel<'a> {
     source: &'a str,
 }
 
-enum BaseSpec {
+pub(crate) enum BaseSpec {
     Pool { pool: String, source: String },
     Model { provider: Option<String>, model: String, effort: Option<String>, source: String, exact_instance: bool },
     Default,
@@ -2341,7 +2341,7 @@ impl Wf {
         })
     }
 
-    async fn inspect_base_spec(
+    pub(crate) async fn inspect_base_spec(
         &self,
         config: &Config,
         base: BaseSpec,
@@ -2368,6 +2368,21 @@ impl Wf {
                 .await
             }
             BaseSpec::Default => self.inspect_default_ticket(caps_base, caps_err).await,
+        }
+    }
+
+    pub(crate) fn user_ticket_base(
+        config: &Config,
+        resolved: &slots::Resolved,
+    ) -> std::result::Result<BaseSpec, (String, String)> {
+        if !resolved.config_problems.is_empty() {
+            return Err(("user".into(), format!("workflow config problem: {}", resolved.config_problems.join("; "))));
+        }
+        match resolved.models.iter().find(|m| m.role == "ticket") {
+            Some(slot) if slot.source != "default" => {
+                Self::base_spec_from_slot(slot).map_err(|e| (slot.source.clone(), e))
+            }
+            _ => Ok(Self::legacy_ticket_base(config)),
         }
     }
 
@@ -2497,38 +2512,18 @@ impl Wf {
                     })
                 })
                 .collect();
-            let mut ticket = if !user_resolved.config_problems.is_empty() {
-                json!({
+            let mut ticket = match Self::user_ticket_base(&config, &user_resolved) {
+                Ok(b) => self.inspect_base_spec(&config, b, caps_base.as_mut(), caps_err.as_deref()).await,
+                Err((src, err)) => json!({
                     "mode": "model",
-                    "source": "user",
+                    "source": src,
                     "provider": Value::Null,
                     "instanceId": Value::Null,
                     "model": Value::Null,
                     "effort": Value::Null,
                     "pool": Value::Null,
-                    "error": format!("workflow config problem: {}", user_resolved.config_problems.join("; ")),
-                })
-            } else {
-                let base = match user_resolved.models.iter().find(|m| m.role == "ticket") {
-                    Some(slot) if slot.source != "default" => match Self::base_spec_from_slot(slot) {
-                        Ok(b) => Ok(b),
-                        Err(e) => Err((slot.source.clone(), e)),
-                    },
-                    _ => Ok(Self::legacy_ticket_base(&config)),
-                };
-                match base {
-                    Ok(b) => self.inspect_base_spec(&config, b, caps_base.as_mut(), caps_err.as_deref()).await,
-                    Err((src, err)) => json!({
-                        "mode": "model",
-                        "source": src,
-                        "provider": Value::Null,
-                        "instanceId": Value::Null,
-                        "model": Value::Null,
-                        "effort": Value::Null,
-                        "pool": Value::Null,
-                        "error": err,
-                    }),
-                }
+                    "error": err,
+                }),
             };
             ticket["userConfigPath"] = json!(folders.config.to_string_lossy());
 
