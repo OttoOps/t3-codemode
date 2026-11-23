@@ -545,6 +545,9 @@ front of `127.0.0.1:47731`, configure [`board.remote`](config.md#remote-board)
 in `config.json`, and restart `t3cm`. `/mcp`, `/healthz` and `/reload` stay
 loopback-only.
 
+The `setup-t3-workflow` skill offers remote access as its last slot. It runs
+the commands below, restarts the service and checks the result.
+
 Five commands manage remote access from the host:
 
 | Command | Does |
