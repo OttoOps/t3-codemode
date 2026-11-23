@@ -8,6 +8,7 @@ mod cli;
 mod config_edit;
 mod config_reload;
 mod flow;
+mod flow_chaos;
 mod issues;
 mod live_github;
 mod mcp_http;
