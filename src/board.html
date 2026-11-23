@@ -3334,9 +3334,21 @@ function patchTicket(el, t, ctx) {
     setAttr(wd, "title", fin.map((w) => w.label).join(", ") + " done");
     setAttr(wd, "aria-label", "Show the " + fin.length + " finished workers for " + t.label);
   }
-  setPause(row.querySelector(".side"), ctx.done ? null : t, t.label, "paused", "pause");
+  const side = row.querySelector(".side");
+  setPause(side, ctx.done ? null : t, t.label, "paused", "pause");
+  const own = ownState(t.status);
+  const canClose = !ctx.done && !!(t.thread && t.joined !== false && !t.done && (own === "idle" || own === "pause" || own === "fail"));
+  let cb = side.querySelector('[data-part="close"]');
+  if (!cb && canClose) {
+    cb = h("button", { class: "linkish", type: "button", "data-part": "close" }, "Close");
+    cb.addEventListener("click", () => act(cb, "/api/tickets/" + encodeURIComponent(el.dataset.thread) + "/close"));
+    side.append(cb);
+  }
+  if (cb) {
+    cb.hidden = !canClose;
+    if (canClose) setAttr(cb, "aria-label", "Close " + t.label);
+  }
   if (ctx.done) {
-    const side = row.querySelector(".side");
     let b = side.querySelector('[data-part="settle"]');
     if (!b) {
       b = h("button", { class: "btn", type: "button", "data-part": "settle" }, "Settle");

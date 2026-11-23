@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
 use crate::app::App;
-use crate::board::{CardRef, LaunchArgs, ModelSettingBody};
+use crate::board::{CardRef, LaunchArgs, ModelSettingBody, T3Unreachable};
 use crate::clock::iso;
 use crate::config::{BoardRemoteConfig, RemoteMode, RemoteOrigin};
 use crate::config_edit::{Rejected, Stale};
@@ -1025,6 +1025,31 @@ async fn ask(State(web): State<Web>, raw: Bytes) -> Response {
     }
 }
 
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct CloseTicketBody {
+    #[serde(default)]
+    notify: bool,
+}
+
+async fn close_ticket(State(web): State<Web>, Path(thread): Path<String>, raw: Bytes) -> Response {
+    let b: CloseTicketBody = if raw.is_empty() {
+        CloseTicketBody::default()
+    } else {
+        match body(&raw) {
+            Ok(b) => b,
+            Err(e) => return error(StatusCode::BAD_REQUEST, e),
+        }
+    };
+    match web.app.wf.close_ticket(&thread, b.notify).await {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) if e.is::<T3Unreachable>() => {
+            error(StatusCode::SERVICE_UNAVAILABLE, web.app.t3.redact(format!("{e:#}")))
+        }
+        Err(e) => failed(&web.app, e),
+    }
+}
+
 async fn settle_ticket(State(web): State<Web>, Path(thread): Path<String>) -> Response {
     match web.app.wf.settle_ticket(&thread).await {
         Ok(v) => json_ok(StatusCode::OK, v),
@@ -1360,6 +1385,7 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/usage-stats", get(get_usage_stats))
         .route("/api/models/ticket", put(put_ticket_model))
         .route("/api/models/ask", put(put_ask_model))
+        .route("/api/tickets/{thread}/close", post(close_ticket))
         .route("/api/tickets/{thread}/settle", post(settle_ticket))
         .route("/api/tickets/{thread}/restore", post(restore_ticket))
         .route("/api/links/{thread}/pause", post(pause_link))

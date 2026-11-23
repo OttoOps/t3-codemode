@@ -730,7 +730,9 @@ ticket you restored on the board ignores a T3 settle older than the restore.
 The **Settled** tab keeps them, with a filter and a
 **Restore** button on each one. Restoring a ticket sends `unsettle` and
 restarts its settle clock. **Settle** on a row and **Settle all done** do it by
-hand.
+hand. An open ticket that is idle, paused or failed also shows **Close**, which
+closes its link and moves it to **Done** so you can settle it without visiting
+the thread.
 
 ## Pausing
 
@@ -1202,6 +1204,7 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `GET /api/settings` | Loopback or the Tailscale owner: the config file, its revision, the saved, default and running values, the keys that need a restart, and any errors. See [Settings API](#settings-api) |
 | `PUT /api/settings` `{revision, file}` | Loopback or the Tailscale owner: check and save the whole config, then reload it; returns `{revision, restart, warnings}` (409 for a stale revision, 422 with per-field `errors` for an invalid result) |
 | `GET /api/settings/pools` | Loopback or the Tailscale owner: `{pools}`, each pool's live member state as `wf.pools()` reports it |
+| `POST /api/tickets/{thread}/close` `{notify?}` | Close an idle, paused or failed open ticket's link, resolve its open cards, and move it to Done; with `notify: true`, also message the thread (404 if not a board ticket, 400 if running, waiting or already done, 503 if T3 cannot verify the thread) |
 | `POST /api/tickets/{thread}/settle`, `/restore` | Settle a done ticket, or bring a settled one back (400 if open, or not settled) |
 | `POST /api/links/{thread}/pause`, `/resume` | [Pause](#pausing) an open ticket or worker link, or resume it; returns `{thread, paused}` (404 for a thread that is neither, 400 for a done one) |
 | `POST /api/asks/{id}/settle`, `/restore` | The same for a closed ask; `id` is `q<n>` |
