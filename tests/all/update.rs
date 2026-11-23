@@ -594,3 +594,93 @@ async fn an_up_to_date_update_survives_an_unreadable_skill_lock() {
     assert!(out.status.success(), "{t}");
     assert!(t.contains("is up to date") && t.contains(".skill-lock.json is not valid JSON"), "{t}");
 }
+
+const OLDER: &str = "0.6.0";
+
+async fn serve_older_latest() -> String {
+    let app = Router::new().route(
+        "/releases/latest",
+        get(|| async { (StatusCode::FOUND, [(header::LOCATION, format!("/releases/tag/v{OLDER}"))]).into_response() }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://127.0.0.1:{}/releases", listener.local_addr().unwrap().port());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    url
+}
+
+fn assert_installed_is_newer() {
+    assert!(Version::parse(OLDER).unwrap() < Version::current(), "OLDER must stay below the crate version");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_never_names_an_older_release_as_latest() {
+    assert_installed_is_newer();
+    let mut env = setup(NEW, false).await;
+    env.url = serve_older_latest().await;
+    let out = tokio::task::spawn_blocking(move || env.t3cm(&["update", "--check"])).await.unwrap();
+    let t = text(&out);
+    assert!(out.status.success(), "{t}");
+    assert!(!t.contains(&format!("latest release: {OLDER}")), "{t}");
+    assert!(t.contains(&format!("{} is up to date", env!("CARGO_PKG_VERSION"))), "{t}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_never_reports_an_older_release_as_latest() {
+    assert_installed_is_newer();
+    let url = serve_older_latest().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let left_by_older_install = format!(r#"{{"latest":"{OLDER}","checkedAt":"{}"}}"#, jiff::Timestamp::now());
+    std::fs::write(state.join("update-check.json"), left_by_older_install).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port().to_string();
+    let home = dir.path().to_path_buf();
+    let base = move |args: &[&str]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_t3cm"));
+        c.args(args)
+            .env_clear()
+            .env("HOME", &home)
+            .env("T3CODE_HOME", &home)
+            .env("T3CM_T3_BIN", home.join("no-t3"))
+            .env("T3CM_TAILSCALE_BIN", home.join("no-tailscale"))
+            .env("T3CM_CONFIG", home.join("none.json"))
+            .env("T3CM_RELEASES_URL", &url)
+            .env("T3CM_STATE_DIR", &state)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        c
+    };
+    let (shown, cached) = tokio::task::spawn_blocking(move || {
+        let state = dir.path().join("state");
+        let mut svc = base(&["serve", "--no-watcher", "--port", &port, "--state-dir"]).arg(&state).spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut shown = Vec::new();
+        loop {
+            let out = base(&["status", "--port", &port]).output().unwrap();
+            if out.status.success() {
+                let s: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+                let update = s["update"].clone();
+                shown.push(update.clone());
+                if !update.is_null() {
+                    break;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let _ = svc.kill();
+        let _ = svc.wait();
+        (shown, std::fs::read_to_string(state.join("update-check.json")).unwrap_or_default())
+    })
+    .await
+    .unwrap();
+    let current = env!("CARGO_PKG_VERSION");
+    assert!(shown.last().is_some_and(|u| !u.is_null()), "the service never ran its check: {shown:?}");
+    for u in shown.iter().filter(|u| !u.is_null()) {
+        assert_eq!(u["latest"], current, "{shown:?}");
+        assert_eq!(u["available"], false, "{shown:?}");
+    }
+    assert!(cached.contains(&format!(r#""checkedBy":"{current}""#)), "{cached}");
+}

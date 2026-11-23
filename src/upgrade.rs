@@ -448,6 +448,14 @@ async fn sync_skills(exe: &Path, release: &Version) -> Result<()> {
     Ok(())
 }
 
+fn up_to_date(current: &Version, published: &Version) -> String {
+    if published < current {
+        format!("t3cm {current} is up to date (newer than the latest published release, {published}).")
+    } else {
+        format!("t3cm {current} is up to date (latest release: {published}).")
+    }
+}
+
 pub async fn run(o: Opts) -> Result<()> {
     let releases = release::releases_url()?;
     let current = Version::current();
@@ -466,13 +474,13 @@ pub async fn run(o: Opts) -> Result<()> {
     if o.check {
         match release::notice(&current, &want, &releases) {
             Some(n) => println!("{n}"),
-            None => println!("t3cm {current} is up to date (latest release: {want})."),
+            None => println!("{}", up_to_date(&current, &want)),
         }
         return Ok(());
     }
     if want == current || (asked.is_none() && want < current) {
         let _lock = lock_updates(&o.state_dir)?;
-        println!("t3cm {current} is up to date (latest release: {want}).");
+        println!("{}", up_to_date(&current, &want));
         if skills_managed()?.is_none() {
             if let Err(e) = offer_take_over() {
                 eprintln!("warn: workflow skills not checked ({e:#})");
