@@ -977,3 +977,752 @@ impl Wf {
         }))
     }
 }
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use arbitrary::Unstructured;
+    use arbtest::arbtest;
+
+    const NOW_STR: &str = "2026-11-17T12:00:00Z";
+    const PAST_STR: &str = "2026-11-17T11:00:00Z";
+    const FUTURE_STR: &str = "2026-11-17T18:00:00Z";
+    const DRIVERS: &[&str] = &["claudeAgent", "codex", "gemini"];
+    const MODELS: &[&str] = &["model-a", "model-b"];
+    const EFFORTS: &[Option<&str>] = &[None, Some("low"), Some("medium"), Some("high")];
+    const COSTS: &[f64] = &[0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 5.0];
+    const RESERVES: &[f64] = &[0.0, 0.0, 0.0, 10.0, 25.0, 50.0, 80.0, 100.0];
+    const ALL_STRATEGIES: &[&str] = &["weighted", "priority", "cheapest", "headroom"];
+
+    fn now() -> Timestamp {
+        NOW_STR.parse().expect("valid timestamp")
+    }
+
+    fn prop<P>(budget_ms: u64, property: P)
+    where
+        P: FnMut(&mut Unstructured<'_>) -> arbitrary::Result<()>,
+    {
+        let mut test = arbtest(property).size_min(32).size_max(4096);
+        if std::env::var_os("ARBTEST_BUDGET_MS").is_none() {
+            test = test.budget_ms(budget_ms);
+        }
+        test.run();
+    }
+
+    #[derive(Clone, Debug)]
+    struct Scenario {
+        pool: PoolConfig,
+        caps: Value,
+        running: BTreeMap<String, u64>,
+        limits: BTreeMap<String, Limit>,
+        usage: BTreeMap<String, Usage>,
+        credits: BTreeMap<String, i64>,
+    }
+
+    impl Scenario {
+        fn inputs(&self) -> Inputs<'_> {
+            Inputs {
+                name: "test-pool",
+                pool: &self.pool,
+                caps: &self.caps,
+                running: &self.running,
+                limits: &self.limits,
+                usage: &self.usage,
+                credits: &self.credits,
+                now: now(),
+            }
+        }
+    }
+
+    fn provider_json(
+        id: &str,
+        driver: &str,
+        constraints: &[&str],
+        listed_model: Option<&str>,
+        effort_opt_id: &str,
+        offered_efforts: &[&str],
+    ) -> Value {
+        let models = match listed_model {
+            Some(m) => json!([{
+                "id": m,
+                "options": [{"id": effort_opt_id, "values": offered_efforts}]
+            }]),
+            None => json!([]),
+        };
+        json!({
+            "providerInstanceId": id,
+            "driverKind": driver,
+            "displayName": id,
+            "models": models,
+            "constraints": constraints,
+        })
+    }
+
+    fn gen_scenario(u: &mut Unstructured<'_>, all_ready: bool) -> arbitrary::Result<Scenario> {
+        let mixed = u.arbitrary::<bool>()?;
+        let strategy = (*u.choose(ALL_STRATEGIES)?).to_string();
+        let pool_driver = if mixed { None } else { Some((*u.choose(DRIVERS)?).to_string()) };
+        let pool_model = if mixed { None } else { Some((*u.choose(MODELS)?).to_string()) };
+        let pool_effort = if mixed { None } else { (*u.choose(EFFORTS)?).map(String::from) };
+        let n = u.int_in_range(1..=8usize)?;
+
+        let mut members = Vec::with_capacity(n);
+        let mut providers_vec = Vec::with_capacity(n);
+        let mut running = BTreeMap::new();
+        let mut limits = BTreeMap::new();
+        let mut usage = BTreeMap::new();
+        let mut credits = BTreeMap::new();
+
+        let seed_credits = u.arbitrary::<bool>()?;
+        if seed_credits && u.arbitrary::<bool>()? {
+            credits.insert("stale-member".to_string(), u.int_in_range(-100..=100)?);
+        }
+
+        for i in 0..n {
+            let id = format!("m{i}");
+            let driver = if mixed { *u.choose(DRIVERS)? } else { pool_driver.as_deref().unwrap() };
+            let m_model = if mixed { Some((*u.choose(MODELS)?).to_string()) } else { None };
+            let m_effort = if mixed { (*u.choose(EFFORTS)?).map(String::from) } else { None };
+            let target_model = m_model.as_deref().or(pool_model.as_deref()).unwrap();
+            let target_effort = m_effort.as_deref().or(pool_effort.as_deref());
+            let weight = u.int_in_range(1..=16u32)?;
+            let reserve = if all_ready { 0.0 } else { *u.choose(RESERVES)? };
+            let cost = *u.choose(COSTS)?;
+
+            let (constraints, listed_model, offered_efforts): (&[&str], Option<&str>, &[&str]) = if all_ready {
+                (&[], Some(target_model), &["low", "medium", "high"])
+            } else {
+                let c: &[&str] = match u.int_in_range(0..=9u8)? {
+                    0 => &["Provider instance is DISABLED."],
+                    1 => &["Account paused"],
+                    _ => &[],
+                };
+                let lm = if u.int_in_range(0..=7u8)? == 0 { None } else { Some(target_model) };
+                let oe: &[&str] = match target_effort {
+                    Some(e) if u.int_in_range(0..=7u8)? == 0 => {
+                        if e == "high" {
+                            &["low", "medium"]
+                        } else {
+                            &["high"]
+                        }
+                    }
+                    _ => &["low", "medium", "high"],
+                };
+                (c, lm, oe)
+            };
+            let effort_opt_id = *u.choose(EFFORT_IDS)?;
+            providers_vec.push(provider_json(&id, driver, constraints, listed_model, effort_opt_id, offered_efforts));
+
+            let run_count = u.int_in_range(0..=4u64)?;
+            if run_count > 0 || u.arbitrary::<bool>()? {
+                running.insert(id.clone(), run_count);
+            }
+
+            if !all_ready {
+                match u.int_in_range(0..=9u8)? {
+                    0 | 1 => {
+                        limits.insert(
+                            id.clone(),
+                            Limit { until: FUTURE_STR.into(), reason: None, at: PAST_STR.into(), thread: None },
+                        );
+                    }
+                    2 => {
+                        limits.insert(
+                            id.clone(),
+                            Limit { until: NOW_STR.into(), reason: None, at: PAST_STR.into(), thread: None },
+                        );
+                    }
+                    3 => {
+                        limits.insert(
+                            id.clone(),
+                            Limit { until: PAST_STR.into(), reason: None, at: PAST_STR.into(), thread: None },
+                        );
+                    }
+                    4 => {
+                        limits.insert(
+                            id.clone(),
+                            Limit { until: "not-a-ts".into(), reason: None, at: PAST_STR.into(), thread: None },
+                        );
+                    }
+                    _ => {}
+                }
+
+                match u.int_in_range(0..=9u8)? {
+                    0..=3 => {}
+                    4 => {
+                        let left = *u.choose(&[0.0, -5.0])?;
+                        let resets_at = if u.arbitrary::<bool>()? { Some(FUTURE_STR.into()) } else { None };
+                        usage.insert(id.clone(), Usage { left, resets_at });
+                    }
+                    5 => {
+                        let left = if reserve > 0.0 {
+                            *u.choose(&[reserve, (reserve * 0.5).max(1.0)])?
+                        } else {
+                            *u.choose(&[10.0, 40.0, 75.0])?
+                        };
+                        usage.insert(id.clone(), Usage { left, resets_at: None });
+                    }
+                    _ => {
+                        let base = *u.choose(&[10.0, 25.0, 50.0, 70.0, 95.0, 100.0])?;
+                        let left = if reserve > 0.0 && reserve < 100.0 && u.arbitrary::<bool>()? {
+                            (reserve + 10.0).min(100.0)
+                        } else {
+                            base
+                        };
+                        usage.insert(id.clone(), Usage { left, resets_at: None });
+                    }
+                }
+            }
+
+            if seed_credits && u.arbitrary::<bool>()? {
+                credits.insert(id.clone(), u.int_in_range(-200..=200)?);
+            }
+
+            members.push(PoolMember { instance_id: id, weight, reserve, cost, model: m_model, effort: m_effort });
+        }
+
+        let pool = PoolConfig {
+            mixed,
+            driver: pool_driver,
+            model: pool_model,
+            effort: pool_effort,
+            strategy,
+            move_on_limit: MoveOnLimit::Ask,
+            members,
+        };
+        Ok(Scenario { pool, caps: json!({ "providers": providers_vec }), running, limits, usage, credits })
+    }
+
+    fn classify_members(sc: &Scenario) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+        let mut open = Vec::new();
+        let mut held = Vec::new();
+        let mut hard_skipped = Vec::new();
+        let t = now();
+        for (i, m) in sc.pool.members.iter().enumerate() {
+            let p = provider(&sc.caps, &m.instance_id).expect("generated provider");
+            let constraints_non_empty = p["constraints"].as_array().is_some_and(|cs| !cs.is_empty());
+            let model = sc.pool.model_of(m);
+            let effort = sc.pool.effort_of(m);
+            let has_model = lists_model(p, model);
+            let has_effort = effort_options(model, effort, p).is_some();
+            let limited = sc.limits.get(&m.instance_id).and_then(|l| parse_ts(&l.until)).is_some_and(|u| u > t);
+            let u_obs = sc.usage.get(&m.instance_id);
+            let exhausted = u_obs.is_some_and(|u| u.left <= 0.0);
+            if constraints_non_empty || !has_model || !has_effort || limited || exhausted {
+                hard_skipped.push(i);
+                continue;
+            }
+            match u_obs {
+                _ if m.reserve <= 0.0 => open.push(i),
+                Some(u) if u.left > m.reserve => open.push(i),
+                Some(_) => hard_skipped.push(i),
+                None => held.push(i),
+            }
+        }
+        (open, held, hard_skipped)
+    }
+
+    fn competing_group(sc: &Scenario, candidates: &[usize]) -> Vec<usize> {
+        match sc.pool.strategy.as_str() {
+            "priority" => Vec::new(),
+            "cheapest" => {
+                let low = candidates.iter().map(|&i| sc.pool.members[i].cost).reduce(f64::min).unwrap();
+                candidates.iter().copied().filter(|&i| sc.pool.members[i].cost == low).collect()
+            }
+            "headroom" => {
+                let left = |i: usize| sc.usage.get(&sc.pool.members[i].instance_id).map(|u| u.left);
+                match candidates.iter().filter_map(|&i| left(i)).reduce(f64::max) {
+                    Some(most) => candidates.iter().copied().filter(|&i| left(i) == Some(most)).collect(),
+                    None => candidates.to_vec(),
+                }
+            }
+            _ => candidates.to_vec(),
+        }
+    }
+
+    #[test]
+    fn choose_respects_eligibility_limits_reserves_and_strategy_bounds() {
+        prop(40, |u| {
+            let sc = gen_scenario(u, false)?;
+            if sc.pool.strategy != "headroom" {
+                assert!(sc.pool.validate().is_ok(), "generated invalid pool: {:?}", sc.pool);
+            }
+
+            let (open, held, _hard_skipped) = classify_members(&sc);
+            let res = choose(&sc.inputs());
+
+            if open.is_empty() && held.is_empty() {
+                let err = format!("{:#}", res.expect_err("no eligible members must fail"));
+                assert!(err.contains("pool test-pool has no member that can run"), "{err}");
+                for m in &sc.pool.members {
+                    assert!(err.contains(&m.instance_id), "missing {} in {err}", m.instance_id);
+                }
+                return Ok(());
+            }
+
+            let c = res.expect("eligible members must yield a choice");
+            let candidates = if !open.is_empty() { &open } else { &held };
+            let chosen_idx = sc
+                .pool
+                .members
+                .iter()
+                .position(|m| m.instance_id == c.instance_id)
+                .expect("chosen member must exist in pool");
+            assert!(candidates.contains(&chosen_idx), "chosen {} not in candidates {:?}", c.instance_id, candidates);
+
+            // Skipped set is exact complement of candidates with no duplicates and excludes chosen.
+            let skipped_ids: Vec<&str> = c.skipped.iter().map(|s| s.instance_id.as_str()).collect();
+            let skipped_set: BTreeSet<&str> = skipped_ids.iter().copied().collect();
+            assert_eq!(skipped_ids.len(), skipped_set.len(), "duplicate skipped entries: {:?}", c.skipped);
+            assert!(!skipped_set.contains(c.instance_id.as_str()));
+            let cand_set: BTreeSet<&str> =
+                candidates.iter().map(|&i| sc.pool.members[i].instance_id.as_str()).collect();
+            assert_eq!(cand_set.len() + skipped_set.len(), sc.pool.members.len());
+            assert!(cand_set.is_disjoint(&skipped_set));
+
+            // Limit, usage, reserve, and model/driver/effort invariants on chosen member.
+            let m = &sc.pool.members[chosen_idx];
+            assert!(active_limit(&sc.limits, &m.instance_id, now()).is_none());
+            if let Some(obs) = sc.usage.get(&m.instance_id) {
+                assert!(obs.left > 0.0, "chose exhausted member: {obs:?}");
+                if m.reserve > 0.0 {
+                    assert!(obs.left > m.reserve, "chose member below reserve: {obs:?} <= {}", m.reserve);
+                }
+            }
+            let p = provider(&sc.caps, &m.instance_id).unwrap();
+            assert_eq!(c.driver, p["driverKind"].as_str().unwrap());
+            assert_eq!(c.model, sc.pool.model_of(m));
+            assert_eq!(c.effort.as_deref(), sc.pool.effort_of(m));
+            assert_eq!(c.options, effort_options(&c.model, c.effort.as_deref(), p).unwrap());
+
+            // Strategy optimality bounds.
+            match sc.pool.strategy.as_str() {
+                "priority" => {
+                    assert_eq!(chosen_idx, candidates[0]);
+                    assert_eq!(c.credits, sc.credits);
+                }
+                "cheapest" => {
+                    let min_cost = candidates.iter().map(|&i| sc.pool.members[i].cost).reduce(f64::min).unwrap();
+                    assert_eq!(m.cost, min_cost);
+                }
+                "headroom" => {
+                    let max_left = candidates
+                        .iter()
+                        .filter_map(|&i| sc.usage.get(&sc.pool.members[i].instance_id).map(|u| u.left))
+                        .reduce(f64::max);
+                    if let Some(best_left) = max_left {
+                        assert_eq!(sc.usage.get(&m.instance_id).map(|u| u.left), Some(best_left));
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn choose_conserves_credits_and_meets_exact_weighted_cycle_bounds() {
+        prop(45, |u| {
+            // Part A: Single-step conservation and exact deltas across arbitrary initial credits.
+            let sc = gen_scenario(u, false)?;
+            let (open, held, _) = classify_members(&sc);
+            let candidates = if !open.is_empty() { open } else { held };
+            if let Ok(c) = choose(&sc.inputs()) {
+                let sum_before: i64 = sc.credits.values().sum();
+                let sum_after: i64 = c.credits.values().sum();
+                assert_eq!(sum_after, sum_before, "credit sum not conserved");
+
+                let group = competing_group(&sc, &candidates);
+                let group_ids: BTreeSet<&str> =
+                    group.iter().map(|&i| sc.pool.members[i].instance_id.as_str()).collect();
+                let total_w: i64 = group.iter().map(|&i| sc.pool.members[i].weight as i64).sum();
+
+                for (k, &before) in &sc.credits {
+                    if !group_ids.contains(k.as_str()) {
+                        assert_eq!(c.credits.get(k), Some(&before), "non-competing credit mutated for {k}");
+                    }
+                }
+                for &i in &group {
+                    let m = &sc.pool.members[i];
+                    let before = sc.credits.get(&m.instance_id).copied().unwrap_or(0);
+                    let expected = before + m.weight as i64 - if m.instance_id == c.instance_id { total_w } else { 0 };
+                    assert_eq!(c.credits.get(&m.instance_id), Some(&expected));
+                }
+            }
+
+            // Part B: Full W-pick smooth weighted round-robin cycle from zero credits with varying loads.
+            let mut cyc = gen_scenario(u, true)?;
+            cyc.pool.members.truncate(cyc.pool.members.len().min(6));
+            let strat = *u.choose(&["weighted", "cheapest", "headroom"])?;
+            cyc.pool.strategy = strat.to_string();
+            if strat == "cheapest" {
+                let common_cost = *u.choose(COSTS)?;
+                for m in &mut cyc.pool.members {
+                    m.cost = common_cost;
+                }
+            }
+            cyc.credits.clear();
+            cyc.usage.clear();
+
+            let total_w: i64 = cyc.pool.members.iter().map(|m| m.weight as i64).sum();
+            let k = cyc.pool.members.len() as i64;
+            let max_neg = total_w - (total_w + k - 1) / k;
+            let max_pos = (k - 1) * max_neg;
+            let mut picks: BTreeMap<String, u32> = BTreeMap::new();
+
+            for _ in 0..total_w {
+                for m in &cyc.pool.members {
+                    cyc.running.insert(m.instance_id.clone(), u.int_in_range(0..=3u64)?);
+                }
+                let c = choose(&cyc.inputs()).expect("all members ready");
+                let count = picks.entry(c.instance_id.clone()).or_default();
+                *count += 1;
+                let w = cyc.pool.members.iter().find(|m| m.instance_id == c.instance_id).unwrap().weight;
+                assert!(*count <= w, "member {} exceeded cycle weight {w} with count {}", c.instance_id, *count);
+                assert_eq!(c.credits.values().sum::<i64>(), 0);
+                for m in &cyc.pool.members {
+                    let cr = c.credits[&m.instance_id];
+                    assert!(
+                        (-max_neg..=max_pos).contains(&cr),
+                        "credit {cr} for {} out of [{}, {}] (W={total_w}, k={k})",
+                        m.instance_id,
+                        -max_neg,
+                        max_pos
+                    );
+                }
+                cyc.credits = c.credits;
+            }
+            for m in &cyc.pool.members {
+                assert_eq!(picks.get(&m.instance_id).copied().unwrap_or(0), m.weight);
+                assert_eq!(cyc.credits[&m.instance_id], 0);
+            }
+            Ok(())
+        });
+    }
+
+    fn apply_avoid(base: &Scenario, avoid: &BTreeSet<usize>, mode: u8) -> Scenario {
+        let mut sc = base.clone();
+        match mode {
+            0 => {
+                for &i in avoid {
+                    let id = sc.pool.members[i].instance_id.clone();
+                    sc.limits.insert(
+                        id,
+                        Limit { until: FUTURE_STR.into(), reason: None, at: PAST_STR.into(), thread: None },
+                    );
+                }
+            }
+            1 => {
+                if let Some(ps) = sc.caps["providers"].as_array_mut() {
+                    for &i in avoid {
+                        let id = &sc.pool.members[i].instance_id;
+                        if let Some(p) = ps.iter_mut().find(|p| p["providerInstanceId"] == *id) {
+                            p["constraints"] = json!(["Provider instance is disabled."]);
+                        }
+                    }
+                }
+            }
+            _ => {
+                sc.pool.members = sc
+                    .pool
+                    .members
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(i, _)| !avoid.contains(i))
+                    .map(|(_, m)| m)
+                    .collect();
+            }
+        }
+        sc
+    }
+
+    #[test]
+    fn choose_avoid_set_is_monotonic_and_satisfies_iia() {
+        prop(45, |u| {
+            let sc = gen_scenario(u, false)?;
+            let n = sc.pool.members.len();
+            let mode = u.int_in_range(0..=2u8)?;
+
+            let mut a1 = BTreeSet::new();
+            let mut a2 = BTreeSet::new();
+            for i in 0..n {
+                match u.int_in_range(0..=2u8)? {
+                    0 => {}
+                    1 => {
+                        a2.insert(i);
+                    }
+                    _ => {
+                        a1.insert(i);
+                        a2.insert(i);
+                    }
+                }
+            }
+
+            let sc1 = apply_avoid(&sc, &a1, mode);
+            let sc2 = apply_avoid(&sc, &a2, mode);
+            let (open1, _, _) = classify_members(&sc1);
+            let (open2, _, _) = classify_members(&sc2);
+            let r1 = choose(&sc1.inputs());
+            let r2 = choose(&sc2.inputs());
+
+            // Feasibility monotonicity: adding exclusions can never make an unsolvable pool solvable.
+            if r1.is_err() {
+                assert!(r2.is_err(), "superset avoid set succeeded when subset failed");
+            }
+            if let Ok(ref c1) = r1 {
+                assert!(a1.iter().all(|&i| sc.pool.members[i].instance_id != c1.instance_id));
+                if mode != 2 {
+                    let sk1: BTreeSet<&str> = c1.skipped.iter().map(|s| s.instance_id.as_str()).collect();
+                    for &i in &a1 {
+                        assert!(sk1.contains(sc.pool.members[i].instance_id.as_str()));
+                    }
+                }
+                // Avoiding the winner forces a different choice or Err.
+                let winner_idx = sc.pool.members.iter().position(|m| m.instance_id == c1.instance_id).unwrap();
+                let mut a_win = a1.clone();
+                a_win.insert(winner_idx);
+                let sc_win = apply_avoid(&sc, &a_win, 0);
+                if let Ok(cw) = choose(&sc_win.inputs()) {
+                    assert_ne!(cw.instance_id, c1.instance_id);
+                    assert!(a_win.iter().all(|&i| sc.pool.members[i].instance_id != cw.instance_id));
+                }
+            }
+            if let Ok(ref c2) = r2 {
+                assert!(a2.iter().all(|&i| sc.pool.members[i].instance_id != c2.instance_id));
+                if mode != 2 {
+                    let sk2: BTreeSet<&str> = c2.skipped.iter().map(|s| s.instance_id.as_str()).collect();
+                    for &i in &a1 {
+                        assert!(sk2.contains(sc.pool.members[i].instance_id.as_str()));
+                    }
+                }
+            }
+
+            // IIA & strategy objective monotonicity when the open/last-resort regime does not flip.
+            if let (Ok(c1), Ok(c2)) = (r1, r2)
+                && open1.is_empty() == open2.is_empty()
+            {
+                let idx1 = sc.pool.members.iter().position(|m| m.instance_id == c1.instance_id).unwrap();
+                let idx2 = sc.pool.members.iter().position(|m| m.instance_id == c2.instance_id).unwrap();
+                if !a2.contains(&idx1) {
+                    assert_eq!(c2.instance_id, c1.instance_id, "IIA violated under strategy {}", sc.pool.strategy);
+                }
+                match sc.pool.strategy.as_str() {
+                    "priority" => assert!(idx2 >= idx1),
+                    "cheapest" => assert!(sc.pool.members[idx2].cost >= sc.pool.members[idx1].cost),
+                    "headroom" => {
+                        if let (Some(u1), Some(u2)) = (sc.usage.get(&c1.instance_id), sc.usage.get(&c2.instance_id)) {
+                            assert!(u2.left <= u1.left);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn choose_tie_breaking_is_deterministic_and_prefers_lower_load_then_order() {
+        prop(40, |u| {
+            // Part A: Pure determinism on arbitrary inputs.
+            let sc = gen_scenario(u, false)?;
+            let r1 = choose(&sc.inputs());
+            let r2 = choose(&sc.inputs());
+            match (r1, r2) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b),
+                (Err(a), Err(b)) => assert_eq!(format!("{a:#}"), format!("{b:#}")),
+                _ => panic!("choose was non-deterministic"),
+            }
+
+            // Part B: Exact tie-breaking on equal (credit + weight): lowest running, then earliest index.
+            let mut tie = gen_scenario(u, true)?;
+            if tie.pool.members.len() < 2 {
+                return Ok(());
+            }
+            let strat = *u.choose(&["weighted", "cheapest", "headroom"])?;
+            tie.pool.strategy = strat.to_string();
+            let target_score = u.int_in_range(-50..=50i64)?;
+            let shared_cost = *u.choose(COSTS)?;
+            let shared_left = *u.choose(&[20.0, 50.0, 80.0])?;
+            tie.credits.clear();
+            tie.usage.clear();
+            tie.running.clear();
+            for m in &mut tie.pool.members {
+                m.cost = shared_cost;
+                tie.credits.insert(m.instance_id.clone(), target_score - m.weight as i64);
+                if strat == "headroom" {
+                    tie.usage.insert(m.instance_id.clone(), Usage { left: shared_left, resets_at: None });
+                }
+                tie.running.insert(m.instance_id.clone(), u.int_in_range(0..=5u64)?);
+            }
+            let min_load = tie.pool.members.iter().map(|m| tie.running[&m.instance_id]).min().unwrap();
+            let expected = tie.pool.members.iter().find(|m| tie.running[&m.instance_id] == min_load).unwrap();
+            let c = choose(&tie.inputs()).unwrap();
+            assert_eq!(c.instance_id, expected.instance_id);
+
+            // Setting a later member to load 0 while all others have load >= 1 forces it to win.
+            let target_idx = u.int_in_range(1..=(tie.pool.members.len() - 1))?;
+            for (i, m) in tie.pool.members.iter().enumerate() {
+                tie.running.insert(m.instance_id.clone(), if i == target_idx { 0 } else { 1 + (i as u64) });
+            }
+            assert_eq!(choose(&tie.inputs()).unwrap().instance_id, tie.pool.members[target_idx].instance_id);
+
+            // Equal loads across all tied members always fall back to pool.members[0].
+            let uniform_load = u.int_in_range(0..=5u64)?;
+            for m in &tie.pool.members {
+                tie.running.insert(m.instance_id.clone(), uniform_load);
+            }
+            assert_eq!(choose(&tie.inputs()).unwrap().instance_id, tie.pool.members[0].instance_id);
+
+            // Part C: Priority is invariant to running, credits, weight, and cost.
+            let mut prio = sc.clone();
+            prio.pool.strategy = "priority".to_string();
+            let base = choose(&prio.inputs()).ok().map(|c| c.instance_id);
+            for m in &mut prio.pool.members {
+                m.weight = u.int_in_range(1..=50)?;
+                m.cost = *u.choose(COSTS)?;
+                prio.running.insert(m.instance_id.clone(), u.int_in_range(0..=20)?);
+                prio.credits.insert(m.instance_id.clone(), u.int_in_range(-500..=500)?);
+            }
+            let perturbed = choose(&prio.inputs()).ok().map(|c| c.instance_id);
+            assert_eq!(base, perturbed);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn choose_falls_back_to_last_resort_and_errors_gracefully_when_exhausted() {
+        prop(40, |u| {
+            let mut sc = gen_scenario(u, true)?;
+            let n = sc.pool.members.len();
+
+            // Part A: Last-resort fallback to held (reserve > 0, usage = None) vs floor (usage <= reserve).
+            let held_count = u.int_in_range(1..=n.min(4))?;
+            let mut held_ids = BTreeSet::new();
+            let mut floor_ids = BTreeSet::new();
+            let mut open_candidate: Option<usize> = None;
+
+            for (i, m) in sc.pool.members.iter_mut().enumerate() {
+                if i < held_count {
+                    m.reserve = *u.choose(&[10.0, 25.0, 50.0, 100.0])?;
+                    held_ids.insert(m.instance_id.clone());
+                } else if u.arbitrary::<bool>()? {
+                    // Usage at or below reserve floor: must never be picked, even as last resort.
+                    m.reserve = *u.choose(&[20.0, 40.0, 60.0])?;
+                    let left = *u.choose(&[m.reserve, (m.reserve - 5.0).max(1.0)])?;
+                    sc.usage.insert(m.instance_id.clone(), Usage { left, resets_at: None });
+                    floor_ids.insert(m.instance_id.clone());
+                } else {
+                    // Open member that we saturate via limit/exhaustion/disabled.
+                    m.reserve = 0.0;
+                    open_candidate.get_or_insert(i);
+                    match u.int_in_range(0..=2u8)? {
+                        0 => {
+                            sc.limits.insert(
+                                m.instance_id.clone(),
+                                Limit { until: FUTURE_STR.into(), reason: None, at: PAST_STR.into(), thread: None },
+                            );
+                        }
+                        1 => {
+                            sc.usage.insert(m.instance_id.clone(), Usage { left: 0.0, resets_at: None });
+                        }
+                        _ => {
+                            if let Some(p) = sc.caps["providers"]
+                                .as_array_mut()
+                                .unwrap()
+                                .iter_mut()
+                                .find(|p| p["providerInstanceId"] == m.instance_id)
+                            {
+                                p["constraints"] = json!(["Provider instance is disabled."]);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let lr = choose(&sc.inputs()).expect("held members must provide last-resort fallback");
+            assert!(
+                held_ids.contains(&lr.instance_id),
+                "expected last resort from {held_ids:?}, got {}",
+                lr.instance_id
+            );
+            assert!(!floor_ids.contains(&lr.instance_id));
+            assert!(lr.reason.contains("last resort:"), "{}", lr.reason);
+            for fid in &floor_ids {
+                assert!(lr.skipped.iter().any(|s| s.instance_id == *fid));
+            }
+
+            // Un-saturating a single open member immediately supersedes all last-resort held members.
+            if let Some(oi) = open_candidate {
+                let oid = sc.pool.members[oi].instance_id.clone();
+                sc.limits.remove(&oid);
+                sc.usage.remove(&oid);
+                if let Some(p) =
+                    sc.caps["providers"].as_array_mut().unwrap().iter_mut().find(|p| p["providerInstanceId"] == oid)
+                {
+                    p["constraints"] = json!([]);
+                }
+                let recovered = choose(&sc.inputs()).expect("open member must win");
+                assert_eq!(recovered.instance_id, oid);
+                assert!(!recovered.reason.contains("last resort:"), "{}", recovered.reason);
+                for hid in &held_ids {
+                    assert!(recovered.skipped.iter().any(|s| s.instance_id == *hid && s.reason.contains("reserve")));
+                }
+            }
+
+            // Part B: Every member saturated or excluded => graceful Err naming every member.
+            let mut ex = gen_scenario(u, true)?;
+            for m in &mut ex.pool.members {
+                match u.int_in_range(0..=5u8)? {
+                    0 => {
+                        ex.limits.insert(
+                            m.instance_id.clone(),
+                            Limit { until: FUTURE_STR.into(), reason: None, at: PAST_STR.into(), thread: None },
+                        );
+                    }
+                    1 => {
+                        let resets_at = if u.arbitrary::<bool>()? { Some(FUTURE_STR.into()) } else { None };
+                        ex.usage.insert(m.instance_id.clone(), Usage { left: 0.0, resets_at });
+                    }
+                    2 => {
+                        m.reserve = 30.0;
+                        ex.usage.insert(m.instance_id.clone(), Usage { left: 20.0, resets_at: None });
+                    }
+                    3 => {
+                        let p = ex.caps["providers"]
+                            .as_array_mut()
+                            .unwrap()
+                            .iter_mut()
+                            .find(|p| p["providerInstanceId"] == m.instance_id)
+                            .unwrap();
+                        p["constraints"] = json!(["Provider instance is disabled."]);
+                    }
+                    4 => {
+                        let p = ex.caps["providers"]
+                            .as_array_mut()
+                            .unwrap()
+                            .iter_mut()
+                            .find(|p| p["providerInstanceId"] == m.instance_id)
+                            .unwrap();
+                        p["constraints"] = json!(["Maintenance window"]);
+                    }
+                    _ => {
+                        let p = ex.caps["providers"]
+                            .as_array_mut()
+                            .unwrap()
+                            .iter_mut()
+                            .find(|p| p["providerInstanceId"] == m.instance_id)
+                            .unwrap();
+                        p["models"] = json!([]);
+                    }
+                }
+            }
+            let err = format!("{:#}", choose(&ex.inputs()).expect_err("all excluded must error"));
+            assert!(err.contains("pool test-pool has no member that can run"), "{err}");
+            for m in &ex.pool.members {
+                assert!(err.contains(&m.instance_id), "missing {} in {err}", m.instance_id);
+            }
+            Ok(())
+        });
+    }
+}
