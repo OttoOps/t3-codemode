@@ -103,6 +103,9 @@ parent and a child, and the service keeps every link and message in its store.
   when unset. A worker link with no `issue` takes one from its pull request's
   closing references (`Closes #N`) at the next
   [GitHub reconcile](board.md#github-reconcile).
+- `wf.openChild` also takes `pr: { format?, sections?, passes?, mergeOnly? }`,
+  the PR description format a worker's [`wf.pr`](#wfpr) `opened` event is
+  checked against. It is stored on the child's link when the child joins.
 - `wf.send({kind, body, gate?, wake?, options?})`, kinds `note | event | gate |
   blocker | report | handoff | closed`, to the caller's parent. Returns
   `{handle, delivery}`: `noted`, `sent`, `queued` (the parent is mid-turn, or
@@ -231,6 +234,10 @@ parent and a child, and the service keeps every link and message in its store.
 - `wf.flow()` returns the [flow](config.md#flow)'s ready queue, the flow
   tickets running, and the free slots. `wf.flow.next()` runs one pick by hand.
   See [wf.flow](#wfflow).
+- `wf.pr({event, repo, pr, head, publishing?, checks?, body?})` is how a
+  worker reports its pull request: `opened`, `updated` or `ready`. Under a
+  board ticket the service checks the description, records the head, or
+  opens the merge card itself, with no ticket turn. See [wf.pr](#wfpr).
 - `wf.merge({repo, pr, head, method?})` merges a GitHub pull request at the
   approved head commit. `repo` is `owner/name`, `head` the full 40-character
   SHA the user approved, and `method` one of `merge`, `squash` or `rebase`.
@@ -265,6 +272,41 @@ async () => {
   const r = await t3.thread_launch({ projectId, title, message, modelSelection: p.modelSelection });
   return wf.picked({ pick: p.pick, thread: r.threadId });
 }
+```
+
+### wf.pr
+
+A worker calls `wf.pr` for each step of its pull request. `repo` is
+`owner/name`, `pr` the number, and `head` the head commit SHA, 7 to 40
+characters. When the worker's ticket is on the board and the link's
+[`relay`](config.md#workflow-layer) is on, the service handles the event
+itself. Each step lands in the ticket's digest as a "handled for you" line.
+
+| `event` | What the service does | `status` |
+|---|---|---|
+| `opened`, with `publishing` | Checks that the Publishing line names the format and each pass, and that the description on GitHub has every heading, element and `Refs #<n>` line the format sets | `open`, or `rewrite` with the rewrite request in `message` and the gaps in `missing` |
+| `updated` | Records the new head and drops any merge card for an older head | `recorded`, with the `dropped` card ids |
+| `ready` | Reads the PR on GitHub, resolves the [delivery slot](config.md#workflow-layer) for its changed files, and opens the ticket's merge card with the answers the slot calls for | `gated` with the `card` and its `options` |
+| `ready`, checks still running | Marks the PR; GitHub reconcile opens the card once they finish | `waiting` |
+| `ready`, a check failed | Nothing on the board; a failure reconcile finds later comes back as a reply | `failing` with the `checks` |
+| `ready`, draft, moved head or merge conflict | Nothing | `refused` with a `reason` |
+
+The format comes from the ticket's `wf.openChild({..., pr})`. `format: "pr"`
+requires the `pr` skill's Summary, Evidence and Merge Danger sections with
+their elements, and `sections` maps more headings to the text each must
+hold. A PR whose merge state is `BLOCKED` or `BEHIND` with every check passed
+still gets its card, and the card names the block.
+
+Where the service cannot decide, it sends the ticket the message a worker
+sent before `wf.pr`, with a line saying why, and returns `status: "ticket"`
+and `why`. That covers a ticket under an overseer thread, `relay` off, a
+worker's second PR, a `mergeOnly` brief, `checks: "none"`, no stored format, a
+delivery slot without a builtin `merge` stage, and a PR it cannot read or
+verify. [ADR 0015](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0015-structured-pr-events-from-the-worker.md)
+lists every case.
+
+```js
+async () => wf.pr({ event: "ready", repo: "acme/widgets", pr: 7, head: "d4db97c" })
 ```
 
 ### wf.merge
