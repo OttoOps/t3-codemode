@@ -352,8 +352,10 @@ fn ticket_issue(covered: &BTreeMap<String, String>, label: &str) -> Option<(Stri
 }
 
 fn ticket_repo(covered: &BTreeMap<String, String>, t: &Ticket) -> Option<(String, u64)> {
-    if let Some((repo, n)) = t.issue.as_deref().and_then(|i| i.rsplit_once('#')) {
-        return Some((repo.to_string(), n.parse().ok()?));
+    if let Some(issue) = t.issue.as_deref() {
+        let parsed = crate::board::parse_github_issue_only(issue)?;
+        let (owner, repo, number) = parsed.github_parts()?;
+        return Some((format!("{owner}/{repo}"), number));
     }
     let (name, n) = t.label.rsplit_once('#')?;
     let known = t.repo.as_deref().filter(|r| r.rsplit_once('/').is_some_and(|(_, s)| s.eq_ignore_ascii_case(name)));
@@ -802,7 +804,14 @@ impl Wf {
             .collect();
         let mut done: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for l in self.store.children(BOARD, false)?.into_iter().filter(|l| l.closed) {
-            done.entry(l.label.to_ascii_lowercase()).or_default().push(l.child);
+            let key = match l.identity.issue.as_deref() {
+                Some(issue) => {
+                    let Some(gh) = crate::board::parse_github_issue_only(issue) else { continue };
+                    gh.slug().to_ascii_lowercase()
+                }
+                None => l.label.to_ascii_lowercase(),
+            };
+            done.entry(key).or_default().push(l.child);
         }
         let opt_in = cfg.opt_in.label.to_ascii_lowercase();
         let (mut queue, mut blocked, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
@@ -817,7 +826,9 @@ impl Wf {
             let key = skip_key(&r.issue.repo, r.issue.number);
             let mut stored = self.store.meta_get(&key)?;
             let mut unheld = Vec::new();
-            for t in done.get(&r.issue.label.to_ascii_lowercase()).into_iter().flatten() {
+            let slug_key = node_key(&r.issue.repo, r.issue.number);
+            let label_key = r.issue.label.to_ascii_lowercase();
+            for t in done.get(&slug_key).into_iter().chain(done.get(&label_key)).flatten() {
                 let held = format!("{HELD}{t}");
                 if self.store.meta_get(&held)?.is_none() {
                     unheld.push(held);

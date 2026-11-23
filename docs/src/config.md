@@ -533,6 +533,34 @@ owner, so a ticket for `other/widgets#41` counts as `acme/widgets#41` when
 workers it runs. The free slots are `maxTickets` minus the flow tickets, and
 never fewer than zero.
 
+### Trackers
+
+`trackers` maps non-GitHub ticket references to T3 projects when `wf.launchTicket`
+runs without an explicit `project` argument. GitHub and GitLab references match
+a T3 project's git `origin` remote by host and repository path first. GitLab
+references fall back to `trackers.hosts` when no remote matches, while GitHub
+keeps origin-remote and explicit-project matching. Jira keys check
+`trackers.jira` by project key first, then `trackers.hosts` for browse URLs.
+
+```json
+{
+  "trackers": {
+    "jira": {
+      "PROJ": "my-service"
+    },
+    "hosts": {
+      "jira.acme.example": "my-service",
+      "gitlab.acme.example": "my-service"
+    }
+  }
+}
+```
+
+| Key | Default | Does |
+|---|---|---|
+| `jira` | `{}` | Maps a Jira project key such as `PROJ`, matched ignoring case, to a T3 project id or title. |
+| `hosts` | `{}` | Maps a tracker hostname without scheme, port or path, matched ignoring case, to a T3 project id or title. |
+
 ### Updates
 
 | Key | Default | Does |

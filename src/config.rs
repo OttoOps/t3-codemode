@@ -5,7 +5,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::board::gh_name;
+use crate::board::{gh_name, is_jira_project_key, is_tracker_host};
 use crate::field::{self, invalid, within};
 use crate::pools::PoolConfig;
 use crate::upstream::UpstreamConfig;
@@ -321,6 +321,76 @@ pub struct Config {
     pub update_check: bool,
     #[serde(default)]
     pub flow: Option<FlowConfig>,
+    #[serde(default)]
+    pub trackers: TrackersConfig,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TrackersConfig {
+    #[serde(default)]
+    pub jira: BTreeMap<String, String>,
+    #[serde(default)]
+    pub hosts: BTreeMap<String, String>,
+}
+
+impl TrackersConfig {
+    pub fn validate(&self) -> Result<()> {
+        let mut seen_jira: BTreeMap<String, &str> = BTreeMap::new();
+        for (key, project) in &self.jira {
+            let at = field::display(&["jira", key]);
+            if !is_jira_project_key(key) {
+                return Err(invalid(
+                    at,
+                    format!(
+                        "jira: {key:?} is not a Jira project key (start with a letter and use at least two letters, digits or _, such as \"PROJ\")"
+                    ),
+                ));
+            }
+            if let Some(other) = seen_jira.insert(key.to_ascii_uppercase(), key) {
+                return Err(invalid(
+                    at,
+                    format!("jira maps both {other:?} and {key:?}, which are the same Jira project key"),
+                ));
+            }
+            if project.trim().is_empty() {
+                return Err(invalid(at, format!("jira.{key} must name a T3 project id or title")));
+            }
+        }
+        let mut seen_hosts: BTreeMap<String, &str> = BTreeMap::new();
+        for (host, project) in &self.hosts {
+            let at = field::display(&["hosts", host]);
+            if !is_tracker_host(host) {
+                return Err(invalid(
+                    at,
+                    format!(
+                        "hosts: {host:?} must be a hostname without scheme, port or path (such as \"jira.example.com\")"
+                    ),
+                ));
+            }
+            if host.eq_ignore_ascii_case("github.com") {
+                return Err(invalid(
+                    at,
+                    "hosts: github.com repositories match by git origin remote, not trackers.hosts",
+                ));
+            }
+            if let Some(other) = seen_hosts.insert(host.to_ascii_lowercase(), host) {
+                return Err(invalid(at, format!("hosts maps both {other:?} and {host:?}, which are the same host")));
+            }
+            if project.trim().is_empty() {
+                return Err(invalid(at, format!("hosts.{} must name a T3 project id or title", field::segment(host))));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn jira_project(&self, project_key: &str) -> Option<(&str, &str)> {
+        self.jira.iter().find(|(k, _)| k.eq_ignore_ascii_case(project_key)).map(|(k, v)| (k.as_str(), v.trim()))
+    }
+
+    pub fn host_project(&self, host: &str) -> Option<(&str, &str)> {
+        self.hosts.iter().find(|(h, _)| h.eq_ignore_ascii_case(host)).map(|(h, v)| (h.as_str(), v.trim()))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -425,6 +495,10 @@ pub fn builtin_defaults() -> Value {
             "reconcileIdleMinutes": 10,
             "openLinks": "desktop",
             "remote": null
+        },
+        "trackers": {
+            "jira": {},
+            "hosts": {}
         }
     })
 }
@@ -597,6 +671,7 @@ impl Config {
         if let Some(flow) = &self.flow {
             flow.validate().map_err(|e| within(e, "flow", "flow"))?;
         }
+        self.trackers.validate().map_err(|e| within(e, "trackers", "trackers"))?;
         Ok(())
     }
 

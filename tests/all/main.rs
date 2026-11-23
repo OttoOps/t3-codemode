@@ -24,6 +24,7 @@ mod setup_steps;
 mod skills_install;
 mod slots;
 mod t3_http;
+mod trackers;
 mod types;
 mod update;
 mod upstream_catalog;

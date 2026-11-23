@@ -164,6 +164,8 @@ pub(crate) fn every_kind_of_key() -> Vec<(&'static str, Value)> {
         ("flow.optIn.label", json!("ready")),
         ("flow.maxTickets", json!(3)),
         ("flow.launch", json!("auto")),
+        ("trackers.jira.PROJ", json!("widgets")),
+        ("trackers.hosts.\"jira.acme.example\"", json!("widgets")),
     ]
 }
 
@@ -287,6 +289,13 @@ fn an_invalid_edit_names_its_field() {
         (set("upstreams.0.name", json!("wf")), "upstreams.0.name"),
         (set("upstreams.0.allow", json!(["*", ""])), "upstreams.0.allow.1"),
         (set("upstreams.0.stdio.env", json!({"API.TOKEN": "literal"})), "upstreams.0.stdio.env.\"API.TOKEN\""),
+        (set("trackers.jira.\"bad-key\"", json!("widgets")), "trackers.jira.bad-key"),
+        (set("trackers.jira.PROJ", json!(" ")), "trackers.jira.PROJ"),
+        (
+            set("trackers.hosts.\"https://jira.example.com\"", json!("widgets")),
+            "trackers.hosts.\"https://jira.example.com\"",
+        ),
+        (set("trackers.hosts.\"jira.example.com\"", json!("")), "trackers.hosts.\"jira.example.com\""),
         (unset("pools.\"gpt-6.1\""), "board.pool"),
         (unset("pools.\"gpt-6.1\".model"), "pools.\"gpt-6.1\".model"),
         (unset("board.nope"), "board.nope"),

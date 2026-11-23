@@ -693,6 +693,7 @@ impl Wf {
             reported: false,
             thread: None,
             link: None,
+            project: None,
             identity: identity.clone(),
         })?;
         let call = format!(
@@ -795,7 +796,10 @@ impl Wf {
                 bad_run: None,
                 settled_at: None,
                 restored_at: None,
-                project: project.or_else(|| old.as_ref().and_then(|o| o.project.clone())),
+                project: project
+                    .or_else(|| launch.and_then(|p| p.project.clone()))
+                    .or_else(|| old.as_ref().and_then(|o| o.project.clone()))
+                    .or_else(|| self.live_of(me).and_then(|v| v["project"].as_str().map(String::from))),
                 paused_at: old.as_ref().filter(|_| !auto).and_then(|o| o.paused_at.clone()),
                 identity,
             })
