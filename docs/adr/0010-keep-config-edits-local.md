@@ -1,9 +1,13 @@
 ---
-status: accepted
+status: "superseded by ADR 0011 for the settings routes; the execute decision stands"
 date: 2026-11-21
 ---
 
 # Keep config edits local and out of execute
+
+[ADR 0011](0011-settings-for-the-tailscale-owner.md) supersedes the settings
+routes decision below and opens them to the Tailscale owner. The decision to
+give `execute` no config global stands.
 
 ## Context and problem statement
 
