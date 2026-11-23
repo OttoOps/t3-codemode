@@ -7431,7 +7431,7 @@ function unresolvedLaunchRefs(d) {
     seen.add(raw);
     const parsed = parseIssueRef(raw);
     if (!parsed || parsed.tracker === "github") continue;
-    if (!d || !resolveIssueProject(parsed, d)) out.push({ raw, parsed });
+    if (launchProjectPicks.has(raw) || !d || !resolveIssueProject(parsed, d)) out.push({ raw, parsed });
   }
   return out;
 }
@@ -7475,10 +7475,7 @@ function paintLaunchProjects() {
   const activeProjects = (d && !d.projectsError && Array.isArray(d.projects)) ? d.projects : null;
   const activeIds = activeProjects ? new Set(activeProjects.map((p) => p.id)) : null;
   for (const [k, pid] of [...launchProjectPicks.entries()]) {
-    if (!refSet.has(k)) { launchProjectPicks.delete(k); continue; }
-    if (activeIds && !activeIds.has(pid)) { launchProjectPicks.delete(k); continue; }
-    const parsed = parseIssueRef(k);
-    if (d && parsed && resolveIssueProject(parsed, d)) launchProjectPicks.delete(k);
+    if (!refSet.has(k) || (activeIds && !activeIds.has(pid))) launchProjectPicks.delete(k);
   }
   const need = unresolvedLaunchRefs(d);
   if (!need.length) {
@@ -7539,7 +7536,7 @@ function paintLaunchProjects() {
         if (sel.value) launchProjectPicks.set(x.raw, sel.value);
         else launchProjectPicks.delete(x.raw);
         launchProjectsErr = "";
-        syncLaunchProjectErrors();
+        paintLaunchProjects();
         paintLaunchModelLine();
       });
       return h("div", { class: "lp-row" },
