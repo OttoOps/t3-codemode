@@ -50,6 +50,7 @@
   --fail-soft: #fbe5e3;
   --done: #24663d;
   --review: #035e91;
+  --pause: #6941c6;
   --flash: rgb(36 102 61 / 0.2);
   --needs-you-surface: #fbf7ef;
 }
@@ -78,6 +79,7 @@
   --fail-soft: #3a1f24;
   --done: #7fcf9b;
   --review: #38bdf8;
+  --pause: #b9a3f7;
   --flash: rgb(127 207 155 / 0.18);
   --needs-you-surface: #1a1a16;
 }
@@ -174,7 +176,8 @@ select:disabled { opacity: 0.55; cursor: default; }
 .s-fail { color: var(--fail); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2 2l8 8M10 2l-8 8' stroke='%23000' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E"); }
 .s-run { color: var(--fg); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4.6' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3Cpath d='M6 1.4a4.6 4.6 0 0 1 0 9.2z'/%3E%3C/svg%3E"); }
 .s-wait { color: var(--fg-2); font-weight: 500; --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4.6' fill='none' stroke='%23000' stroke-width='1.8' stroke-dasharray='1.8 2.2'/%3E%3C/svg%3E"); }
-.s-idle, .s-pause { color: var(--fg-2); font-weight: 500; --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4.4' fill='none' stroke='%23000' stroke-width='1.4'/%3E%3C/svg%3E"); }
+.s-pause { color: var(--pause); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3.75 2v8M8.25 2v8' stroke='%23000' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.s-idle { color: var(--fg-2); font-weight: 500; --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4.4' fill='none' stroke='%23000' stroke-width='1.4'/%3E%3C/svg%3E"); }
 .s-done { color: var(--done); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M1.5 6.5l3 3 6-7' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
 .pill {
   display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 20px; padding: 0 8px;
@@ -188,6 +191,9 @@ select:disabled { opacity: 0.55; cursor: default; }
 .s-pr-queued { color: var(--review); }
 .s-pr-closed { color: var(--fg-2); font-weight: 500; }
 .s-pr-merged { color: var(--done); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23000' stroke-width='1.4'%3E%3Ccircle cx='3' cy='2.5' r='1.4'/%3E%3Ccircle cx='3' cy='9.5' r='1.4'/%3E%3Ccircle cx='9' cy='6' r='1.4'/%3E%3Cpath d='M3 4v4M3.6 3.8c.8 1.4 2 2.2 4 2.2'/%3E%3C/svg%3E"); }
+.s-pr-green { color: var(--done); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23000' stroke-width='1.4'%3E%3Ccircle cx='6' cy='6' r='4.8'/%3E%3Cpath d='M3.7 6.1l1.6 1.6 3-3.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+.s-pr-review { color: var(--review); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23000' stroke-width='1.4'%3E%3Ccircle cx='6' cy='6' r='4.8'/%3E%3Cpath d='M6 3.4V6l1.8 1.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+.s-alert { color: var(--fail); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23000'%3E%3Cpath d='M6 1.4 11 10.4H1z' stroke-width='1.4' stroke-linejoin='round'/%3E%3Cpath d='M6 4.6v2.6M6 8.7v.1' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E"); }
 .spill {
   height: 18px; padding: 0 8px; border-radius: 9px; vertical-align: middle;
   border: 1px solid color-mix(in srgb, currentColor 75%, transparent);
@@ -204,7 +210,7 @@ a:hover > .spill, a:focus-visible > .spill { border-color: currentColor; }
 
 .app {
   height: 100vh; height: 100dvh; display: grid;
-  grid-template-rows: 48px auto minmax(0, 1fr);
+  grid-template-rows: 48px auto auto minmax(0, 1fr);
 }
 .top {
   display: flex; align-items: center; gap: 16px; min-width: 0;
@@ -383,6 +389,49 @@ a:hover > .spill, a:focus-visible > .spill { border-color: currentColor; }
   .conf-tabs { display: none; }
   .conf-panels { padding: 12px; }
   .conf-foot { padding: 8px 12px; }
+}
+
+.pulse {
+  display: flex; align-items: stretch; gap: 8px; min-width: 0;
+  padding: 4px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
+}
+.pslots { flex: 1 1 auto; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; min-width: 0; }
+.pslot {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-rows: 16px 16px; column-gap: 4px; align-items: center;
+  min-width: 0; padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2);
+  color: var(--fg); text-align: left; cursor: pointer; font-size: 12px; line-height: 16px;
+}
+.pslot:hover { background: var(--surface-hover); border-color: var(--border-strong); }
+.pslot[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.pslot .mark { grid-row: 1; }
+.pslot .plab { grid-row: 1; color: var(--fg-2); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pslot[aria-pressed="true"] .plab { color: var(--fg); }
+.pslot .pn { grid-row: 1; font-weight: 600; font-variant-numeric: tabular-nums; }
+.pslot .pd { grid-column: 1 / -1; grid-row: 2; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pulse.folded .pslot { grid-template-rows: 16px; }
+.pulse.folded .pd { display: none; }
+#pulse-fold { flex: none; align-self: center; }
+@media (min-width: 1200px) {
+  .app.pfold { grid-template-columns: fit-content(70%) minmax(0, 1fr); grid-template-rows: 48px auto minmax(0, 1fr); }
+  .app.pfold > .top, .app.pfold > .panes { grid-column: 1 / -1; }
+  .app.pfold > .fbar { grid-row: 2; grid-column: 1; }
+  .app.pfold #filter-q { flex: none; width: 280px; }
+  .app.pfold > .pulse { grid-row: 2; grid-column: 2; align-items: center; padding-left: 0; }
+}
+.pslot .plab-s, .pulse.folded .plab-l { display: none; }
+.pulse.folded .plab-s { display: inline; }
+@media (max-width: 1199px) {
+  .pslot { grid-template-rows: 16px; }
+  .pslot .pd, #pulse-fold { display: none; }
+}
+@media (max-width: 899px) {
+  .pulse { padding: 4px 12px; }
+  .pslots { gap: 4px; }
+  .pslot { min-height: 44px; padding: 4px; justify-content: center; }
+}
+@media (max-width: 599px) {
+  .pslot { grid-template-columns: auto auto; justify-content: center; column-gap: 4px; }
+  .pslot .plab { display: none; }
 }
 
 .fbar {
@@ -815,7 +864,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   #composer:not(.has-out) .dock #out { display: none; }
 }
 @media (max-width: 899px) {
-  .app { grid-template-rows: 48px auto minmax(0, 1fr); }
+  .app { grid-template-rows: 48px auto auto minmax(0, 1fr); }
   .fbar { padding: 4px 12px; }
   .fbar #filter-q { flex: 1 1 100%; height: 44px; font-size: 16px; }
   .fopt { min-height: 44px; }
@@ -959,6 +1008,10 @@ kbd { font-family: var(--mono); font-size: 12px; }
     <button class="btn" type="button" id="keys-btn" aria-haspopup="dialog"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4 7h1M7 7h2M11 7h1M5 9.5h6"/></svg><span class="w">Shortcuts</span></button>
   </span>
 </header>
+<section class="pulse" id="pulse" aria-label="Board pulse">
+  <div class="pslots" id="pslots" role="group" aria-label="Quick status filters"></div>
+  <button class="btn quiet ic" type="button" id="pulse-fold" aria-expanded="true" aria-controls="pslots" aria-label="Fold the pulse strip to one line" title="Fold the pulse strip"></button>
+</section>
 <div class="fbar" id="fbar" role="search" aria-label="Filter the board">
   <span class="facet ctx" id="ctx">
     <button class="btn fbtn" type="button" id="ctx-btn" aria-haspopup="true" aria-expanded="false" aria-controls="ctx-pop">Context: All</button>
@@ -1722,18 +1775,51 @@ function prChip(pr, owner, withState) {
   return slot.firstChild;
 }
 
+const MERGEABLE = new Set(["CLEAN", "HAS_HOOKS", "UNSTABLE"]);
+const HELD_REVIEW = new Set(["CHANGES_REQUESTED", "REVIEW_REQUIRED"]);
+
+function prExec(pr) {
+  if (!pr || !safeUrl(pr.url)) return null;
+  const st = prState(pr);
+  if (st === "queued") return "pr-green";
+  const r = st === "open" && pr.readiness;
+  if (!r) return null;
+  if (r.checks === "failing" && r.reviewDecision === "APPROVED") return "alert";
+  const green = !r.isDraft && (r.checks === "passing" || r.checks === null) && MERGEABLE.has(r.mergeStateStatus) && !HELD_REVIEW.has(r.reviewDecision);
+  return green ? "pr-green" : "pr-review";
+}
+
+function prWord(pr, exec) {
+  const st = prState(pr);
+  if (st === "queued" || !exec) return st;
+  if (exec === "pr-green") return "ready";
+  if (exec === "alert") return "failing";
+  const r = pr.readiness;
+  if (r.isDraft) return "draft";
+  if (r.reviewDecision === "CHANGES_REQUESTED") return "changes";
+  if (r.checks === "failing") return "CI failing";
+  if (r.checks === "pending") return "CI";
+  if (r.mergeStateStatus === "DIRTY") return "conflict";
+  if (r.mergeStateStatus === "BEHIND") return "behind";
+  return "review";
+}
+
+const PR_SAID = { "pr-green": "ready to merge", "alert": "approved with failing checks" };
+
 function setPrChip(slot, pr, owner, withState) {
   const u = pr && safeUrl(pr.url);
   if (!u) { if (slot.firstChild) slot.replaceChildren(); return; }
-  const st = prState(pr);
+  const exec = prExec(pr);
+  const word = prWord(pr, exec);
   let a = slot.firstChild;
   if (!a || a.tagName !== "A") { a = threadLink(u); slot.replaceChildren(a); }
   setAttr(a, "href", u);
   setAttr(a, "class", "prl");
-  setAttr(a, "aria-label", "PR #" + pr.number + " " + st + (owner ? " for " + owner : ""));
+  setAttr(a, "aria-label", "PR #" + pr.number + " " + (PR_SAID[exec] || word) + (owner ? " for " + owner : ""));
+  setAttr(a, "title", withState ? null : "PR #" + pr.number + " " + (PR_SAID[exec] || word));
   let pill = a.firstChild;
   if (!pill || pill.tagName !== "SPAN") { pill = h("span", {}); a.replaceChildren(pill); }
-  setStatusPill(pill, "pr-" + st, "#" + pr.number + (withState ? " " + st : ""));
+  setStatusPill(pill, exec || "pr-" + prState(pr), "#" + pr.number + (withState ? " " + word : ""));
 }
 
 function ticketChip(label, o) {
@@ -2289,7 +2375,8 @@ function needsOf(cards) {
   return m;
 }
 
-const PHASES = [["running", "running"], ["waiting", "needs you"], ["blocked", "blocked"], ["done", "done"]];
+const PHASES = [["running", "running"], ["waiting", "needs you"], ["blocked", "blocked"], ["paused", "paused"],
+  ["pr-green", "ready to merge"], ["pr-review", "in review or CI"], ["alert", "alert"], ["done", "done"]];
 const CARD_KINDS = ["gate", "blocker", "report", "escalate"];
 const FACETS = [
   { key: "projects", name: "Project", values: projectValues },
@@ -2373,8 +2460,16 @@ function placeMatch(p, v) {
 
 function phaseOf(t, cards) {
   if (t.done) return "done";
-  if (cards.some((c) => FAIL_KINDS.has(c.kind)) || ticketState(t, []) === "fail") return cards.length ? ["blocked", "waiting"] : "blocked";
-  return cards.length ? "waiting" : "running";
+  const tags = new Set();
+  for (const x of [t, ...(t.workers || []).filter((w) => !w.done)]) {
+    const e = prExec(x.pr);
+    if (e) tags.add(e);
+    if (x.paused) tags.add("paused");
+  }
+  if (cards.some((c) => FAIL_KINDS.has(c.kind)) || ticketState(t, []) === "fail") tags.add("blocked");
+  if (cards.length) tags.add("waiting");
+  else if (!tags.has("blocked") && !t.paused) tags.add("running");
+  return [...tags];
 }
 
 function filterCtx(s) {
@@ -2583,6 +2678,105 @@ function paintFilterBar(hidden) {
   setText(b, n + " hidden");
   setAttr(b, "data-urgent", urgent ? "1" : null);
   setAttr(b, "aria-label", n + (n > 1 ? " new decisions" : " new decision") + " hidden by the filter. Clear the filter to show them");
+}
+
+const PULSE = [
+  { key: "active", tone: "run", label: "Active", short: "Active", vals: ["running"] },
+  { key: "green", tone: "pr-green", label: "Ready to merge", short: "Ready", vals: ["pr-green"] },
+  { key: "review", tone: "pr-review", label: "In review or CI", short: "Review", vals: ["pr-review"] },
+  { key: "held", tone: "pause", label: "Paused or blocked", short: "Paused", vals: ["paused", "blocked"] },
+  { key: "alert", tone: "alert", label: "Alerts", short: "Alerts", vals: ["alert"] },
+];
+const PULSE_KEY = "t3board.pulse";
+
+function pulseOn(sl) {
+  return sl.vals.every((v) => filter.statuses.has(v));
+}
+
+function togglePulse(sl) {
+  const on = pulseOn(sl);
+  for (const v of sl.vals) {
+    if (on) filter.statuses.delete(v);
+    else filter.statuses.add(v);
+  }
+  filterChanged();
+}
+
+function prList(tix, tag) {
+  const out = [];
+  for (const t of tix) {
+    for (const x of [t, ...(t.workers || []).filter((w) => !w.done)]) {
+      const e = prExec(x.pr);
+      if (e !== tag || out.some((o) => o.url === x.pr.url)) continue;
+      out.push({ url: x.pr.url, text: "#" + x.pr.number + (tag === "pr-review" ? " " + prWord(x.pr, e) : "") });
+    }
+  }
+  const head = out.slice(0, 3).map((o) => o.text).join(", ");
+  return out.length > 3 ? head + " +" + (out.length - 3) : head;
+}
+
+function pulseDetail(sl, tix, s) {
+  if (sl.key === "active") {
+    const run = runningIn(s.tree);
+    const said = run + (run === 1 ? " thread" : " threads") + " running";
+    const max = s.flowMaxTickets;
+    if (!max) return said;
+    const open = s.tree.filter((t) => !t.done).length;
+    return said + ", " + open + " of " + max + " tickets" + (open > max ? ", " + (open - max) + " over the cap" : "");
+  }
+  if (sl.key === "held") {
+    const n = (v) => tix.filter((x) => x.tags.includes(v)).length;
+    const p = n("paused"), b = n("blocked");
+    return p || b ? [p && p + " paused", b && b + " blocked"].filter(Boolean).join(", ") : "Nothing parked";
+  }
+  const list = prList(tix.map((x) => x.t), sl.vals[0]);
+  if (sl.key === "alert") return list ? list + " failing after approval" : "No alerts";
+  return list || (sl.key === "green" ? "No PR ready" : "No PR in review");
+}
+
+function makePulse(sl) {
+  return h("button", { class: "pslot", type: "button", "data-slot": sl.key, "aria-pressed": "false", onclick: () => togglePulse(sl) },
+    mark(sl.tone), h("span", { class: "plab" }, h("span", { class: "plab-l" }, sl.label), h("span", { class: "plab-s" }, sl.short)),
+    h("span", { class: "pn num" }), h("span", { class: "pd" }));
+}
+
+function paintPulse(s) {
+  const box = $("pslots");
+  if (!box.firstChild) for (const sl of PULSE) box.append(makePulse(sl));
+  const ctx = filterCtx(s);
+  const all = s.tree.filter((t) => !t.done).map((t) => {
+    const d = ticketDesc(t, ctx);
+    return { t, d, tags: [].concat(d.phase) };
+  });
+  PULSE.forEach((sl, i) => {
+    const b = box.children[i];
+    const tix = all.filter((x) => x.tags.some((v) => sl.vals.includes(v)));
+    const n = tix.filter((x) => matches(x.d)).length;
+    const detail = pulseDetail(sl, tix, s);
+    const count = shown(n, tix.length);
+    const on = pulseOn(sl);
+    setText(b.querySelector(".pn"), count);
+    setText(b.querySelector(".pd"), detail);
+    setAttr(b, "aria-pressed", on ? "true" : "false");
+    setAttr(b, "title", sl.label + ": " + detail + (on ? ". Click to clear this filter" : ". Click to filter the board"));
+    setAttr(b, "aria-label", sl.label + ", " + (filtering() ? n + " of " + tix.length : tix.length) +
+      (tix.length === 1 ? " ticket" : " tickets") + ". " + detail);
+  });
+}
+
+function foldPulse(folded, keep) {
+  $("pulse").classList.toggle("folded", folded);
+  $("app").classList.toggle("pfold", folded);
+  const b = $("pulse-fold");
+  setAttr(b, "aria-expanded", folded ? "false" : "true");
+  setAttr(b, "aria-label", folded ? "Unfold the pulse strip" : "Fold the pulse strip to one line");
+  setAttr(b, "title", folded ? "Unfold the pulse strip" : "Fold the pulse strip");
+  if (!keep) return;
+  try { localStorage.setItem(PULSE_KEY, folded ? "folded" : "open"); } catch (_) {}
+}
+
+function pulsePref() {
+  try { return localStorage.getItem(PULSE_KEY) || ""; } catch (_) { return ""; }
 }
 
 const FILTERED = ["cards", "open", "done", "settled", "feed", "newIssues"];
@@ -3083,7 +3277,8 @@ function patchTicket(el, t, ctx) {
   const extra = Math.max(0, live.length - WORKERS_SHOWN);
   if (!extra && !fin.length) el._wopen = false;
   const rank = (w) => ORDER.indexOf(workerState(w, cards));
-  const shown = el._wopen ? ws : [...live].sort((a, b) => rank(a) - rank(b)).slice(0, WORKERS_SHOWN);
+  const prRank = (w) => w.pr && t.pr && w.pr.url === t.pr.url ? -1 >>> 0 : ["alert", "pr-green", "pr-review"].indexOf(prExec(w.pr)) >>> 0;
+  const shown = el._wopen ? ws : [...live].sort((a, b) => rank(a) - rank(b) || prRank(a) - prRank(b)).slice(0, WORKERS_SHOWN);
   part(el, "ws").hidden = !ws.length;
   sync(part(el, "workers"), shown, {
     key: (w) => w.thread || w.label,
@@ -4040,6 +4235,7 @@ function render(s) {
   showTicketsHeld();
   const seen = new Set(v.cards.map((c) => c.id));
   paintFilterBar(filtering() ? s.cards.filter((c) => !seen.has(c.id) && !hiddenBase.has(cardSeen(c))) : []);
+  paintPulse(s);
   const openShown = v.tree.filter((t) => !t.done).length;
   const runAll = runningIn(s.tree);
   const running = runningIn(v.tree);
@@ -5059,6 +5255,12 @@ function wire() {
   });
   for (const f of FACETS) $("facets").append(makeFacet(f));
   makeCtxPop();
+  const short = window.matchMedia ? window.matchMedia("(max-height: 999px)") : null;
+  const autoFold = () => { if (!pulsePref()) foldPulse(!!(short && short.matches), false); };
+  if (pulsePref()) foldPulse(pulsePref() === "folded", false);
+  else autoFold();
+  if (short && short.addEventListener) short.addEventListener("change", autoFold);
+  $("pulse-fold").addEventListener("click", () => foldPulse(!$("pulse").classList.contains("folded"), true));
   paintFilterBar([]);
   const q = $("filter-q");
   q.addEventListener("input", queryTyped);

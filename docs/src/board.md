@@ -17,6 +17,10 @@ each new card while the tab is hidden.
 The page has three panels under a header that counts the cards waiting on you
 and the threads running. Only the lists scroll.
 
+Between the header and the filter bar, the pulse strip counts the open tickets
+in five slots, as [The pulse strip](#the-pulse-strip) describes. Click a slot
+to filter the board to its tickets, and click it again to clear that filter.
+
 - **Needs you.** Gates, blockers, reports and the watcher's escalations each
   become a card, blockers first. A card opens with the ask itself ("Merge
   #64"), then the ticket, its issue title and how long the card has waited.
@@ -53,6 +57,7 @@ and the threads running. Only the lists scroll.
   | half-filled ring | running |
   | dashed ring | waiting |
   | hollow ring | idle |
+  | two bars, violet | paused ([pausing](#pausing)) |
   | check | done |
 
   Amber marks only the tickets with an open card. A row shows the ticket label,
@@ -61,7 +66,18 @@ and the threads running. Only the lists scroll.
   the last message, and a gate already answered reads "Answered: ...", or "Dismissed: ..." when you dismissed its card. The
   workers sit at the end of the row, with finished ones folded into a count
   that expands. A pull request shows as an outlined pill with its number, and
-  on the ticket's own row its state: open, queued, merged or closed.
+  on the ticket's own row its state: open, queued, merged or closed. Once a
+  [GitHub reconcile](#github-reconcile) has read an open pull request's
+  readiness, the pill says where it stands instead:
+
+  | Pill | Mark | Means |
+  |---|---|---|
+  | `ready`, green | ringed check | not a draft, checks passing or none, no review held, and GitHub can merge it; a queued pull request is green too |
+  | `review`, `CI`, `CI failing`, `draft`, `changes`, `conflict` or `behind`, blue | ringed clock | still in review or CI: the word names what holds it |
+  | `failing`, red | triangle | approved, but a check at the head failed |
+
+  A worker's pill shows only the number, with the same mark and color, and
+  its tooltip says the state.
 - **Activity.** Notes and events from tickets, the latest `board.feed` (50)
   of them, under the ticket and worker that sent them. Runs from the same
   sender fold into one row that expands. The board drops kind prefixes and
@@ -330,8 +346,11 @@ Settled section at once.
   not known. The filter keeps the T3 project id, so a pick still holds once
   the repo arrives, and
   [ADR 0004](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0004-context-projects-by-id.md)
-  has the reasoning. Status is running, needs you, blocked or done. Card
-  kind narrows only the cards.
+  has the reasoning. Status is running, needs you, blocked, paused, ready to
+  merge, in review or CI, alert or done. A ticket can hold several: one whose
+  worker runs while its pull request is in CI is both running and in review
+  or CI, and a pick matches a ticket that holds any picked status. Card kind
+  narrows only the cards.
 - **Search** narrows the page while you type, with no Enter. Every word must
   appear somewhere in the ticket label, the issue title or number, the repo, or
   the card or feed text. `Esc` clears it, and `/` focuses it when single-key
@@ -339,6 +358,29 @@ Settled section at once.
 
 While a filter is on, each count reads visible/total. A new card the filter
 hides shows up as "N hidden", and clicking it clears the filter.
+
+### The pulse strip
+
+Each slot shows a count of open tickets and one line about them. The chevron
+at the strip's end folds it, and this browser remembers that. Until you use the
+chevron, the strip starts folded on a window under 1000 px tall. Folded, it shows
+each slot's mark, a short name and its count, and from 1200 px it moves up
+beside the filter bar, so the panels get its row back. Below 1200 px the strip
+always shows one line per slot, and below 600 px only each slot's mark and
+count. Hover a slot for its full line.
+
+| Slot | Counts tickets that are | Status it filters by |
+|---|---|---|
+| Active | running: open, with no card, not blocked, and not paused itself. The line says how many threads run and, with a [flow](#the-flow), the open tickets against `maxTickets` and how many are over it | running |
+| Ready to merge | holding a pull request that is ready to merge or queued | ready to merge |
+| In review or CI | holding a pull request still in review or CI | in review or CI |
+| Paused or blocked | paused, or with a paused worker, or failed or blocked. A paused link counts while its thread runs, waits or fails too | paused and blocked |
+| Alerts | holding an approved pull request with a failing check | alert |
+
+A slot sets its statuses in the Status filter, so it composes with the
+project, card kind and search filters and with the context you are in, and
+**Save filter** keeps it in a context. A slot reads pressed while all of its
+statuses are picked. While a filter is on, each count reads visible/total.
 
 ### Contexts
 
@@ -1115,7 +1157,7 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `GET /icon.svg`, `/icon-192.png`, `/icon-512.png` | Embedded board icons for browser tabs, notifications, and Add to Home Screen (same board auth guards) |
 | `GET /pair` | Remote browser pairing page (enabled when `board.remote.mode` is `"pairing"`, or `"tailscale"` with `requirePairing: true`); reads the token from `#<token>`, clears the fragment, and posts to `POST /api/pair` |
 | `POST /api/pair` `{token, label?}` | Redeem a single-use 5-minute pairing token (`Content-Type: application/json`) over the remote HTTPS origin and set a 30-day `HttpOnly; Secure; SameSite=Strict; Path=/` session cookie |
-| `GET /api/state` | `{rev, cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, flow, counts, service}`, with `counts.newIssues`. `flow` is `true` when the config has a `flow` block. `rev` is the board revision: it goes up with every change, keeps going up across a restart, and a state whose `rev` is at least a write's `rev` already holds that write; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. A ticket's or worker's open `pr` carries `readiness` once a [GitHub reconcile](#github-reconcile) has read it open: `isDraft`, `mergeStateStatus` and `reviewDecision` as GitHub gives them, and `checks`. `reviewDecision` is `null` when the repository requires no review. `checks` is `failing` when a check at the head failed, `pending` while one runs, `passing` when every check succeeded or was cancelled, skipped or neutral, and `null` when the head has no checks or has more than 100 and none of the first 100 failed. A pull request that no reconcile has read yet has no `readiness`. Tickets and workers carry `paused`, `pausedAt` while paused, and `status: "paused"` in place of `idle` ([pausing](#pausing)). Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` while `updateCheck` is `false` or until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
+| `GET /api/state` | `{rev, cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, flow, flowMaxTickets, counts, service}`, with `counts.newIssues`. `flow` is `true` when the config has a `flow` block. `flowMaxTickets` is that block's `maxTickets`, or `null` without one. `rev` is the board revision: it goes up with every change, keeps going up across a restart, and a state whose `rev` is at least a write's `rev` already holds that write; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. A ticket's or worker's open `pr` carries `readiness` once a [GitHub reconcile](#github-reconcile) has read it open: `isDraft`, `mergeStateStatus` and `reviewDecision` as GitHub gives them, and `checks`. `reviewDecision` is `null` when the repository requires no review. `checks` is `failing` when a check at the head failed, `pending` while one runs, `passing` when every check succeeded or was cancelled, skipped or neutral, and `null` when the head has no checks or has more than 100 and none of the first 100 failed. A pull request that no reconcile has read yet has no `readiness`. Tickets and workers carry `paused`, `pausedAt` while paused, and `status: "paused"` in place of `idle` ([pausing](#pausing)). Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` while `updateCheck` is `false` or until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
 | `GET /api/events` | SSE: a `state` event on every change, carrying the same `rev` (closes when a remote pairing session is revoked or expires, or when a Tailscale login is no longer allowed) |
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it; a flow launch card takes `launch` or `skip` instead ([The flow](#the-flow)) |
@@ -1137,7 +1179,7 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `POST /api/new-issues/{id}/dismiss`, `/restore` | Dismiss the entry, or bring a dismissed one back (400 if already dismissed, or not dismissed) |
 | `POST /api/settle-done` | Settle every done ticket and closed ask; returns `{tickets, asks}` counts |
 | `GET /api/contexts` | `{contexts: [...]}`, sorted by name; each is `{id, name, spec, createdAt, updatedAt}`, and `spec` is `{projects, statuses, kinds, q?}`. Each project is a T3 project id, or, for an item with no project id, its lowercased `owner/repo` or title. A context saved before project ids holds an `owner/repo` or a project title instead, and an item matches it ignoring case |
-| `PUT /api/contexts/{id}` `{name, spec}` | Create the context (201) or replace its name and filter (200), answering `{context, rev}`. Leave out `spec` to rename an existing context, or `name` to change only its filter; either form needs the context to exist (404 if it does not). `id` is 1 to 64 letters, digits, `-` or `_`. Names are unique ignoring case (409), at most 60 characters, and never "All". Statuses are `running`, `waiting`, `blocked` and `done`, and kinds are the card kinds. The board keeps at most 100 contexts |
+| `PUT /api/contexts/{id}` `{name, spec}` | Create the context (201) or replace its name and filter (200), answering `{context, rev}`. Leave out `spec` to rename an existing context, or `name` to change only its filter; either form needs the context to exist (404 if it does not). `id` is 1 to 64 letters, digits, `-` or `_`. Names are unique ignoring case (409), at most 60 characters, and never "All". Statuses are `running`, `waiting`, `blocked`, `done`, `paused`, `pr-green`, `pr-review` and `alert`, and kinds are the card kinds. The board keeps at most 100 contexts |
 | `DELETE /api/contexts/{id}` | Delete the context (404 if there is none), answering `{deleted, rev}` |
 | `POST /api/open` `{link}` | Loopback-only: open a T3 thread link in the running Windows desktop app (on Windows, or from WSL); returns `{opened}`, and the page opens a new tab when it is `false` (400 for a link that is not a T3 thread; 403 for authenticated remote requests, or the usual 401/403 guard refusal otherwise) |
 

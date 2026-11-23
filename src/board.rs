@@ -2082,6 +2082,7 @@ impl Wf {
             "flow": self.config().flow.is_some(),
             "counts": {"cards": cards.len(), "tickets": open, "running": running, "settled": settled_total,
                        "newIssues": new_issues.len()},
+            "flowMaxTickets": self.config().flow.as_ref().map(|f| f.max_tickets),
             "service": self.service_view(),
         }))
     }
