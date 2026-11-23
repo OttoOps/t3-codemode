@@ -4,7 +4,7 @@ use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::BOARD;
 use t3_codemode::config::Config;
-use t3_codemode::fake::{check_run, github_pr, pull_request};
+use t3_codemode::fake::{check_run, github_pr, project, pull_request};
 use t3_codemode::server;
 
 const REPO: &str = "acme/widgets";
@@ -1755,4 +1755,46 @@ async fn a_worker_opened_with_an_issue_keeps_it_over_its_prs_closing_reference()
 
     let ln = h.app.store.link_get(WORKER).unwrap().unwrap();
     assert_eq!(ln.identity.issue.as_deref(), Some("acme/widgets#115"));
+}
+
+#[tokio::test]
+async fn a_queue_drop_between_worker_open_and_ready_card_is_idempotent_on_first_reconcile() {
+    let h = H::new();
+    let repo = h.dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    h.fake.set_projects(vec![project("proj:widgets", &repo.to_string_lossy())]);
+    h.fake.update(TICKET, json!({"projectId": "proj:widgets"}));
+    h.fake.update(WORKER, json!({"projectId": "proj:widgets"}));
+    h.wf(TICKET, "join", json!({"parent": BOARD, "label": "widgets#41", "role": "ticket"})).await;
+    h.wf(
+        WORKER,
+        "join",
+        json!({"parent": TICKET, "label": "#41 PR 1/1", "role": "worker", "issue": "acme/widgets#41", "part": "1/1"}),
+    )
+    .await;
+
+    let mut pr = github_pr(HEAD, "CLEAN", true);
+    pr["body"] = json!("## Summary\n\ntest\n\nRefs #41\n");
+    h.github.set_pr(REPO, 7, pr);
+    h.github.set_checks(REPO, 7, json!([check_run("ci", "SUCCESS")]));
+    h.github.drop_from_queue(REPO, 7, "failed_checks", &at(3));
+
+    h.clock.set(&at(5));
+    let r = h.wf(WORKER, "pr", json!({"event": "ready", "repo": REPO, "pr": 7, "head": HEAD})).await;
+    assert_eq!(r["status"], "gated", "{r}");
+
+    // Worker opened at T0, queue drop happened at T0+3, ready card opened at T0+5.
+    // The first reconcile must fold the worker's open time into `since` so the drop is
+    // reported immediately rather than surfacing only on a second reconcile.
+    check(&h, 6).await;
+    let after_first: Vec<String> = cards(&h, false).into_iter().map(|c| c["id"].as_str().unwrap().into()).collect();
+    assert!(
+        cards(&h, false).iter().any(|c| c["text"].as_str().is_some_and(|t| t.contains("failed checks"))),
+        "first reconcile should report the queue drop: {:?}",
+        cards(&h, false)
+    );
+
+    check(&h, 6).await;
+    let after_second: Vec<String> = cards(&h, false).into_iter().map(|c| c["id"].as_str().unwrap().into()).collect();
+    assert_eq!(after_second, after_first, "second reconcile must be idempotent");
 }

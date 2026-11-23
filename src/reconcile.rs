@@ -572,6 +572,13 @@ impl Wf {
             let status = wait.as_ref().map(|w| w.status);
             let prev = self.store.pr_seen_get(&t.repo, t.number)?;
             let live_tickets = self.live_tickets(t, &cards, wait.as_ref(), prev.as_ref(), floor)?;
+            let since = live_tickets
+                .iter()
+                .map(|(_, s)| s.as_str())
+                .chain(std::iter::once(t.since.as_str()))
+                .filter(|s| !s.is_empty())
+                .min()
+                .unwrap_or(t.since.as_str());
             let left = if o.state != "OPEN" || o.queued {
                 None
             } else if prev.as_ref().is_some_and(|p| p.queued) {
@@ -584,13 +591,13 @@ impl Wf {
                 }
             };
             let after = match prev.as_ref().and_then(|p| p.queued_at.as_deref()) {
-                Some(q) if later(q, &t.since) => q,
-                _ => t.since.as_str(),
+                Some(q) if later(q, since) => q,
+                _ => since,
             };
             let mut merged = None;
             let advance = match o.state.as_str() {
                 "MERGED" | "CLOSED" => {
-                    merged = self.finished(t, &o, &cards, wait.as_ref(), &live_tickets, pass)?;
+                    merged = self.finished(t, &o, &cards, wait.as_ref(), &live_tickets, since, pass)?;
                     None
                 }
                 "OPEN" => self.open(t, &o, &cards, wait, &live_tickets, after, left.as_deref(), pass)?,
@@ -611,7 +618,7 @@ impl Wf {
                 state: o.state.clone(),
                 head: o.head.clone(),
                 queued: o.queued,
-                since: t.since.clone(),
+                since: since.to_string(),
                 tickets: live_tickets,
                 at: self.now(),
                 left,
@@ -652,6 +659,7 @@ impl Wf {
         Ok(w.filter(|w| t.approval.as_ref() == Some(&w.approval)))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn finished(
         &self,
         t: &Tracked,
@@ -659,6 +667,7 @@ impl Wf {
         cards: &[Card],
         wait: Option<&MergeWait>,
         live_tickets: &[(String, String)],
+        since: &str,
         pass: &mut Pass,
     ) -> Result<Option<crate::merge_answer::Answered>> {
         let merged = o.state == "MERGED";
@@ -705,7 +714,7 @@ impl Wf {
         }
         let on_feed = told == 0
             && code.is_none()
-            && later(&end, &t.since)
+            && later(&end, since)
             && (wait.is_some() || !stale.is_empty())
             && self.store.pr_event_mark(&t.repo, t.number, &event, BOARD, &self.now())?;
         let seqs: Vec<i64> = stale.iter().map(|c| c.seq).collect();
