@@ -37,7 +37,7 @@ jobs:
           lycheeVersion: ${{ env.LYCHEE_VERSION }}
           args: >-
             --no-progress --exclude-path docs/book/404.html
-            --remap '^https://github\.com/OttoOps/t3-codemode/blob/main/ https://github.com/OttoOps/t3-codemode/blob/${{ github.sha }}/'
+            --remap '^https://github\.com/OttoOps/t3-codemode/blob/main/ file://${{ github.workspace }}/'
             'docs/book/**/*.html'
       - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/configure-pages@v6
