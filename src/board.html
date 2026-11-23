@@ -51,6 +51,7 @@
   --done: #24663d;
   --review: #035e91;
   --pause: #6941c6;
+  --unlock: var(--review);
   --flash: rgb(36 102 61 / 0.2);
   --needs-you-surface: #fbf7ef;
   --s1: #2a52c4;
@@ -84,6 +85,7 @@
   --done: #7fcf9b;
   --review: #38bdf8;
   --pause: #b9a3f7;
+  --unlock: var(--review);
   --flash: rgb(127 207 155 / 0.18);
   --needs-you-surface: #1a1a16;
   --s1: #86a5f7;
@@ -1067,6 +1069,61 @@ kbd { font-family: var(--mono); font-size: 12px; }
 .dr-card .dq { font-weight: 600; overflow-wrap: anywhere; }
 .dr-card .btn, .dr-card .spill { justify-self: start; }
 .dr-card .meta { overflow-wrap: anywhere; }
+.dr-deps { display: grid; gap: 8px; min-width: 0; }
+.dr-dep { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 4px 8px; align-items: center; font-size: 13px; line-height: 18px; }
+.dr-dep > span:first-child { color: var(--fg-2); }
+.dr-dep ul { display: flex; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
+.dr-dep li { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+.dr-dep .linkish { max-width: 100%; }
+.dr-dep .gone-dep { color: var(--fg-2); }
+.dr-lane { font-size: 13px; line-height: 18px; color: var(--fg-2); overflow-wrap: anywhere; }
+.gsub {
+  flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; min-height: 40px; padding: 8px 16px;
+  border-bottom: 1px solid var(--border); background: var(--surface-2); font-size: 12px; line-height: 16px; color: var(--fg-2);
+}
+.gsub .gnote { flex: 1 1 100%; color: var(--fg-2); }
+.gkey { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.gkey svg { width: 22px; height: 8px; flex: none; }
+.gkey .k-up { stroke: var(--fail); }
+.gkey .k-down { stroke: var(--unlock); }
+.gkey .k-par { stroke: var(--border-strong); stroke-dasharray: 3 3; }
+.gscroll { overflow: auto; overscroll-behavior: contain; }
+#tp-graph > .empty { position: static; }
+.gscroll > svg { display: block; }
+.glane { fill: var(--surface-2); stroke: var(--border); stroke-width: 1; }
+.glane.alt { fill: var(--surface); }
+.glt { fill: var(--fg); font-size: 12px; font-weight: 600; }
+.glb { fill: var(--fg-2); font-size: 12px; font-weight: 500; }
+.ge { fill: none; stroke: var(--border-strong); stroke-width: 1.5; }
+.ge.par { stroke-dasharray: 4 3; }
+.ge.up { stroke: var(--fail); stroke-width: 2.5; }
+.ge.down { stroke: var(--unlock); stroke-width: 2.5; }
+.ge.dim { stroke-opacity: 0.25; }
+.gmk { fill: var(--border-strong); }
+.gmk.up { fill: var(--fail); }
+.gmk.down { fill: var(--unlock); }
+.gnode {
+  display: grid; align-content: center; gap: 0; width: 100%; height: 100%; padding: 4px 8px; margin: 0; text-align: left; cursor: pointer;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--fg); font: inherit;
+}
+.gnode:hover { background: var(--surface-hover); border-color: var(--border-strong); }
+.gnode:focus-visible { outline: 2px solid var(--accent); outline-offset: -5px; }
+.gnode .gl { font-size: 12px; line-height: 16px; font-weight: 600; }
+.gnode .g3 { display: flex; min-width: 0; }
+.gnode .spill { max-width: 100%; overflow: hidden; }
+.gnode .spill .w { overflow: hidden; text-overflow: ellipsis; }
+.gnode .g2 { font-size: 12px; line-height: 16px; color: var(--fg-2); }
+.gnode[data-inspected] { background: var(--surface-hover); border-color: var(--fg); }
+.gnode.hot, .gnode.up, .gnode.down { border-color: currentColor; outline: 1px solid currentColor; outline-offset: -2px; }
+.gnode.hot { color: var(--fg); }
+.gnode.up { color: var(--fail); }
+.gnode.down { color: var(--unlock); }
+.gnode.up .gl, .gnode.down .gl { color: var(--fg); }
+.gnode.hot:focus-visible, .gnode.up:focus-visible, .gnode.down:focus-visible { outline: 2px solid var(--accent); outline-offset: -5px; }
+.gnode.dim { border-color: var(--border); background: var(--bg); }
+.gnode.dim .gl, .gnode.dim .g2, .gnode.dim .mark { color: var(--fg-3); }
+.gnode.out { border-style: dashed; background: var(--surface-2); }
+.gnode.out .gl, .gnode.out .g2, .gnode.out .mark { color: var(--fg-3); }
 @media (max-width: 1199px) { .drawer { z-index: 4; } }
 @media (max-width: 599px) {
   .drawer { width: 100vw; max-width: none; border-left: 0; }
@@ -1243,6 +1300,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
         <button class="tab" role="tab" type="button" id="tab-open" aria-controls="tp-open" aria-selected="true" tabindex="0" data-tab="open">Open<span class="n num" id="n-open"></span></button>
         <button class="tab" role="tab" type="button" id="tab-done" aria-controls="tp-done" aria-selected="false" tabindex="-1" data-tab="done">Done<span class="n num" id="n-done"></span></button>
         <button class="tab" role="tab" type="button" id="tab-settled" aria-controls="tp-settled" aria-selected="false" tabindex="-1" data-tab="settled">Settled<span class="n num" id="n-settled"></span></button>
+        <button class="tab" role="tab" type="button" id="tab-graph" aria-controls="tp-graph" aria-selected="false" tabindex="-1" data-tab="graph">Graph<span class="n num" id="n-graph"></span></button>
         <button class="tab mid-only" role="tab" type="button" id="tab-activity" aria-controls="p-act" aria-selected="false" tabindex="-1" data-tab="activity">Activity<span class="n num" id="n-feed-tab"></span></button>
       </div>
       <span class="newslot"><button class="newbtn off" type="button" id="new-tix" tabindex="-1" aria-hidden="true"></button></span>
@@ -1267,6 +1325,16 @@ kbd { font-family: var(--mono); font-size: 12px; }
         </div>
         <div class="scroll rows" id="settled" role="list" aria-label="Settled tickets and asks"></div>
         <p class="empty" id="settled-empty" hidden>Nothing settled yet.</p>
+      </div>
+      <div class="tp" id="tp-graph" role="tabpanel" aria-labelledby="tab-graph" hidden>
+        <div class="gsub" id="graph-key">
+          <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-up" d="M1 4h20" stroke-width="2.5"/></svg>blocks it</span>
+          <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-down" d="M1 4h20" stroke-width="2.5"/></svg>it unlocks</span>
+          <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-par" d="M1 4h20" stroke-width="1.5"/></svg>parent</span>
+          <span class="gnote" id="graph-note"></span>
+        </div>
+        <div class="scroll gscroll" id="gscroll" role="group" aria-label="Dependency graph" aria-describedby="graph-note"></div>
+        <p class="empty" id="graph-empty" hidden>No open tickets or flow issues to draw.</p>
       </div>
       <div class="err-strip" id="act-err" hidden><span id="act-err-text"></span><button class="btn quiet" type="button" id="act-err-close">Close</button></div>
     </div>
@@ -1347,7 +1415,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
 <dialog id="keys" aria-labelledby="keys-h">
   <h2 id="keys-h">Keyboard shortcuts</h2>
   <dl>
-    <dt>j / k</dt><dd>Next or previous card or row</dd>
+    <dt>j / k</dt><dd>Next or previous card, row or graph issue</dd>
     <dt>g d, g t, g a</dt><dd>Go to Needs you, Tickets, Activity</dd>
     <dt>l</dt><dd>Focus Launch</dd>
     <dt>a</dt><dd>Focus Ask</dd>
@@ -3961,7 +4029,7 @@ function flipNewView() {
 }
 
 const FLOW_POLL_MS = 60000;
-const flow = { sig: null, busy: false, again: false, shown: null, open: { blocked: false, skipped: false },
+const flow = { sig: null, busy: false, again: false, shown: null, failed: false, open: { blocked: false, skipped: false },
   view: null, nodes: new Map(), ext: new Set(), ready: 0, waiting: 0 };
 
 function flowGraph(v) {
@@ -3992,6 +4060,7 @@ function flowDue(s) {
     flow.sig = null;
     flow.shown = null;
     flow.view = null;
+    flow.failed = false;
     flowGraph(null);
     $("flow-err").hidden = true;
     flowShow(false);
@@ -4017,13 +4086,17 @@ async function loadFlow() {
     if (!r.ok || !data) throw new Error((data && data.error) || "HTTP " + r.status);
     if (!state || !state.flow) return;
     $("flow-err").hidden = true;
+    flow.failed = false;
     paintFlow(data);
+    paintGraph();
   } catch (e) {
     if (!state || !state.flow) return;
     errFrom.set("flow-err", btn);
     setText($("flow-err-text"), "Could not read the up-next queue: " + e.message);
     $("flow-err").hidden = false;
     flowShow(true);
+    flow.failed = true;
+    if (state) paintGraph();
   } finally {
     flow.busy = false;
     setAttr(btn, "aria-disabled", null);
@@ -4123,7 +4196,7 @@ function paintFlow(v) {
   const moved = flowGraph(v);
   flowShow(!!v.enabled);
   if (moved && state) render(state);
-  if (!v.enabled) return;
+  if (!v.enabled) { if (state) paintGraph(); return; }
   const queue = v.queue || [], blocked = v.blocked || [], skipped = v.skipped || [];
   const a = document.activeElement;
   const list = a && a.tagName === "A" && a.closest ? a.closest("#flow-q, #flow-b, #flow-s") : null;
@@ -4141,6 +4214,431 @@ function paintFlow(v) {
   flowGroup("skipped", skipped, skipped.map((i) => flowRow(i, 0, flowFacts(i), [])));
   const back = list && [...list.querySelectorAll("a")].find((x) => x.getAttribute("href") === href && (x.closest("li") || x).getAttribute("data-issue") === row);
   if (back) back.focus({ preventScroll: true });
+  if (state) { paintGraph(); if (dr.open) paintDrawer(); }
+}
+
+const GRAPH_KEY = "t3board.graph";
+const SVG_NS = "http://www.w3.org/2000/svg";
+const GEO = { W: 168, H: 62, GAP: 32, ROW: 10, PAD: 10, HEAD: 28, LANE_GAP: 8 };
+const TRACK_RANK = { label: 0, milestone: 1, repo: 1, component: 2, none: 3 };
+const graph = { mode: "tickets", nodes: new Map(), byThread: new Map(), edges: [], order: [], sig: null, held: false,
+  pointer: false, hot: null, hover: null, focus: null, lead: null, active: null, btns: new Map(), paths: [], marks: null, lay: null };
+
+function svgEl(tag, attrs, ...kids) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) if (v !== null && v !== undefined && v !== false) el.setAttribute(k, v === true ? "" : v);
+  for (const kid of kids.flat()) if (kid !== null && kid !== undefined && kid !== false) el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  return el;
+}
+
+function graphPref() {
+  try { return localStorage.getItem(GRAPH_KEY) === "on"; } catch (_) { return false; }
+}
+
+function graphRemember(tab) {
+  if (!["open", "done", "settled", "graph"].includes(tab)) return;
+  try { localStorage.setItem(GRAPH_KEY, tab === "graph" ? "on" : "off"); } catch (_) {}
+}
+
+function graphTicket(n) {
+  const th = n && n.ticket && n.ticket.thread;
+  return th && state ? state.tree.find((t) => t.thread === th) || null : null;
+}
+
+function graphData(s) {
+  const g = s.flow && flow.view && flow.view.enabled && flow.view.graph;
+  if (g) {
+    const nodes = (g.nodes || []).filter((n) => n && n.id);
+    return { mode: "flow", nodes, edges: (g.edges || []).filter((e) => e && e.from && e.to) };
+  }
+  const nodes = s.tree.filter((t) => !t.done && t.thread).map((t) => {
+    const ids = ticketIds(t);
+    const issue = ids && ids.issue;
+    return { id: "t:" + t.thread, repo: t.repo || "", number: null, label: t.label, url: (issue && issue.url) || issueUrl(t.label, t.repo),
+      title: titleOf(t), state: "open", tracked: true, track: t.repo || "Tickets", trackBy: t.repo ? "repo" : "none", parent: null, subIssues: [],
+      blockedBy: [], unlocks: [], ticket: { thread: t.thread, link: t.link, status: t.status } };
+  });
+  const mode = !s.flow || (flow.view && !flow.view.enabled) ? "tickets" : flow.failed ? "error" : "loading";
+  return { mode, nodes, edges: [] };
+}
+
+function graphKey(n) {
+  return [String(n.repo || "").toLowerCase(), typeof n.number === "number" ? n.number : 0, String(n.label || "").toLowerCase(), n.id];
+}
+
+function graphCmp(a, b) {
+  const x = graphKey(a), y = graphKey(b);
+  for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] < y[i] ? -1 : 1;
+  return 0;
+}
+
+function graphLayout(nodes, edges) {
+  const list = [...nodes].sort(graphCmp);
+  const at = new Map(list.map((n, i) => [n.id, i]));
+  const preds = list.map(() => []);
+  const succs = list.map(() => []);
+  const link = new Set();
+  for (const e of edges) {
+    const a = at.get(e.to), b = at.get(e.from);
+    if (a === undefined || b === undefined || a === b) continue;
+    const k = a + ">" + b;
+    if (link.has(k)) continue;
+    link.add(k);
+    succs[a].push(b);
+    preds[b].push(a);
+  }
+  const depth = list.map(() => -1);
+  const left = preds.map((p) => p.length);
+  const ready = list.map((_, i) => i).filter((i) => !left[i]);
+  while (ready.length) {
+    ready.sort((a, b) => a - b);
+    const i = ready.shift();
+    depth[i] = Math.max(0, ...preds[i].map((p) => depth[p] + 1));
+    for (const s of succs[i]) if (--left[s] === 0) ready.push(s);
+  }
+  for (let i = 0; i < list.length; i++) if (depth[i] < 0) depth[i] = Math.max(0, ...preds[i].filter((p) => depth[p] >= 0).map((p) => depth[p] + 1));
+  const lanes = new Map();
+  list.forEach((n, i) => {
+    const by = n.trackBy || "component";
+    const name = String(n.track || "").trim() || n.label || n.id;
+    if (!lanes.has(name)) lanes.set(name, { name, by, idx: [], tickets: 0, linked: false });
+    const l = lanes.get(name);
+    if (preds[i].length || succs[i].length) l.linked = true;
+    if ((TRACK_RANK[by] ?? 3) < (TRACK_RANK[l.by] ?? 3)) l.by = by;
+    l.idx.push(i);
+    if (n.ticket) l.tickets++;
+  });
+  const order = [...lanes.values()].sort((a, b) => (a.by === "none") - (b.by === "none") || (b.tickets > 0) - (a.tickets > 0) || (TRACK_RANK[a.by] ?? 3) - (TRACK_RANK[b.by] ?? 3)
+    || (a.name.toLowerCase() < b.name.toLowerCase() ? -1 : a.name.toLowerCase() > b.name.toLowerCase() ? 1 : 0));
+  const cols = Math.max(2, 1 + Math.max(0, ...depth));
+  const pos = new Map();
+  const rowOf = list.map(() => null);
+  let y = 0;
+  const out = [];
+  order.forEach((l, li) => {
+    const linked = l.idx.filter((i) => preds[i].length || succs[i].length);
+    const alone = l.idx.filter((i) => !preds[i].length && !succs[i].length);
+    const rows = [];
+    const byCol = new Map();
+    for (const i of linked) { if (!byCol.has(depth[i])) byCol.set(depth[i], []); byCol.get(depth[i]).push(i); }
+    for (const d of [...byCol.keys()].sort((a, b) => a - b)) {
+      const col = byCol.get(d);
+      const bary = (i) => { const r = preds[i].map((p) => rowOf[p]).filter((v) => v !== null); return r.length ? r.reduce((a, b) => a + b, 0) / r.length : Infinity; };
+      col.sort((a, b) => bary(a) - bary(b) || a - b);
+      let r = 0;
+      for (const i of col) {
+        const want = bary(i);
+        if (Number.isFinite(want) && want >= y) r = Math.max(r, Math.round(want - y));
+        while ((rows[r] || []).includes(d)) r++;
+        (rows[r] ||= []).push(d);
+        rowOf[i] = y + r;
+        pos.set(list[i].id, { col: d, row: r, lane: li });
+        r++;
+      }
+    }
+    let r = rows.length;
+    alone.forEach((i, k) => {
+      const c = k % cols;
+      if (k && !c) r++;
+      pos.set(list[i].id, { col: c, row: r, lane: li });
+      rowOf[i] = y + r;
+    });
+    const height = Math.max(rows.length, alone.length ? r + 1 : 0, 1);
+    out.push({ name: l.name, by: l.by === "component" && !l.linked ? "none" : l.by, rows: height, count: l.idx.length, top: 0 });
+    y += height;
+  });
+  let top = 0;
+  for (const l of out) {
+    l.top = top;
+    l.h = GEO.HEAD + l.rows * (GEO.H + GEO.ROW) + GEO.PAD - GEO.ROW;
+    top += l.h + GEO.LANE_GAP;
+  }
+  for (const [id, p] of pos) {
+    p.x = GEO.PAD + p.col * (GEO.W + GEO.GAP);
+    p.y = out[p.lane].top + GEO.HEAD + p.row * (GEO.H + GEO.ROW);
+  }
+  const maxCol = Math.max(0, ...[...pos.values()].map((p) => p.col));
+  const width = GEO.PAD + GEO.GAP / 2 + (maxCol + 1) * GEO.W + maxCol * GEO.GAP;
+  const seq = [...pos.entries()].sort((a, b) => a[1].lane - b[1].lane || a[1].col - b[1].col || a[1].row - b[1].row).map((x) => x[0]);
+  return { pos, lanes: out, width, height: Math.max(0, top - GEO.LANE_GAP), seq };
+}
+
+function graphState(n, ctx) {
+  const t = graphTicket(n);
+  if (t) {
+    const cards = ctx.needs.get(t.thread) || [];
+    const st = ticketState(t, cards);
+    return [markOf(st, cards), WORDS[st]];
+  }
+  if (n.ticket) {
+    const st = state && state.settled.tickets.some((x) => x.thread && x.thread === n.ticket.thread) ? "done" : ownState(n.ticket.status);
+    return [st, WORDS[st]];
+  }
+  if (n.state === "closed") return ["done", "closed"];
+  if (n.ready) return ["ready", "ready"];
+  if (n.external) return ["external", "external"];
+  if (n.flowList === "blocked") return ["wait", "blocked"];
+  if (n.flowList === "skipped") return ["idle", "skipped"];
+  return ["idle", n.state === "open" ? "open" : "issue"];
+}
+
+function graphDesc(n, ctx) {
+  const extra = [n.id, n.track, n.milestone && n.milestone.title];
+  const t = graphTicket(n);
+  if (t) {
+    const d = ticketDesc(t, ctx);
+    return { ...d, text: [...d.text, ...extra] };
+  }
+  const phase = [];
+  if (n.ready) phase.push("ready");
+  if (n.external) phase.push("external");
+  if (n.flowList === "blocked") phase.push("blocked");
+  if (n.state === "closed") phase.push("done");
+  return { place: placeOf({ repo: n.repo }), phase: phase.length ? phase : null, text: [n.label, n.title, n.repo, ...extra] };
+}
+
+function graphWalk(id, key) {
+  const seen = new Set();
+  const todo = [id];
+  while (todo.length) {
+    const n = graph.nodes.get(todo.pop());
+    for (const x of (n && n[key]) || []) if (!seen.has(x) && x !== id && graph.nodes.has(x)) { seen.add(x); todo.push(x); }
+  }
+  return seen;
+}
+
+function graphNode(id) {
+  return graph.nodes.get(id) || null;
+}
+
+function graphSub(n) {
+  const th = n.ticket && n.ticket.thread;
+  if (th && state && (state.tree.some((t) => t.thread === th) || state.settled.tickets.some((t) => t.thread === th))) return { kind: "ticket", key: th };
+  return { kind: "issue", key: n.id };
+}
+
+function graphSig(lay, edges) {
+  return JSON.stringify([graph.mode, lay.wide, lay.height, lay.lanes.map((l) => [l.name, l.by, l.top, l.h, l.count]),
+    [...lay.pos.entries()].map(([id, p]) => [id, p.x, p.y]), edges.map((e) => [e.from, e.to, e.kind])]);
+}
+
+function graphNote(mode, lay) {
+  const lanes = lay.lanes.length;
+  if (mode === "tickets") return "No flow in the config, so this shows the open tickets with no links, one lane per repository.";
+  if (mode === "loading") return "Reading the dependency graph. Until it loads, this shows the open tickets, one lane per repository.";
+  if (mode === "error") return "Could not read the dependency graph, so this shows the open tickets, one lane per repository.";
+  const said = lanes + " lane" + (lanes === 1 ? "" : "s") + " by track, milestone or links. Hover or focus an issue to trace it.";
+  return flow.failed ? "Could not refresh the dependency graph, so this is the last one read. " + said : said;
+}
+
+function paintGraph() {
+  if (!state) return;
+  const d = graphData(state);
+  graph.mode = d.mode;
+  graph.nodes = new Map(d.nodes.map((n) => [n.id, n]));
+  graph.byThread = new Map(d.nodes.filter((n) => n.ticket && n.ticket.thread).map((n) => [n.ticket.thread, n]));
+  const ctx = filterCtx(state);
+  const on = filtering();
+  const hits = d.nodes.filter((n) => !on || matches(graphDesc(n, ctx)));
+  setText($("n-graph"), shown(hits.length, d.nodes.length, true));
+  setAttr($("n-graph"), "aria-label", d.nodes.length ? (on ? hits.length + " of " + d.nodes.length : d.nodes.length) + " issues" : null);
+  if ($("app").dataset.tab !== "graph") return;
+  const lay = graphLayout(d.nodes, d.edges);
+  lay.wide = Math.max(lay.width, $("gscroll").clientWidth || 0);
+  setText($("graph-note"), graphNote(d.mode, lay));
+  for (const k of $("graph-key").querySelectorAll(".gkey")) k.hidden = d.mode !== "flow";
+  $("graph-empty").hidden = d.nodes.length > 0;
+  $("gscroll").hidden = !d.nodes.length;
+  const box = $("gscroll");
+  const sig = graphSig(lay, d.edges);
+  if (sig !== graph.sig) {
+    if (graph.sig !== null && (graph.pointer || focusInside(box)) && graph.btns.size) graph.held = true;
+    else { graph.held = false; graphBuild(box, lay, d.edges); graph.sig = sig; }
+  }
+  const hit = new Set(hits.map((n) => n.id));
+  for (const [id, b] of graph.btns) {
+    const n = graph.nodes.get(id);
+    if (n) graphPatch(b, n, ctx, on && !hit.has(id));
+  }
+  if (graph.hot && !graph.nodes.has(graph.hot)) graph.hot = null;
+  graphMark();
+  markInspected();
+}
+
+function graphBuild(box, lay, edges) {
+  const had = focusInside(box) && document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.id : null;
+  graph.lay = lay;
+  graph.btns = new Map();
+  graph.paths = [];
+  const marker = (cls) => svgEl("marker", { id: "gm-" + cls, viewBox: "0 0 8 8", refX: "7", refY: "4", markerWidth: "8", markerHeight: "8", orient: "auto-start-reverse", markerUnits: "userSpaceOnUse" },
+    svgEl("path", { class: "gmk" + (cls === "base" ? "" : " " + cls), d: "M0 0L8 4L0 8z" }));
+  const root = svgEl("svg", { width: lay.width, height: lay.height, viewBox: "0 0 " + lay.width + " " + lay.height },
+    svgEl("defs", {}, marker("base"), marker("up"), marker("down")));
+  const wide = lay.wide;
+  lay.lanes.forEach((l, i) => {
+    const words = { label: "track label", milestone: "milestone", repo: "repository", component: "linked issues" }[l.by] || "";
+    const max = Math.max(8, Math.floor((Math.min(wide, 640) - 2 * GEO.PAD - 120) / 7));
+    const name = l.name.length > max ? l.name.slice(0, max - 1) + "…" : l.name;
+    root.append(svgEl("g", { class: "glg" },
+      svgEl("rect", { class: "glane" + (i % 2 ? " alt" : ""), x: 0.5, y: l.top + 0.5, width: wide - 1, height: l.h - 1, rx: 6 }),
+      svgEl("text", { class: "glt", x: GEO.PAD, y: l.top + 18 }, svgEl("title", {}, words ? l.name + ", lane by " + words : l.name), name,
+        svgEl("tspan", { class: "glb", dx: 8 }, (words ? words + " · " : "") + l.count))));
+  });
+  if (wide > lay.width) { root.setAttribute("width", wide); root.setAttribute("viewBox", "0 0 " + wide + " " + lay.height); }
+  const eg = svgEl("g", { class: "gedges" });
+  for (const e of edges) {
+    const blocked = e.kind === "blockedBy";
+    const src = lay.pos.get(e.to), dst = lay.pos.get(e.from);
+    if (!src || !dst) continue;
+    let d;
+    const sy = src.y + GEO.H / 2, dy = dst.y + GEO.H / 2;
+    if (dst.x > src.x) {
+      const x1 = src.x + GEO.W, x2 = dst.x - (blocked ? 2 : 0), dx = Math.max(16, (x2 - x1) / 2);
+      d = "M" + x1 + " " + sy + "C" + (x1 + dx) + " " + sy + " " + (x2 - dx) + " " + dy + " " + x2 + " " + dy;
+    } else {
+      const x = src.x + GEO.W, bend = x + GEO.GAP / 2;
+      d = "M" + x + " " + sy + "C" + bend + " " + sy + " " + bend + " " + dy + " " + (dst.x + GEO.W + (blocked ? 2 : 0)) + " " + dy;
+    }
+    const p = svgEl("path", { class: "ge" + (blocked ? "" : " par"), d, "marker-end": blocked ? "url(#gm-base)" : null });
+    graph.paths.push({ el: p, e });
+    eg.append(p);
+  }
+  root.append(eg);
+  const ng = svgEl("g", { class: "gnodes" });
+  for (const id of lay.seq) {
+    const p = lay.pos.get(id);
+    const b = h("button", { class: "gnode", type: "button", "data-id": id, tabindex: "-1" },
+      h("span", { class: "gl clip", "data-part": "label" }),
+      h("span", { class: "g2 clip", "data-part": "title" }),
+      h("span", { class: "g3" }, h("span", { "data-part": "st" })));
+    graph.btns.set(id, b);
+    ng.append(svgEl("foreignObject", { x: p.x, y: p.y, width: GEO.W, height: GEO.H }, b));
+  }
+  root.append(ng);
+  box.replaceChildren(root);
+  graph.order = lay.seq;
+  if (!graph.active || !graph.btns.has(graph.active)) graph.active = lay.seq[0] || null;
+  graphRove();
+  if (had && graph.btns.has(had)) graph.btns.get(had).focus({ preventScroll: true });
+}
+
+function graphPatch(b, n, ctx, out) {
+  const [mk, word] = graphState(n, ctx);
+  setText(part(b, "label"), n.label || n.id);
+  const st = part(b, "st");
+  setStatusPill(st, mk, word);
+  const t = graphTicket(n);
+  const title = n.title || (t ? titleOf(t) : "");
+  setText(part(b, "title"), title || (n.tracked ? "" : "Not opted into the flow"));
+  const said = [n.label || n.id, title, word, n.track ? "lane " + n.track : "",
+    (n.blockedBy || []).length ? "blocked by " + n.blockedBy.length : "", (n.unlocks || []).length ? "unlocks " + n.unlocks.length : "",
+    out ? "outside the filter" : ""].filter(Boolean).join(", ");
+  setAttr(b, "aria-label", said);
+  setAttr(b, "title", [n.label || n.id, title].filter(Boolean).join(": "));
+  b.classList.toggle("out", !!out);
+}
+
+function graphRove() {
+  for (const [id, b] of graph.btns) setAttr(b, "tabindex", id === graph.active ? "0" : "-1");
+}
+
+function graphMark() {
+  const hot = graph.hot && graph.nodes.has(graph.hot) ? graph.hot : null;
+  const up = hot ? graphWalk(hot, "blockedBy") : new Set();
+  const down = hot ? graphWalk(hot, "unlocks") : new Set();
+  const n = hot ? graph.nodes.get(hot) : null;
+  const kin = new Set(n ? [n.parent, ...(n.subIssues || [])].filter(Boolean) : []);
+  for (const [id, b] of graph.btns) {
+    b.classList.toggle("hot", id === hot);
+    b.classList.toggle("up", up.has(id));
+    b.classList.toggle("down", down.has(id) && !up.has(id));
+    b.classList.toggle("dim", !!hot && id !== hot && !up.has(id) && !down.has(id) && !kin.has(id));
+  }
+  for (const { el, e } of graph.paths) {
+    let cls = "ge" + (e.kind === "blockedBy" ? "" : " par");
+    if (hot && e.kind === "blockedBy") {
+      if ((e.from === hot || up.has(e.from)) && up.has(e.to)) cls += " up";
+      else if ((e.to === hot || down.has(e.to)) && down.has(e.from)) cls += " down";
+      else cls += " dim";
+    } else if (hot && e.from !== hot && e.to !== hot) cls += " dim";
+    if (el.getAttribute("class") !== cls) {
+      el.setAttribute("class", cls);
+      if (e.kind === "blockedBy") el.setAttribute("marker-end", "url(#gm-" + (/ up$/.test(cls) ? "up" : / down$/.test(cls) ? "down" : "base") + ")");
+    }
+  }
+}
+
+function graphHover(id) {
+  graph.hover = id;
+  if (id) graph.lead = "hover";
+  graphTrace();
+}
+
+function graphTrace() {
+  const hot = (graph.lead === "focus" && graph.focus) || graph.hover || graph.focus;
+  if (graph.hot === hot) return;
+  graph.hot = hot;
+  graphMark();
+}
+
+function graphOpen(b) {
+  const n = graphNode(b.dataset.id);
+  if (!n) return announce("This issue is no longer in the graph.");
+  graph.active = n.id;
+  graphRove();
+  openDrawer(graphSub(n), { el: b, item: b, graph: n.id });
+}
+
+function graphBtn(id) {
+  const b = id && graph.btns.get(id);
+  return b && b.isConnected ? b : null;
+}
+
+function graphFocus(id) {
+  const b = graphBtn(id);
+  if (!b) return false;
+  graph.active = id;
+  graphRove();
+  b.focus();
+  if (b.scrollIntoView) b.scrollIntoView({ block: "nearest", inline: "nearest" });
+  return true;
+}
+
+function graphMove(delta) {
+  const all = graph.order.filter((id) => graph.btns.has(id));
+  if (!all.length) return;
+  let i = all.indexOf(graph.active);
+  i = i < 0 ? 0 : Math.max(0, Math.min(all.length - 1, i + delta));
+  graphFocus(all[i]);
+}
+
+function graphRelease() {
+  if (!graph.held || graph.pointer || focusInside($("gscroll"))) return;
+  graph.held = false;
+  graph.sig = null;
+  paintGraph();
+}
+
+function initGraph() {
+  const box = $("gscroll");
+  const nodeOf = (e) => e.target && e.target.closest ? e.target.closest(".gnode") : null;
+  box.addEventListener("click", (e) => { const b = nodeOf(e); if (b) graphOpen(b); });
+  box.addEventListener("pointerover", (e) => { const b = nodeOf(e); const id = b ? b.dataset.id : null; if (id !== graph.hover) graphHover(id); });
+  box.addEventListener("pointerenter", () => { graph.pointer = true; });
+  box.addEventListener("pointerleave", () => { graph.pointer = false; graphHover(null); graphRelease(); });
+  box.addEventListener("focusin", (e) => { const b = nodeOf(e); if (b) { graph.active = b.dataset.id; graph.focus = b.dataset.id; graph.lead = "focus"; graphRove(); graphTrace(); } });
+  box.addEventListener("focusout", () => setTimeout(() => {
+    if (!focusInside(box)) { graph.focus = null; graphTrace(); graphRelease(); }
+  }, 0));
+  if (window.ResizeObserver) new ResizeObserver(() => { if ($("app").dataset.tab === "graph") paintGraph(); }).observe(box);
+  box.addEventListener("keydown", (e) => {
+    const b = nodeOf(e);
+    if (!b || e.ctrlKey || e.metaKey || e.altKey) return;
+    const step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1, Home: -1e9, End: 1e9, ...(prefs.keys ? { j: 1, k: -1 } : {}) }[e.key];
+    if (step === undefined) return;
+    e.preventDefault();
+    graphMove(step);
+  });
 }
 
 const openGroups = new Set();
@@ -4900,6 +5398,7 @@ function render(s) {
   syncNew(s);
   flowDue(s);
   if (s.flow && flow.view) paintFlow(flow.view);
+  paintGraph();
   syncFeed(v.feed, s.feed);
   showTicketsHeld();
   const seen = new Set(v.cards.map((c) => c.id));
@@ -4942,7 +5441,7 @@ function setConnected(on) {
   if (connected === on) return;
   connected = on;
   document.body.classList.toggle("stale", !on);
-  for (const id of ["cards", "open", "done", "settled", "feed"]) setAttr($(id), "aria-busy", on ? null : "true");
+  for (const id of ["cards", "open", "done", "settled", "feed", "gscroll"]) setAttr($(id), "aria-busy", on ? null : "true");
   if (state) {
     for (const card of $("cards").children) if (card._card) paintSending(card);
     paintService(state);
@@ -5180,8 +5679,9 @@ async function act(btn, path) {
 function selectTab(tab, focus) {
   const app = $("app");
   const prev = app.dataset.tab;
-  const box = (t) => t === "activity" ? $("feed") : $(t);
-  if (prev && prev !== tab && box(prev)) box(prev)._saved = box(prev).scrollTop || 0;
+  const box = (t) => t === "activity" ? $("feed") : t === "graph" ? $("gscroll") : $(t);
+  if (prev && prev !== tab && box(prev)) { box(prev)._saved = box(prev).scrollTop || 0; box(prev)._savedLeft = box(prev).scrollLeft || 0; }
+  if (prev === "graph" && tab !== "graph") { graph.pointer = false; graph.focus = null; graphHover(null); graphRelease(); }
   setAttr(app, "data-tab", tab);
   for (const b of $("tix-tabs").querySelectorAll('[role="tab"]')) {
     const on = b.dataset.tab === tab;
@@ -5189,9 +5689,10 @@ function selectTab(tab, focus) {
     setAttr(b, "tabindex", on ? "0" : "-1");
     if (on && focus) b.focus();
   }
-  for (const t of ["open", "done", "settled"]) $("tp-" + t).hidden = t !== tab;
+  for (const t of ["open", "done", "settled", "graph"]) $("tp-" + t).hidden = t !== tab;
+  if (tab === "graph" && state) paintGraph();
   const el = box(tab);
-  if (el && el._saved !== undefined) el.scrollTop = el._saved;
+  if (el && el._saved !== undefined) { el.scrollTop = el._saved; el.scrollLeft = el._savedLeft || 0; }
   if (state) showTicketsHeld();
   saveHash();
 }
@@ -5219,7 +5720,8 @@ function loadHash() {
   try { hsh = (location.hash || "").slice(1); } catch (_) {}
   const [panel, tab] = hsh.split("-");
   if (["decisions", "tickets", "activity"].includes(panel)) selectPanel(panel);
-  if (["done", "settled"].includes(tab) || (tab === "activity" && !wide() && !phone())) selectTab(tab);
+  if (["done", "settled", "graph"].includes(tab) || (tab === "activity" && !wide() && !phone())) selectTab(tab);
+  else if (!tab && graphPref()) selectTab("graph");
 }
 
 function tabKeys(container, attr, pick) {
@@ -5264,7 +5766,8 @@ function jump(where) {
     selectPanel("tickets");
     const t = $("app").dataset.tab;
     if (t === "activity") selectTab("open");
-    focusList($($("app").dataset.tab));
+    if ($("app").dataset.tab !== "graph") focusList($($("app").dataset.tab));
+    else if (!graphFocus(graph.active)) focusList($("gscroll"));
   } else if (where === "activity") {
     if (phone()) selectPanel("activity");
     else if (!wide()) { selectPanel("tickets"); selectTab("activity"); }
@@ -5327,7 +5830,8 @@ function initDrawer() {
         h("span", { "data-part": "st" }), h("span", { "data-part": "pr" }),
         statusPill("pause", "paused", { "data-part": "paused", hidden: true }),
         statusPill("external", "external", { "data-part": "ext", hidden: true, title: FLOW_PILL.external }),
-        h("span", { class: "chip", "data-part": "repo", hidden: true }), h("span", { class: "chip", "data-part": "proj", hidden: true })),
+        h("span", { class: "chip", "data-part": "repo", hidden: true }), h("span", { class: "chip", "data-part": "proj", hidden: true }),
+        h("span", { class: "chip", "data-part": "prio", hidden: true }), h("span", { class: "chip", "data-part": "ms", hidden: true })),
       h("div", { class: "dr-acts", "data-part": "acts", role: "group", "aria-label": "Actions" },
         link("gh-issue"), link("gh-pr"), h("span", { "data-part": "t3" }),
         btn("tocard"), btn("pause"), btn("settle"), btn("restore"), btn("launch"), btn("nisflip")),
@@ -5335,7 +5839,7 @@ function initDrawer() {
       sec("latest", "Latest message", h("div", { class: "dr-text md", "data-part": "latest-b" }), h("p", { class: "meta", "data-part": "latest-m" })),
       sec("note", "Note", h("div", { class: "dr-text md", "data-part": "note-b" }), h("p", { class: "meta", "data-part": "note-m" })),
       sec("workers", "Workers", h("ul", { class: "dr-list", "data-part": "workers-l" })),
-      h("section", { class: "dr-sec", "data-part": "deps", hidden: true })),
+      sec("deps", "Dependencies", h("p", { class: "dr-lane", "data-part": "deps-lane" }), h("div", { class: "dr-deps", "data-part": "deps-l" }))),
     h("div", { class: "err-strip", id: "dr-err", hidden: true },
       h("span", { id: "dr-err-text" }), h("button", { class: "btn quiet", type: "button", id: "dr-err-close", onclick: () => closeErr("dr-err") }, "Close"))));
   if (window.ResizeObserver) new ResizeObserver(() => { if (dr.open) placeDrawer(); }).observe($("main"));
@@ -5421,6 +5925,7 @@ function subjectEl(sub) {
   const byKey = (list, attr, v) => [...$(list).children].find((el) => el.getAttribute(attr) === v && !el.classList.contains("gone")) || null;
   if (sub.kind === "card") return cardEl(sub.key);
   if (sub.kind === "new") return byKey("nis", "data-key", sub.key);
+  if (sub.kind === "issue") return graphBtn(sub.key);
   return byKey("open", "data-thread", sub.key) || byKey("done", "data-thread", sub.key) || byKey("settled", "data-key", "t:" + sub.key);
 }
 
@@ -5428,12 +5933,14 @@ function restoreFrom(f) {
   let t = f && f.el;
   if (t && (!t.isConnected || t.closest(".gone"))) t = null;
   if (!t && f && f.item && f.item.isConnected && !f.item.classList.contains("gone")) t = f.item;
+  if (!t && f && f.graph) t = graphBtn(f.graph);
   if (!t && f && f.sub) t = subjectEl(f.sub);
   if (t && (t.classList.contains("gone") || t.closest("[hidden]"))) t = null;
   const l = t ? listOf(t) : null;
   if (t && l && itemOf(l, t) === t) return focusItem(l, t);
   if (t) return t.focus();
   const tab = $("app").dataset.tab;
+  if (tab === "graph" && f && f.sub && f.sub.kind !== "card") return graphFocus(graph.active) || focusList($("gscroll"));
   focusList(f && f.sub && f.sub.kind !== "card" && ["open", "done", "settled"].includes(tab) ? $(tab) : $("cards"));
 }
 
@@ -5459,6 +5966,10 @@ function placeDrawer() {
 }
 
 function drFind(sub, s) {
+  if (sub.kind === "issue") {
+    const n = graphNode(sub.key);
+    return n ? { n } : null;
+  }
   if (sub.kind === "ticket") {
     const t = s.tree.find((x) => x.thread === sub.key);
     if (t) return { t };
@@ -5508,6 +6019,8 @@ function drPills(mk, word, pr, owner, paused, place) {
   setPrChip(drPart("pr"), pr, owner, true);
   drPart("paused").hidden = !paused;
   drPart("ext").hidden = true;
+  drPart("prio").hidden = true;
+  drPart("ms").hidden = true;
   const repo = String((place && place.repo) || "");
   const proj = String((place && place.project && place.project.title) || "");
   const r = drPart("repo");
@@ -5670,6 +6183,9 @@ function paintTicketDrawer(t, settled) {
   drHead(t.label, partTag(t, fw), titleOf(t), fw ? workerIds(fw) : ticketIds(t));
   drPills(markOf(st, cards), settled ? "settled" : WORDS[st], pr, t.label, !settled && !t.done && !!t.paused, t);
   drPart("ext").hidden = settled || !!t.done || !t.thread || !flow.ext.has(t.thread);
+  const gn = (t.thread && graph.byThread.get(t.thread)) || null;
+  drFlowPills(gn);
+  drDeps(gn);
   drLink("gh-issue", issueUrl(t.label, t.repo), "Open issue on GitHub", "Open issue " + t.label + " on GitHub");
   drLink("gh-pr", pr && pr.url, pr ? "Open PR #" + pr.number + " on GitHub" : "", pr ? "Open PR #" + pr.number + " for " + t.label + " on GitHub" : "");
   drT3(t.link, t.label);
@@ -5702,7 +6218,7 @@ function paintCardDrawer(c) {
   drPills(k.mk, k.word, null, c.label || c.id, false, c);
   const l = k.p.link;
   drLink("gh-issue", l && l.href, l ? l.text + (/^https:\/\/github\.com\//.test(l.href) ? " on GitHub" : "") : "", l ? l.text + " for card " + cardLabel(c) : "");
-  drClear("gh-pr", "pause", "settle", "restore", "launch", "nisflip", "needs", "latest", "workers");
+  drClear("gh-pr", "pause", "settle", "restore", "launch", "nisflip", "needs", "latest", "workers", "deps");
   drT3(c.link, cardLabel(c));
   drBtn("tocard", true, "Go to card " + c.id, "Go to card " + cardLabel(c) + " in Needs you", () => { jumpToCard(c.id); drUncover(cardEl(c.id)); });
   drSec("note", true);
@@ -5714,7 +6230,7 @@ function paintNewDrawer(i) {
   drHead(i.label, "", i.title || i.label);
   drPills("idle", i.dismissed ? "dismissed" : "new issue", null, i.label, false, i);
   drLink("gh-issue", i.url, "Open issue on GitHub", "Open issue " + i.label + " on GitHub");
-  drClear("gh-pr", "tocard", "pause", "settle", "restore", "needs", "latest", "workers");
+  drClear("gh-pr", "tocard", "pause", "settle", "restore", "needs", "latest", "workers", "deps");
   const slot = drPart("t3");
   setLink(slot, i.threadLink, "Open filing thread", "Open the thread that filed " + i.label);
   if (slot.firstChild) setAttr(slot.firstChild, "class", "btn");
@@ -5731,7 +6247,91 @@ function paintNewDrawer(i) {
   drMeta(drPart("note-m"), i.dismissed ? "Dismissed" : "Filed by " + who, i.dismissed ? i.dismissedAt : i.at, i.dismissed ? i.dismissedAtLocal : i.atLocal, "");
 }
 
+function drFlowPills(n) {
+  const on = !!n && graph.mode === "flow";
+  const p = drPart("prio");
+  p.hidden = !on || !n.priority;
+  setText(p, on && n.priority ? "priority: " + n.priority : "");
+  setAttr(p, "title", on && n.priority ? "Priority from its priority: label" : null);
+  const m = drPart("ms");
+  const ms = on && n.milestone && n.milestone.title ? n.milestone : null;
+  m.hidden = !ms;
+  setText(m, ms ? ms.title : "");
+  setAttr(m, "title", ms ? "Milestone " + ms.title + (ms.dueOn ? ", due " + String(ms.dueOn).slice(0, 10) : "") : null);
+}
+
+const DEP_ROWS = [["blockedBy", "Blocked by"], ["unlocks", "Unlocks"], ["parent", "Parent"], ["subIssues", "Sub-issues"]];
+const LANE_BY = { label: "its track label", milestone: "its milestone", component: "the issues linked to it" };
+
+function drDeps(n) {
+  const sec = drPart("deps");
+  const on = !!n && graph.mode === "flow";
+  sec.hidden = !on;
+  if (!on) return;
+  const linked = ["blockedBy", "unlocks", "subIssues"].some((k) => (n[k] || []).length) || !!n.parent;
+  const why = n.trackBy === "component" && !linked ? "" : LANE_BY[n.trackBy];
+  setText(drPart("deps-lane"), n.track ? "Lane " + n.track + (why ? ", from " + why : "") + "." : "");
+  const ctx = filterCtx(state);
+  const rows = DEP_ROWS.map(([k, name]) => [k, name, [].concat(n[k] || []).filter(Boolean).map((id) => {
+    const x = graphNode(id);
+    return x ? [id, x.label || id, x.title || "", ...graphState(x, ctx)] : [id, id, "", null, null];
+  })]);
+  const more = (n.moreBlockers ? ["blockedBy"] : []).concat(n.moreSubIssues ? ["subIssues"] : []);
+  rows.splice(0, rows.length, ...rows.filter((r) => r[2].length || more.includes(r[0])));
+  const l = drPart("deps-l");
+  const sig = JSON.stringify([n.id, n.url, rows, more]);
+  if (l._sig === sig) return;
+  l._sig = sig;
+  const said = (r) => r.length + (r.length === 1 ? " issue" : " issues");
+  const kids = rows.map(([k, name, list]) => h("div", { class: "dr-dep", role: "group", "aria-label": name + ", " + said(list) },
+    h("span", {}, name),
+    h("ul", {}, ...list.map(([id, label, title, mk, word]) => h("li", {},
+      graphNode(id) ? ticketChip(label, { onclick: () => drJump(id), name: "Inspect " + label + (title ? ": " + title : "") + (word ? ", " + word : ""), class: "dep" })
+        : h("span", { class: "chip gone-dep", title: label }, label),
+      mk ? statusPill(mk, word) : null)),
+      more.includes(k) && safeUrl(n.url) ? h("li", {}, h("a", { href: safeUrl(n.url), target: "_blank", rel: "noopener noreferrer" }, "and more on GitHub")) : null)));
+  l.replaceChildren(...(kids.length ? kids : [h("p", { class: "meta" }, "No blockers, unlocks, parent or sub-issues.")]));
+}
+
+function drJump(id) {
+  const n = graphNode(id);
+  if (n) openDrawer(graphSub(n));
+}
+
+function flowSaid(n) {
+  const out = [];
+  if (n.state === "closed") out.push("Closed on GitHub.");
+  if (n.flowList === "queue") out.push("In the ready queue: opted in, no open blocker and no ticket yet.");
+  else if (n.flowList === "blocked") out.push(n.external ? "Held by blockers outside the covered repos, or labelled blocked: external." : "Held by an open blocker.");
+  else if (n.flowList === "skipped") out.push("Skipped on a launch card. It stays out of the queue until its labels or blockers change.");
+  else if (n.ticket) out.push("Its board ticket is " + (n.ticket.status || "open") + ".");
+  else if (!n.tracked) out.push("Not opted into the flow. It shows because an issue the board tracks links to it.");
+  return out.join(" ");
+}
+
+function paintIssueDrawer(n) {
+  const [mk, word] = graphState(n, filterCtx(state));
+  const label = n.label || n.id;
+  drHead(label, "", n.title || label, null);
+  drPills(mk, word, null, label, false, { repo: n.repo });
+  drPart("ext").hidden = !n.external || mk === "external";
+  drFlowPills(n);
+  drLink("gh-issue", n.url, "Open issue on GitHub", "Open issue " + label + " on GitHub");
+  drClear("gh-pr", "tocard", "pause", "settle", "restore", "launch", "nisflip", "needs", "latest", "workers");
+  if (n.ticket && safeUrl(n.ticket.link)) drT3(n.ticket.link, label);
+  else drClear("t3");
+  const said = flowSaid(n);
+  drSec("note", !!said);
+  setText(drPart("note-h"), "Flow");
+  drPart("note-b").hidden = true;
+  const m = drPart("note-m");
+  m._key = null;
+  setText(m, said);
+  drDeps(n);
+}
+
 function drGoneSaid(sub) {
+  if (sub.kind === "issue") return "This issue is no longer in the graph.";
   if (sub.kind === "new") return "This issue is no longer in New issues.";
   if (sub.kind === "card") return "Card " + sub.key + " was resolved.";
   return "This ticket is no longer on the board.";
@@ -5753,6 +6353,7 @@ function paintDrawer() {
     setText(gone, drGoneText(dr.sub));
     for (const b of box.querySelectorAll("button")) if (b.dataset.part !== "close" && b.id !== "dr-err-close") setAttr(b, "aria-disabled", "true");
   } else if (hit.i) paintNewDrawer(hit.i);
+  else if (hit.n) paintIssueDrawer(hit.n);
   else if (hit.t) paintTicketDrawer(hit.t, !!hit.settled);
   else paintCardDrawer(hit.c);
   setAttr(box, "data-kind", dr.sub.kind);
@@ -5778,6 +6379,8 @@ function markInspected() {
   const card = s && (s.kind === "card" ? s.key : s.card);
   if (card && cardEl(card)) want.push(cardEl(card));
   if (s && s.kind === "new") { const r = byKey("nis", "data-key", s.key); if (r) want.push(r); }
+  const gn = s && (s.kind === "issue" ? graphBtn(s.key) : s.kind === "ticket" && graph.byThread.has(s.key) ? graphBtn(graph.byThread.get(s.key).id) : null);
+  if (gn) want.push(gn);
   for (const el of dr.marked) if (!want.includes(el)) setAttr(el, "data-inspected", null);
   for (const el of want) setAttr(el, "data-inspected", el.classList.contains("gone") ? null : "true");
   dr.marked = want;
@@ -6405,6 +7008,7 @@ function layInit() {
 
 function wire() {
   initDrawer();
+  initGraph();
   document.addEventListener("click", inspectClick);
   track("cards", $("cards"), $("new-cards"));
   track("open", $("open"), null);
@@ -6432,7 +7036,7 @@ function wire() {
       if (it && l._active !== it) { l._active = it; rove(l); }
     });
   }
-  tabKeys($("tix-tabs"), "tab", selectTab);
+  tabKeys($("tix-tabs"), "tab", (tab, focus) => { selectTab(tab, focus); graphRemember(tab); });
   tabKeys($("mtabs"), "panel", selectPanel);
   for (const a of document.querySelectorAll(".skip a")) {
     a.addEventListener("click", (e) => { e.preventDefault(); jump(a.dataset.jump); });

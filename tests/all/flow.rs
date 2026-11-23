@@ -1177,3 +1177,226 @@ async fn a_ticket_whose_repo_the_board_knows_is_read_there_and_picks_read_only_s
     assert!(!reads[0]["query"].as_str().unwrap().contains("blockedBy"), "{}", reads[0]["query"]);
     assert_eq!(reads[0]["variables"]["o0"], "acme");
 }
+
+const GRAPH: &str = r##"
+const btn = (id) => q('.gnode[data-id="' + id + '"]');
+const nodes = () => document.querySelectorAll(".gnode").map((b) => b.dataset.id);
+const spot = (id) => { const f = btn(id).parentNode; return [+f.getAttribute("x"), +f.getAttribute("y")]; };
+const lanes = () => document.querySelectorAll(".glt").map((t) => t.childNodes.filter((n) => n.nodeType === 3).map((n) => n.data).join(""));
+const marks = () => Object.fromEntries(nodes().map((id) => [id, ["hot", "up", "down", "dim", "out"].filter((c) => btn(id).classList.contains(c)).join(" ")]));
+const edges = () => document.querySelectorAll(".ge").map((p) => p.getAttribute("class"));
+const dp = (name) => q('#drawer [data-part="' + name + '"]');
+const deps = () => document.querySelectorAll("#drawer .dr-dep").map((d) => d.textContent);
+const chip = (label) => document.querySelectorAll("#drawer .dr-dep button").find((b) => b.textContent === label);
+"##;
+
+async fn graph_page() -> (String, Value, Value) {
+    let h = flowing(4);
+    issue(&h, REPO, 1, &[FLOW, "track: board"], 1);
+    issue(&h, REPO, 2, &[FLOW, "track: board", "priority: high"], 2);
+    issue(&h, REPO, 3, &[], 3);
+    issue(&h, REPO, 4, &[FLOW], 4);
+    issue(&h, REPO, 5, &[], 5);
+    issue(&h, REPO, 6, &[], 6);
+    issue(&h, TOOLS, 7, &[FLOW], 7);
+    h.github.set_blockers(REPO, 2, &[(REPO, 1), (REPO, 3)]);
+    h.github.close_issue(REPO, 3);
+    h.github.set_blockers(REPO, 4, &[(REPO, 2)]);
+    h.github.set_parent(REPO, 4, (REPO, 5));
+    h.github.set_milestone(REPO, 2, "v0.9.0", None);
+    ticket(&h, "mcp:t6", "widgets#6").await;
+    panel_page(h).await
+}
+
+#[tokio::test]
+async fn the_graph_tab_draws_lanes_and_traces_blockers_and_unlocks() {
+    let (html, st, view) = graph_page().await;
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        &format!(
+            r##"{GRAPH}
+fetchReply = (url) => url === "/api/flow" ? reply(200, view) : new Promise(() => {{}});
+emitState(base);
+await tick();
+selectTab("graph");
+const first = {{ lanes: lanes(), nodes: nodes(), edges: edges(), n: q("#n-graph").textContent, note: q("#graph-note").textContent,
+  at: Object.fromEntries(nodes().map((id) => [id, spot(id)])) }};
+emitState({{ ...base }});
+await tick();
+const again = Object.fromEntries(nodes().map((id) => [id, spot(id)]));
+btn("acme/widgets#2").dispatch("pointerover");
+const hover = {{ marks: marks(), edges: edges() }};
+q("#gscroll").dispatch("pointerleave");
+const left = Object.values(marks()).filter(Boolean).length;
+btn("acme/widgets#4").dispatch("focusin");
+btn("acme/widgets#2").dispatch("pointerover");
+q("#gscroll").dispatch("pointerover");
+const focused = marks()["acme/widgets#4"];
+q("#gscroll").dispatch("pointerleave");
+const stays = marks()["acme/widgets#4"];
+btn("acme/widgets#2").dispatch("pointerover");
+btn("acme/widgets#1").dispatch("focusin");
+const latest = [marks()["acme/widgets#1"], marks()["acme/widgets#2"]];
+btn("acme/widgets#1").dispatch("focusout");
+q("#gscroll").dispatch("pointerleave");
+advance(1);
+btn("acme/widgets#4").dispatch("focusout");
+advance(1);
+setFilter({{ statuses: ["ready"] }});
+await tick();
+const ready = {{ marks: marks(), n: q("#n-graph").textContent }};
+setFilter({{}});
+return {{ first, same: JSON.stringify(again) === JSON.stringify(first.at), hover, left, focused, stays, latest, ready }};
+"##
+        ),
+    );
+    let f = &r["first"];
+    assert_eq!(
+        f["lanes"],
+        json!(["widgets#6", "board", "tools#7"]),
+        "lanes follow each node's track, and lanes holding a ticket come first: {r}"
+    );
+    assert_eq!(
+        f["nodes"],
+        json!([
+            "acme/widgets#6",
+            "acme/widgets#1",
+            "acme/widgets#3",
+            "acme/widgets#5",
+            "acme/widgets#2",
+            "acme/widgets#4",
+            "acme/tools#7"
+        ]),
+        "lane by lane, column by column: {r}"
+    );
+    assert_eq!(f["edges"], json!(["ge", "ge", "ge", "ge par"]), "three blocked-by links and one parent link: {r}");
+    assert_eq!(f["n"], "7", "{r}");
+    assert!(f["note"].as_str().unwrap().starts_with("3 lanes by track"), "{r}");
+    let at = |id: &str| f["at"][id].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect::<Vec<_>>();
+    assert!(at("acme/widgets#1")[0] < at("acme/widgets#2")[0], "a blocker sits left of what it blocks: {r}");
+    assert!(at("acme/widgets#2")[0] < at("acme/widgets#4")[0], "{r}");
+    assert!(at("acme/widgets#5")[0] < at("acme/widgets#4")[0], "a parent sits left of its sub-issues: {r}");
+    assert_eq!(r["same"], true, "the same graph lays out the same way: {r}");
+    let h = &r["hover"]["marks"];
+    assert_eq!(
+        (&h["acme/widgets#2"], &h["acme/widgets#1"], &h["acme/widgets#3"], &h["acme/widgets#4"], &h["acme/widgets#5"]),
+        (&json!("hot"), &json!("up"), &json!("up"), &json!("down"), &json!("dim")),
+        "{r}"
+    );
+    assert_eq!(r["hover"]["edges"], json!(["ge up", "ge up", "ge down", "ge par dim"]), "{r}");
+    assert_eq!(r["left"], 0, "leaving the graph clears the trace: {r}");
+    assert_eq!(
+        (&r["focused"], &r["stays"]),
+        (&json!("hot"), &json!("hot")),
+        "with no node under the pointer, the focused node keeps its trace: {r}"
+    );
+    assert_eq!(r["latest"], json!(["hot", "down"]), "focus moved after the hover drives the trace: {r}");
+    let rd = &r["ready"];
+    assert_eq!(rd["n"], "2/7", "{r}");
+    assert_eq!((&rd["marks"]["acme/widgets#1"], &rd["marks"]["acme/tools#7"]), (&json!(""), &json!("")), "{r}");
+    assert_eq!(rd["marks"]["acme/widgets#2"], "out", "{r}");
+}
+
+#[tokio::test]
+async fn a_graph_node_opens_the_inspector_and_its_chips_move_between_issues() {
+    let (html, st, view) = graph_page().await;
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        &format!(
+            r##"{GRAPH}
+fetchReply = (url) => url === "/api/flow" ? reply(200, view) : new Promise(() => {{}});
+emitState(base);
+await tick();
+selectTab("graph");
+const box = q("#gscroll");
+box.scrollTop = 80;
+btn("acme/widgets#2").dispatch("click");
+const issue = {{ kind: q("#drawer").getAttribute("data-kind"), id: dp("id").textContent, title: dp("title").textContent, st: dp("st").textContent,
+  prio: dp("prio").hidden ? null : dp("prio").textContent, ms: dp("ms").hidden ? null : dp("ms").textContent,
+  gh: dp("gh-issue").getAttribute("href"), lane: dp("deps-lane").textContent, deps: deps(),
+  marked: document.querySelectorAll(".gnode[data-inspected]").map((b) => b.dataset.id) }};
+chip("widgets#4").dispatch("click");
+const moved = {{ id: dp("id").textContent, deps: deps(), scroll: box.scrollTop, focus: document.activeElement === dp("title") }};
+chip("widgets#5").dispatch("click");
+const parent = {{ id: dp("id").textContent, note: dp("note-m").textContent, deps: deps() }};
+btn("acme/widgets#6").dispatch("click");
+const ticket = {{ kind: q("#drawer").getAttribute("data-kind"), id: dp("id").textContent, deps: dp("deps").hidden, lane: dp("deps-lane").textContent }};
+closeDrawer(true);
+return {{ issue, moved, parent, ticket, back: document.activeElement === btn("acme/widgets#6") }};
+"##
+        ),
+    );
+    let i = &r["issue"];
+    assert_eq!(
+        (&i["kind"], &i["id"], &i["title"], &i["st"], &i["prio"], &i["ms"]),
+        (
+            &json!("issue"),
+            &json!("widgets#2"),
+            &json!("Issue 2"),
+            &json!("blocked"),
+            &json!("priority: high"),
+            &json!("v0.9.0")
+        ),
+        "{r}"
+    );
+    assert_eq!(i["gh"], "https://github.com/acme/widgets/issues/2", "{r}");
+    assert_eq!(i["lane"], "Lane board, from its track label.", "{r}");
+    assert_eq!(i["deps"], json!(["Blocked bywidgets#1readywidgets#3closed", "Unlockswidgets#4blocked"]), "{r}");
+    assert_eq!(i["marked"], json!(["acme/widgets#2"]), "{r}");
+    let m = &r["moved"];
+    assert_eq!(m["id"], "widgets#4", "{r}");
+    assert_eq!(m["deps"], json!(["Blocked bywidgets#2blocked", "Parentwidgets#5open"]), "{r}");
+    assert_eq!(
+        (&m["scroll"], &m["focus"]),
+        (&json!(80), &json!(true)),
+        "a chip moves the inspector, not the board: {r}"
+    );
+    let p = &r["parent"];
+    assert_eq!(p["deps"], json!(["Sub-issueswidgets#4blocked"]), "{r}");
+    assert!(p["note"].as_str().unwrap().starts_with("Not opted into the flow"), "{r}");
+    assert_eq!(
+        r["ticket"],
+        json!({"kind": "ticket", "id": "widgets#6", "deps": false, "lane": "Lane widgets#6."}),
+        "{r}"
+    );
+    assert_eq!(r["back"], true, "Esc-style close returns focus to the node: {r}");
+}
+
+#[tokio::test]
+async fn the_graph_says_when_a_refresh_fails_until_a_read_succeeds() {
+    let (html, st, view) = graph_page().await;
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        r##"
+let fail = false;
+fetchReply = (url) => url === "/api/flow" ? (fail ? reply(502, { error: "GitHub said no" }) : reply(200, view)) : new Promise(() => {});
+emitState(base);
+await tick();
+selectTab("graph");
+const note = () => q("#graph-note").textContent.startsWith("Could not refresh");
+const good = note();
+fail = true;
+loadFlow();
+await tick();
+const failed = [note(), document.querySelectorAll(".gnode").length];
+closeErr("flow-err");
+emitState({ ...base });
+const dismissed = note();
+fail = false;
+loadFlow();
+await tick();
+return { good, failed, dismissed, back: note() };
+"##,
+    );
+    assert_eq!(
+        r,
+        json!({"good": false, "failed": [true, 7], "dismissed": true, "back": false}),
+        "the last graph stays, says it is stale, and recovers on the same payload: {r}"
+    );
+}

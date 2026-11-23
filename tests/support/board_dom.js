@@ -135,6 +135,7 @@ const document = {
   title: "",
   listeners: {},
   createElement: (t) => new Element(t),
+  createElementNS: (_, t) => new Element(t),
   createTextNode: (t) => new Text(t),
   addEventListener(t, f) { (this.listeners[t] ||= []).push(f); },
   getElementById(id) {
