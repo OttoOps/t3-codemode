@@ -144,7 +144,7 @@ async fn dismissing_the_last_relayed_card_releases_the_ticket() {
     let h = H::new();
     board_ticket_with_worker(&h).await;
     let id = review_gate(&h).await["card"].as_str().unwrap().to_string();
-    h.app.wf.dismiss(&id).unwrap();
+    h.app.wf.dismiss(&id).await.unwrap();
     assert_eq!(gate_of(&h, TICKET), None);
     let id =
         h.wf(WORKER, "send", json!({"kind": "blocker", "body": BLOCKED})).await["card"].as_str().unwrap().to_string();

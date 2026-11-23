@@ -705,7 +705,7 @@ async fn a_moved_head_waits_for_a_free_board_slot_and_then_gets_one_gate() {
     assert!(format!("{err:#}").contains("full"), "{err:#}");
     assert_eq!(h.app.store.merge_waits().unwrap().len(), 1);
 
-    h.app.wf.dismiss(full[0]["id"].as_str().unwrap()).unwrap();
+    h.app.wf.dismiss(full[0]["id"].as_str().unwrap()).await.unwrap();
     check(&h, 4).await;
 
     let gates: Vec<Value> = cards(&h, false).into_iter().filter(|c| c["kind"] == "gate").collect();

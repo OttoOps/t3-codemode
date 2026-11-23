@@ -1367,23 +1367,8 @@ impl Wf {
         Ok(Some(out))
     }
 
-    pub fn dismiss(&self, id: &str) -> Result<Value> {
-        let card = self.cards()?.into_iter().find(|c| c.id == id);
-        match self.store.waiting_resolve(BOARD, id, Some("dismissed"), &self.now())? {
-            Some(_) => {
-                if let Some(c) = &card {
-                    if c.worker.is_none()
-                        && let Some(ticket) = c.ticket.as_deref()
-                    {
-                        self.sync_merge_gate_pr(ticket)?;
-                    }
-                    self.release_relayed(c)?;
-                }
-                self.changed();
-                Ok(json!({"card": id, "dismissed": true}))
-            }
-            None => bail!("no open board card {id:?}"),
-        }
+    pub async fn dismiss(&self, id: &str) -> Result<Value> {
+        self.dismiss_at(id, &CardRef::default()).await
     }
 
     pub async fn dismiss_at(&self, id: &str, want: &CardRef<'_>) -> Result<Value> {

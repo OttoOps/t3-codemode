@@ -924,7 +924,7 @@ async fn the_board_route_writes_no_skip_state_and_launches_nothing() {
     let id = first["picked"][0]["card"].as_str().unwrap().to_string();
     h.app.wf.answer(&id, "skip").await.unwrap();
     for c in flow_cards(&h) {
-        h.app.wf.dismiss(c["id"].as_str().unwrap()).unwrap();
+        h.app.wf.dismiss(c["id"].as_str().unwrap()).await.unwrap();
     }
     h.github.update_issue(REPO, 1, json!({"labels": {"nodes": [{"name": FLOW}, {"name": "priority: high"}]}}));
     let s = crate::board::start(h).await;
