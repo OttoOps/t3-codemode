@@ -1194,7 +1194,7 @@ async fn list_new_issues(State(web): State<Web>) -> Response {
 }
 
 async fn get_flow(State(web): State<Web>) -> Response {
-    match web.app.wf.flow().await {
+    match web.app.wf.flow(true).await {
         Ok(v) => json_ok(StatusCode::OK, v),
         Err(e) => error(StatusCode::BAD_GATEWAY, web.app.t3.redact(format!("{e:#}"))),
     }

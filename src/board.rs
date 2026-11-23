@@ -712,7 +712,7 @@ impl Wf {
         true
     }
 
-    fn place(&self, project: Option<&str>, live: &Value) -> (Value, Value) {
+    pub(crate) fn place(&self, project: Option<&str>, live: &Value) -> (Value, Value) {
         let id = project.or_else(|| live["project"].as_str());
         let known = id.and_then(|i| self.known_project(i)).unwrap_or(Value::Null);
         let pr_repo = live["pr"]["repository"].as_str().filter(|r| r.contains('/'));
@@ -1090,12 +1090,18 @@ impl Wf {
         Ok(rows)
     }
 
-    fn ensure_not_on_board(&self, label: &str) -> Result<()> {
-        if self.store.children(BOARD, true)?.iter().any(|l| l.label == label) {
-            bail!("{label} is already on the board; close or finish it before launching it again");
+    fn ensure_not_on_board(&self, label: &str, issue: Option<&str>) -> Result<()> {
+        let same = |l: &str, i: Option<&str>| match (issue, i) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            _ => l == label || issue.is_some_and(|a| a.eq_ignore_ascii_case(l)),
+        };
+        if let Some(l) = self.store.children(BOARD, true)?.iter().find(|l| same(&l.label, l.identity.issue.as_deref()))
+        {
+            bail!("{} is already on the board; close or finish it before launching it again", l.label);
         }
-        if self.store.pending_all()?.iter().any(|p| p.parent == BOARD && p.label == label) {
-            bail!("{label} was launched and has not joined yet; the board reports it if it never does");
+        let pending = self.store.pending_all()?;
+        if let Some(p) = pending.iter().find(|p| p.parent == BOARD && same(&p.label, p.identity.issue.as_deref())) {
+            bail!("{} was launched and has not joined yet; the board reports it if it never does", p.label);
         }
         Ok(())
     }
@@ -1467,12 +1473,12 @@ impl Wf {
                 a.issue
             )
         })?;
-        let label = issue.label();
         let identity = Identity {
             issue: Some(issue.slug()),
             ..checked_identity("launchTicket", None, a.parent_issue.as_deref(), a.part.as_deref())?
         };
-        self.ensure_not_on_board(&label)?;
+        self.ensure_not_on_board(&issue.label(), identity.issue.as_deref())?;
+        let label = if self.open_labels()?.contains(&issue.label()) { issue.slug() } else { issue.label() };
         let wanted = nonempty(a.project);
         let model_arg = nonempty(a.model);
         let effort_arg = nonempty(a.effort);
@@ -1596,6 +1602,13 @@ impl Wf {
         Ok(taken)
     }
 
+    fn open_labels(&self) -> Result<std::collections::HashSet<String>> {
+        let mut open: std::collections::HashSet<String> =
+            self.store.children(BOARD, true)?.into_iter().map(|l| l.label).collect();
+        open.extend(self.store.pending_all()?.into_iter().filter(|p| p.parent == BOARD).map(|p| p.label));
+        Ok(open)
+    }
+
     async fn reserve_label(&self, wanted: &str, suffix: bool, identity: &Identity) -> Result<String> {
         let params = self.config().link_params("overseer", "ticket")?;
         let _g = self.lock.lock().await;
@@ -1606,7 +1619,10 @@ impl Wf {
                 .find(|l| !taken.contains(l))
                 .unwrap_or_default()
         } else {
-            self.ensure_not_on_board(wanted)?;
+            self.ensure_not_on_board(wanted, identity.issue.as_deref())?;
+            if self.open_labels()?.contains(wanted) {
+                bail!("{wanted} is already on the board; close or finish it before launching it again");
+            }
             wanted.to_string()
         };
         self.store.pending_put(&Pending {
@@ -2118,7 +2134,7 @@ impl Wf {
         Ok(json!({"tickets": tickets, "asks": asks}))
     }
 
-    fn node_view(&self, ln: &Link) -> Value {
+    pub(crate) fn node_view(&self, ln: &Link) -> Value {
         let live = self.live_of(&ln.child);
         let paused = !ln.closed && ln.paused_at.is_some();
         let status = match (ln.closed, chip(live.as_ref())) {

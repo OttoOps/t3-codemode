@@ -292,6 +292,21 @@ async fn launch_ticket_maps_the_repo_to_a_project_and_preregisters_the_link() {
 }
 
 #[tokio::test]
+async fn a_relaunched_issue_keeps_its_label_after_each_ticket_closes() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/widgets", "git@github.com:o/widgets.git");
+    for _ in 0..3 {
+        let r = result(&h.exec("async () => wf.launchTicket({ issue: 'o/widgets#7' })").await);
+        assert_eq!(r["label"], "widgets#7", "{r}");
+        let thread = r["thread"].as_str().unwrap().to_string();
+        h.wf(&thread, "join", json!({"parent": BOARD, "label": "widgets#7", "role": "ticket"})).await;
+        let done = h.wf(&thread, "send", json!({"kind": "handoff", "body": "done"})).await;
+        assert_eq!(done["closed"], true, "{done}");
+    }
+}
+
+#[tokio::test]
 async fn launch_ticket_carries_the_parent_issue_and_part_to_the_ticket_link() {
     let h = H::new();
     h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);

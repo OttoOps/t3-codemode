@@ -35,6 +35,10 @@ async fn flow(h: &H) -> Value {
     result(&h.exec("async () => wf.flow()").await)
 }
 
+async fn graph(h: &H) -> Value {
+    h.app.wf.flow(true).await.unwrap()
+}
+
 fn labels(list: &Value) -> Vec<String> {
     list.as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()
 }
@@ -172,6 +176,208 @@ async fn the_queue_reads_every_page_of_a_repo() {
     assert_eq!(reads[0]["variables"]["label"], FLOW);
 }
 
+fn node<'a>(f: &'a Value, id: &str) -> &'a Value {
+    f["graph"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id)
+        .unwrap_or_else(|| panic!("no node {id}: {f}"))
+}
+
+fn ids(list: &Value) -> Vec<String> {
+    list.as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect()
+}
+
+async fn gadget_ticket(h: &H) {
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets"), project("p-gadgets", "/src/gadgets")]);
+    h.remotes.set("/src/gadgets", "git@github.com:acme/gadgets.git");
+    h.github.set_issue("acme/gadgets", github_issue(3, "Gadget work", &[], "2026-10-20T09:00:00Z"));
+    let mut th = t3_codemode::fake::thread("mcp:g3", "running", T0);
+    th["projectId"] = json!("p-gadgets");
+    h.fake.put(th);
+    h.wf("mcp:g3", "join", json!({"parent": BOARD, "label": "gadgets#3", "role": "ticket"})).await;
+    h.app.wf.board_tick().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_graph_covers_flow_issues_and_active_tickets_with_their_edges() {
+    let h = flowing(4);
+    issue(&h, REPO, 1, &[FLOW, "track: board"], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    issue(&h, REPO, 3, &[], 3);
+    issue(&h, REPO, 4, &[FLOW], 4);
+    issue(&h, REPO, 5, &[], 5);
+    issue(&h, REPO, 6, &["priority: high"], 6);
+    issue(&h, TOOLS, 7, &[], 7);
+    issue(&h, REPO, 10, &[FLOW], 10);
+    issue(&h, REPO, 11, &[FLOW], 11);
+    h.github.set_blockers(REPO, 2, &[(REPO, 1), (REPO, 3)]);
+    h.github.close_issue(REPO, 3);
+    h.github.set_parent(REPO, 4, (REPO, 5));
+    h.github.set_milestone(REPO, 4, "v0.9.0", None);
+    h.github.set_blockers(REPO, 6, &[(TOOLS, 7)]);
+    h.github.set_parent(REPO, 11, (REPO, 10));
+    ticket(&h, "mcp:t6", "widgets#6").await;
+    gadget_ticket(&h).await;
+    h.github.set_blockers("acme/gadgets", 3, &[(REPO, 11)]);
+    let before = h.github.calls().len();
+
+    let f = graph(&h).await;
+
+    let ops: Vec<String> = h.github.operations()[before..].to_vec();
+    assert_eq!(ops, ["flowIssues", "flowIssues", "flowTickets"]);
+    let g = &f["graph"];
+    let all: Vec<&str> = g["nodes"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap()).collect();
+    assert_eq!(
+        all,
+        [
+            "acme/gadgets#3",
+            "acme/tools#7",
+            "acme/widgets#1",
+            "acme/widgets#2",
+            "acme/widgets#3",
+            "acme/widgets#4",
+            "acme/widgets#5",
+            "acme/widgets#6",
+            "acme/widgets#10",
+            "acme/widgets#11"
+        ]
+    );
+    assert_eq!(
+        g["edges"],
+        json!([
+            {"from": "acme/gadgets#3", "to": "acme/widgets#11", "kind": "blockedBy"},
+            {"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy"},
+            {"from": "acme/widgets#2", "to": "acme/widgets#3", "kind": "blockedBy"},
+            {"from": "acme/widgets#4", "to": "acme/widgets#5", "kind": "parent"},
+            {"from": "acme/widgets#6", "to": "acme/tools#7", "kind": "blockedBy"},
+            {"from": "acme/widgets#11", "to": "acme/widgets#10", "kind": "parent"},
+        ])
+    );
+
+    let one = node(&f, "acme/widgets#1");
+    assert_eq!(one["tracked"], true);
+    assert_eq!(one["flowList"], "queue");
+    assert_eq!(one["ready"], true);
+    assert_eq!(one["external"], false);
+    assert_eq!(ids(&one["unlocks"]), ["acme/widgets#2"]);
+    assert_eq!((one["track"].as_str(), one["trackBy"].as_str()), (Some("board"), Some("label")));
+    assert_eq!(one["ticket"], Value::Null);
+
+    let two = node(&f, "acme/widgets#2");
+    assert_eq!(two["flowList"], "blocked");
+    assert_eq!((two["ready"].as_bool(), two["external"].as_bool()), (Some(false), Some(false)));
+    assert_eq!(ids(&two["blockedBy"]), ["acme/widgets#1", "acme/widgets#3"]);
+    assert_eq!((two["track"].as_str(), two["trackBy"].as_str()), (Some("board"), Some("component")));
+
+    let three = node(&f, "acme/widgets#3");
+    assert_eq!(three["tracked"], false);
+    assert_eq!(three["state"], "closed");
+    assert_eq!(three["title"], "Issue 3");
+    assert_eq!(three["url"], "https://github.com/acme/widgets/issues/3");
+
+    let four = node(&f, "acme/widgets#4");
+    assert_eq!(four["parent"], "acme/widgets#5");
+    assert_eq!(four["milestone"]["title"], "v0.9.0");
+    assert_eq!((four["track"].as_str(), four["trackBy"].as_str()), (Some("v0.9.0"), Some("milestone")));
+    let five = node(&f, "acme/widgets#5");
+    assert_eq!((five["tracked"].as_bool(), five["state"].as_str()), (Some(false), Some("open")));
+    assert_eq!(ids(&five["subIssues"]), ["acme/widgets#4"]);
+    assert_eq!((five["track"].as_str(), five["trackBy"].as_str()), (Some("v0.9.0"), Some("component")));
+
+    let six = node(&f, "acme/widgets#6");
+    assert_eq!(six["tracked"], true);
+    assert_eq!(six["flowList"], Value::Null);
+    assert_eq!(six["priority"], "high");
+    assert_eq!(six["ticket"]["thread"], "mcp:t6");
+    assert_eq!(six["ticket"]["status"], "running");
+    assert_eq!(six["external"], false);
+    assert_eq!((six["track"].as_str(), six["trackBy"].as_str()), (Some("tools#7"), Some("component")));
+
+    let ten = node(&f, "acme/widgets#10");
+    assert_eq!(ids(&ten["subIssues"]), ["acme/widgets#11"]);
+    assert_eq!(node(&f, "acme/widgets#11")["parent"], "acme/widgets#10");
+    assert_eq!(ids(&node(&f, "acme/widgets#11")["unlocks"]), ["acme/gadgets#3"]);
+
+    let gadget = node(&f, "acme/gadgets#3");
+    assert_eq!(gadget["title"], "Gadget work");
+    assert_eq!(gadget["ticket"]["thread"], "mcp:g3");
+    assert_eq!(gadget["tracked"], true);
+}
+
+#[tokio::test]
+async fn a_node_is_external_by_label_or_when_every_open_blocker_is_outside_the_tracked_repos() {
+    let h = flowing(4);
+    issue(&h, REPO, 1, &[FLOW, "Blocked: External"], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    issue(&h, REPO, 3, &[FLOW], 3);
+    issue(&h, REPO, 4, &[FLOW], 4);
+    issue(&h, REPO, 5, &["priority: low"], 5);
+    h.github.set_blockers(REPO, 2, &[("acme/outside", 9)]);
+    h.github.set_blockers(REPO, 3, &[("acme/outside", 9), (TOOLS, 7)]);
+    h.github.set_issue(TOOLS, github_issue(8, "Tool fix", &[], "2026-10-01T09:00:00Z"));
+    h.github.set_blockers(REPO, 4, &[(TOOLS, 8)]);
+    h.github.close_issue(TOOLS, 8);
+    h.github.set_blockers(REPO, 5, &[("acme/outside", 9)]);
+    ticket(&h, "mcp:t5", "widgets#5").await;
+
+    let f = graph(&h).await;
+
+    let ext = |id: &str| (node(&f, id)["external"].as_bool().unwrap(), node(&f, id)["ready"].as_bool().unwrap());
+    assert_eq!(ext("acme/widgets#1"), (true, false));
+    assert_eq!(ext("acme/widgets#2"), (true, false));
+    assert_eq!(ext("acme/widgets#3"), (false, false));
+    assert_eq!(ext("acme/widgets#4"), (false, true));
+    assert_eq!(ext("acme/widgets#5"), (true, false));
+    assert_eq!(node(&f, "acme/widgets#5")["ticket"]["thread"], "mcp:t5");
+    assert_eq!(node(&f, "acme/outside#9")["tracked"], false);
+    assert_eq!(f["blocked"].as_array().unwrap().iter().find(|b| b["label"] == "widgets#2").unwrap()["external"], false);
+}
+
+#[tokio::test]
+async fn the_ticket_reads_share_one_query_per_fifty_tickets() {
+    let h = flowing(80);
+    for n in 1..=60 {
+        issue(&h, REPO, n, &[], 1);
+        ticket(&h, &format!("mcp:t{n}"), &format!("widgets#{n}")).await;
+    }
+    let before = h.github.calls().len();
+
+    let f = graph(&h).await;
+
+    let ops: Vec<String> = h.github.operations()[before..].to_vec();
+    assert_eq!(ops, ["flowIssues", "flowIssues", "flowTickets", "flowTickets"]);
+    assert_eq!(f["graph"]["nodes"].as_array().unwrap().len(), 60);
+    let missing: Vec<&Value> =
+        f["graph"]["nodes"].as_array().unwrap().iter().filter(|n| !n["ticket"]["thread"].is_string()).collect();
+    assert!(missing.is_empty(), "{missing:?}");
+}
+
+#[tokio::test]
+async fn with_no_flow_block_the_graph_holds_the_active_tickets_and_reads_nothing() {
+    let h = H::new();
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    let mut th = t3_codemode::fake::thread("mcp:t1", "running", T0);
+    th["projectId"] = json!("p-widgets");
+    h.fake.put(th);
+    h.wf("mcp:t1", "join", json!({"parent": BOARD, "label": "widgets#1", "role": "ticket"})).await;
+    h.app.wf.board_tick().await.unwrap();
+    let before = h.github.calls().len();
+
+    let f = graph(&h).await;
+
+    assert_eq!(h.github.calls().len(), before);
+    assert_eq!(f["enabled"], false);
+    let n = node(&f, "acme/widgets#1");
+    assert_eq!(n["tracked"], true);
+    assert_eq!(n["title"], Value::Null);
+    assert_eq!(n["ticket"]["thread"], "mcp:t1");
+    assert_eq!((n["track"].as_str(), n["trackBy"].as_str()), (Some("widgets#1"), Some("component")));
+    assert_eq!(f["graph"]["edges"], json!([]));
+}
+
 #[tokio::test]
 async fn with_no_flow_block_the_flow_is_off_and_reads_nothing() {
     let h = H::new();
@@ -183,6 +389,7 @@ async fn with_no_flow_block_the_flow_is_off_and_reads_nothing() {
         json!({"enabled": false, "launch": null, "maxTickets": 0, "free": 0, "running": [], "queue": [], "blocked": [],
                "skipped": []})
     );
+    assert_eq!(graph(&h).await["graph"], json!({"nodes": [], "edges": []}));
     assert!(h.github.calls().is_empty());
 }
 
@@ -206,7 +413,8 @@ async fn wf_flow_is_in_the_catalog_with_its_signature() {
     let h = H::new();
     let out = h.app.search(r#"async () => catalog.find(t => t.name === "wf.flow").signature"#).await;
     let sig = ok_json(&out)["result"].as_str().unwrap().to_string();
-    assert!(sig.contains("wf.flow(): Promise<{ enabled: boolean;"), "{sig}");
+    assert!(sig.contains("wf.flow(input?: { graph?: boolean }): Promise<{ enabled: boolean;"), "{sig}");
+    assert!(sig.contains("graph?: { nodes:"), "{sig}");
     assert!(sig.contains("queue:"), "{sig}");
 }
 
@@ -601,6 +809,37 @@ async fn an_auto_pick_does_not_launch_a_sub_issue_after_launching_its_parent() {
 }
 
 #[tokio::test]
+async fn an_auto_pick_launches_an_issue_whose_label_a_fork_ticket_holds_and_refuses_it_twice() {
+    let h = flowing_with(2, "auto");
+    issue(&h, REPO, 5, &[FLOW], 1);
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets"), project("p-other", "/src/other")]);
+    h.remotes.set("/src/other", "git@github.com:other/widgets.git");
+    let mut th = t3_codemode::fake::thread("mcp:o5", "running", T0);
+    th["projectId"] = json!("p-other");
+    h.fake.put(th);
+    h.wf(
+        "mcp:o5",
+        "join",
+        json!({"parent": BOARD, "label": "widgets#5", "role": "ticket", "issue": "other/widgets#5"}),
+    )
+    .await;
+    h.app.wf.board_tick().await.unwrap();
+
+    reconcile(&h).await;
+
+    let launched: Vec<String> = h.fake.launched().iter().map(|l| l["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(launched, ["acme/widgets#5: Issue 5"]);
+    assert!(h.app.store.pending_all().unwrap().iter().any(|p| p.label == "acme/widgets#5"));
+    let again = h.exec("async () => wf.launchTicket({ issue: 'acme/widgets#5' })").await;
+    assert!(err_text(&again).contains("acme/widgets#5 was launched and has not joined yet"), "{}", again.text);
+    let fork = h.exec("async () => wf.launchTicket({ issue: 'other/widgets#5' })").await;
+    assert!(err_text(&fork).contains("widgets#5 is already on the board"), "{}", fork.text);
+    let f = graph(&h).await;
+    assert_eq!(labels(&f["running"]), ["acme/widgets#5"]);
+    assert_eq!(f["queue"], json!([]));
+}
+
+#[tokio::test]
 async fn an_auto_launched_sub_issue_names_its_parent_on_the_ticket() {
     let h = flowing_with(1, "auto");
     issue(&h, REPO, 1, &[], 1);
@@ -639,12 +878,15 @@ async fn board_queue(h: &H) {
 async fn the_board_route_returns_the_queue_wf_flow_returns() {
     let h = flowing(1);
     board_queue(&h).await;
-    let want = flow(&h).await;
+    let want = result(&h.exec("async () => wf.flow({ graph: true })").await);
+    let lean = flow(&h).await;
     let s = crate::board::start(h).await;
 
     let got = s.get("/api/flow").await;
 
     assert_eq!(got, want);
+    assert!(lean.get("graph").is_none(), "{lean}");
+    assert!(got["graph"]["nodes"].as_array().is_some_and(|n| !n.is_empty()), "{got}");
     assert_eq!(labels(&got["queue"]), ["widgets#7", "widgets#2"]);
     assert_eq!(labels(&got["blocked"]), ["widgets#4", "widgets#6"]);
     assert_eq!(labels(&got["skipped"]), ["widgets#1"]);

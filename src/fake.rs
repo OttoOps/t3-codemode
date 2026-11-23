@@ -723,6 +723,28 @@ fn issue_node(st: &GhState, r: &Value) -> Value {
            "repository": {"nameWithOwner": repo}})
 }
 
+fn full_issue_node(st: &GhState, i: &Value) -> Value {
+    let name = i["nameWithOwner"].as_str().unwrap_or_default();
+    let number = i["number"].as_u64().unwrap_or_default();
+    let blockers: Vec<Value> = i["blockers"].as_array().into_iter().flatten().map(|r| issue_node(st, r)).collect();
+    let parent = issue_node(st, &i["parentRef"]);
+    let mut subs: Vec<&Value> = st
+        .issues
+        .values()
+        .filter(|c| {
+            c["parentRef"][0].as_str().is_some_and(|r| r.eq_ignore_ascii_case(name))
+                && c["parentRef"][1].as_u64() == Some(number)
+        })
+        .collect();
+    subs.sort_by_key(|c| c["number"].as_u64());
+    let subs: Vec<Value> =
+        subs.into_iter().map(|c| issue_node(st, &json!([c["nameWithOwner"], c["number"]]))).collect();
+    json!({"number": number, "title": i["title"], "url": format!("https://github.com/{name}/issues/{number}"),
+           "createdAt": i["createdAt"], "state": i["state"], "labels": i["labels"], "milestone": i["milestone"],
+           "parent": parent, "blockedBy": {"totalCount": blockers.len(), "nodes": blockers},
+           "subIssues": {"totalCount": subs.len(), "nodes": subs}})
+}
+
 fn flow_issues(st: &GhState, variables: &Value) -> Value {
     let repo = format!("{}/{}", variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap())
         .to_ascii_lowercase();
@@ -748,22 +770,7 @@ fn flow_issues(st: &GhState, variables: &Value) -> Value {
     let start: usize = variables["after"].as_str().and_then(|c| c.parse().ok()).unwrap_or(0);
     let size = if st.issue_page == 0 { 100 } else { st.issue_page };
     let end = (start + size).min(matching.len());
-    let nodes: Vec<Value> = matching[start.min(end)..end]
-        .iter()
-        .map(|i| {
-            let name = i["nameWithOwner"].as_str().unwrap_or_default();
-            let number = i["number"].as_u64().unwrap_or_default();
-            let blockers: Vec<Value> =
-                i["blockers"].as_array().into_iter().flatten().map(|r| issue_node(st, r)).collect();
-            let mut parent = issue_node(st, &i["parentRef"]);
-            if let Some(p) = parent.as_object_mut() {
-                p.remove("state");
-            }
-            json!({"number": number, "title": i["title"], "url": format!("https://github.com/{name}/issues/{number}"),
-                   "createdAt": i["createdAt"], "labels": i["labels"], "milestone": i["milestone"], "parent": parent,
-                   "blockedBy": {"totalCount": blockers.len(), "nodes": blockers}})
-        })
-        .collect();
+    let nodes: Vec<Value> = matching[start.min(end)..end].iter().map(|i| full_issue_node(st, i)).collect();
     let name = matching.first().and_then(|i| i["nameWithOwner"].as_str()).unwrap_or(&repo).to_string();
     json!({"data": {"repository": {"nameWithOwner": name, "issues": {
         "pageInfo": {"hasNextPage": end < matching.len(), "endCursor": (end < matching.len()).then(|| end.to_string())},
@@ -779,11 +786,13 @@ fn flow_tickets(st: &GhState, variables: &Value) -> Value {
         let repo = format!("{owner}/{}", variables[format!("r{i}")].as_str().unwrap()).to_ascii_lowercase();
         let number = variables[format!("n{i}")].as_u64().unwrap();
         let alias = format!("t{i}");
-        let issue = st.issues.get(&issue_key(&repo, number)).map(|i| json!({"state": i["state"]}));
+        let issue = st.issues.get(&issue_key(&repo, number)).map(|i| full_issue_node(st, i));
         if issue.is_none() {
             errs.push(json!({"type": "NOT_FOUND", "path": [alias, "issue"], "message": "no issue"}));
         }
-        data.insert(alias, json!({"issue": issue}));
+        let name =
+            issue.as_ref().map_or(json!(repo), |_| st.issues[&issue_key(&repo, number)]["nameWithOwner"].clone());
+        data.insert(alias, json!({"nameWithOwner": name, "issue": issue}));
     }
     let mut out = json!({"data": data});
     if !errs.is_empty() {
