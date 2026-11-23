@@ -1799,6 +1799,146 @@ return { held, after: ids() };
 }
 
 #[tokio::test]
+async fn a_card_resolved_from_its_own_button_leaves_no_placeholder() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+const list = document.getElementById("cards");
+emitState(base);
+list.dispatch("pointerenter");
+card("a1").querySelector('[data-opt="1"]').dispatch("click");
+advance(5000);
+const sent = answers().length;
+emitState({ ...base, cards: [base.cards[1]] });
+const held = { gone: card("a1").classList.contains("gone"), focus: document.activeElement === card("a2") };
+advance(3999);
+const kept = !!card("a1");
+advance(1);
+return { sent, held, kept, after: ids(), focus: document.activeElement === card("a2") };
+"##,
+    );
+    assert_eq!(r["sent"], 1, "{r}");
+    assert_eq!(r["held"], json!({"gone": true, "focus": true}), "{r}");
+    assert_eq!(r["kept"], true, "{r}");
+    assert_eq!(r["after"], json!(["a2"]), "{r}");
+    assert_eq!(r["focus"], true, "{r}");
+}
+
+#[tokio::test]
+async fn the_last_card_resolved_from_its_button_hands_focus_to_the_list() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+const list = document.getElementById("cards");
+emitState({ ...base, cards: [base.cards[0]] });
+list.dispatch("pointerenter");
+card("a1").querySelector('[data-opt="1"]').dispatch("click");
+advance(5000);
+emitState({ ...base, cards: [] });
+const focus = document.activeElement === list;
+advance(4000);
+return { focus, after: ids(), empty: !document.getElementById("cards-empty").hidden };
+"##,
+    );
+    assert_eq!(r, json!({"focus": true, "after": [], "empty": true}), "{r}");
+}
+
+#[tokio::test]
+async fn a_placeholder_expires_while_the_panel_is_busy_but_not_while_focused() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+const list = document.getElementById("cards");
+emitState(base);
+list.dispatch("pointerenter");
+card("a2").querySelector("input").focus();
+emitState({ ...base, cards: [base.cards[1]] });
+const placed = card("a1").classList.contains("gone");
+advance(4000);
+const expired = ids();
+emitState(base);
+document.getElementById("new-cards").dispatch("click");
+card("a2").querySelector("input").focus();
+emitState({ ...base, cards: [base.cards[1]] });
+card("a1").focus();
+advance(8000);
+const focused = ids();
+card("a2").querySelector("input").focus();
+advance(4000);
+return { placed, expired, focused, after: ids() };
+"##,
+    );
+    assert_eq!(r, json!({"placed": true, "expired": ["a2"], "focused": ["a1", "a2"], "after": ["a2"]}), "{r}");
+}
+
+#[tokio::test]
+async fn a_held_card_leaves_once_focus_moves_to_another_card() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+const list = document.getElementById("cards");
+emitState(base);
+list.dispatch("pointerenter");
+const input = card("a1").querySelector("input");
+input.focus();
+emitState({ ...base, cards: [base.cards[1]] });
+const held = card("a1").classList.contains("stale-item");
+card("a2").querySelector("input").focus();
+input.dispatch("focusout");
+advance(0);
+const gone = card("a1").classList.contains("gone");
+advance(4000);
+return { held, gone, after: ids() };
+"##,
+    );
+    assert_eq!(r, json!({"held": true, "gone": true, "after": ["a2"]}), "{r}");
+}
+
+#[tokio::test]
+async fn placeholders_are_swept_when_the_page_returns_or_the_stream_reconnects() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+const list = document.getElementById("cards");
+const open = document.getElementById("open");
+const tombs = () => document.querySelectorAll(".gone[data-key]").length;
+emitState(base);
+list.dispatch("pointerenter");
+open.dispatch("pointerenter");
+card("a2").querySelector("input").focus();
+emitState({ ...base, cards: [base.cards[1]], tree: [base.tree[1]] });
+const before = tombs();
+document.hidden = true;
+for (const f of document.listeners.visibilitychange) f();
+const hidden = tombs();
+document.hidden = false;
+for (const f of document.listeners.visibilitychange) f();
+const shown = tombs();
+emitState(base);
+document.getElementById("new-cards").dispatch("click");
+card("a2").querySelector("input").focus();
+emitState({ ...base, cards: [base.cards[1]] });
+const again = tombs();
+eventSource.onerror();
+advance(1000);
+emitState({ ...base, cards: [base.cards[1]] });
+return { before, hidden, shown, again, reconnected: tombs(), order: ids() };
+"##,
+    );
+    assert_eq!(r, json!({"before": 2, "hidden": 2, "shown": 0, "again": 1, "reconnected": 0, "order": ["a2"]}), "{r}");
+}
+
+#[tokio::test]
 async fn a_reply_leaves_after_five_seconds_and_undo_sends_nothing() {
     let (html, st) = two_gate_page().await;
     let r = page_scenario(
