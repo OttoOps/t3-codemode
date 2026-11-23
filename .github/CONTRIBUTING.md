@@ -71,6 +71,16 @@ commit in your branch should stand on its own:
 
 Squash fixup commits yourself before review ends.
 
+## Releases
+
+You do not bump the version or push tags. On every push to `main`,
+[release-plz](https://release-plz.dev) opens or updates a
+`chore: release vX.Y.Z` pull request that bumps `Cargo.toml` and adds the
+release to `CHANGELOG.md`, from the Conventional Commit subjects since the
+last tag: `feat` bumps the minor version, anything else the patch. Merging
+that pull request tags the release, and the tag starts the release
+workflow, which builds, signs and publishes it (ADR 0017).
+
 ## What this project will and will not take
 
 `t3cm` stays a local, single-user service in front of T3 Code. Changes that
