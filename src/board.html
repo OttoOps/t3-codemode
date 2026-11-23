@@ -202,6 +202,8 @@ select:disabled { opacity: 0.55; cursor: default; }
 .s-pr-green { color: var(--done); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23000' stroke-width='1.4'%3E%3Ccircle cx='6' cy='6' r='4.8'/%3E%3Cpath d='M3.7 6.1l1.6 1.6 3-3.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
 .s-pr-review { color: var(--review); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23000' stroke-width='1.4'%3E%3Ccircle cx='6' cy='6' r='4.8'/%3E%3Cpath d='M6 3.4V6l1.8 1.3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
 .s-alert { color: var(--fail); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23000'%3E%3Cpath d='M6 1.4 11 10.4H1z' stroke-width='1.4' stroke-linejoin='round'/%3E%3Cpath d='M6 4.6v2.6M6 8.7v.1' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.s-ready { color: var(--fg); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M3.6 2.1v7.8L9.9 6z' fill='none' stroke='%23000' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+.s-external { color: var(--fg-2); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23000' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6.8 1.6h3.6v3.6M10.4 1.6 5.6 6.4'/%3E%3Cpath d='M8.8 7.4v3H1.6V3.2h3'/%3E%3C/svg%3E"); }
 .spill {
   height: 18px; padding: 0 8px; border-radius: 9px; vertical-align: middle;
   border: 1px solid color-mix(in srgb, currentColor 75%, transparent);
@@ -550,6 +552,7 @@ a:hover > .spill, a:focus-visible > .spill { border-color: currentColor; }
 .frow .f1 { display: flex; gap: 8px; align-items: baseline; min-width: 0; line-height: 18px; }
 .frow .tl { font-weight: 600; flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .frow .tl a { color: var(--fg); }
+.frow .f1 .spill { flex: none; margin-left: auto; }
 .frow .f2 { grid-column: 2; min-width: 0; overflow-wrap: anywhere; }
 .frow .f2 a { color: var(--fg-2); }
 .fgroup { border-bottom: 1px solid var(--border); }
@@ -2521,8 +2524,9 @@ function needsOf(cards) {
   return m;
 }
 
-const PHASES = [["running", "running"], ["waiting", "needs you"], ["blocked", "blocked"], ["paused", "paused"],
-  ["pr-green", "ready to merge"], ["pr-review", "in review or CI"], ["alert", "alert"], ["done", "done"]];
+const PHASES = [["running", "running"], ["ready", "ready to launch"], ["waiting", "needs you"], ["blocked", "blocked"],
+  ["external", "blocked: external"], ["paused", "paused"], ["pr-green", "ready to merge"], ["pr-review", "in review or CI"],
+  ["alert", "alert"], ["done", "done"]];
 const CARD_KINDS = ["gate", "blocker", "report", "escalate"];
 const FACETS = [
   { key: "projects", name: "Project", values: projectValues },
@@ -2613,6 +2617,7 @@ function phaseOf(t, cards) {
     if (x.paused) tags.add("paused");
   }
   if (cards.some((c) => FAIL_KINDS.has(c.kind)) || ticketState(t, []) === "fail") tags.add("blocked");
+  if (t.thread && flow.ext.has(t.thread)) tags.add("external");
   if (cards.length) tags.add("waiting");
   else if (!tags.has("blocked") && !t.paused) tags.add("running");
   return [...tags];
@@ -2830,7 +2835,7 @@ const PULSE = [
   { key: "active", tone: "run", label: "Active", short: "Active", vals: ["running"] },
   { key: "green", tone: "pr-green", label: "Ready to merge", short: "Ready", vals: ["pr-green"] },
   { key: "review", tone: "pr-review", label: "In review or CI", short: "Review", vals: ["pr-review"] },
-  { key: "held", tone: "pause", label: "Paused or blocked", short: "Paused", vals: ["paused", "blocked"] },
+  { key: "held", tone: "pause", label: "Paused or blocked", short: "Paused", vals: ["paused", "blocked", "external"] },
   { key: "alert", tone: "alert", label: "Alerts", short: "Alerts", vals: ["alert"] },
 ];
 const PULSE_KEY = "t3board.pulse";
@@ -2866,14 +2871,15 @@ function pulseDetail(sl, tix, s) {
     const run = runningIn(s.tree);
     const said = run + (run === 1 ? " thread" : " threads") + " running";
     const max = s.flowMaxTickets;
-    if (!max) return said;
+    const ready = s.flow && flow.view && flow.view.enabled ? ", " + flow.ready + " ready to launch" : "";
+    if (!max) return said + ready;
     const open = s.tree.filter((t) => !t.done).length;
-    return said + ", " + open + " of " + max + " tickets" + (open > max ? ", " + (open - max) + " over the cap" : "");
+    return said + ", " + open + " of " + max + " tickets" + (open > max ? ", " + (open - max) + " over the cap" : "") + ready;
   }
   if (sl.key === "held") {
     const n = (v) => tix.filter((x) => x.tags.includes(v)).length;
-    const p = n("paused"), b = n("blocked");
-    return p || b ? [p && p + " paused", b && b + " blocked"].filter(Boolean).join(", ") : "Nothing parked";
+    const p = n("paused"), b = n("blocked"), e = n("external") + flow.waiting;
+    return p || b || e ? [p && p + " paused", b && b + " blocked", e && e + " external"].filter(Boolean).join(", ") : "Nothing parked";
   }
   const list = prList(tix.map((x) => x.t), sl.vals[0]);
   if (sl.key === "alert") return list ? list + " failing after approval" : "No alerts";
@@ -3348,6 +3354,16 @@ function patchWorker(el, w, t, cards) {
   setPause(el, w, w.label, "wpaused", "wpause");
 }
 
+function setExternal(host, on) {
+  let p = part(host, "ext");
+  if (!p) {
+    if (!on) return;
+    p = statusPill("external", "external", { "data-part": "ext", title: FLOW_PILL.external });
+    host.prepend(p);
+  }
+  p.hidden = !on;
+}
+
 function setPause(host, x, label, pillPart, btnPart) {
   let b = part(host, btnPart);
   const on = !!(x && x.thread && x.joined !== false && !x.done);
@@ -3455,6 +3471,7 @@ function patchTicket(el, t, ctx) {
   }
   const side = row.querySelector(".side");
   setPause(side, ctx.done ? null : t, t.label, "paused", "pause");
+  setExternal(side, !ctx.done && !!t.thread && flow.ext.has(t.thread));
   const own = ownState(t.status);
   const canClose = !ctx.done && !!(t.thread && t.joined !== false && !t.done && (own === "idle" || own === "pause" || own === "fail"));
   let cb = side.querySelector('[data-part="close"]');
@@ -3884,7 +3901,25 @@ function flipNewView() {
 }
 
 const FLOW_POLL_MS = 60000;
-const flow = { sig: null, busy: false, again: false, shown: null, open: { blocked: false, skipped: false } };
+const flow = { sig: null, busy: false, again: false, shown: null, open: { blocked: false, skipped: false },
+  view: null, nodes: new Map(), ext: new Set(), ready: 0, waiting: 0 };
+
+function flowGraph(v) {
+  const nodes = (v && v.enabled && v.graph && v.graph.nodes) || [];
+  const ext = new Set(nodes.filter((n) => n.external && n.ticket && n.ticket.thread).map((n) => n.ticket.thread));
+  const ready = nodes.filter((n) => n.ready).length;
+  const waiting = nodes.filter((n) => n.external && n.flowList === "blocked").length;
+  const same = ready === flow.ready && waiting === flow.waiting && ext.size === flow.ext.size && [...ext].every((x) => flow.ext.has(x));
+  flow.waiting = waiting;
+  flow.nodes = new Map(nodes.map((n) => [String(n.id).toLowerCase(), n]));
+  flow.ext = ext;
+  flow.ready = ready;
+  return !same;
+}
+
+function flowNode(i) {
+  return flow.nodes.get((i.repo + "#" + i.number).toLowerCase()) || null;
+}
 
 function flowSig(s) {
   const open = (s.tree || []).filter((t) => !t.done).map((t) => t.label).sort();
@@ -3896,6 +3931,8 @@ function flowDue(s) {
   if (!s.flow) {
     flow.sig = null;
     flow.shown = null;
+    flow.view = null;
+    flowGraph(null);
     $("flow-err").hidden = true;
     flowShow(false);
     return;
@@ -3953,20 +3990,36 @@ function flowRefs(list, home) {
   return out;
 }
 
-function flowRow(i, n, facts) {
+function flowRow(i, n, facts, phase) {
   const u = safeUrl(i.url);
   const parts = [];
   for (const f of facts.filter((x) => x && (!Array.isArray(x) || x.length))) {
     if (parts.length) parts.push(h("span", { "aria-hidden": "true" }, " · "));
     parts.push(h("span", {}, f));
   }
-  return h("li", { class: "frow", "data-issue": i.repo + "#" + i.number },
+  const pill = phase.includes("external") ? statusPill("external", "external", { title: FLOW_PILL.external })
+    : phase.includes("ready") ? statusPill("ready", "ready", { title: FLOW_PILL.ready }) : null;
+  const li = h("li", { class: "frow", "data-issue": i.repo + "#" + i.number },
     h("span", { class: "fn num", "aria-hidden": n ? null : "true" }, n ? String(n) : ""),
     h("span", { class: "f1" },
       h("span", { class: "tl", title: i.repo + "#" + i.number },
         u ? h("a", { href: u, target: "_blank", rel: "noopener noreferrer", "aria-label": "Open issue " + i.label + " on GitHub" }, i.label) : i.label),
-      h("span", { class: "ttl clip", title: i.title || null }, i.title || "")),
+      h("span", { class: "ttl clip", title: i.title || null }, i.title || ""), pill),
     h("span", { class: "f2 meta", "data-part": "why" }, parts));
+  li.hidden = filtering() && !matches({ place: placeOf({ repo: i.repo }), phase: phase.length ? phase : null, text: [i.label, i.title, i.repo] });
+  return li;
+}
+
+const FLOW_PILL = {
+  ready: "Ready to launch: no open blocker and no ticket yet",
+  external: "Blocked from outside: labelled blocked: external, or every open blocker is outside the covered repos",
+};
+
+function flowPhase(i, base) {
+  const n = flowNode(i);
+  const out = [...base];
+  if ((n && n.external) || i.external) out.push("external");
+  return out;
 }
 
 function flowFacts(i) {
@@ -3992,7 +4045,7 @@ function flowFold(id) {
 
 function flowGroup(id, list, rows) {
   $("flow-" + id).hidden = !list.length;
-  setText($("n-flow-" + id[0]), String(list.length || ""));
+  setText($("n-flow-" + id[0]), shown(rows.filter((r) => !r.hidden).length, list.length, true));
   $("flow-" + id[0]).replaceChildren(...rows);
   flowFold(id);
 }
@@ -4003,24 +4056,29 @@ function flowToggle(id) {
 }
 
 function paintFlow(v) {
-  const key = JSON.stringify(v);
+  flow.view = v;
+  const key = JSON.stringify([v, filtering() ? filterSpec() : null]);
   if (key === flow.shown) return;
   flow.shown = key;
+  const moved = flowGraph(v);
   flowShow(!!v.enabled);
+  if (moved && state) render(state);
   if (!v.enabled) return;
   const queue = v.queue || [], blocked = v.blocked || [], skipped = v.skipped || [];
   const a = document.activeElement;
   const list = a && a.tagName === "A" && a.closest ? a.closest("#flow-q, #flow-b, #flow-s") : null;
   const href = list ? a.getAttribute("href") : null;
   const row = list && a.closest("li") ? a.closest("li").getAttribute("data-issue") : null;
-  setText($("n-flow"), String(queue.length || ""));
-  setAttr($("n-flow"), "aria-label", queue.length ? queue.length + " ready" : null);
+  const qrows = queue.map((i, n) => flowRow(i, n + 1, flowFacts(i), flowPhase(i, ["ready"])));
+  const qshown = qrows.filter((r) => !r.hidden).length;
+  setText($("n-flow"), shown(qshown, queue.length, true));
+  setAttr($("n-flow"), "aria-label", queue.length ? (filtering() ? qshown + " of " + queue.length : queue.length) + " ready" : null);
   const slots = v.free + " of " + v.maxTickets + " slot" + (v.maxTickets === 1 ? "" : "s") + " free";
   setText($("flow-slots"), slots + " · launch: " + (v.launch || "ask"));
-  $("flow-q").replaceChildren(...queue.map((i, n) => flowRow(i, n + 1, flowFacts(i))));
+  $("flow-q").replaceChildren(...qrows);
   $("flow-empty").hidden = queue.length > 0;
-  flowGroup("blocked", blocked, blocked.map((b) => flowRow(b, 0, [flowBlockers(b), "priority: " + (b.priority || "none")])));
-  flowGroup("skipped", skipped, skipped.map((i) => flowRow(i, 0, flowFacts(i))));
+  flowGroup("blocked", blocked, blocked.map((b) => flowRow(b, 0, [flowBlockers(b), "priority: " + (b.priority || "none")], flowPhase(b, ["blocked"]))));
+  flowGroup("skipped", skipped, skipped.map((i) => flowRow(i, 0, flowFacts(i), [])));
   const back = list && [...list.querySelectorAll("a")].find((x) => x.getAttribute("href") === href && (x.closest("li") || x).getAttribute("data-issue") === row);
   if (back) back.focus({ preventScroll: true });
 }
@@ -4698,6 +4756,7 @@ let everConnected = false;
 function render(s) {
   const prior = state;
   state = s;
+  if (!s.flow && flow.view) { flow.view = null; flowGraph(null); }
   const apply = syncContexts(s);
   if (apply) {
     loadFilter(apply.spec);
@@ -4717,6 +4776,7 @@ function render(s) {
   syncSettled(s);
   syncNew(s);
   flowDue(s);
+  if (s.flow && flow.view) paintFlow(flow.view);
   syncFeed(v.feed, s.feed);
   showTicketsHeld();
   const seen = new Set(v.cards.map((c) => c.id));
@@ -5142,6 +5202,7 @@ function initDrawer() {
       h("div", { class: "dr-pills", "data-part": "pills" },
         h("span", { "data-part": "st" }), h("span", { "data-part": "pr" }),
         statusPill("pause", "paused", { "data-part": "paused", hidden: true }),
+        statusPill("external", "external", { "data-part": "ext", hidden: true, title: FLOW_PILL.external }),
         h("span", { class: "chip", "data-part": "repo", hidden: true }), h("span", { class: "chip", "data-part": "proj", hidden: true })),
       h("div", { class: "dr-acts", "data-part": "acts", role: "group", "aria-label": "Actions" },
         link("gh-issue"), link("gh-pr"), h("span", { "data-part": "t3" }),
@@ -5318,6 +5379,7 @@ function drPills(mk, word, pr, owner, paused, place) {
   setStatusPill(drPart("st"), mk, word);
   setPrChip(drPart("pr"), pr, owner, true);
   drPart("paused").hidden = !paused;
+  drPart("ext").hidden = true;
   const repo = String((place && place.repo) || "");
   const proj = String((place && place.project && place.project.title) || "");
   const r = drPart("repo");
@@ -5479,6 +5541,7 @@ function paintTicketDrawer(t, settled) {
   const pr = (fw && fw.pr && safeUrl(fw.pr.url) ? fw.pr : null) || (t.pr && safeUrl(t.pr.url) ? t.pr : null) || (live.length ? live[live.length - 1].pr : null);
   drHead(t.label, partTag(t, fw), titleOf(t));
   drPills(markOf(st, cards), settled ? "settled" : WORDS[st], pr, t.label, !settled && !t.done && !!t.paused, t);
+  drPart("ext").hidden = settled || !!t.done || !t.thread || !flow.ext.has(t.thread);
   drLink("gh-issue", issueUrl(t.label, t.repo), "Open issue on GitHub", "Open issue " + t.label + " on GitHub");
   drLink("gh-pr", pr && pr.url, pr ? "Open PR #" + pr.number + " on GitHub" : "", pr ? "Open PR #" + pr.number + " for " + t.label + " on GitHub" : "");
   drT3(t.link, t.label);
