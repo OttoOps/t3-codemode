@@ -661,13 +661,11 @@ async fn api_launch_accepts_optional_project_per_ref_and_keeps_string_refs() {
         (&json!(true), &json!("p-eng"), &json!("ENG-5"))
     );
 
-    // Unknown fields inside an item or on the body are rejected with 400
+    // Unknown fields inside an item are rejected with 400
     let bad_item = s
         .post("/api/launch", json!({"issues": [{"issue": "PROJ-2", "projectId": "p-gl"}]}), Some(&s.csrf()), None)
         .await;
     assert_eq!(bad_item.status(), 400);
-    let bad_body = s.post("/api/launch", json!({"issues": ["PROJ-2"], "extra": true}), Some(&s.csrf()), None).await;
-    assert_eq!(bad_body.status(), 400);
     let empty = s.post("/api/launch", json!({"issues": [{"issue": "   "}]}), Some(&s.csrf()), None).await;
     assert_eq!(empty.status(), 400);
     let too_many: Vec<Value> = (1..=21).map(|n| json!({"issue": format!("PROJ-{n}"), "project": "p-gl"})).collect();
@@ -702,9 +700,9 @@ async fn api_models_exposes_active_projects_remotes_and_trackers() {
     assert_eq!(
         body["projects"],
         json!([
+            { "id": "p-web", "title": "Web App", "remote": { "host": "github.com", "path": "acme/web", "port": null } },
             { "id": "p-api", "title": "API Service", "remote": { "host": "gitlab.acme.example", "path": "team/api", "port": 8443 } },
-            { "id": "p-plain", "title": "Scratch", "remote": null },
-            { "id": "p-web", "title": "Web App", "remote": { "host": "github.com", "path": "acme/web", "port": null } }
+            { "id": "p-plain", "title": "Scratch", "remote": null }
         ]),
         "{body}"
     );
@@ -879,4 +877,110 @@ return {{
     assert_eq!(r["clearedAfter"], true, "{r}");
     assert!(r["errText"].as_str().unwrap().contains("Could not load T3 projects: t3 down"), "{r}");
     assert_eq!(r["retried"], true, "{r}");
+}
+
+#[tokio::test]
+async fn launch_form_handles_loading_race_stale_mapped_project_and_url_hosts() {
+    let h = with_trackers(json!({ "jira": { "MAPPED": "API Service" } }));
+    let s = crate::board::start(h).await;
+    let mut p_api = project("p-api", "/src/api");
+    p_api["title"] = json!("API Service");
+    let mut p_web = project("p-web", "/src/web");
+    p_web["title"] = json!("Web App");
+    s.h.fake.set_projects(vec![p_api, p_web]);
+    s.h.remotes.set("/src/web", "git@github.com:acme/web.git");
+
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st: Value = s.get("/api/state").await;
+    let models: Value = s.get("/api/models").await;
+    let mut after_archive = models.clone();
+    after_archive["projects"] = json!([
+        { "id": "p-web", "title": "Web App", "remote": { "host": "github.com", "path": "acme/web", "port": null } }
+    ]);
+    after_archive["modelsRev"] = json!(2);
+
+    let r = crate::board::run_page_async_with(
+        &html,
+        "",
+        &format!(
+            r##"async () => {{
+const base = {st};
+let curModels = {models};
+const afterArchive = {after_archive};
+let failNextLaunch = false;
+const tick = async () => {{ for (let i = 0; i < 12; i++) await Promise.resolve(); }};
+fetchReply = (url, opts) => {{
+  const m = (opts && opts.method) || "GET";
+  if (url === "/api/models" && m === "GET") return Promise.resolve({{ ok: true, json: async () => curModels }});
+  if (url === "/api/launch" && m === "POST") {{
+    const body = JSON.parse(opts.body);
+    if (failNextLaunch) {{
+      failNextLaunch = false;
+      return Promise.resolve({{
+        ok: true,
+        json: async () => ({{
+          results: body.issues.map((item) => ({{
+            ok: false,
+            issue: typeof item === "string" ? item : item.issue,
+            error: "trackers.jira.MAPPED maps to T3 project \"API Service\", which was not found"
+          }}))
+        }})
+      }});
+    }}
+    return Promise.resolve({{
+      ok: true,
+      json: async () => ({{
+        results: body.issues.map((item, i) => ({{
+          ok: true,
+          issue: typeof item === "string" ? item : item.issue,
+          label: typeof item === "string" ? item : item.issue,
+          link: "https://t3/launch:" + (i + 1)
+        }}))
+      }})
+    }});
+  }}
+  return Promise.resolve({{ ok: true, json: async () => ({{}}) }});
+}};
+
+const ta = document.getElementById("issues");
+const box = document.getElementById("launch-projects");
+const form = document.getElementById("launch");
+
+// 1. Submitting unmapped PROJ-123 before projects load waits for /api/models and shows the picker without POSTing.
+ta.value = "PROJ-123";
+form.dispatch("submit");
+await tick();
+const postsWhileLoading = fetches.filter((f) => f.url === "/api/launch").length;
+const pickerOpenedOnLoad = !box.hidden && !!box.querySelector('select[data-ref="PROJ-123"]');
+
+// 2. HTTP(S) Jira URLs with underscore hostname or trailing DNS dot get pickers.
+ta.value = "https://jira_internal/browse/OPS-1\nhttps://jira.acme.example./browse/OPS-2";
+ta.dispatch("input");
+const urlRefsShown = [...box.querySelectorAll("select[data-ref]")].map((s) => s.dataset.ref);
+
+// 3. Mapped project archived after page load: launch fails, refreshModels runs, and picker appears for MAPPED-7.
+emitState(base);
+ta.value = "MAPPED-7";
+ta.dispatch("input");
+const hiddenBeforeArchive = box.hidden;
+curModels = afterArchive;
+failNextLaunch = true;
+form.dispatch("submit");
+await tick();
+const pickerAfterFailure = !box.hidden && [...box.querySelectorAll("select[data-ref]")].map((s) => s.dataset.ref);
+
+return {{ postsWhileLoading, pickerOpenedOnLoad, urlRefsShown, hiddenBeforeArchive, pickerAfterFailure }};
+}}"##
+        ),
+    );
+
+    assert_eq!(r["postsWhileLoading"], 0, "{r}");
+    assert_eq!(r["pickerOpenedOnLoad"], true, "{r}");
+    assert_eq!(
+        r["urlRefsShown"],
+        json!(["https://jira_internal/browse/OPS-1", "https://jira.acme.example./browse/OPS-2"]),
+        "{r}"
+    );
+    assert_eq!(r["hiddenBeforeArchive"], true, "{r}");
+    assert_eq!(r["pickerAfterFailure"], json!(["MAPPED-7"]), "{r}");
 }

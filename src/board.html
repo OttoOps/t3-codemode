@@ -7292,7 +7292,8 @@ function parseUrlAuthority(auth) {
   const m = auth[0] === "[" ? /^(\[[0-9a-fA-F:]+\])(?::(\d+))?$/.exec(auth) : /^([^:]+)(?::(\d+))?$/.exec(auth);
   if (!m) return null;
   const host = m[1].toLowerCase();
-  if (!isTrackerHost(host)) return null;
+  if (!host) return null;
+  if (host[0] !== "[" && (!/^[a-z0-9._-]+$/.test(host) || host[0] === "." || host.includes(".."))) return null;
   const port = m[2] !== undefined ? Number(m[2]) : null;
   if (port !== null && (!Number.isInteger(port) || port < 1 || port > 65535)) return null;
   return { host, port };
@@ -7423,12 +7424,17 @@ function unresolvedLaunchRefs(d) {
 }
 
 function launchProjectOptions(projects) {
+  const sorted = [...projects].sort((a, b) => {
+    const ta = String(a.title || a.id).toLowerCase();
+    const tb = String(b.title || b.id).toLowerCase();
+    return ta < tb ? -1 : ta > tb ? 1 : (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  });
   const titleCounts = new Map();
-  for (const p of projects) {
+  for (const p of sorted) {
     const k = String(p.title || p.id).toLowerCase();
     titleCounts.set(k, (titleCounts.get(k) || 0) + 1);
   }
-  const prelim = projects.map((p) => {
+  const prelim = sorted.map((p) => {
     const title = p.title || p.id;
     const dup = (titleCounts.get(title.toLowerCase()) || 0) > 1;
     const base = dup ? title + " (" + ((p.remote && p.remote.path) || p.id) + ")" : title;
@@ -9467,15 +9473,33 @@ async function onLaunch(e) {
   const draft = ta.value;
   const issues = draft.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
   if (!issues.length || btn.disabled) return;
+  const hasNonGithub = issues.some((ref) => {
+    const p = parseIssueRef(ref);
+    return p && p.tracker !== "github";
+  });
+  if (hasNonGithub && !modelsState.data) {
+    btn.disabled = true;
+    setText(btn, "Loading projects...");
+    try { await refreshModels(false); } finally { btn.disabled = false; setText(btn, "Launch"); }
+    if (ta.value !== draft) return;
+  }
   const d = modelsState.data;
-  if (d && !d.projectsError && Array.isArray(d.projects) && d.projects.length) {
+  if (hasNonGithub) {
+    if (!d || d.projectsError) {
+      paintLaunchProjects();
+      return;
+    }
     const missing = unresolvedLaunchRefs(d).filter((x) => !launchProjectPicks.get(x.raw));
     if (missing.length) {
-      launchProjectsErr = "Choose a project for " + missing.map((x) => x.parsed.label).join(", ") + " before launching.";
-      paintLaunchProjects();
-      const firstBad = $("launch-projects").querySelector('select[aria-invalid="true"]');
-      if (firstBad) firstBad.focus();
-      announce(launchProjectsErr, true);
+      if ((d.projects || []).length) {
+        launchProjectsErr = "Choose a project for " + missing.map((x) => x.parsed.label).join(", ") + " before launching.";
+        paintLaunchProjects();
+        const firstBad = $("launch-projects").querySelector('select[aria-invalid="true"]');
+        if (firstBad) firstBad.focus();
+        announce(launchProjectsErr, true);
+      } else {
+        paintLaunchProjects();
+      }
       return;
     }
   }
@@ -9503,6 +9527,7 @@ async function onLaunch(e) {
       launchProjectPicks.clear();
       launchProjectsErr = "";
     }
+    if (bad.length) await refreshModels(false);
     paintLaunchProjects();
     paintLaunchModelLine();
   } catch (err) {
