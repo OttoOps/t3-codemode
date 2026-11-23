@@ -47,7 +47,9 @@ to filter the board to its tickets, and click it again to clear that filter.
 - **Up next,** under New issues when the config has a [`flow` block](config.md#flow):
   the flow's ready queue, in the order the board launches it.
   [The up-next panel](#the-up-next-panel) covers what each row shows.
-- **Tickets,** in Open, Done and Settled tabs, grouped by state. A ticket
+- **Tickets,** in Open, Done and Settled tabs, grouped by state, and a
+  [Graph](#the-graph-tab) tab that draws the open tickets and the flow's issues
+  with the links between them. A ticket
   takes the most urgent state of its own thread and its workers, so a ticket
   whose worker runs reads running:
 
@@ -429,7 +431,8 @@ records the composable delivery design.
 
 The bar under the header narrows the page to the work you pick. Each filter
 applies to the decision cards, the ticket tree, the activity feed, the
-Settled section and the [Up next](#the-up-next-panel) rows at once.
+Settled section, the [Up next](#the-up-next-panel) rows and the
+[Graph](#the-graph-tab) tab at once.
 
 - **Project, Status and Card kind** are multi-select dropdowns. Type in one to
   narrow its list, and Enter toggles the first value left. A project shows as
@@ -508,7 +511,8 @@ inside it. A card outside it still counts toward "N hidden".
 ## The inspector
 
 Click a ticket row, a worker, a pull request pill, a card's ask or ticket line,
-a New issues row or a Settled ticket, or press Enter on a focused card or row,
+a New issues row, a Settled ticket or an issue in the [Graph](#the-graph-tab)
+tab, or press Enter on a focused card, row or issue,
 and the inspector slides in from the right with that item's details. It covers
 the right side of the board under the pulse strip and filter bar. The lists
 keep their scroll and keep updating, and you can still answer the cards on the
@@ -534,6 +538,14 @@ gets the hover shade, so you can find it on the board.
   from `GET /api/msg/{handle}`.
 - **Workers.** Each worker's state, a link to its thread, its pull request and
   Pause or Resume. Opened from a worker, the inspector shades that worker.
+- **Dependencies.** With a `flow` block, a ticket or issue in
+  [the dependency graph](#the-dependency-graph) shows its lane and its
+  Blocked by, Unlocks, Parent and Sub-issues as chips, each with its state.
+  A chip moves the inspector to that issue, or to its ticket when it has one,
+  and leaves the board where it was. `Esc` still returns focus to the item
+  that first opened the inspector. The pills add the issue's priority and
+  milestone. An issue with no ticket shows its flow standing, such as "In the
+  ready queue", in place of the ticket sections.
 
 The inspector follows its item while the board updates. If the item leaves the
 board, the inspector says so, keeps the last details it had and disables its
@@ -806,6 +818,55 @@ A node's track follows the first rule that applies:
 
 Ticket rows on the board carry an **external** pill when their node is
 external, and the inspector shows the same pill.
+
+### The Graph tab
+
+The Graph tab in the Tickets pane draws the dependency graph as an SVG
+swimlane view, with no library and no request beyond `GET /api/flow`. This
+browser remembers whether you left the Tickets pane on Graph, and opens it
+there after a reload; `#tickets-graph` in the address opens it too.
+
+- **Lanes.** Each lane is a track, by the rules in
+  [the dependency graph](#the-dependency-graph): a `track:` label, else a
+  milestone, else the issues linked to it, so an issue with no link, label or
+  milestone has a lane of its own. Its heading names the track, what set it
+  and how many issues it holds. Lanes holding a ticket come first, then label,
+  milestone and linked tracks, each in name order.
+- **Layout.** A blocker sits to the left of what it blocks, and a parent to
+  the left of its sub-issues, so work flows left to right. The same graph
+  always lays out the same way. A wide graph scrolls inside the tab, never
+  the page. Each issue shows its `repo#N`, title and state: a ticket's live
+  state, or for an issue with no ticket ready, blocked, external, skipped,
+  closed or open. Amber still marks only a ticket with an open card.
+- **Links.** A solid arrow runs from a blocker to the issue it blocks, and a
+  dashed line from a parent to its sub-issue.
+- **Tracing.** Hover or focus an issue, and the chain of issues that block it,
+  however far back, turns red, and the chain it unlocks turns blue. Its
+  parent and sub-issues keep their look, and everything else turns muted
+  until the pointer leaves and focus moves out of the graph. The latest hover
+  or focus picks the issue, and with the pointer off the graph, the focused
+  issue keeps its trace.
+- **Filters.** The [filter bar](#filtering-the-page), a saved
+  [context](#contexts), search and the [pulse strip](#the-pulse-strip) apply
+  to the graph too. An issue they leave out stays in place with a dashed
+  outline and muted text, so the layout never jumps, and the tab's count
+  reads visible/total. A ticket matches as its row would; an issue with no
+  ticket matches by repo, its ready, blocked, external or closed standing,
+  and its label, title, track and milestone.
+- **Inspector.** Click an issue, or press Enter or Space on it, to open it in
+  [the inspector](#the-inspector).
+- **Keyboard.** The graph is one tab stop. The arrow keys move between
+  issues lane by lane and left to right, as do `j` and `k` while single-key
+  shortcuts are on, and Home and End jump to the first and last.
+- **Live updates.** The graph follows each board update. While the pointer or
+  focus is in the graph, a change that would move issues waits until it
+  leaves, so nothing shifts under the pointer.
+
+Without a `flow` block, or while `/api/flow` is loading or failing, the tab
+draws the open tickets with no links, one lane per repository and a
+**Tickets** lane for those the board has not placed, and says so above the
+graph. When a refresh fails after a good read, the tab keeps the last graph
+it read and says so.
 
 ## GitHub reconcile
 

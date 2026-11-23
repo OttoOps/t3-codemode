@@ -9998,3 +9998,73 @@ fn answers_stored_before_the_cut_flag_infer_it_from_their_shape() {
     assert_eq!(view(json!({"answer": capped, "answerCut": false})), false);
     assert_eq!(view(json!({"answer": null})), Value::Null);
 }
+
+#[tokio::test]
+async fn without_a_flow_the_graph_tab_draws_open_tickets_one_lane_per_repo_and_is_remembered() {
+    let (html, st) = two_gate_page().await;
+    let r = run_page_async_with(
+        &html,
+        r#"globalThis.__storage = { "t3board.graph": "on" };"#,
+        &format!(
+            r##"async () => {{
+{PAGE_HELPERS}
+const base = {st};
+{ROWS}
+const tree = [
+  T("acme/b#2", {{ repo: "acme/b", status: "running" }}),
+  T("acme/a#1", {{ repo: "acme/a" }}),
+  T("loose#3"),
+  T("acme/a#4", {{ repo: "acme/a", done: true }}),
+];
+const restored = document.getElementById("app").getAttribute("data-tab");
+emitState({{ ...base, cards: [], tree }});
+const btn = (id) => q('.gnode[data-id="' + id + '"]');
+const lanes = document.querySelectorAll(".glt").map((t) => t.childNodes.filter((n) => n.nodeType === 3).map((n) => n.data).join(""));
+const nodes = document.querySelectorAll(".gnode").map((b) => [b.dataset.id, b.getAttribute("tabindex"), b.querySelector('[data-part="st"]').textContent]);
+btn("t:t-acme/a#1").focus();
+btn("t:t-acme/a#1").dispatch("keydown", {{ key: "ArrowDown" }});
+const moved = document.activeElement.dataset.id;
+btn("t:t-acme/b#2").dispatch("keydown", {{ key: "End" }});
+const end = document.activeElement.dataset.id;
+prefs.keys = false;
+btn("t:t-loose#3").dispatch("keydown", {{ key: "k" }});
+const keysOff = document.activeElement.dataset.id;
+prefs.keys = true;
+btn("t:t-loose#3").dispatch("keydown", {{ key: "k" }});
+const keysOn = document.activeElement.dataset.id;
+const tabs = nodes.length && document.querySelectorAll(".gnode").filter((b) => b.getAttribute("tabindex") === "0").map((b) => b.dataset.id);
+btn("t:t-acme/a#1").dispatch("click");
+const opened = document.getElementById("drawer").getAttribute("data-kind") + " " + q('#drawer [data-part="id"]').textContent;
+const depsHidden = q('#drawer [data-part="deps"]').hidden;
+graphRemember("open");
+const pref = localStorage.getItem("t3board.graph");
+return {{ restored, lanes, nodes, moved, end, keysOff, keysOn, tabs, opened, depsHidden, pref, note: q("#graph-note").textContent,
+  edges: document.querySelectorAll(".ge").length, flowFetches: fetches.filter((f) => f.url === "/api/flow").length }};
+}}"##
+        ),
+    );
+    assert_eq!(r["restored"], "graph", "the viewer's last tab comes back from localStorage: {r}");
+    assert_eq!(r["lanes"], json!(["acme/a", "acme/b", "Tickets"]), "{r}");
+    assert_eq!(
+        r["nodes"],
+        json!([["t:t-acme/a#1", "0", "idle"], ["t:t-acme/b#2", "-1", "running"], ["t:t-loose#3", "-1", "idle"]]),
+        "open tickets only, one roving tab stop: {r}"
+    );
+    assert!(r["note"].as_str().unwrap().starts_with("No flow in the config"), "{r}");
+    assert_eq!((&r["edges"], &r["flowFetches"]), (&json!(0), &json!(0)), "{r}");
+    assert_eq!((&r["moved"], &r["end"]), (&json!("t:t-acme/b#2"), &json!("t:t-loose#3")), "{r}");
+    assert_eq!(
+        (&r["keysOff"], &r["keysOn"]),
+        (&json!("t:t-loose#3"), &json!("t:t-acme/b#2")),
+        "k moves only while single-key shortcuts are on: {r}"
+    );
+    assert_eq!(r["tabs"], json!(["t:t-acme/b#2"]), "{r}");
+    assert_eq!(r["opened"], "ticket acme/a#1", "{r}");
+    assert_eq!(r["depsHidden"], true, "{r}");
+    assert_eq!(r["pref"], "off", "{r}");
+    for needle in ["id=\"tab-graph\"", "id=\"tp-graph\"", "t3board.graph", "createElementNS(SVG_NS"] {
+        assert!(html.contains(needle), "missing {needle:?}");
+    }
+    let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/board.md")).unwrap();
+    assert!(doc.contains("### The Graph tab"), "docs/src/board.md documents the Graph tab");
+}
