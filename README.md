@@ -57,7 +57,7 @@ They load in T3 Code's Claude Code, Codex and Antigravity threads.
 | Skill | Say | What it does |
 |---|---|---|
 | `t3-workflow` | "how does the T3 workflow work" | The link protocol under every workflow thread, and the router to the other skills. |
-| `setup-t3-workflow` | "set up the T3 workflow" | Picks the reviewer, passes, credential renewal, delivery and models, and writes the config. |
+| `setup-t3-workflow` | "set up the T3 workflow" | Picks the reviewer, passes, credential renewal, delivery and models, writes the config, and sets up remote board access. |
 | `t3-overseer` | "work 41, 42 and 43 in parallel" | One root thread over several issues, with one list of the decisions you owe. |
 | `t3-ticket` | "work on issue 42" | Splits an issue into PRs, runs one worker thread per PR, merges and deploys on your word. |
 | `t3-worker` | nothing, `t3-ticket` launches it | Builds one PR, has it reviewed, follows it to merged, hands off. |
@@ -132,7 +132,8 @@ Tailscale tells t3cm each caller's login, so no browser needs pairing. Only
 the host's own login gets in unless you pass `--allow-user <login>`, once per
 login; add `--require-pairing` to also pair each browser.
 `t3cm board unexpose` turns remote access back off once you restart the
-service.
+service. The `setup-t3-workflow` skill runs these steps for you, including the
+operator step, when you ask your agent to open the board from another device.
 
 Behind Caddy, nginx or Cloudflare Tunnel, set `board.remote` to
 `{"mode": "pairing", "origin": "https://board.example.com"}` in the config
