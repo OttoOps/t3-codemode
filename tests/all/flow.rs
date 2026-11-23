@@ -2,7 +2,7 @@ use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::BOARD;
 use t3_codemode::config::Config;
-use t3_codemode::fake::github_issue;
+use t3_codemode::fake::{github_issue, project};
 use t3_codemode::field;
 use t3_codemode::store::Pending;
 
@@ -11,11 +11,18 @@ const TOOLS: &str = "acme/tools";
 const FLOW: &str = "flow";
 
 fn flowing(max: usize) -> H {
-    let cfg =
-        Config::from_value(json!({"flow": {"repos": [REPO, TOOLS], "optIn": {"label": FLOW}, "maxTickets": max}}));
+    flowing_with(max, "ask")
+}
+
+fn flowing_with(max: usize, launch: &str) -> H {
+    let cfg = Config::from_value(
+        json!({"flow": {"repos": [REPO, TOOLS], "optIn": {"label": FLOW}, "maxTickets": max, "launch": launch}}),
+    );
     let h = H::build(Vec::new(), cfg.unwrap());
     h.github.add_repo(REPO);
     h.github.add_repo(TOOLS);
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
     h
 }
 
@@ -172,7 +179,8 @@ async fn with_no_flow_block_the_flow_is_off_and_reads_nothing() {
 
     assert_eq!(
         f,
-        json!({"enabled": false, "launch": null, "maxTickets": 0, "free": 0, "running": [], "queue": [], "blocked": []})
+        json!({"enabled": false, "launch": null, "maxTickets": 0, "free": 0, "running": [], "queue": [], "blocked": [],
+               "skipped": []})
     );
     assert!(h.github.calls().is_empty());
 }
@@ -241,4 +249,352 @@ fn the_flow_block_is_validated() {
     assert!(msg.contains("project"), "{msg}");
     let (_, msg) = config_error(json!({"repos": [REPO], "maxTickets": 1}));
     assert!(msg.contains("optIn"), "{msg}");
+}
+
+fn flow_cards(h: &H) -> Vec<Value> {
+    h.app
+        .wf
+        .cards()
+        .unwrap()
+        .into_iter()
+        .map(|c| serde_json::to_value(c).unwrap())
+        .filter(|c| c["kind"] == "flow")
+        .collect()
+}
+
+async fn next(h: &H) -> Value {
+    result(&h.exec("async () => wf.flow.next()").await)
+}
+
+async fn reconcile(h: &H) {
+    h.app.wf.reconcile().await.unwrap();
+}
+
+#[tokio::test]
+async fn in_ask_mode_a_handoff_raises_a_launch_card_for_the_top_ready_issue() {
+    let h = flowing(2);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    issue(&h, REPO, 3, &[FLOW, "priority: low"], 3);
+    issue(&h, REPO, 4, &[FLOW, "priority: high"], 4);
+    issue(&h, REPO, 9, &[], 5);
+    h.github.set_blockers(REPO, 4, &[(REPO, 9)]);
+    h.github.close_issue(REPO, 9);
+    ticket(&h, "mcp:t1", "widgets#1").await;
+    ticket(&h, "mcp:t2", "widgets#2").await;
+
+    reconcile(&h).await;
+    assert!(flow_cards(&h).is_empty());
+    h.wf("mcp:t1", "send", json!({"kind": "handoff", "body": "done"})).await;
+
+    let c = flow_cards(&h);
+    assert_eq!(c.len(), 1);
+    assert_eq!(
+        c[0]["text"],
+        "Launch widgets#4 next? (priority: high, unblocked by #9), here: https://github.com/acme/widgets/issues/4"
+    );
+    assert_eq!(c[0]["options"], json!(["launch", "skip"]));
+    assert_eq!(c[0]["label"], "widgets#4");
+    assert_eq!(c[0]["ticket"], Value::Null);
+    assert_eq!(c[0]["flow"]["url"], "https://github.com/acme/widgets/issues/4");
+    reconcile(&h).await;
+    assert_eq!(flow_cards(&h).len(), 1);
+    assert!(h.fake.launched().is_empty());
+
+    let id = c[0]["id"].as_str().unwrap();
+    let r = h.app.wf.answer(id, "launch").await.unwrap();
+    assert_eq!(r["launched"]["ok"], true);
+    assert_eq!(h.fake.launched()[0]["title"], "widgets#4: Issue 4");
+    assert!(flow_cards(&h).is_empty());
+    reconcile(&h).await;
+    assert!(flow_cards(&h).is_empty());
+    let f = flow(&h).await;
+    assert_eq!(f["free"], 0);
+    assert_eq!(labels(&f["queue"]), ["widgets#3"]);
+    assert_eq!(labels(&f["skipped"]), ["widgets#1"]);
+}
+
+#[tokio::test]
+async fn in_auto_mode_a_handoff_launches_the_next_issue_and_posts_a_feed_event() {
+    let h = flowing_with(1, "auto");
+    issue(&h, REPO, 1, &[FLOW], 1);
+    issue(&h, REPO, 2, &[FLOW, "priority: high"], 2);
+    issue(&h, REPO, 3, &[FLOW], 3);
+    ticket(&h, "mcp:t1", "widgets#1").await;
+
+    h.wf("mcp:t1", "send", json!({"kind": "handoff", "body": "done"})).await;
+
+    let launched = h.fake.launched();
+    assert_eq!(launched.len(), 1);
+    assert_eq!(launched[0]["title"], "widgets#2: Issue 2");
+    assert_eq!(launched[0]["projectId"], "p-widgets");
+    assert!(flow_cards(&h).is_empty());
+    let feed = h.app.wf.feed(10).unwrap();
+    assert!(
+        feed.iter().any(|m| m["kind"] == "event" && m["head"] == "Flow launched widgets#2 (priority: high)"),
+        "{feed:?}"
+    );
+    reconcile(&h).await;
+    assert_eq!(h.fake.launched().len(), 1);
+}
+
+#[tokio::test]
+async fn an_auto_launch_that_fails_skips_the_issue_instead_of_retrying_it() {
+    let h = flowing_with(1, "auto");
+    issue(&h, TOOLS, 5, &[FLOW], 1);
+
+    let r = next(&h).await;
+
+    assert_eq!(r["picked"][0]["launched"]["ok"], false);
+    assert!(h.fake.launched().is_empty());
+    let f = flow(&h).await;
+    assert_eq!(labels(&f["skipped"]), ["tools#5"]);
+    assert_eq!(next(&h).await["reason"], "no ready issue to launch");
+}
+
+#[tokio::test]
+async fn with_launch_off_nothing_launches_and_nothing_is_read() {
+    let h = flowing_with(1, "off");
+    issue(&h, REPO, 1, &[FLOW], 1);
+    ticket(&h, "mcp:t1", "widgets#1").await;
+
+    h.wf("mcp:t1", "send", json!({"kind": "handoff", "body": "done"})).await;
+    let r = next(&h).await;
+
+    assert_eq!(r["launch"], "off");
+    assert_eq!(r["picked"], json!([]));
+    assert!(r["reason"].as_str().unwrap().contains("off"), "{r}");
+    assert!(flow_cards(&h).is_empty());
+    assert!(h.fake.launched().is_empty());
+    assert!(h.github.calls().is_empty());
+}
+
+#[tokio::test]
+async fn an_issue_becomes_ready_on_the_next_reconcile_tick_after_its_last_blocker_closes() {
+    let h = flowing(1);
+    issue(&h, REPO, 5, &[FLOW], 1);
+    issue(&h, REPO, 6, &[], 2);
+    issue(&h, TOOLS, 7, &[], 3);
+    h.github.set_blockers(REPO, 5, &[(REPO, 6), (TOOLS, 7)]);
+
+    reconcile(&h).await;
+    assert!(flow_cards(&h).is_empty());
+    h.github.close_issue(REPO, 6);
+    reconcile(&h).await;
+    assert!(flow_cards(&h).is_empty());
+    h.github.close_issue(TOOLS, 7);
+    reconcile(&h).await;
+
+    let c = flow_cards(&h);
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0]["label"], "widgets#5");
+    assert!(c[0]["text"].as_str().unwrap().contains("(priority: none, unblocked by #6, tools#7)"), "{}", c[0]["text"]);
+}
+
+#[tokio::test]
+async fn a_flow_tickets_issue_closing_opens_its_slot() {
+    let h = flowing(1);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    ticket(&h, "mcp:t1", "widgets#1").await;
+
+    reconcile(&h).await;
+    assert!(flow_cards(&h).is_empty());
+    h.github.close_issue(REPO, 1);
+    reconcile(&h).await;
+
+    assert_eq!(labels(&json!(flow_cards(&h))), ["widgets#2"]);
+    let f = flow(&h).await;
+    assert_eq!(f["running"], json!([]));
+    assert_eq!(f["free"], 1);
+}
+
+#[tokio::test]
+async fn a_skipped_issue_stays_out_of_the_picks_until_its_labels_or_blockers_change() {
+    let h = flowing(1);
+    issue(&h, REPO, 1, &[FLOW, "priority: high"], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    issue(&h, REPO, 3, &[], 3);
+
+    let first = next(&h).await;
+    let id = first["picked"][0]["card"].as_str().unwrap().to_string();
+    assert_eq!(first["picked"][0]["label"], "widgets#1");
+    let r = h.app.wf.answer(&id, "skip").await.unwrap();
+
+    assert_eq!(r["skipped"], "widgets#1");
+    assert_eq!(r["next"]["picked"][0]["label"], "widgets#2");
+    assert_eq!(labels(&json!(flow_cards(&h))), ["widgets#2"]);
+    let f = flow(&h).await;
+    assert_eq!(labels(&f["skipped"]), ["widgets#1"]);
+    assert_eq!(labels(&f["queue"]), ["widgets#2"]);
+    let two = flow_cards(&h)[0]["id"].as_str().unwrap().to_string();
+    h.app.wf.answer(&two, "skip").await.unwrap();
+    reconcile(&h).await;
+    assert!(flow_cards(&h).is_empty());
+
+    h.github.update_issue(REPO, 1, json!({"labels": {"nodes": [{"name": FLOW}, {"name": "priority: medium"}]}}));
+    h.github.set_blockers(REPO, 2, &[(REPO, 3)]);
+    h.github.close_issue(REPO, 3);
+    let f = flow(&h).await;
+    assert_eq!(labels(&f["queue"]), ["widgets#1", "widgets#2"]);
+    assert_eq!(f["skipped"], json!([]));
+    reconcile(&h).await;
+    h.github.update_issue(REPO, 1, json!({"labels": {"nodes": [{"name": FLOW}, {"name": "priority: high"}]}}));
+    assert_eq!(labels(&flow(&h).await["queue"]), ["widgets#1", "widgets#2"]);
+}
+
+#[tokio::test]
+async fn wf_flow_next_runs_one_pick_and_open_cards_hold_their_slots() {
+    let h = flowing(3);
+    for n in 1..=4 {
+        issue(&h, REPO, n, &[FLOW], n as u32);
+    }
+
+    assert_eq!(next(&h).await["picked"][0]["label"], "widgets#1");
+    let second = next(&h).await;
+    assert_eq!(second["picked"][0]["label"], "widgets#2");
+    assert_eq!(second["offered"][0]["label"], "widgets#1");
+    reconcile(&h).await;
+    assert_eq!(labels(&json!(flow_cards(&h))), ["widgets#1", "widgets#2", "widgets#3"]);
+    let full = next(&h).await;
+    assert_eq!(full["picked"], json!([]));
+    assert_eq!(full["reason"], "no free ticket slot");
+
+    h.github.close_issue(REPO, 2);
+    reconcile(&h).await;
+    assert_eq!(labels(&json!(flow_cards(&h))), ["widgets#1", "widgets#3", "widgets#4"]);
+    let resolved = h.app.wf.cards_with(true).unwrap();
+    let gone = resolved.iter().find(|c| c.label.as_deref() == Some("widgets#2")).unwrap();
+    assert_eq!(gone.resolution.as_deref(), Some("no longer ready"));
+}
+
+#[tokio::test]
+async fn a_flow_card_takes_only_launch_or_skip() {
+    let h = flowing(1);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    let id = next(&h).await["picked"][0]["card"].as_str().unwrap().to_string();
+
+    let e = h.app.wf.answer(&id, "maybe").await.unwrap_err();
+
+    assert!(format!("{e:#}").contains("takes \"launch\" or \"skip\""), "{e:#}");
+    assert_eq!(flow_cards(&h).len(), 1);
+}
+
+#[tokio::test]
+async fn wf_flow_next_is_in_the_catalog() {
+    let h = H::new();
+    let out = h.app.search(r#"async () => catalog.find(t => t.name === "wf.flow.next").signature"#).await;
+    let sig = ok_json(&out)["result"].as_str().unwrap().to_string();
+    assert!(sig.contains("wf.flow.next(): Promise<{ launch:"), "{sig}");
+}
+
+#[tokio::test]
+async fn a_launch_card_for_an_issue_no_longer_ready_launches_nothing() {
+    let h = flowing(1);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    let id = next(&h).await["picked"][0]["card"].as_str().unwrap().to_string();
+    h.github.close_issue(REPO, 1);
+
+    let e = h.app.wf.answer(&id, "launch").await.unwrap_err();
+
+    assert!(format!("{e:#}").contains("widgets#1 is no longer ready"), "{e:#}");
+    assert!(h.fake.launched().is_empty());
+    assert!(flow_cards(&h).is_empty());
+}
+
+#[tokio::test]
+async fn a_card_whose_issue_launched_elsewhere_no_longer_holds_a_slot() {
+    let h = flowing(2);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    reconcile(&h).await;
+    let cards = flow_cards(&h);
+    assert_eq!(labels(&json!(cards)), ["widgets#1", "widgets#2"]);
+    result(&h.exec("async () => wf.launchTicket({ issue: 'acme/widgets#1' })").await);
+
+    let r = h.app.wf.answer(cards[1]["id"].as_str().unwrap(), "launch").await.unwrap();
+
+    assert_eq!(r["launched"]["ok"], true);
+    assert_eq!(h.fake.launched().len(), 2);
+}
+
+#[tokio::test]
+async fn a_skip_expires_when_a_blocker_reopens_and_closes_again() {
+    let h = flowing(1);
+    issue(&h, REPO, 5, &[FLOW], 1);
+    issue(&h, REPO, 6, &[], 2);
+    h.github.set_blockers(REPO, 5, &[(REPO, 6)]);
+    h.github.close_issue(REPO, 6);
+    let id = next(&h).await["picked"][0]["card"].as_str().unwrap().to_string();
+    h.app.wf.answer(&id, "skip").await.unwrap();
+
+    h.github.update_issue(REPO, 6, json!({"state": "OPEN"}));
+    reconcile(&h).await;
+    h.github.close_issue(REPO, 6);
+
+    assert_eq!(labels(&flow(&h).await["queue"]), ["widgets#5"]);
+}
+
+#[tokio::test]
+async fn a_ticket_that_finishes_while_its_issue_is_blocked_frees_it_once_the_blocker_closes() {
+    let h = flowing(1);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    issue(&h, REPO, 2, &[], 2);
+    h.github.set_blockers(REPO, 1, &[(REPO, 2)]);
+    ticket(&h, "mcp:t1", "widgets#1").await;
+
+    h.wf("mcp:t1", "send", json!({"kind": "handoff", "body": "done"})).await;
+    h.github.close_issue(REPO, 2);
+
+    let f = flow(&h).await;
+    assert_eq!(labels(&f["queue"]), ["widgets#1"]);
+    assert_eq!(f["skipped"], json!([]));
+}
+
+#[tokio::test]
+async fn with_more_cards_than_slots_the_oldest_ready_card_keeps_the_slot() {
+    let h = flowing(2);
+    for n in 1..=3 {
+        issue(&h, REPO, n, &[FLOW], n as u32);
+    }
+    reconcile(&h).await;
+    let cards = flow_cards(&h);
+    assert_eq!(labels(&json!(cards)), ["widgets#1", "widgets#2"]);
+    result(&h.exec("async () => wf.launchTicket({ issue: 'acme/widgets#3' })").await);
+
+    let r = h.app.wf.answer(cards[0]["id"].as_str().unwrap(), "launch").await.unwrap();
+
+    assert_eq!(r["launched"]["ok"], true);
+    assert_eq!(h.fake.launched().len(), 2);
+}
+
+#[tokio::test]
+async fn switching_to_auto_retires_the_open_launch_cards_and_launches() {
+    let mut h = flowing(1);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    next(&h).await;
+    assert_eq!(flow_cards(&h).len(), 1);
+    h.config = Config::from_value(
+        json!({"flow": {"repos": [REPO, TOOLS], "optIn": {"label": FLOW}, "maxTickets": 1, "launch": "auto"}}),
+    )
+    .unwrap();
+    h.reopen();
+
+    reconcile(&h).await;
+
+    assert!(flow_cards(&h).is_empty());
+    assert_eq!(h.fake.launched()[0]["title"], "widgets#1: Issue 1");
+}
+
+#[tokio::test]
+async fn an_auto_pick_does_not_launch_a_sub_issue_after_launching_its_parent() {
+    let h = flowing_with(2, "auto");
+    issue(&h, REPO, 1, &[FLOW], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    h.github.set_parent(REPO, 2, (REPO, 1));
+
+    reconcile(&h).await;
+
+    let launched: Vec<String> = h.fake.launched().iter().map(|l| l["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(launched, ["widgets#1: Issue 1"]);
 }

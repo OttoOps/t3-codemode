@@ -334,6 +334,18 @@ impl Wf {
         for t in &pass.woken {
             self.flush_to(t).await?;
         }
+        self.flow_due.store(false, std::sync::atomic::Ordering::Release);
+        match self.flow_pick(None).await {
+            Ok(v) => pass.actions.extend(
+                v["picked"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| p["label"].as_str())
+                    .map(|l| format!("flow picked {l}")),
+            ),
+            Err(e) => failed.push(format!("flow: {e:#}")),
+        }
         if !pass.actions.is_empty() {
             self.changed();
         }

@@ -1953,7 +1953,9 @@ function resetCard(card) {
   part(card, "err").hidden = true;
 }
 
-function optionsSig(c) { return JSON.stringify([c.options, !!c.ticket]); }
+function answerable(c) { return !!(c.ticket || c.flow); }
+
+function optionsSig(c) { return JSON.stringify([c.options, answerable(c)]); }
 
 function patchCard(card, c) {
   if (card._card && inst(card._card) !== inst(c)) {
@@ -2009,7 +2011,7 @@ function patchCard(card, c) {
   const sig = optionsSig(c);
   if (opts.getAttribute("data-sig") !== sig) {
     setAttr(opts, "data-sig", sig);
-    opts.replaceChildren(...(c.ticket ? c.options.map((o, i) => h("button", { class: "btn answer", type: "button", "data-opt": String(i + 1),
+    opts.replaceChildren(...(answerable(c) ? c.options.map((o, i) => h("button", { class: "btn answer", type: "button", "data-opt": String(i + 1),
       "aria-label": o + ", reply to " + cardLabel(c),
       onclick: (e) => { if (!blocked(card)) startSend(card._card, "answer", o); else e.preventDefault(); } }, o)) : []));
   }

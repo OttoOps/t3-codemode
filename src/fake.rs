@@ -629,6 +629,9 @@ fn operation(query: &str) -> &'static str {
     if query.starts_with("query FlowIssues(") {
         return "flowIssues";
     }
+    if query.starts_with(crate::flow::FLOW_TICKETS) {
+        return "flowTickets";
+    }
     for op in ["enqueuePullRequest", "mergePullRequest", "enablePullRequestAutoMerge"] {
         if query.contains(op) {
             return op;
@@ -695,6 +698,27 @@ fn flow_issues(st: &GhState, variables: &Value) -> Value {
     }}}})
 }
 
+fn flow_tickets(st: &GhState, variables: &Value) -> Value {
+    let mut data = serde_json::Map::new();
+    let mut errs = Vec::new();
+    for i in 0.. {
+        let Some(owner) = variables[format!("o{i}")].as_str() else { break };
+        let repo = format!("{owner}/{}", variables[format!("r{i}")].as_str().unwrap()).to_ascii_lowercase();
+        let number = variables[format!("n{i}")].as_u64().unwrap();
+        let alias = format!("t{i}");
+        let issue = st.issues.get(&issue_key(&repo, number)).map(|i| json!({"state": i["state"]}));
+        if issue.is_none() {
+            errs.push(json!({"type": "NOT_FOUND", "path": [alias, "issue"], "message": "no issue"}));
+        }
+        data.insert(alias, json!({"issue": issue}));
+    }
+    let mut out = json!({"data": data});
+    if !errs.is_empty() {
+        out["errors"] = json!(errs);
+    }
+    out
+}
+
 impl crate::github::GitHub for FakeGitHub {
     fn graphql<'a>(&'a self, query: &'a str, variables: Value) -> BoxFut<'a, anyhow::Result<Value>> {
         Box::pin(async move {
@@ -709,6 +733,9 @@ impl crate::github::GitHub for FakeGitHub {
             }
             if op == "flowIssues" {
                 return Ok(flow_issues(&st, &variables));
+            }
+            if op == "flowTickets" {
+                return Ok(flow_tickets(&st, &variables));
             }
             if op == "reconcile" {
                 let mut data = serde_json::Map::new();

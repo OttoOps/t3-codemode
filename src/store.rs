@@ -455,6 +455,10 @@ impl Store {
         self.with(|c| c.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).optional())
     }
 
+    pub fn meta_del(&self, key: &str) -> Result<bool> {
+        Ok(self.with(|c| c.execute("DELETE FROM meta WHERE key = ?1", [key]))? > 0)
+    }
+
     pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
         self.with(|c| {
             c.execute(

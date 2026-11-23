@@ -34,7 +34,7 @@ pub struct H {
     pub github: Arc<FakeGitHub>,
     pub desktop: Arc<FakeDesktop>,
     pub tailscale: Arc<FakeTailscale>,
-    config: Config,
+    pub config: Config,
 }
 
 impl H {

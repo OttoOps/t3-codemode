@@ -168,7 +168,8 @@ parent and a child, and the service keeps every link and message in its store.
 - `wf.waiting.add`, `wf.waiting.resolve` and `wf.waiting.list` keep an overseer
   thread's waiting list.
 - `wf.flow()` returns the [flow](config.md#flow)'s ready queue, the flow
-  tickets running, and the free slots. See [wf.flow](#wfflow).
+  tickets running, and the free slots. `wf.flow.next()` runs one pick by hand.
+  See [wf.flow](#wfflow).
 - `wf.merge({repo, pr, head, method?})` merges a GitHub pull request at the
   approved head commit. `repo` is `owner/name`, `head` the full 40-character
   SHA the user approved, and `method` one of `merge`, `squash` or `rebase`.
@@ -262,11 +263,12 @@ needs no caller and changes nothing. It returns:
 | `enabled` | `false` when the config has no `flow` block. Then every list is empty and `wf.flow()` reads nothing from GitHub. |
 | `launch`, `maxTickets` | The config's values, or `null` and `0` when the flow is off. |
 | `free` | `maxTickets` minus the flow tickets running, never below zero. |
-| `running` | The flow tickets: `label`, `repo`, `number`, `url`, and the ticket's `thread` and `link`. `thread` is `null` for a launch that hasn't joined yet. |
+| `running` | The flow tickets: `label`, `repo`, `number`, `url`, and the ticket's `thread` and `link`. `thread` is `null` for a launch that hasn't joined yet. A ticket whose issue has closed isn't listed. |
 | `queue` | The ready issues in launch order. |
 | `blocked` | The opt-in issues held back by an open blocker or by `blocked: external`, in the same order. |
+| `skipped` | Ready issues kept out of the picks, in the same order: skipped on a launch card, or still open after their own ticket finished. Each comes back once its labels or blockers change. |
 
-Each issue in `queue` and `blocked` has `repo`, `number`, `label`, `url`,
+Each issue in `queue`, `blocked` and `skipped` has `repo`, `number`, `label`, `url`,
 `title`, `priority`, `milestone`, `createdAt`, `parent` and `unblockedBy`.
 `priority` is `high`, `medium`, `low` or `null`, `milestone` has `title` and
 `dueOn` or is `null`, and `unblockedBy` lists the closed issues that used to
@@ -281,6 +283,24 @@ async () => {
   const f = await wf.flow();
   return { free: f.free, next: f.queue.slice(0, 3).map(i => `${i.label} ${i.priority ?? "-"}`) };
 }
+```
+
+`wf.flow.next()` runs one pick by hand, under the rules the board applies when
+a slot opens ([The flow](board.md#the-flow)). It takes the first ready issue
+that has no launch card yet. With `launch: "ask"` it raises that issue's
+launch card, with `"auto"` it launches the ticket, and with `"off"` it reads
+nothing and launches nothing. It returns:
+
+| Field | Holds |
+|---|---|
+| `launch`, `free` | The config's mode and the free slots the pick saw. |
+| `picked` | The issue it took, if any: `label`, `url`, `title`, `priority` and `why` (such as `priority: high, unblocked by #9`), with `card` for the card it raised, `launched` for the `wf.launchTicket` result, or `error` when the launch threw. |
+| `offered` | The launch cards still open, each `{ label, card }`. Each holds a slot. |
+| `retired` | The launch cards this pick resolved, because their issue is no longer ready or no slot is free. |
+| `reason` | Why `picked` is empty: `no free ticket slot`, `no ready issue to launch`, or the flow being off. |
+
+```js
+async () => (await wf.flow.next()).picked
 ```
 
 ## console
