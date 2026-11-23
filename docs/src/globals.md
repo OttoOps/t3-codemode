@@ -105,6 +105,10 @@ parent and a child, and the service keeps every link and message in its store.
   entry fails the send. A thread parent gets only the body.
 - `wf.reply`, `wf.gate`, `wf.close`, `wf.inbox`, `wf.show`, `wf.board`,
   `wf.adopt` and `wf.sweep` cover the rest of a link's life.
+- `wf.pause({ child?, paused? })` pauses a link that is parked on purpose:
+  the caller's own parent link, or with `child` one of its child links.
+  `paused: false` resumes it. The [board](board.md#pausing) shows it as
+  paused, not idle.
 - `wf.launchTicket`, `wf.dispatch`, `wf.cards`, `wf.answer` and `wf.feed` work
   with the [board](board.md).
 - `wf.issue({ url, title?, note? })` reports a GitHub issue the calling thread

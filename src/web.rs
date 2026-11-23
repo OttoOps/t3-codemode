@@ -1039,6 +1039,20 @@ async fn restore_ticket(State(web): State<Web>, Path(thread): Path<String>) -> R
     }
 }
 
+async fn pause_link(State(web): State<Web>, Path(thread): Path<String>) -> Response {
+    match web.app.wf.pause_link(&thread, true).await {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
+async fn resume_link(State(web): State<Web>, Path(thread): Path<String>) -> Response {
+    match web.app.wf.pause_link(&thread, false).await {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
 async fn settle_ask(State(web): State<Web>, Path(id): Path<String>) -> Response {
     match web.app.wf.settle_ask(&id) {
         Ok(v) => json_ok(StatusCode::OK, v),
@@ -1297,6 +1311,8 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/models/ask", put(put_ask_model))
         .route("/api/tickets/{thread}/settle", post(settle_ticket))
         .route("/api/tickets/{thread}/restore", post(restore_ticket))
+        .route("/api/links/{thread}/pause", post(pause_link))
+        .route("/api/links/{thread}/resume", post(resume_link))
         .route("/api/asks/{id}/settle", post(settle_ask))
         .route("/api/asks/{id}/restore", post(restore_ask))
         .route("/api/settle-done", post(settle_done))

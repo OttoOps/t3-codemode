@@ -222,6 +222,60 @@ async fn an_open_gate_suppresses_nudges() {
 }
 
 #[tokio::test]
+async fn a_paused_link_is_never_nudged_escalated_or_reported_until_it_resumes() {
+    let h = H::new();
+    link_ticket_worker(&h).await;
+    assert_eq!(h.tick(45).await, vec!["nudge #41 PR 1/2 (1/2)"]);
+    assert_eq!(h.wf(WORKER, "pause", json!({})).await, json!({"label": "#41 PR 1/2", "paused": true}));
+    assert_eq!(link(&h, WORKER).nudges, 0);
+    let n = h.sent().len();
+    for m in [100, 200, 300] {
+        assert!(h.tick(m).await.is_empty());
+    }
+    h.fake.update(WORKER, json!({"status": "waiting", "pendingRequestCount": 1}));
+    assert!(h.tick(400).await.is_empty());
+    h.fake.update(WORKER, json!({"status": "running", "pendingRequestCount": 0}));
+    assert!(h.tick(500).await.is_empty());
+    h.fake.update(WORKER, json!({"status": "failed"}));
+    assert!(h.tick(501).await.is_empty());
+    assert_eq!(h.sent().len(), n);
+    let b = h.wf(TICKET, "board", json!({})).await;
+    assert_eq!(b["children"][0]["paused"], true);
+
+    h.fake.update(WORKER, json!({"status": "idle", "updatedAt": at(501)}));
+    assert_eq!(h.wf(WORKER, "pause", json!({"paused": false})).await["paused"], false);
+    assert!(h.tick(520).await.is_empty());
+    assert_eq!(h.tick(546).await, vec!["nudge #41 PR 1/2 (1/2)"]);
+    assert_eq!(h.wf(TICKET, "board", json!({})).await["children"][0]["paused"], false);
+}
+
+#[tokio::test]
+async fn a_parent_pauses_and_resumes_a_child_by_label() {
+    let h = H::new();
+    link_ticket_worker(&h).await;
+    assert_eq!(h.wf(TICKET, "pause", json!({"child": "#41 PR 1/2"})).await["paused"], true);
+    assert!(link(&h, WORKER).paused_at.is_some());
+    assert!(h.tick(300).await.is_empty());
+    h.wf(TICKET, "pause", json!({"child": WORKER, "paused": false})).await;
+    assert_eq!(link(&h, WORKER).paused_at, None);
+    assert_eq!(h.tick(301).await, vec!["nudge #41 PR 1/2 (1/2)"]);
+    let err = h.wf_err(TICKET, "pause", json!({})).await;
+    assert!(err.contains("no parent link to pause"), "{err}");
+    h.wf(WORKER, "send", json!({"kind": "handoff", "body": "done"})).await;
+    let err = h.wf_err(TICKET, "pause", json!({"child": WORKER})).await;
+    assert!(err.contains("closed"), "{err}");
+}
+
+#[tokio::test]
+async fn a_rejoin_keeps_the_pause() {
+    let h = H::new();
+    let call = link_ticket_worker(&h).await;
+    h.wf(WORKER, "pause", json!({})).await;
+    h.exec_as(WORKER, &call).await;
+    assert!(link(&h, WORKER).paused_at.is_some());
+}
+
+#[tokio::test]
 async fn the_gate_kind_opens_the_gate_and_wakes() {
     let h = H::new();
     link_ticket_worker(&h).await;
@@ -507,6 +561,7 @@ fn bare_link(child: &str, parent: &str, label: &str) -> Link {
         settled_at: None,
         restored_at: None,
         project: None,
+        paused_at: None,
     }
 }
 

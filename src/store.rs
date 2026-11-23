@@ -105,6 +105,8 @@ pub struct Link {
     pub restored_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_at: Option<String>,
 }
 
 impl Link {
