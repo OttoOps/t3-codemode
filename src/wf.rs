@@ -8,13 +8,13 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use crate::board::{BOARD, LaunchArgs, NewCard, Remotes, checked_options};
+use crate::board::{BOARD, LaunchArgs, NewCard, Remotes, checked_identity, checked_options, identity_args};
 use crate::clock::{Clock, iso, local_clock, minutes_since};
 use crate::config::{CLOSING, Config, LinkParams, UP_KINDS};
 use crate::github::GitHub;
 use crate::issues::IssueArgs;
 use crate::merge::MergeArgs;
-use crate::store::{Bind, Link, Pending, Store};
+use crate::store::{Bind, Identity, Link, Pending, Store};
 use crate::t3::{T3Client, T3Error};
 use crate::tokens::{T3Tokens, TokenSource};
 use crate::usage::UsageSource;
@@ -38,6 +38,10 @@ struct InitArgs {
     label: Option<String>,
     #[serde(default)]
     root: bool,
+    issue: Option<String>,
+    #[serde(rename = "parentIssue")]
+    parent_issue: Option<String>,
+    part: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -45,6 +49,10 @@ struct InitArgs {
 struct OpenChildArgs {
     role: String,
     label: String,
+    issue: Option<String>,
+    #[serde(rename = "parentIssue")]
+    parent_issue: Option<String>,
+    part: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -56,6 +64,10 @@ struct JoinArgs {
     down: Option<i64>,
     miss: Option<i64>,
     stall: Option<i64>,
+    issue: Option<String>,
+    #[serde(rename = "parentIssue")]
+    parent_issue: Option<String>,
+    part: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -559,7 +571,9 @@ impl Wf {
             "init" => self.init(me, parse(method, args)?).await,
             "openChild" => {
                 let a: OpenChildArgs = parse(method, args)?;
-                self.open_child(me, &a.role, &a.label).await
+                let id =
+                    checked_identity("openChild", a.issue.as_deref(), a.parent_issue.as_deref(), a.part.as_deref())?;
+                self.open_child(me, &a.role, &a.label, id).await
             }
             "join" => self.join(me, parse(method, args)?).await,
             "issue" => self.report_issue(me, parse::<IssueArgs>(method, args)?).await,
@@ -597,6 +611,7 @@ impl Wf {
     async fn init(&self, me: &str, a: InitArgs) -> Result<Value> {
         let config = self.config();
         config.check_role(&a.role)?;
+        let id = checked_identity("init", a.issue.as_deref(), a.parent_issue.as_deref(), a.part.as_deref())?;
         let guard = self.lock.lock().await;
         let open = self.store.link_get(me)?.filter(|l| !l.closed);
         if !a.root && open.is_none() && config.board_oversees(&a.role) {
@@ -616,6 +631,9 @@ impl Wf {
                 down: None,
                 miss: None,
                 stall: None,
+                issue: id.issue,
+                parent_issue: id.parent_issue,
+                part: id.part,
             };
             let joined = self.bind(me, args, thread.as_ref(), true).await?;
             return Ok(json!({"thread": me, "role": a.role, "root": false, "parent": joined["parent"],
@@ -630,7 +648,7 @@ impl Wf {
         Ok(out)
     }
 
-    async fn open_child(&self, me: &str, role: &str, label: &str) -> Result<Value> {
+    async fn open_child(&self, me: &str, role: &str, label: &str, identity: Identity) -> Result<Value> {
         if label.trim().is_empty() {
             bail!("wf.openChild: label must not be empty");
         }
@@ -649,15 +667,17 @@ impl Wf {
             reported: false,
             thread: None,
             link: None,
+            identity: identity.clone(),
         })?;
         let call = format!(
-            "async () => wf.join({{ parent: {}, label: {}, role: {}, down: {}, miss: {}, stall: {} }})",
+            "async () => wf.join({{ parent: {}, label: {}, role: {}, down: {}, miss: {}, stall: {}{} }})",
             json!(me),
             json!(label),
             json!(role),
             params.down,
             params.miss,
-            params.stall
+            params.stall,
+            identity_args(&identity)
         );
         let brief = format!(
             "## t3-codemode link\n\
@@ -685,6 +705,7 @@ impl Wf {
 
     async fn join(&self, me: &str, a: JoinArgs) -> Result<Value> {
         self.config().check_role(&a.role)?;
+        checked_identity("join", a.issue.as_deref(), a.parent_issue.as_deref(), a.part.as_deref())?;
         let thread = self.read_thread(me).await.ok();
         self.bind(me, a, thread.as_ref(), false).await
     }
@@ -692,6 +713,7 @@ impl Wf {
     async fn bind(&self, me: &str, a: JoinArgs, thread: Option<&Value>, auto: bool) -> Result<Value> {
         let field = |k: &str| thread.and_then(|t| t[k].as_str()).map(String::from);
         let (link_url, project) = (field("link"), field("projectId"));
+        let given = checked_identity("join", a.issue.as_deref(), a.parent_issue.as_deref(), a.part.as_deref())?;
         let _g = self.lock.lock().await;
         let parent_role = self.store.node_role(&a.parent)?;
         let config = self.config();
@@ -703,12 +725,26 @@ impl Wf {
         };
         params.validate().map_err(|e| anyhow!("the brief's link numbers are invalid: {e}"))?;
         let now = self.now();
+        let reserved = match auto {
+            true => Identity::default(),
+            false => self
+                .store
+                .pending_all()?
+                .into_iter()
+                .find(|p| p.parent == a.parent && p.label == a.label)
+                .map(|p| p.identity)
+                .unwrap_or_default(),
+        };
         let launched_by = auto.then_some(BOARD);
         let bound = self.store.link_bind_launched(me, !auto, launched_by, |current, launch| {
             if auto && let Some(l) = current.as_ref().filter(|l| !l.closed) {
                 return Bind::Kept(l.clone());
             }
             let old = current.filter(|l| l.parent == a.parent);
+            let identity = given.clone().or(launch.map(|p| p.identity.clone()).unwrap_or_default()).or(match &old {
+                Some(o) => o.identity.clone(),
+                None => reserved.clone(),
+            });
             Bind::Saved(Link {
                 child: me.into(),
                 parent: a.parent.clone(),
@@ -735,6 +771,7 @@ impl Wf {
                 restored_at: None,
                 project: project.or_else(|| old.as_ref().and_then(|o| o.project.clone())),
                 paused_at: old.as_ref().filter(|_| !auto).and_then(|o| o.paused_at.clone()),
+                identity,
             })
         })?;
         let ln = match bound {
@@ -953,7 +990,9 @@ impl Wf {
             children.push(json!({
                 "label": k.label, "role": k.role, "thread": k.child, "link": k.link.clone().or_else(|| live["link"].as_str().map(String::from)),
                 "status": status, "asks": count(&live["pendingRequestCount"]), "background": count(&live["pendingBackgroundTasks"]),
-                "gate": k.gate, "paused": k.paused_at.is_some(), "lastUp": local_clock(&k.last_up), "nudges": k.nudges, "unread": k.unread.len(),
+                "gate": k.gate, "paused": k.paused_at.is_some(),
+                "issue": k.identity.issue, "parentIssue": k.identity.parent_issue, "part": k.identity.part,
+                "lastUp": local_clock(&k.last_up), "nudges": k.nudges, "unread": k.unread.len(),
                 "settled": k.settled_at.is_some(),
                 "last": last.map(|m| json!({"handle": m.handle, "kind": m.kind, "head": m.head(90)})),
             }));

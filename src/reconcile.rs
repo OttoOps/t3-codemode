@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::board::{BOARD, Card, NewCard, gh_name};
+use crate::board::{BOARD, Card, NewCard, gh_name, parse_issue_only};
 use crate::clock::{local_clock, parse_ts};
 use crate::github::errors;
 use crate::merge::{CHECKS, ENQUEUE_PR, MERGE_PR, Ready, checks, ready};
@@ -21,7 +21,7 @@ const EXIT_WINDOW_MINS: f64 = 30.0;
 const PR_FIELDS: &str = "fragment F on PullRequest { id state isDraft headRefOid mergeStateStatus reviewDecision \
 isMergeQueueEnabled isInMergeQueue mergeQueueEntry { position } mergeCommit { oid } mergedAt closedAt \
 timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) { nodes { ... on RemovedFromMergeQueueEvent { \
-reason createdAt } } } ...Checks }";
+reason createdAt } } } closingIssuesReferences(first: 10) { nodes { number repository { nameWithOwner } } } ...Checks }";
 const HELD: &str = "has a failing check at its approved head";
 const NO_REASON: &str = "no reason recorded";
 const NO_TICKET: &str =
@@ -66,6 +66,13 @@ fn at_host_start(before: &str) -> bool {
             .chars()
             .last()
             .is_none_or(|c| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | '@')))
+}
+
+fn closing_issue(repo: &Value) -> Option<String> {
+    repo["pullRequest"]["closingIssuesReferences"]["nodes"].as_array()?.iter().find_map(|n| {
+        let repo = n["repository"]["nameWithOwner"].as_str()?;
+        parse_issue_only(&format!("{repo}#{}", n["number"].as_u64()?)).map(|i| i.slug())
+    })
 }
 
 fn approved_head(body: &str) -> Option<String> {
@@ -169,6 +176,7 @@ struct Tracked {
     tickets: Vec<(String, String)>,
     cards: Vec<i64>,
     approval: Option<String>,
+    unnamed: Vec<String>,
 }
 
 impl Tracked {
@@ -385,6 +393,10 @@ impl Wf {
             for (o, r, n) in urls.iter().flat_map(|u| pr_refs(u)) {
                 add(&mut map, &format!("{o}/{r}"), n).add(Some(&ln.parent), &ln.opened);
             }
+            let shown = live.as_ref().and_then(|l| l["pr"]["url"].as_str()).and_then(|u| pr_refs(u).into_iter().next());
+            if let Some((o, r, n)) = shown.filter(|_| ln.identity.issue.is_none()) {
+                add(&mut map, &format!("{o}/{r}"), n).unnamed.push(ln.child.clone());
+            }
         }
         for card in self.cards()? {
             if let Some(p) = &card.pr {
@@ -420,7 +432,33 @@ impl Wf {
         Ok(map)
     }
 
+    async fn name_workers(&self, t: &Tracked, repo: &Value) -> Result<()> {
+        let Some(issue) = (!t.unnamed.is_empty()).then(|| closing_issue(repo)).flatten() else { return Ok(()) };
+        let mut named = false;
+        {
+            let _g = self.lock.lock().await;
+            for w in &t.unnamed {
+                let live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+                let shown =
+                    live.get(w).and_then(|(_, l)| l["pr"]["url"].as_str().and_then(|u| pr_refs(u).into_iter().next()));
+                if !shown.is_some_and(|(o, r, n)| n == t.number && format!("{o}/{r}").eq_ignore_ascii_case(&t.repo)) {
+                    continue;
+                }
+                if let Some(mut ln) = self.store.link_get(w)?.filter(|l| !l.closed && l.identity.issue.is_none()) {
+                    ln.identity.issue = Some(issue.clone());
+                    self.store.link_save(&ln)?;
+                    named = true;
+                }
+            }
+        }
+        if named {
+            self.changed();
+        }
+        Ok(())
+    }
+
     async fn fix(&self, t: &Tracked, repo: &Value, read_at: &str, pass: &mut Pass) -> Result<()> {
+        self.name_workers(t, repo).await?;
         let o = Obs::read(repo);
         let advance = {
             let _g = self.lock.lock().await;

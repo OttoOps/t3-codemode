@@ -51,11 +51,20 @@ fn obj(props: Value, required: &[&str]) -> Value {
     json!({"type": "object", "properties": props, "required": required, "additionalProperties": false})
 }
 
+fn with_identity(mut props: Value) -> Value {
+    let issue =
+        json!({"type": "string", "description": "<owner>/<repo>#<n> or https://github.com/<owner>/<repo>/issues/<n>"});
+    props["issue"] = issue.clone();
+    props["parentIssue"] = issue;
+    props["part"] = json!({"type": "string", "description": "n/N, such as \"1/4\""});
+    props
+}
+
 pub fn builtins() -> Vec<Entry> {
     let kinds = json!(["note", "event", "gate", "blocker", "report", "handoff", "closed"]);
     let link = obj(
-        json!({"parent": {"type": "string"}, "label": {"type": "string"}, "role": {"type": "string"},
-               "down": {"type": "integer"}, "miss": {"type": "integer"}, "stall": {"type": "integer"}}),
+        with_identity(json!({"parent": {"type": "string"}, "label": {"type": "string"}, "role": {"type": "string"},
+               "down": {"type": "integer"}, "miss": {"type": "integer"}, "stall": {"type": "integer"}})),
         &["parent", "label", "role"],
     );
     vec![
@@ -104,25 +113,27 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.init",
             "wf",
-            "Start this thread with a role: overseer, ticket or worker. A role the overseer role lists as a child (ticket by default) with no open link joins the board (parent \"board\"), labeled from its board launch, `label`, or its T3 title, so its gates become board cards; root: true keeps it a standalone root. Other roles start as roots. A thread the board launched clears its own pending launch, matched by thread id.",
-            "wf.init(input: { role: string; label?: string; root?: boolean }): Promise<{ thread: string; role: string; root: boolean; parent?: string; label?: string; watcher: string }>;",
+            "Start this thread with a role: overseer, ticket or worker. A role the overseer role lists as a child (ticket by default) with no open link joins the board (parent \"board\"), labeled from its board launch, `label`, or its T3 title, so its gates become board cards; root: true keeps it a standalone root. Other roles start as roots. A thread the board launched clears its own pending launch, matched by thread id. Optional issue, parentIssue and part are stored on the board link it joins.",
+            "wf.init(input: { role: string; label?: string; root?: boolean; issue?: string; parentIssue?: string; part?: string }): Promise<{ thread: string; role: string; root: boolean; parent?: string; label?: string; watcher: string }>;",
             obj(
-                json!({"role": {"type": "string"}, "label": {"type": "string"}, "root": {"type": "boolean"}}),
+                with_identity(
+                    json!({"role": {"type": "string"}, "label": {"type": "string"}, "root": {"type": "boolean"}}),
+                ),
                 &["role"],
             ),
         ),
         builtin(
             "wf.openChild",
             "wf",
-            "Prepare a link to a child thread you are about to launch. Paste the returned brief, verbatim, at the end of the child's launch brief; the child binds the link with wf.join.",
-            "wf.openChild(input: { role: string; label: string }): Promise<{ brief: string; params: { down: number; miss: number; stall: number } }>;",
-            obj(json!({"role": {"type": "string"}, "label": {"type": "string"}}), &["role", "label"]),
+            "Prepare a link to a child thread you are about to launch. Paste the returned brief, verbatim, at the end of the child's launch brief; the child binds the link with wf.join, whose call in the brief carries any issue, parentIssue and part given here. issue and parentIssue (each <owner>/<repo>#<n> or its issue URL) name the GitHub issue the child works and the epic it belongs to, and part (n/N, such as \"1/4\") says which of the epic's PRs it is; wf.board() and the board return all three.",
+            "wf.openChild(input: { role: string; label: string; issue?: string; parentIssue?: string; part?: string }): Promise<{ brief: string; params: { down: number; miss: number; stall: number } }>;",
+            obj(with_identity(json!({"role": {"type": "string"}, "label": {"type": "string"}})), &["role", "label"]),
         ),
         builtin(
             "wf.join",
             "wf",
-            "Join the link a parent opened (the call is in your launch brief). The watcher then nudges you after `down` idle minutes with no gate open.",
-            "wf.join(input: { parent: string; label: string; role: string; down?: number; miss?: number; stall?: number }): Promise<{ parent: string; label: string; params: { down: number; miss: number; stall: number } }>;",
+            "Join the link a parent opened (the call is in your launch brief). The watcher then nudges you after `down` idle minutes with no gate open. A rejoin without issue, parentIssue or part keeps the ones the link has. A worker link with no issue takes one from the closing-issue references (Closes #N) of its PR at the next GitHub reconcile.",
+            "wf.join(input: { parent: string; label: string; role: string; down?: number; miss?: number; stall?: number; issue?: string; parentIssue?: string; part?: string }): Promise<{ parent: string; label: string; params: { down: number; miss: number; stall: number } }>;",
             link,
         ),
         builtin(
@@ -187,7 +198,7 @@ pub fn builtins() -> Vec<Entry> {
             "wf.board",
             "wf",
             "Your parent link and one object per child link, with live T3 status. all: include closed links. parent: show that node's tree instead, each child with its workers (parent: \"board\" is the whole t3-codemode board, no caller needed).",
-            "wf.board(input?: { all?: boolean; parent?: string }): Promise<{ parent: { thread: string; label: string; closed: boolean; gate: string | null } | null; children: { label: string; role: string; thread: string; link: string | null; status: string; asks: number; background: number; gate: string | null; paused: boolean; lastUp: string; nudges: number; unread: number; last: { handle: string; kind: string; head: string } | null }[] }>;",
+            "wf.board(input?: { all?: boolean; parent?: string }): Promise<{ parent: { thread: string; label: string; closed: boolean; gate: string | null } | null; children: { label: string; role: string; thread: string; link: string | null; status: string; asks: number; background: number; gate: string | null; paused: boolean; issue: string | null; parentIssue: string | null; part: string | null; lastUp: string; nudges: number; unread: number; last: { handle: string; kind: string; head: string } | null }[] }>;",
             obj(json!({"all": {"type": "boolean"}, "parent": {"type": "string"}}), &[]),
         ),
         builtin(
@@ -207,10 +218,12 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.launchTicket",
             "wf",
-            "Launch a t3-ticket thread for a GitHub issue that reports to the t3-codemode board (the root overseer). The T3 project is the one whose workspace origin remote is the issue's repo, unless project (id or title) is given. The model resolves through the models.ticket slot for the issue's project in this order: launch arguments (model/effort), the repo's .t3-workflow.json and AGENTS.md, the user config's models.ticket, legacy board.* ticket keys, and the built-in default. A pool value picks through that pool (as wf.pick does) and adds pool and reason to the result. The result always carries instanceId, model, effort and modelSource. An unmapped repo, an invalid or unavailable model/instance/effort/pool, or a failed launch throws and leaves an error card on the board, never falling back to the built-in default.",
-            "wf.launchTicket(input: { issue: string; project?: string; title?: string; model?: string; effort?: string }): Promise<{ ok: true; label: string; thread: string; link: string | null; projectId: string; title: string; instanceId: string; model: string; effort: string | null; modelSource: \"argument\" | \".t3-workflow.json\" | \"AGENTS.md\" | \"user\" | \"board\" | \"default\"; pool?: string; reason?: string }>;",
+            "Launch a t3-ticket thread for a GitHub issue that reports to the t3-codemode board (the root overseer). The T3 project is the one whose workspace origin remote is the issue's repo, unless project (id or title) is given. The model resolves through the models.ticket slot for the issue's project in this order: launch arguments (model/effort), the repo's .t3-workflow.json and AGENTS.md, the user config's models.ticket, legacy board.* ticket keys, and the built-in default. A pool value picks through that pool (as wf.pick does) and adds pool and reason to the result. The result always carries instanceId, model, effort and modelSource. An unmapped repo, an invalid or unavailable model/instance/effort/pool, or a failed launch throws and leaves an error card on the board, never falling back to the built-in default. The ticket's link stores issue as <owner>/<repo>#<n>, with the optional parentIssue and part.",
+            "wf.launchTicket(input: { issue: string; parentIssue?: string; part?: string; project?: string; title?: string; model?: string; effort?: string }): Promise<{ ok: true; label: string; thread: string; link: string | null; projectId: string; title: string; instanceId: string; model: string; effort: string | null; modelSource: \"argument\" | \".t3-workflow.json\" | \"AGENTS.md\" | \"user\" | \"board\" | \"default\"; pool?: string; reason?: string }>;",
             obj(
                 json!({"issue": {"type": "string", "description": "https://github.com/<owner>/<repo>/issues/<n> or <owner>/<repo>#<n>"},
+                       "parentIssue": {"type": "string", "description": "<owner>/<repo>#<n> or https://github.com/<owner>/<repo>/issues/<n>"},
+                       "part": {"type": "string", "description": "n/N, such as \"1/4\""},
                        "project": {"type": "string"}, "title": {"type": "string"}, "model": {"type": "string"}, "effort": {"type": "string"}}),
                 &["issue"],
             ),

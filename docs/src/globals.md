@@ -74,7 +74,7 @@ async () => {
 `wf` is the thread-workflow layer. Threads form a tree of links, each between a
 parent and a child, and the service keeps every link and message in its store.
 
-- `wf.init({role, label?, root?})` starts a thread with no parent link. A role
+- `wf.init({role, label?, root?, issue?, parentIssue?, part?})` starts a thread with no parent link. A role
   that `roles.overseer.children` lists, which is only `ticket` by default, joins
   the board the way `wf.join({ parent: "board", label, role: "ticket" })` does,
   under the board launch's label, `label`, or its T3 title, in that order. The
@@ -91,6 +91,18 @@ parent and a child, and the service keeps every link and message in its store.
   the parent launches the child with `t3.t3_thread_launch` in `execute`, the
   service records the new thread on its launch in the pending list, and the
   watcher's never-joined report links to it.
+- `wf.openChild`, `wf.join`, `wf.init` and `wf.launchTicket` take an optional
+  `issue`, `parentIssue` and `part`. `issue` is the GitHub issue the link
+  works, `parentIssue` the epic it belongs to, each as `<owner>/<repo>#<n>` or
+  the issue's URL, and `part` says which of the epic's PRs it is, as `n/N`
+  with `1 <= n <= N`, such as `"1/4"`. The link stores them as
+  `<owner>/<repo>#<n>` and `n/N`, and a malformed value fails the call.
+  `wf.openChild` writes them into the `wf.join` call in its brief. A rejoin
+  that leaves one out keeps the value the link already has. `wf.board()` and
+  the board's `/api/state` return all three on each ticket and worker, `null`
+  when unset. A worker link with no `issue` takes one from its pull request's
+  closing references (`Closes #N`) at the next
+  [GitHub reconcile](board.md#github-reconcile).
 - `wf.send({kind, body, gate?, wake?, options?})`, kinds `note | event | gate |
   blocker | report | handoff | closed`, to the caller's parent. Returns
   `{handle, delivery}`: `noted`, `sent`, `queued` (the parent is mid-turn, or

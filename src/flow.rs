@@ -604,7 +604,15 @@ impl Wf {
                 }
             }
             let title = Some(i.title.clone()).filter(|t| !t.trim().is_empty());
-            let args = LaunchArgs { issue: i.url.clone(), project: None, title, model: None, effort: None };
+            let args = LaunchArgs {
+                issue: i.url.clone(),
+                parent_issue: i.parent.as_ref().map(|p| p.url.clone()),
+                part: None,
+                project: None,
+                title,
+                model: None,
+                effort: None,
+            };
             match self.launch_unlocked(args).await {
                 Ok(r) if r["ok"] == true => {
                     self.flow_event(&format!("Flow launched {} ({})", i.label, why(i)));
@@ -691,7 +699,15 @@ impl Wf {
         if let (true, Some(i)) = (word == LAUNCH, current) {
             drop(g);
             let title = Some(i.title.clone()).filter(|t| !t.trim().is_empty());
-            let args = LaunchArgs { issue: i.url.clone(), project: None, title, model: None, effort: None };
+            let args = LaunchArgs {
+                issue: i.url.clone(),
+                parent_issue: i.parent.as_ref().map(|p| p.url.clone()),
+                part: None,
+                project: None,
+                title,
+                model: None,
+                effort: None,
+            };
             let launched = self.launch_unlocked(args).await?;
             return Ok(json!({"card": card.id, "launched": launched}));
         }

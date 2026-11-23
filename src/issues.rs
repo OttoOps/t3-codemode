@@ -174,7 +174,15 @@ impl Wf {
 
     pub async fn launch_new_issue(&self, id: &str) -> Result<Value> {
         let (_, i) = self.new_issue_row(id)?;
-        let args = LaunchArgs { issue: i.url, project: None, title: i.title, model: None, effort: None };
+        let args = LaunchArgs {
+            issue: i.url,
+            parent_issue: None,
+            part: None,
+            project: None,
+            title: i.title,
+            model: None,
+            effort: None,
+        };
         let mut r = self.launch_ticket(args).await?;
         r["id"] = json!(id);
         Ok(r)
