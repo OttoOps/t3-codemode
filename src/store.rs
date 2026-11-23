@@ -199,6 +199,14 @@ pub struct PrSeen {
     pub left: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued_at: Option<String>,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<String>,
 }
 
 pub struct Wake<'a> {

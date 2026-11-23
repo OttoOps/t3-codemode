@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::board::{BOARD, Card, NewCard, gh_name};
 use crate::clock::{local_clock, parse_ts};
 use crate::github::errors;
-use crate::merge::{CHECKS, ENQUEUE_PR, MERGE_PR, Ready, ready};
+use crate::merge::{CHECKS, ENQUEUE_PR, MERGE_PR, Ready, checks, ready};
 use crate::store::{MergeWait, PrSeen, WaitStatus, Wake};
 use crate::wf::{Wf, header};
 
@@ -18,7 +18,7 @@ const BATCH: usize = 100;
 const PAGE_LOAD_GAP_MINS: f64 = 0.5;
 const MAX_FAILURES: u32 = 3;
 const EXIT_WINDOW_MINS: f64 = 30.0;
-const PR_FIELDS: &str = "fragment F on PullRequest { id state isDraft headRefOid mergeStateStatus \
+const PR_FIELDS: &str = "fragment F on PullRequest { id state isDraft headRefOid mergeStateStatus reviewDecision \
 isMergeQueueEnabled isInMergeQueue mergeQueueEntry { position } mergeCommit { oid } mergedAt closedAt \
 timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) { nodes { ... on RemovedFromMergeQueueEvent { \
 reason createdAt } } } ...Checks }";
@@ -87,6 +87,15 @@ pub fn card_pr(body: &str) -> Option<CardPr> {
     Some(CardPr { repo: format!("{owner}/{name}").to_ascii_lowercase(), number: *number, head: approved_head(body) })
 }
 
+fn readiness(seen: &PrSeen) -> Value {
+    json!({
+        "isDraft": seen.draft,
+        "mergeStateStatus": seen.merge_state,
+        "reviewDecision": seen.review_decision,
+        "checks": seen.checks,
+    })
+}
+
 fn short(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
@@ -114,6 +123,8 @@ struct Obs {
     queued: bool,
     draft: bool,
     merge_state: String,
+    review_decision: Option<String>,
+    checks: Option<&'static str>,
     ready: Ready,
     queue: bool,
     id: String,
@@ -135,6 +146,8 @@ impl Obs {
             queued: pr["isInMergeQueue"] == true,
             draft: pr["isDraft"] == true,
             merge_state: pr["mergeStateStatus"].as_str().unwrap_or("UNKNOWN").into(),
+            review_decision: pr["reviewDecision"].as_str().map(String::from),
+            checks: checks(pr),
             ready: ready(pr),
             queue: pr["isMergeQueueEnabled"] == true,
             id: s("id"),
@@ -232,10 +245,14 @@ impl Wf {
         if pr["state"] == "open"
             && let Some((o, r, n)) = pr["url"].as_str().and_then(|u| pr_refs(u).into_iter().next())
             && let Ok(Some(seen)) = self.store.pr_seen_get(&format!("{o}/{r}").to_ascii_lowercase(), n)
-            && seen.queued
             && seen.state == "OPEN"
         {
-            pr["state"] = json!("queued");
+            if seen.queued {
+                pr["state"] = json!("queued");
+            }
+            if seen.merge_state.is_some() {
+                pr["readiness"] = readiness(&seen);
+            }
         }
         pr
     }
@@ -432,10 +449,7 @@ impl Wf {
                 Some(l) => self.exited(t, &o, &l, after, status, pass)?,
                 None => None,
             };
-            if prev.as_ref().map(|p| (p.state.as_str(), p.queued)) != Some((o.state.as_str(), o.queued)) {
-                self.changed();
-            }
-            self.store.pr_seen_put(&PrSeen {
+            let seen = PrSeen {
                 repo: t.repo.clone(),
                 pr: t.number,
                 state: o.state.clone(),
@@ -446,7 +460,17 @@ impl Wf {
                 at: self.now(),
                 left,
                 queued_at,
-            })?;
+                draft: o.draft,
+                merge_state: Some(o.merge_state.clone()),
+                review_decision: o.review_decision.clone(),
+                checks: o.checks.map(String::from),
+            };
+            let shown = |p: &PrSeen| (p.state.clone(), p.queued, readiness(p));
+            let moved = prev.as_ref().map(shown) != Some(shown(&seen));
+            self.store.pr_seen_put(&seen)?;
+            if moved {
+                self.changed();
+            }
             advance
         };
         match advance {

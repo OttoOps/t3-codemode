@@ -1847,6 +1847,34 @@ async fn ticket_with_worker(h: &H) {
 }
 
 #[tokio::test]
+async fn api_state_reports_an_open_prs_readiness_from_the_last_reconcile() {
+    use t3_codemode::fake::{check_run, github_pr};
+    let s = start(H::new()).await;
+    ticket_with_worker(&s.h).await;
+    s.h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 81, "open")]);
+    s.h.tick(1).await;
+    let head = "1111111111111111111111111111111111111111";
+    s.h.github.set_pr("acme/widgets", 81, github_pr(head, "CLEAN", false));
+    s.h.github.update_pr("acme/widgets", 81, json!({"reviewDecision": "APPROVED"}));
+    s.h.github.set_checks("acme/widgets", 81, json!([check_run("build", "SUCCESS")]));
+    let worker = |st: &Value| {
+        let t = st["tree"].as_array().unwrap().iter().find(|t| t["label"] == "widgets#41").unwrap();
+        t["workers"][0]["pr"].clone()
+    };
+    assert!(worker(&s.get("/api/state").await).get("readiness").is_none());
+
+    s.h.app.wf.reconcile().await.unwrap();
+
+    let pr = worker(&s.get("/api/state").await);
+    assert_eq!(pr["state"], "open");
+    assert_eq!(
+        pr["readiness"],
+        json!({"isDraft": false, "mergeStateStatus": "CLEAN", "reviewDecision": "APPROVED", "checks": "passing"})
+    );
+    assert_eq!(s.h.github.operations(), ["reconcile"]);
+}
+
+#[tokio::test]
 async fn a_finished_workers_merged_pr_shows_on_the_board() {
     let h = H::new();
     ticket_with_worker(&h).await;

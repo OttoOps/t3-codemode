@@ -462,7 +462,7 @@ pub struct FakeGitHub(Mutex<GhState>);
 pub fn github_pr(head: &str, merge_state: &str, queue: bool) -> Value {
     json!({
         "state": "OPEN", "isDraft": false, "headRefOid": head, "mergeStateStatus": merge_state,
-        "isMergeQueueEnabled": queue, "isInMergeQueue": false, "mergeQueueEntry": null, "mergeCommit": null,
+        "reviewDecision": null, "isMergeQueueEnabled": queue, "isInMergeQueue": false, "mergeQueueEntry": null, "mergeCommit": null,
         "mergedAt": null, "closedAt": null, "timelineItems": {"nodes": []}, "commits": head_commit(head, json!([]))
     })
 }
@@ -700,7 +700,7 @@ impl crate::github::GitHub for FakeGitHub {
         Box::pin(async move {
             let mut st = self.st();
             let op = operation(query);
-            st.calls.push(json!({"operation": op, "variables": variables}));
+            st.calls.push(json!({"operation": op, "query": query, "variables": variables}));
             if st.down {
                 anyhow::bail!("gh api graphql failed: gh: not logged in");
             }
