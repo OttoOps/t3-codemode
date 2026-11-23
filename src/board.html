@@ -7287,16 +7287,32 @@ function parseJiraKey(raw, ignoreCase) {
   return { scope, key: scope + "-" + num };
 }
 
-function parseUrlAuthority(auth) {
+function parseHttpUrl(s) {
+  if (typeof URL === "function") {
+    try {
+      const u = new URL(s);
+      if ((u.protocol !== "http:" && u.protocol !== "https:") || u.username || u.password || !u.hostname) return null;
+      const host = u.hostname.toLowerCase();
+      const webPort = u.port ? Number(u.port) : (u.protocol === "https:" ? 443 : 80);
+      return { host, webPort, parts: u.pathname.split("/").filter(Boolean) };
+    } catch (_) {
+      return null;
+    }
+  }
+  const um = /^(https?):\/\/([^/?#]+)(\/[^?#]*)?(?:[?#].*)?$/i.exec(s);
+  if (!um) return null;
+  const scheme = um[1].toLowerCase();
+  const auth = um[2];
   if (!auth || auth.includes("@")) return null;
   const m = auth[0] === "[" ? /^(\[[0-9a-fA-F:]+\])(?::(\d+))?$/.exec(auth) : /^([^:]+)(?::(\d+))?$/.exec(auth);
   if (!m) return null;
   const host = m[1].toLowerCase();
   if (!host) return null;
-  if (host[0] !== "[" && (!/^[a-z0-9._-]+$/.test(host) || host[0] === "." || host.includes(".."))) return null;
+  if (host[0] !== "[" && (/[\x00-\x20<>"{}|\\^`?#/@:]/.test(host) || host[0] === "." || host.includes(".."))) return null;
   const port = m[2] !== undefined ? Number(m[2]) : null;
   if (port !== null && (!Number.isInteger(port) || port < 1 || port > 65535)) return null;
-  return { host, port };
+  const webPort = port !== null ? port : (scheme === "https" ? 443 : 80);
+  return { host, webPort, parts: (um[3] || "").split("/").filter(Boolean) };
 }
 
 function parseIssueRef(raw) {
@@ -7328,21 +7344,18 @@ function parseIssueRef(raw) {
     }
     return null;
   }
-  const um = /^(https?):\/\/([^/?#]+)(\/[^?#]*)?(?:[?#].*)?$/i.exec(s);
-  if (um) {
-    const scheme = um[1].toLowerCase();
-    const auth = parseUrlAuthority(um[2]);
-    if (!auth || auth.host === "github.com" || auth.host === "www.github.com") return null;
-    const webPort = auth.port !== null ? auth.port : (scheme === "https" ? 443 : 80);
-    const parts = (um[3] || "").split("/").filter(Boolean);
+  if (/^https?:\/\//i.test(s)) {
+    const parsedUrl = parseHttpUrl(s);
+    if (!parsedUrl || parsedUrl.host === "github.com" || parsedUrl.host === "www.github.com") return null;
+    const { host, webPort, parts } = parsedUrl;
     const dash = parts.indexOf("-");
     if (dash >= 2 && parts[dash + 1] === "issues" && parts[dash + 2] && parts.slice(0, dash).every(isPathSeg)) {
       const n = parsePositiveInt(parts[dash + 2]);
-      if (n) return { tracker: "gitlab", host: auth.host, scope: parts.slice(0, dash).join("/"), key: n, port: webPort, label: parts[dash - 1] + "#" + n };
+      if (n) return { tracker: "gitlab", host, scope: parts.slice(0, dash).join("/"), key: n, port: webPort, label: parts[dash - 1] + "#" + n };
     }
     if (parts.length >= 2 && parts[parts.length - 2] === "browse") {
       const j = parseJiraKey(parts[parts.length - 1], true);
-      if (j) return { tracker: "jira", host: auth.host, scope: j.scope, key: j.key, port: webPort, label: j.key };
+      if (j) return { tracker: "jira", host, scope: j.scope, key: j.key, port: webPort, label: j.key };
     }
     return null;
   }
@@ -9507,6 +9520,7 @@ async function onLaunch(e) {
     const project = launchProjectPicks.get(ref);
     return project ? { issue: ref, project } : ref;
   });
+  let refreshAfterBad = false;
   btn.disabled = true;
   setText(btn, "Launching...");
   $("dock").classList.add("show-out");
@@ -9527,13 +9541,21 @@ async function onLaunch(e) {
       launchProjectPicks.clear();
       launchProjectsErr = "";
     }
-    if (bad.length) await refreshModels(false);
+    refreshAfterBad = bad.some((x) => {
+      const p = parseIssueRef(x.issue);
+      return p && p.tracker !== "github";
+    });
     paintLaunchProjects();
     paintLaunchModelLine();
   } catch (err) {
     out.replaceChildren(h("li", { class: "oh" }, "Launch results"), h("li", { class: "bad" }, err.message));
     announce("Launch failed: " + err.message, true);
-  } finally { btn.disabled = false; setText(btn, "Launch"); paintOut(); }
+  } finally {
+    btn.disabled = false;
+    setText(btn, "Launch");
+    paintOut();
+    if (refreshAfterBad) refreshModels(false);
+  }
 }
 
 async function onAsk(e) {
