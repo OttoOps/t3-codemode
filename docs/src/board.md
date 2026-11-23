@@ -119,7 +119,8 @@ still switches, but goes back to System on reload.
 
 Single-key shortcuts work while no field has focus: `/` focuses search, `a`
 focuses Ask, `l` focuses Launch, `j` and `k` move between cards and rows, and
-`?` lists the rest. The list has a switch that turns them off.
+`?` lists the rest. The list has a switch that turns them off. Enter on a
+focused card or row opens it in [the inspector](#the-inspector).
 
 On a local board, and on a remote board opened by its Tailscale owner, the gear
 button in the header opens [Settings](#settings).
@@ -385,7 +386,8 @@ Settled section at once.
 - **Search** narrows the page while you type, with no Enter. Every word must
   appear somewhere in the ticket label, the issue title or number, the repo, or
   the card or feed text. `Esc` clears it, and `/` focuses it when single-key
-  shortcuts are on.
+  shortcuts are on. While [the inspector](#the-inspector) is open, the first
+  `Esc` closes it and the next one clears the search.
 
 While a filter is on, each count reads visible/total. A new card the filter
 hides shows up as "N hidden", and clicking it clears the filter.
@@ -439,6 +441,41 @@ includes the save, however long that takes.
 
 While a context is on, a browser notification goes out only for a new card
 inside it. A card outside it still counts toward "N hidden".
+
+## The inspector
+
+Click a ticket row, a worker, a pull request pill, a card's ask or ticket line,
+a New issues row or a Settled ticket, or press Enter on a focused card or row,
+and the inspector slides in from the right with that item's details. It covers
+the right side of the board under the pulse strip and filter bar. The lists
+keep their scroll and keep updating, and you can still answer the cards on the
+left. Below 600 px the inspector takes the full width. The row or card it shows
+gets the hover shade, so you can find it on the board.
+
+- **Header.** The ticket or issue as `repo#N`, the PR part such as `PR 2/5`
+  when a worker names one, the title, and a close button.
+- **Pills.** The live state, the pull request pill with the same readiness word
+  as the [ticket list](#what-the-page-shows), `paused`, and the repository and
+  project when `/api/state` knows them.
+- **Actions.** Open issue on GitHub, Open PR on GitHub, Open T3 thread, and
+  whichever of Pause or Resume, Settle and Restore apply to the ticket. A new
+  issue offers Launch and Dismiss, or Restore once dismissed. A plain click on
+  a row's pull request pill opens the inspector, and a Ctrl-click or
+  middle-click goes straight to GitHub.
+- **Needs you.** The ticket's open cards, each with Go to card, which focuses
+  the card on the board.
+- **Latest message.** The ticket's last gate, blocker, handoff or note. When
+  the board holds only the start of it, the inspector loads the whole message
+  from `GET /api/msg/{handle}`.
+- **Workers.** Each worker's state, a link to its thread, its pull request and
+  Pause or Resume. Opened from a worker, the inspector shades that worker.
+
+The inspector follows its item while the board updates. If the item leaves the
+board, the inspector says so, keeps the last details it had and disables its
+buttons. Opening another item replaces what it shows. `Esc` or the close button
+closes the inspector and puts focus back on the item that opened it. The next
+`Esc` clears an active search. While the inspector covers Launch and Ask, `l`
+and `a` close it first.
 
 ## From a thread
 

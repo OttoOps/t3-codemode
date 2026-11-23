@@ -931,7 +931,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .btn.answer { padding: 0 12px; white-space: normal; text-align: center; }
   .act .opts { min-width: 0; max-width: 100%; }
   .ph { padding: 0 12px; }
-  .ctx a, .tr a, .ws a, .ask a, .srow a, .act a, .fullbox a { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; }
+  .ctx a, .tr a, .ws a, .ask a, .srow a, .act a, .fullbox a, .drawer a { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; }
   .md a { display: inline; min-height: 0; min-width: 0; }
   .tr .tn, .tr .t1, .ws { align-items: center; }
   .ctx { align-items: center; }
@@ -975,6 +975,51 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .app.sheet #out { max-height: none; flex: 1 1 auto; }
   #feed > li { padding: 8px 12px; }
   .sending, .act { min-height: 44px; }
+}
+.tk > .tr, .nrow, .srow:not(.ask), .card .q, .card .ctx, .card .detail { cursor: pointer; }
+.tk[data-inspected] > .tr, .nrow[data-inspected], .srow[data-inspected], .wi[data-inspected], .card[data-inspected] { background: var(--surface-hover); }
+.card[data-inspected] { border-color: var(--border-strong); }
+.drawer {
+  position: fixed; right: 0; top: var(--dr-top, 48px); bottom: var(--dr-bottom, 0px); z-index: 25;
+  width: 400px; max-width: 94vw; display: flex; flex-direction: column; min-height: 0;
+  background: var(--surface); border-left: 1px solid var(--border-strong);
+  transform: translateX(100%); visibility: hidden;
+  transition: transform 200ms ease-out, visibility 0s linear 200ms;
+}
+.drawer.open { transform: none; visibility: visible; transition: transform 200ms ease-out, visibility 0s; }
+.dr-head { flex: none; display: flex; align-items: flex-start; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.dr-hl { flex: 1 1 auto; min-width: 0; display: grid; gap: 4px; }
+.dr-id { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; line-height: 18px; color: var(--fg-2); }
+.dr-id .tag { flex: none; font-size: 12px; line-height: 16px; font-weight: 600; }
+.dr-head h2 { font-size: 16px; line-height: 20px; font-weight: 600; overflow-wrap: anywhere; }
+.dr-x { flex: none; width: 28px; padding: 0; }
+.dr-x::before {
+  content: ""; width: 16px; height: 16px; background: currentColor;
+  -webkit-mask: var(--x) center / contain no-repeat; mask: var(--x) center / contain no-repeat;
+  --x: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 4l8 8M12 4l-8 8' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+.dr-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12px 16px 24px; display: grid; align-content: start; gap: 16px; }
+.dr-pills, .dr-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.dr-acts a.btn, .dr-acts a.btn:hover { text-decoration: none; color: var(--fg); }
+.dr-gone { padding: 8px 12px; border: 1px dashed var(--border-strong); border-radius: 4px; color: var(--fg-2); font-size: 13px; line-height: 18px; }
+.dr-sec { display: grid; gap: 8px; min-width: 0; }
+.dr-sec h3 { display: flex; gap: 8px; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--fg-2); }
+.dr-text { font-size: 13px; line-height: 18px; overflow-wrap: anywhere; }
+.dr-text strong { font-weight: 600; }
+.dr-list { display: grid; gap: 0; }
+.dr-w, .dr-card { display: grid; gap: 4px 8px; min-width: 0; padding: 8px; border-top: 1px solid var(--border); font-size: 13px; line-height: 18px; }
+.dr-w { grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; }
+.dr-w .wn { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dr-w .wa { display: flex; align-items: center; gap: 8px; }
+.dr-w[data-inspected] { background: var(--surface-hover); }
+.dr-card .dq { font-weight: 600; overflow-wrap: anywhere; }
+.dr-card .btn, .dr-card .spill { justify-self: start; }
+.dr-card .meta { overflow-wrap: anywhere; }
+@media (max-width: 1199px) { .drawer { z-index: 4; } }
+@media (max-width: 599px) {
+  .drawer { width: 100vw; max-width: none; border-left: 0; }
+  .dr-head { padding: 8px 12px; }
+  .dr-body { padding: 12px 12px 24px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
@@ -1213,7 +1258,8 @@ kbd { font-family: var(--mono); font-size: 12px; }
     <dt>/</dt><dd>Focus search; Esc clears it</dd>
     <dt>r</dt><dd>Reply to the focused card</dd>
     <dt>1 to 9</dt><dd>Focus that option; Enter sends it</dd>
-    <dt>Esc</dt><dd>Back to the panel</dd>
+    <dt>Enter</dt><dd>Open the focused card's or row's details</dd>
+    <dt>Esc</dt><dd>Close details, back to the panel, then clear search</dd>
     <dt>?</dt><dd>This list</dd>
     <dt class="lay-only" hidden>Drag a header</dt><dd class="lay-only" hidden>Move a panel; Esc cancels</dd>
     <dt class="lay-only" hidden>Grip + arrows</dt><dd class="lay-only" hidden>Move the focused panel</dd>
@@ -2077,7 +2123,7 @@ function makeCard(c) {
   const input = h("input", { type: "text", "data-part": "input", autocomplete: "off",
     oninput: (e) => drafts.set(card.dataset.id, { inst: card._card && inst(card._card), value: e.target.value }),
     onkeydown: (e) => {
-      if (e.key === "Escape" && !e.target.value) { e.preventDefault(); e.stopPropagation(); closeReply(card); }
+      if (e.key === "Escape" && !e.target.value && !dr.open) { e.preventDefault(); e.stopPropagation(); closeReply(card); }
     } });
   const form = h("form", { class: "reply", "data-part": "reply", hidden: true, onsubmit: (e) => {
       e.preventDefault();
@@ -3667,7 +3713,10 @@ async function newAct(btn, path, i, done) {
   setAttr(btn, "aria-disabled", "true");
   const launch = done === "launched";
   if (launch) setText(btn, "Launching...");
-  const error = $("new-err");
+  const errorId = btn.closest("#drawer") ? "dr-err" : "new-err";
+  const said = btn.getAttribute("aria-label");
+  const sub = dr.sub;
+  const error = $(errorId);
   error.hidden = true;
   try {
     const r = await post(path);
@@ -3676,8 +3725,9 @@ async function newAct(btn, path, i, done) {
     if (row) row._gone = i.label + " " + done;
     announce((launch ? "Launched " : done === "restored" ? "Restored " : "Dismissed ") + i.label + ".");
   } catch (e) {
-    errFrom.set("new-err", btn);
-    setText($("new-err-text"), e.message);
+    if (drShows(errorId, sub, said, e.message, btn)) return;
+    errFrom.set(errorId, btn);
+    setText($(errorId + "-text"), e.message);
     error.hidden = false;
     announce(e.message, true);
   } finally {
@@ -3686,6 +3736,7 @@ async function newAct(btn, path, i, done) {
     const stale = !!btn.closest(".stale-item");
     setAttr(btn, "data-stale", stale ? "1" : null);
     setAttr(btn, "aria-disabled", stale ? "true" : null);
+    if (errorId === "dr-err") paintDrawer();
   }
 }
 
@@ -4393,6 +4444,7 @@ function render(s) {
   paintUpdate(s);
   paintDrift(s);
   syncModelsRev(s);
+  if (dr.open) paintDrawer();
   document.title = (s.counts.cards ? "(" + s.counts.cards + ") " : "") + "t3 board";
   firstState = false;
 }
@@ -4515,6 +4567,7 @@ function showAuthScreen(status, data) {
   pairEl.hidden = !showPair;
   retryEl.className = showPair ? "btn" : "btn go";
 
+  closeDrawer(false);
   const skip = document.querySelector(".skip");
   if (skip) skip.hidden = true;
   $("app").hidden = true;
@@ -4605,17 +4658,21 @@ function closeErr(id) {
     if (document.activeElement === b) return;
   }
   if (id === "composer-err") $($("composer").dataset.mode === "ask" ? "question" : "issues").focus();
+  else if (id === "dr-err") { if (dr.open) drPart("title").focus(); else focusList($("cards")); }
   else { const t = $("tix-tabs").querySelector('[aria-selected="true"]'); if (t) t.focus(); }
 }
 async function act(btn, path) {
   if (btn.getAttribute("aria-disabled") === "true") return;
   btn._busy = true;
   setAttr(btn, "aria-disabled", "true");
-  const errorId = btn.closest("#composer") ? "composer-err" : "act-err";
+  const errorId = btn.closest("#drawer") ? "dr-err" : btn.closest("#composer") ? "composer-err" : "act-err";
+  const said = btn.getAttribute("aria-label");
+  const sub = dr.sub;
   const error = $(errorId);
   error.hidden = true;
   try { await post(path); }
   catch (e) {
+    if (drShows(errorId, sub, said, e.message, btn)) return;
     errFrom.set(errorId, btn);
     setText($(errorId + "-text"), e.message);
     error.hidden = false;
@@ -4625,6 +4682,7 @@ async function act(btn, path) {
     const stale = !!btn.closest(".stale-item");
     setAttr(btn, "data-stale", stale ? "1" : null);
     setAttr(btn, "aria-disabled", stale ? "true" : null);
+    if (errorId === "dr-err") paintDrawer();
   }
 }
 
@@ -4706,6 +4764,7 @@ function jump(where) {
   layReveal(where);
   if (where === "launch" || where === "ask") {
     setMode(where);
+    drUncover($("composer"));
     $(where === "launch" ? "issues" : "question").focus();
     return;
   }
@@ -4753,6 +4812,479 @@ function jumpToTicket(thread) {
   }
 }
 
+const dr = { open: false, sub: null, from: null, marked: [], msgs: new Map() };
+const LAST_WORD = { gate: "Latest gate", blocker: "Blocker", error: "Error", escalate: "Escalation", handoff: "Handoff", closed: "Closed", report: "Report", event: "Latest event", note: "Latest note" };
+
+function drPart(name) { return part($("drawer"), name); }
+
+function initDrawer() {
+  const sec = (name, title, ...kids) => h("section", { class: "dr-sec", "data-part": name, "aria-labelledby": "dr-h-" + name, hidden: true },
+    h("h3", { id: "dr-h-" + name }, h("span", { "data-part": name + "-h" }, title), h("span", { class: "num", "data-part": name + "-n" })), ...kids);
+  const btn = (name) => h("button", { class: "btn", type: "button", "data-part": name, hidden: true });
+  const link = (name) => h("a", { class: "btn", "data-part": name, target: "_blank", rel: "noopener noreferrer", hidden: true });
+  document.body.append(h("aside", { id: "drawer", class: "drawer", "aria-labelledby": "dr-title" },
+    h("div", { class: "dr-head" },
+      h("div", { class: "dr-hl" },
+        h("p", { class: "dr-id" }, h("span", { class: "chip", "data-part": "id" }), h("span", { class: "tag", "data-part": "part", hidden: true })),
+        h("h2", { id: "dr-title", tabindex: "-1", "data-part": "title" })),
+      h("button", { class: "btn quiet dr-x", type: "button", "data-part": "close", "aria-label": "Close details", title: "Close details (Esc)",
+        onclick: () => closeDrawer(true) })),
+    h("div", { class: "dr-body", "data-part": "body" },
+      h("p", { class: "dr-gone", "data-part": "gone", role: "status", hidden: true }),
+      h("div", { class: "dr-pills", "data-part": "pills" },
+        h("span", { "data-part": "st" }), h("span", { "data-part": "pr" }),
+        statusPill("pause", "paused", { "data-part": "paused", hidden: true }),
+        h("span", { class: "chip", "data-part": "repo", hidden: true }), h("span", { class: "chip", "data-part": "proj", hidden: true })),
+      h("div", { class: "dr-acts", "data-part": "acts", role: "group", "aria-label": "Actions" },
+        link("gh-issue"), link("gh-pr"), h("span", { "data-part": "t3" }),
+        btn("tocard"), btn("pause"), btn("settle"), btn("restore"), btn("launch"), btn("nisflip")),
+      sec("needs", "Needs you", h("ul", { class: "dr-list", "data-part": "needs-l" })),
+      sec("latest", "Latest message", h("div", { class: "dr-text md", "data-part": "latest-b" }), h("p", { class: "meta", "data-part": "latest-m" })),
+      sec("note", "Note", h("div", { class: "dr-text md", "data-part": "note-b" }), h("p", { class: "meta", "data-part": "note-m" })),
+      sec("workers", "Workers", h("ul", { class: "dr-list", "data-part": "workers-l" })),
+      h("section", { class: "dr-sec", "data-part": "deps", hidden: true })),
+    h("div", { class: "err-strip", id: "dr-err", hidden: true },
+      h("span", { id: "dr-err-text" }), h("button", { class: "btn quiet", type: "button", id: "dr-err-close", onclick: () => closeErr("dr-err") }, "Close"))));
+  if (window.ResizeObserver) new ResizeObserver(() => { if (dr.open) placeDrawer(); }).observe($("main"));
+}
+
+function subjectOf(el) {
+  const tk = el.closest(".tk");
+  if (tk) {
+    if (tk.classList.contains("gone") || !tk.dataset.thread) return null;
+    const wi = el.closest(".wi");
+    return { kind: "ticket", key: tk.dataset.thread, worker: wi && !wi.classList.contains("gone") ? wi.dataset.key || null : null, item: tk };
+  }
+  const card = el.closest(".card");
+  if (card) return card.classList.contains("gone") || !card._card ? null : { kind: "card", key: card.dataset.id, item: card };
+  const nr = el.closest(".nrow");
+  if (nr) return nr.classList.contains("gone") || !nr.dataset.key ? null : { kind: "new", key: nr.dataset.key, item: nr };
+  const sr = el.closest(".srow");
+  const k = sr && !sr.classList.contains("gone") ? sr.dataset.key || "" : "";
+  return k.startsWith("t:") ? { kind: "ticket", key: k.slice(2), item: sr } : null;
+}
+
+function drSame(a, b) {
+  return !!a && !!b && a.kind === b.kind && a.key === b.key && (a.worker || null) === (b.worker || null) && (a.card || null) === (b.card || null);
+}
+
+function openDrawer(sub, from) {
+  if (from) from.sub = { kind: sub.kind, key: sub.key };
+  if (sub.kind === "card" && state) {
+    const c = state.cards.find((x) => x.id === sub.key);
+    if (c && c.ticket && state.tree.some((t) => t.thread === c.ticket)) sub = { kind: "ticket", key: c.ticket, card: c.id };
+  }
+  const fresh = !dr.open || !drSame(dr.sub, sub);
+  dr.sub = { kind: sub.kind, key: sub.key, worker: sub.worker || null, card: sub.card || null };
+  if (from) dr.from = from;
+  for (const [k, v] of dr.msgs) if (v.error) dr.msgs.delete(k);
+  dr.open = true;
+  $("drawer").classList.add("open");
+  if (fresh) $("dr-err").hidden = true;
+  paintDrawer();
+  if (fresh) {
+    drPart("body").scrollTop = 0;
+    const w = drPart("workers-l").querySelector("[data-inspected]");
+    if (w && w.scrollIntoView) w.scrollIntoView({ block: "nearest" });
+  }
+  drPart("title").focus();
+}
+
+function drShows(errorId, sub, said, msg, btn) {
+  if (errorId !== "dr-err") return false;
+  const text = said + ": " + msg;
+  if (dr.open && drSame(sub, dr.sub)) {
+    errFrom.set(errorId, btn);
+    setText($("dr-err-text"), text);
+    $("dr-err").hidden = false;
+  }
+  announce(text, true);
+  return true;
+}
+
+function clearSearch() {
+  $("filter-q").value = "";
+  clearTimeout(queryTimer);
+  filter.q = "";
+  filterChanged();
+}
+
+function closeDrawer(restore) {
+  if (!dr.open) return;
+  const box = $("drawer");
+  restore = restore || focusInside(box);
+  dr.open = false;
+  dr.sub = null;
+  box.classList.remove("open");
+  $("dr-err").hidden = true;
+  markInspected();
+  const f = dr.from;
+  dr.from = null;
+  if (restore) restoreFrom(f);
+}
+
+function subjectEl(sub) {
+  const byKey = (list, attr, v) => [...$(list).children].find((el) => el.getAttribute(attr) === v && !el.classList.contains("gone")) || null;
+  if (sub.kind === "card") return cardEl(sub.key);
+  if (sub.kind === "new") return byKey("nis", "data-key", sub.key);
+  return byKey("open", "data-thread", sub.key) || byKey("done", "data-thread", sub.key) || byKey("settled", "data-key", "t:" + sub.key);
+}
+
+function restoreFrom(f) {
+  let t = f && f.el;
+  if (t && (!t.isConnected || t.closest(".gone"))) t = null;
+  if (!t && f && f.item && f.item.isConnected && !f.item.classList.contains("gone")) t = f.item;
+  if (!t && f && f.sub) t = subjectEl(f.sub);
+  if (t && (t.classList.contains("gone") || t.closest("[hidden]"))) t = null;
+  const l = t ? listOf(t) : null;
+  if (t && l && itemOf(l, t) === t) return focusItem(l, t);
+  if (t) return t.focus();
+  const tab = $("app").dataset.tab;
+  focusList(f && f.sub && f.sub.kind !== "card" && ["open", "done", "settled"].includes(tab) ? $(tab) : $("cards"));
+}
+
+function drUncover(el) {
+  if (!dr.open || !el || !el.getBoundingClientRect) return;
+  const r = el.getBoundingClientRect();
+  const d = $("drawer").getBoundingClientRect();
+  if (r.right > d.left && r.left < d.right && r.bottom > d.top && r.top < d.bottom) closeDrawer(false);
+}
+
+function placeDrawer() {
+  const box = $("drawer");
+  if (!box.style || !box.style.setProperty) return;
+  const m = $("main").getBoundingClientRect();
+  const top = m && m.top > 0 ? m.top : 48;
+  let bottom = 0;
+  if (!wide()) {
+    const c = $("composer").getBoundingClientRect();
+    if (c && c.top > 0 && window.innerHeight) bottom = Math.max(0, window.innerHeight - c.top);
+  }
+  box.style.setProperty("--dr-top", top + "px");
+  box.style.setProperty("--dr-bottom", bottom + "px");
+}
+
+function drFind(sub, s) {
+  if (sub.kind === "ticket") {
+    const t = s.tree.find((x) => x.thread === sub.key);
+    if (t) return { t };
+    const st = ((s.settled && s.settled.tickets) || []).find((x) => x.thread === sub.key);
+    return st ? { t: st, settled: true } : null;
+  }
+  if (sub.kind === "card") {
+    const c = s.cards.find((x) => x.id === sub.key);
+    return c ? { c } : null;
+  }
+  const i = (s.newIssues || []).find((x) => x.id === sub.key) || (s.dismissedIssues || []).find((x) => x.id === sub.key);
+  return i ? { i } : null;
+}
+
+function issueUrl(label, repo) {
+  const m = /^(?:([\w.-]+\/[\w.-]+)|([\w.-]+))?#(\d+)$/.exec(String(label || ""));
+  if (!m) return null;
+  let r = m[1] || "";
+  const known = /^[\w.-]+\/[\w.-]+$/.test(String(repo || "")) ? repo : "";
+  if (!r && known && (!m[2] || m[2].toLowerCase() === known.split("/")[1].toLowerCase())) r = known;
+  return r ? "https://github.com/" + r + "/issues/" + m[3] : null;
+}
+
+function partTag(t, w) {
+  const ws = (t.workers || []).filter((x) => /\bPR \d+\/\d+\b/.test(x.label || ""));
+  const pick = w || ws.filter((x) => !x.done).pop() || ws[ws.length - 1];
+  const m = pick && /\bPR \d+\/\d+\b/.exec(pick.label || "");
+  return m ? m[0] : "";
+}
+
+function drHead(id, tag, title) {
+  const i = drPart("id");
+  setText(i, id);
+  setAttr(i, "title", id || null);
+  const p = drPart("part");
+  p.hidden = !tag;
+  setText(p, tag || "");
+  setText(drPart("title"), title || id);
+}
+
+function drPills(mk, word, pr, owner, paused, place) {
+  setStatusPill(drPart("st"), mk, word);
+  setPrChip(drPart("pr"), pr, owner, true);
+  drPart("paused").hidden = !paused;
+  const repo = String((place && place.repo) || "");
+  const proj = String((place && place.project && place.project.title) || "");
+  const r = drPart("repo");
+  r.hidden = !repo;
+  setText(r, repo);
+  setAttr(r, "title", repo ? "Repository " + repo : null);
+  const p = drPart("proj");
+  p.hidden = !proj || proj === repo || proj === repo.split("/").pop();
+  setText(p, proj);
+  setAttr(p, "title", proj ? "Project " + proj : null);
+}
+
+function drLink(name, href, text, label) {
+  const a = drPart(name);
+  const u = safeUrl(href);
+  a.hidden = !u;
+  setAttr(a, "href", u);
+  setText(a, u ? text : "");
+  setAttr(a, "aria-label", u ? label : null);
+}
+
+function drBtn(name, show, text, label, onclick) {
+  const b = drPart(name);
+  b.hidden = !show;
+  if (!show) return;
+  setText(b, text);
+  setAttr(b, "aria-label", label);
+  setAttr(b, "aria-disabled", b._busy ? "true" : null);
+  b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") onclick(b); };
+}
+
+function drT3(href, label) {
+  const slot = drPart("t3");
+  setLink(slot, href, "Open T3 thread", "Open the T3 thread for " + label);
+  if (slot.firstChild) setAttr(slot.firstChild, "class", "btn");
+}
+
+function drSec(name, show, n) {
+  const s = drPart(name);
+  s.hidden = !show;
+  setText(drPart(name + "-n"), n ? String(n) : "");
+  return s;
+}
+
+function loadMsg(hd) {
+  dr.msgs.set(hd, { loading: true });
+  if (dr.msgs.size > 64) dr.msgs.delete(dr.msgs.keys().next().value);
+  const done = (v) => { dr.msgs.set(hd, v); if (dr.open) paintDrawer(); };
+  fetch("/api/msg/" + encodeURIComponent(hd), { credentials: "same-origin" })
+    .then(async (r) => {
+      let m = null;
+      try { m = await r.json(); } catch (_) { m = null; }
+      if (handleAuthFailure(r.status, m, false)) return;
+      done(r.ok && m && typeof m.body === "string" ? { body: m.body } : { error: (m && m.error) || "HTTP " + r.status });
+    })
+    .catch((e) => done({ error: String((e && e.message) || e) }));
+}
+
+function drMsg(el, meta, handle, head, word, iso, local) {
+  const cut = !!handle && /\.\.\.$/.test(String(head || ""));
+  let m = cut ? dr.msgs.get(handle) : null;
+  if (cut && !m) { loadMsg(handle); m = dr.msgs.get(handle); }
+  const full = m && typeof m.body === "string";
+  renderAnswer(el, full ? m.body : head, cut && !full);
+  el.hidden = false;
+  drMeta(meta, word, iso, local, m && m.loading ? "Loading the full message." : m && m.error ? "The full message did not load: " + m.error : "");
+}
+
+function drMeta(meta, word, iso, local, said) {
+  const age = h("span", { class: "age num" });
+  paintAge(age, iso, local);
+  const key = JSON.stringify([word, age.textContent, age.getAttribute("title"), said]);
+  if (meta._key === key) return;
+  meta._key = key;
+  meta.replaceChildren(...[word, age.textContent ? age : null, said].filter(Boolean).flatMap((x, i) => i ? [" · ", x] : [x]));
+}
+
+function drCard(c) {
+  const p = parseAsk(c);
+  const fail = FAIL_KINDS.has(c.kind);
+  return { p, mk: fail ? "fail" : c.kind === "report" ? "report" : "need", word: KIND_WORD[c.kind] || "Decision" };
+}
+
+function makeDrCard() {
+  return h("li", { class: "dr-card" },
+    h("span", { "data-part": "kind" }), h("span", { class: "dq", "data-part": "ask" }), h("span", { class: "meta", "data-part": "det", hidden: true }),
+    h("button", { class: "btn", type: "button", "data-part": "go" }));
+}
+
+function patchDrCard(el, c) {
+  const k = drCard(c);
+  setStatusPill(part(el, "kind"), k.mk, k.word);
+  setText(part(el, "ask"), k.p.ask);
+  const d = part(el, "det");
+  d.hidden = !k.p.detail;
+  setText(d, k.p.detail);
+  const b = part(el, "go");
+  setText(b, "Go to card " + c.id);
+  setAttr(b, "aria-label", "Go to card " + cardLabel(c) + " in Needs you");
+  setAttr(b, "aria-disabled", null);
+  b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") { jumpToCard(c.id); drUncover(cardEl(c.id)); } };
+  setAttr(el, "data-inspected", dr.sub && dr.sub.card === c.id ? "true" : null);
+}
+
+function makeDrWorker() {
+  return h("li", { class: "dr-w" },
+    h("span", { "data-part": "st" }), h("span", { class: "wn", "data-part": "name" }),
+    h("span", { class: "wa" }, h("span", { "data-part": "pr" }), h("button", { class: "btn quiet", type: "button", "data-part": "pause", hidden: true })));
+}
+
+function patchDrWorker(el, w, t, cards) {
+  const st = workerState(w, cards);
+  setStatusPill(part(el, "st"), st, WORDS[st]);
+  const name = shortLabel(w, t);
+  const nm = part(el, "name");
+  if (safeUrl(w.link)) setLink(nm, w.link, name, "Open worker thread " + w.label + ", " + WORDS[st]);
+  else plainText(nm, name);
+  setAttr(nm, "title", w.label);
+  setPrChip(part(el, "pr"), w.pr, w.label, true);
+  const b = part(el, "pause");
+  const on = !!(w.thread && w.joined !== false && !w.done);
+  b.hidden = !on;
+  if (on) {
+    setText(b, w.paused ? "Resume" : "Pause");
+    setAttr(b, "aria-label", (w.paused ? "Resume " : "Pause ") + w.label);
+    setAttr(b, "aria-disabled", b._busy ? "true" : null);
+    b.onclick = () => act(b, "/api/links/" + encodeURIComponent(w.thread) + (w.paused ? "/resume" : "/pause"));
+  }
+  setAttr(el, "data-inspected", dr.sub && dr.sub.worker && dr.sub.worker === (w.thread || w.label) ? "true" : null);
+}
+
+function drClear(...names) {
+  for (const n of names) {
+    const el = drPart(n);
+    if (el.tagName === "SECTION") el.hidden = true;
+    else if (el.tagName === "SPAN") { if (el.firstChild) el.replaceChildren(); }
+    else el.hidden = true;
+  }
+}
+
+function paintTicketDrawer(t, settled) {
+  const s = state;
+  const sub = dr.sub;
+  const cards = settled ? [] : sortCards(s.cards.filter((c) => c.ticket === t.thread));
+  const st = settled ? "done" : ticketState(t, cards);
+  const ws = t.workers || [];
+  const fw = sub.worker ? ws.find((w) => (w.thread || w.label) === sub.worker) || null : null;
+  const live = ws.filter((w) => !w.done && w.pr && safeUrl(w.pr.url));
+  const pr = (fw && fw.pr && safeUrl(fw.pr.url) ? fw.pr : null) || (t.pr && safeUrl(t.pr.url) ? t.pr : null) || (live.length ? live[live.length - 1].pr : null);
+  drHead(t.label, partTag(t, fw), titleOf(t));
+  drPills(markOf(st, cards), settled ? "settled" : WORDS[st], pr, t.label, !settled && !t.done && !!t.paused, t);
+  drLink("gh-issue", issueUrl(t.label, t.repo), "Open issue on GitHub", "Open issue " + t.label + " on GitHub");
+  drLink("gh-pr", pr && pr.url, pr ? "Open PR #" + pr.number + " on GitHub" : "", pr ? "Open PR #" + pr.number + " for " + t.label + " on GitHub" : "");
+  drT3(t.link, t.label);
+  const th = encodeURIComponent(t.thread || "");
+  const pausable = !settled && !t.done && !!t.thread && t.joined !== false;
+  drBtn("pause", pausable, t.paused ? "Resume" : "Pause", (t.paused ? "Resume " : "Pause ") + t.label,
+    (b) => act(b, "/api/links/" + th + (t.paused ? "/resume" : "/pause")));
+  drBtn("settle", !settled && !!t.done && !!t.thread, "Settle", "Settle " + t.label, (b) => act(b, "/api/tickets/" + th + "/settle"));
+  drBtn("restore", settled, "Restore", "Restore " + t.label, (b) => act(b, "/api/tickets/" + th + "/restore"));
+  drClear("tocard", "launch", "nisflip", "note");
+  drSec("needs", cards.length > 0, cards.length);
+  sync(drPart("needs-l"), cards, { key: (c) => c.id, make: makeDrCard, patch: patchDrCard, live: true, quiet: true, rove: false });
+  const last = t.last;
+  drSec("latest", !!last);
+  if (last) {
+    const word = LAST_WORD[last.kind] || "Latest message";
+    const how = last.kind === "gate" && !cards.length ? (last.dismissed ? ", dismissed" : ", answered") : "";
+    setText(drPart("latest-h"), word + how);
+    drMsg(drPart("latest-b"), drPart("latest-m"), last.handle, last.head, "", last.iso, last.at);
+  }
+  const rank = (w) => (w.done ? 100 : 0) + ORDER.indexOf(workerState(w, cards));
+  const sorted = ws.map((w, i) => [w, i]).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map((x) => x[0]);
+  drSec("workers", sorted.length > 0, sorted.length);
+  sync(drPart("workers-l"), sorted, { key: (w) => w.thread || w.label, make: makeDrWorker, patch: (el, w) => patchDrWorker(el, w, t, cards), live: true, quiet: true, rove: false });
+}
+
+function paintCardDrawer(c) {
+  const k = drCard(c);
+  drHead(c.label || "Card " + c.id, "", k.p.ask);
+  drPills(k.mk, k.word, null, c.label || c.id, false, c);
+  drLink("gh-issue", k.p.link && k.p.link.href, k.p.link ? k.p.link.text + " on GitHub" : "", k.p.link ? k.p.link.text + " for card " + cardLabel(c) : "");
+  drClear("gh-pr", "pause", "settle", "restore", "launch", "nisflip", "needs", "latest", "workers");
+  drT3(c.link, cardLabel(c));
+  drBtn("tocard", true, "Go to card " + c.id, "Go to card " + cardLabel(c) + " in Needs you", () => { jumpToCard(c.id); drUncover(cardEl(c.id)); });
+  drSec("note", true);
+  setText(drPart("note-h"), "Message");
+  drMsg(drPart("note-b"), drPart("note-m"), null, c.text, "", c.at, c.atLocal);
+}
+
+function paintNewDrawer(i) {
+  drHead(i.label, "", i.title || i.label);
+  drPills("idle", i.dismissed ? "dismissed" : "new issue", null, i.label, false, i);
+  drLink("gh-issue", i.url, "Open issue on GitHub", "Open issue " + i.label + " on GitHub");
+  drClear("gh-pr", "tocard", "pause", "settle", "restore", "needs", "latest", "workers");
+  const slot = drPart("t3");
+  setLink(slot, i.threadLink, "Open filing thread", "Open the thread that filed " + i.label);
+  if (slot.firstChild) setAttr(slot.firstChild, "class", "btn");
+  const path = "/api/new-issues/" + encodeURIComponent(i.id);
+  drBtn("launch", !i.dismissed, "Launch", "Launch a ticket for " + i.label, (b) => newAct(b, path + "/launch", i, "launched"));
+  drBtn("nisflip", true, i.dismissed ? "Restore" : "Dismiss", (i.dismissed ? "Restore " : "Dismiss ") + i.label,
+    (b) => newAct(b, path + (i.dismissed ? "/restore" : "/dismiss"), i, i.dismissed ? "restored" : "dismissed"));
+  drSec("note", true);
+  setText(drPart("note-h"), i.note ? "Note from the filing thread" : "Filed");
+  const nb = drPart("note-b");
+  nb.hidden = !i.note;
+  if (i.note) renderAnswer(nb, i.note);
+  const who = i.threadTitle || "an unknown thread";
+  drMeta(drPart("note-m"), i.dismissed ? "Dismissed" : "Filed by " + who, i.dismissed ? i.dismissedAt : i.at, i.dismissed ? i.dismissedAtLocal : i.atLocal, "");
+}
+
+function drGoneText(sub) {
+  if (sub.kind === "new") return "This issue is no longer in New issues. Its last known state is below.";
+  if (sub.kind === "card") return "Card " + sub.key + " was resolved. Its last known state is below.";
+  return "This ticket is no longer on the board. Its last known state is below.";
+}
+
+function paintDrawer() {
+  if (!dr.open || !state) return;
+  const box = $("drawer");
+  const had = focusInside(box) ? document.activeElement : null;
+  placeDrawer();
+  const hit = drFind(dr.sub, state);
+  const gone = drPart("gone");
+  gone.hidden = !!hit;
+  if (!hit) {
+    setText(gone, drGoneText(dr.sub));
+    for (const b of box.querySelectorAll("button")) if (b.dataset.part !== "close" && b.id !== "dr-err-close") setAttr(b, "aria-disabled", "true");
+  } else if (hit.i) paintNewDrawer(hit.i);
+  else if (hit.t) paintTicketDrawer(hit.t, !!hit.settled);
+  else paintCardDrawer(hit.c);
+  setAttr(box, "data-kind", dr.sub.kind);
+  markInspected();
+  if (had && (!had.isConnected || !box.contains(had) || had.closest("[hidden]"))) drPart("title").focus();
+}
+
+function markInspected() {
+  const want = [];
+  const s = dr.open ? dr.sub : null;
+  const byKey = (list, attr, v) => [...$(list).children].find((el) => el.getAttribute(attr) === v) || null;
+  if (s && s.kind === "ticket") {
+    for (const id of ["open", "done"]) {
+      const r = byKey(id, "data-thread", s.key);
+      if (!r) continue;
+      want.push(r);
+      const w = s.worker ? [...r.querySelectorAll(".wi")].find((x) => x.dataset.key === s.worker) : null;
+      if (w) want.push(w);
+    }
+    const sr = byKey("settled", "data-key", "t:" + s.key);
+    if (sr) want.push(sr);
+  }
+  const card = s && (s.kind === "card" ? s.key : s.card);
+  if (card && cardEl(card)) want.push(cardEl(card));
+  if (s && s.kind === "new") { const r = byKey("nis", "data-key", s.key); if (r) want.push(r); }
+  for (const el of dr.marked) if (!want.includes(el)) setAttr(el, "data-inspected", null);
+  for (const el of want) setAttr(el, "data-inspected", el.classList.contains("gone") ? null : "true");
+  dr.marked = want;
+}
+
+function inspectClick(e) {
+  if (e.defaultPrevented || (e.button || 0) !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+  const t = e.target;
+  if (!t || !t.closest || t.closest("#drawer, #composer, .ph, .lctl, .tgroup")) return;
+  const pr = t.closest("a.prl");
+  if (!pr) {
+    if (t.closest("a, button, input, textarea, select, label, summary, .act, .reply, .fullbox, .sending")) return;
+    if (t.closest(".card") && !t.closest(".q, .ctx, .detail")) return;
+    const sel = window.getSelection ? String(window.getSelection() || "") : "";
+    if (sel) return;
+  }
+  const sub = subjectOf(t);
+  if (!sub) return;
+  if (pr && e.preventDefault) e.preventDefault();
+  openDrawer(sub, { el: pr || sub.item, item: sub.item });
+}
+
 const lists = () => [$("cards"), $("nis"), $("open"), $("done"), $("settled"), $("feed"), $("asks")];
 
 function listOf(el) {
@@ -4767,13 +5299,19 @@ document.addEventListener("keydown", (e) => {
   const field = t && t.closest && t.closest("input, textarea, select, [contenteditable]");
   if (e.key === "Escape") {
     if ($("keys").open || $("models-dlg").open || $("settings-dlg").open) return;
+    if (dr.open) {
+      e.preventDefault();
+      closeDrawer(!field || $("drawer").contains(t));
+      return;
+    }
     if (field || (t && t.closest && t.closest("#composer"))) {
       const l = listOf(t);
       if (l) { e.preventDefault(); focusList(l); }
       else if (field) { e.preventDefault(); t.blur(); focusList($("cards")); }
     } else {
       const l = listOf(t);
-      if (l && t !== l._active) { e.preventDefault(); focusItem(l, itemOf(l, t)); }
+      if (filter.q || $("filter-q").value) { e.preventDefault(); clearSearch(); }
+      else if (l && t !== l._active) { e.preventDefault(); focusItem(l, itemOf(l, t)); }
     }
     return;
   }
@@ -4781,6 +5319,10 @@ document.addEventListener("keydown", (e) => {
   if (field || e.ctrlKey || e.metaKey || e.altKey) return;
   const list = listOf(t);
   if (list && itemOf(list, t) === t) {
+    if (e.key === "Enter") {
+      const sub = subjectOf(t);
+      if (sub) { e.preventDefault(); return openDrawer(sub, { el: t, item: t }); }
+    }
     if (e.key === "ArrowDown") { e.preventDefault(); return moveIn(list, 1); }
     if (e.key === "ArrowUp") { e.preventDefault(); return moveIn(list, -1); }
     if (e.key === "Home") { e.preventDefault(); return moveIn(list, -1e9); }
@@ -5334,6 +5876,8 @@ function layInit() {
 }
 
 function wire() {
+  initDrawer();
+  document.addEventListener("click", inspectClick);
   track("cards", $("cards"), $("new-cards"));
   track("open", $("open"), null);
   $("new-tix").addEventListener("click", () => { const p = $("new-tix")._panel; if (p) applyHeld(p); });
@@ -5395,13 +5939,10 @@ function wire() {
   const q = $("filter-q");
   q.addEventListener("input", queryTyped);
   q.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape" || !(q.value || filter.q)) return;
+    if (e.key !== "Escape" || dr.open || !(q.value || filter.q)) return;
     e.preventDefault();
     e.stopPropagation();
-    q.value = "";
-    clearTimeout(queryTimer);
-    filter.q = "";
-    filterChanged();
+    clearSearch();
   });
   $("filter-clear").addEventListener("click", () => { useContext("", true); q.focus(); });
   $("hidden-new").addEventListener("click", () => {
