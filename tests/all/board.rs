@@ -2267,7 +2267,7 @@ return { done, blocked, needs, gates, failedGate };
 }
 
 #[tokio::test]
-async fn the_f_key_focuses_search_only_with_single_key_shortcuts_on() {
+async fn slash_focuses_search_and_a_focuses_ask_only_with_single_key_shortcuts_on() {
     let (html, st) = two_gate_page().await;
     let r = page_scenario(
         &html,
@@ -2275,17 +2275,80 @@ async fn the_f_key_focuses_search_only_with_single_key_shortcuts_on() {
         r##"
 emitState(base);
 const press = (key) => { for (const f of document.listeners.keydown) f({ key, target: document.body, preventDefault() {} }); };
+const searchBox = document.getElementById("filter-q");
+const askBox = document.getElementById("question");
+press("/");
+const search = document.activeElement === searchBox;
+document.activeElement = document.body;
+press("a");
+const asked = document.activeElement === askBox;
+document.activeElement = document.body;
 press("f");
-const on = document.activeElement === document.getElementById("filter-q");
+const f = document.activeElement === searchBox;
 document.activeElement = document.body;
 const box = document.getElementById("keys-on");
 box.checked = false;
 box.dispatch("change");
-press("f");
-return { on, off: document.activeElement === document.getElementById("filter-q") };
+press("/");
+press("a");
+return { search, asked, f, off: document.activeElement !== document.body };
 "##,
     );
-    assert_eq!(r, json!({"on": true, "off": false}));
+    assert_eq!(r, json!({"search": true, "asked": true, "f": false, "off": false}));
+}
+
+#[tokio::test]
+async fn the_theme_toggle_cycles_persists_and_survives_missing_storage() {
+    let (html, st) = two_gate_page().await;
+    let prelude = r#"
+globalThis.__storage = { "t3board.theme": "dark" };
+globalThis.__dark = false;
+globalThis.__mq = [];
+globalThis.matchMedia = (m) => ({ get matches() { return /prefers-color-scheme: dark/.test(m) && globalThis.__dark; }, addEventListener: (_, f) => globalThis.__mq.push(f) });
+"#;
+    let body = format!(
+        r##"() => {{
+{PAGE_HELPERS}
+const base = {st};
+emitState(base);
+const root = document.documentElement;
+const btn = document.getElementById("theme-btn");
+const shown = () => btn.querySelectorAll("[data-theme-icon]").filter((s) => !s.hasAttribute("hidden")).map((s) => s.getAttribute("data-theme-icon"));
+const snap = () => ({{ theme: root.getAttribute("data-theme"), stored: localStorage.getItem("t3board.theme"), label: btn.getAttribute("aria-label") }});
+const loaded = snap();
+btn.dispatch("click");
+const system = snap();
+globalThis.__dark = true;
+for (const f of globalThis.__mq) f();
+const osDark = snap();
+btn.dispatch("click");
+const light = snap();
+for (const k of ["system", "light", "dark"]) btn.append(h("svg", {{ "data-theme-icon": k }}));
+localStorage.setItem = () => {{ throw new Error("blocked"); }};
+btn.dispatch("click");
+const noStore = {{ ...snap(), icons: shown() }};
+return {{ loaded, system, osDark, light, noStore }};
+}}"##
+    );
+    let r = run_page_async_with(&html, prelude, &body);
+    assert_eq!(
+        r["loaded"],
+        json!({"theme": "dark", "stored": "dark", "label": "Theme: Dark. Switch to System"}),
+        "{r}"
+    );
+    assert_eq!(
+        r["system"],
+        json!({"theme": "light", "stored": null, "label": "Theme: System. Switch to Light"}),
+        "{r}"
+    );
+    assert_eq!(r["osDark"]["theme"], json!("dark"), "System follows the OS: {r}");
+    assert_eq!(
+        r["light"],
+        json!({"theme": "light", "stored": "light", "label": "Theme: Light. Switch to Dark"}),
+        "{r}"
+    );
+    assert_eq!(r["noStore"]["theme"], json!("dark"), "a storage error still switches the theme: {r}");
+    assert_eq!(r["noStore"]["icons"], json!(["dark"]), "{r}");
 }
 
 #[tokio::test]
@@ -3477,7 +3540,7 @@ return out;
     );
     assert_eq!(r["order"], json!(["a2", "a1"]), "{r}");
     assert_eq!(r["ask"], json!(["Merge #64", "Worker cannot reach the registry; fix the token"]), "{r}");
-    assert_eq!(r["word"], json!([true, "Blocked:"]), "{r}");
+    assert_eq!(r["word"], json!([true, "Blocked"]), "{r}");
     assert_eq!(r["detail"], "Verified: approved at 905fcaa.", "{r}");
     assert_eq!((&r["review"], &r["open"]), (&json!("Review #64"), &json!("Open link")), "{r}");
     assert_eq!(r["cls"], "card k-fail", "{r}");

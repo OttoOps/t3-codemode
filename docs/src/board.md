@@ -57,7 +57,8 @@ and the threads running. Only the lists scroll.
   ticket that needs you, a `Reply "merge"` link to its card. Other rows show
   the last message, and a gate already answered reads "Answered: ...", or "Dismissed: ..." when you dismissed its card. The
   workers sit at the end of the row, with finished ones folded into a count
-  that expands.
+  that expands. A pull request shows as an outlined pill with its number, and
+  on the ticket's own row its state: open, queued, merged or closed.
 - **Activity.** Notes and events from tickets, the latest `board.feed` (50)
   of them, under the ticket and worker that sent them. Runs from the same
   sender fold into one row that expands. The board drops kind prefixes and
@@ -81,6 +82,15 @@ and the threads running. Only the lists scroll.
   gets archived.
 
 Times show as ages (`36m`, `1h 32m`); hover one for the local time.
+
+The page follows your system's light or dark setting. The theme button in the
+header, a half-filled circle, switches it to Light, then Dark, then back to
+System, and this browser remembers the choice. A browser that blocks storage
+still switches, but goes back to System on reload.
+
+Single-key shortcuts work while no field has focus: `/` focuses search, `a`
+focuses Ask, `l` focuses Launch, `j` and `k` move between cards and rows, and
+`?` lists the rest. The list has a switch that turns them off.
 
 On a local board, and on a remote board opened by its Tailscale owner, the gear
 button in the header opens [Settings](#settings).
@@ -312,7 +322,7 @@ Settled section at once.
   kind narrows only the cards.
 - **Search** narrows the page while you type, with no Enter. Every word must
   appear somewhere in the ticket label, the issue title or number, the repo, or
-  the card or feed text. `Esc` clears it, and `f` focuses it when single-key
+  the card or feed text. `Esc` clears it, and `/` focuses it when single-key
   shortcuts are on.
 
 While a filter is on, each count reads visible/total. A new card the filter
