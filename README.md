@@ -115,6 +115,36 @@ path, so t3cm installs all five together in one folder:
   and a credential renewal skill. Each is optional, and the worker skips a
   slot with no skill.
 
+## Open the board from another device
+
+The board at `http://127.0.0.1:47731/` answers only on the host by default.
+To open it from a phone or a laptop on your tailnet, serve it with Tailscale
+Serve:
+
+```bash
+sudo tailscale set --operator=$USER   # once, for Tailscale on Linux or inside WSL
+t3cm board expose --tailscale         # Serve on HTTPS port 47732, write board.remote
+systemctl --user restart t3-codemode  # or the restart command expose prints
+t3cm status                           # remote.enabled is true, remote.origin is the URL
+```
+
+Tailscale tells t3cm each caller's login, so no browser needs pairing. Only
+the host's own login gets in unless you pass `--allow-user <login>`, once per
+login; add `--require-pairing` to also pair each browser.
+`t3cm board unexpose` turns remote access back off once you restart the
+service.
+
+Behind Caddy, nginx or Cloudflare Tunnel, set `board.remote` to
+`{"mode": "pairing", "origin": "https://board.example.com"}` in the config
+and restart. Then pair each browser with `t3cm board pair`, which prints a
+single-use link and QR code that expire in 5 minutes. `t3cm board sessions`
+lists the paired browsers, `t3cm board revoke <id>` cuts one off, and
+`t3cm board revoke --all` cuts off every one. See
+[Remote access](https://ottoops.com/t3-codemode/board.html#remote-access) for
+the proxy rules and examples, and
+[Remote board](https://ottoops.com/t3-codemode/config.html#remote-board) for
+every `board.remote` key.
+
 ## Contributing
 
 Every commit carries a DCO signoff (`git commit -s`), and pull requests merge

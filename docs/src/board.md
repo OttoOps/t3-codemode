@@ -532,17 +532,60 @@ front of `127.0.0.1:47731`, configure [`board.remote`](config.md#remote-board)
 in `config.json`, and restart `t3cm`. `/mcp`, `/healthz` and `/reload` stay
 loopback-only.
 
+Five commands manage remote access from the host:
+
+| Command | Does |
+|---|---|
+| `t3cm board expose --tailscale` | Serves the board over Tailscale Serve and writes `board.remote` |
+| `t3cm board unexpose` | Removes the board's Tailscale Serve routes and sets `board.remote` to `{"mode": "off"}` |
+| `t3cm board pair` | Mints a single-use pairing link and QR code for one browser |
+| `t3cm board sessions` | Lists the paired browsers' active sessions |
+| `t3cm board revoke <ID>` or `--all` | Ends one session, or every session |
+
+`board.remote` is a [restart-only key](config.md#restart-only-keys), so the
+service keeps its old remote settings until it restarts. `expose` and
+`unexpose` print the restart command for your platform, such as
+`systemctl --user restart t3-codemode` on Linux. `pair`, `sessions` and
+`revoke` work on `store.db` in the state directory that `--state-dir` or
+`T3CM_STATE_DIR` sets, and each takes `--json`.
+
+Pick the front end by who opens the board:
+
+- **Tailscale Serve,** when every device that opens it is on your tailnet.
+  Tailscale issues the certificate and tells `t3cm` who each caller is, so no
+  browser needs pairing.
+- **Your own reverse proxy,** such as Caddy, nginx or Cloudflare Tunnel, when
+  a device is not on your tailnet. You write `board.remote` yourself, with mode
+  `"pairing"`, and pair each browser.
+
+`t3cm board expose` drives Tailscale only. Without `--tailscale` it stops and
+points you at `config.json`.
+
 ### Tailscale Serve
 
 Tailscale Serve terminates HTTPS with an automatic certificate on your
 tailnet's MagicDNS hostname (`https://box.acme.ts.net:47732/`) and injects the
-caller's `Tailscale-User-Login` header. `t3cm` defaults to HTTPS port `47732`
-so it does not collide with T3 Code's own `:443` binding.
+caller's `Tailscale-User-Login` header. Serve keeps the board on your tailnet;
+`t3cm` never turns on Funnel. `t3cm` defaults to HTTPS port `47732` so it does
+not collide with T3 Code's own `:443` binding.
 
-1. Make sure MagicDNS and HTTPS Certificates are enabled in your Tailscale
-   admin console and the node is signed in (`tailscale status`). On Linux, if
-   you run `tailscale serve` without `sudo`, grant your user operator access
-   once with `sudo tailscale set --operator=$USER`.
+1. Make sure `tailscale status` shows Tailscale up on the host, and that
+   MagicDNS and HTTPS Certificates are enabled in your Tailscale admin
+   console. `t3cm board expose` checks all three and stops with the fix when
+   one is missing.
+
+   `t3cm` runs `tailscale serve` as your own user. Tailscale on Linux, and
+   Tailscale installed inside a WSL distro, takes Serve changes only from root
+   or its operator, so make your user the operator once:
+
+   ```sh
+   sudo tailscale set --operator=$USER
+   ```
+
+   Without it, `expose` fails with Tailscale's access-denied error and prints
+   that command as a hint. `t3cm` finds the `tailscale` CLI on `PATH`, or at
+   `T3CM_TAILSCALE_BIN`. Under WSL with no Linux `tailscale`, it uses Windows'
+   `tailscale.exe` through interop, and the operator step does not apply.
 
 2. Expose the board and write `board.remote` in `config.json`:
 
@@ -560,19 +603,55 @@ so it does not collide with T3 Code's own `:443` binding.
    - `--https-port <PORT>`: serve on a port other than `47732` (refuses to
      overwrite a port already serving a different target).
    - `--port <PORT>`: target a non-default local `t3cm` port (defaults to
-     `T3CM_PORT` or `47731`).
-   - `--allow-user <LOGIN>`: repeatable explicit Tailscale login allowlist
-     (defaults to the host's own login from `tailscale status --json`).
+     `T3CM_PORT` or `47731`). Pass the same `--port` to `t3cm status` and
+     `t3cm board unexpose`.
+   - `--allow-user <LOGIN>`: repeatable explicit Tailscale login allowlist,
+     written to `allowUsers`. Without it, only the host's own login, as
+     `tailscale status --json` reports it, gets in. A list replaces that default, so
+     include your own login to keep your access.
    - `--require-pairing`: also require a per-browser pairing cookie on top of
      `Tailscale-User-Login`. With this enabled, run `t3cm board pair` for each
      remote browser.
    - `--json`: machine-readable output.
 
-3. Check remote state and drift at any time:
+   This mode needs no pairing. Tailscale Serve authenticates each
+   request and adds its `Tailscale-User-Login` header, and `t3cm` admits the
+   request when that login is allowed. Until you set `requirePairing`,
+   `t3cm board pair` refuses and says so.
 
-   - `t3cm status` (and loopback `GET /healthz`) includes a `remote` object
-     with `mode`, `enabled`, `origin`, `requirePairing`, `allowUsers`,
-     `allowUsersSource`, `hostLogin`, and `activeSessions`.
+3. Restart the service, then check the result:
+
+   ```sh
+   t3cm status
+   ```
+
+   Its `remote` object, which loopback `GET /healthz` also returns, shows what
+   the running service enforces. `enabled` is `true`, and `origin` is the URL to
+   open on the other device:
+
+   ```json
+   "remote": {
+     "mode": "tailscale",
+     "enabled": true,
+     "origin": "https://box.acme.ts.net:47732",
+     "requirePairing": false,
+     "allowUsers": ["alice@acme.example"],
+     "allowUsersSource": "tailscale",
+     "hostLogin": "alice@acme.example",
+     "tailscaleError": null,
+     "activeSessions": 0
+   }
+   ```
+
+   `enabled: false` after an `expose` means the service has not restarted
+   onto the new config. `allowUsersSource` is `"config"` when `allowUsers`
+   comes from `config.json`, as `--allow-user` writes it, and `"tailscale"`
+   when it is the host's own login. It is `"unavailable"` when the service
+   could not read the host's login, and then `tailscaleError` says why and the
+   service refuses every Tailscale caller. In `pairing` mode the object
+   carries only `mode`, `enabled`, `origin`, `requirePairing` and
+   `activeSessions`.
+
    - `t3cm doctor` verifies that `config.json`, the running service, Tailscale
      status, MagicDNS, HTTPS certificates (`CertDomains`), and
      `tailscale serve status` agree, and flags any drift or accidental Funnel /
@@ -580,12 +659,21 @@ so it does not collide with T3 Code's own `:443` binding.
    - `t3cm serve` never mutates Tailscale state on start or restart; only
      `t3cm board expose` and `t3cm board unexpose` change `tailscale serve`.
 
-4. To turn remote access back off, disable the Tailscale Serve port and set
-   `board.remote.mode` to `"off"`, then restart the service:
+4. To turn remote access back off:
 
    ```sh
    t3cm board unexpose
    ```
+
+   It removes the Serve routes that proxy to the board's local port on the
+   port in `board.remote.origin`, or on `--https-port <PORT>`, and leaves
+   other Serve handlers alone. When you exposed a non-default local port, pass
+   the same `--port <PORT>`. Without it, `unexpose` does not recognize the
+   board's Serve route, so it can turn `board.remote` off and leave the route
+   in place, or refuse. It refuses, naming the command to run, when that port
+   forwards the board over plain HTTP or raw TCP. Then it sets `board.remote`
+   to `{"mode": "off"}` and prints the restart command. Restart the service to
+   apply it.
 
 ### Pairing a browser
 
@@ -606,6 +694,10 @@ of Tailscale Serve with `requirePairing: true`:
    }
    ```
 
+   After the restart, `t3cm status` shows `remote.enabled: true`, and
+   `remote.origin` is the HTTPS origin you configured, such as
+   `"https://board.example.com"` behind a proxy.
+
 2. Mint a single-use 5-minute pairing URL and QR code on the host:
 
    ```sh
@@ -613,6 +705,8 @@ of Tailscale Serve with `requirePairing: true`:
    ```
 
    Pass `--no-qr` to print only the URL, or `--json` for machine-readable output.
+   `t3cm board pair` refuses while `board.remote` is off, and in `tailscale`
+   mode without `requirePairing`.
 
 3. Scan the QR code or open the `https://board.example.com/pair#<token>` link
    in the remote browser. The `/pair` page reads the token from the URL
