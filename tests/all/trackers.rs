@@ -898,6 +898,11 @@ async fn launch_form_handles_loading_race_stale_mapped_project_and_url_hosts() {
         { "id": "p-web", "title": "Web App", "remote": { "host": "github.com", "path": "acme/web", "port": null } }
     ]);
     after_archive["modelsRev"] = json!(2);
+    let mut restored_models = models.clone();
+    restored_models["modelsRev"] = json!(3);
+    let mut after_mapped = models.clone();
+    after_mapped["trackers"] = json!({ "jira": { "MAPPED": "API Service", "PROJ": "API Service" }, "hosts": {} });
+    after_mapped["modelsRev"] = json!(4);
 
     let r = crate::board::run_page_async_with(
         &html,
@@ -907,6 +912,8 @@ async fn launch_form_handles_loading_race_stale_mapped_project_and_url_hosts() {
 const base = {st};
 let curModels = {models};
 const afterArchive = {after_archive};
+const restoredModels = {restored_models};
+const afterMapped = {after_mapped};
 let failNextLaunch = false;
 const tick = async () => {{ for (let i = 0; i < 12; i++) await Promise.resolve(); }};
 fetchReply = (url, opts) => {{
@@ -979,7 +986,39 @@ await tick();
 const ghFailReenabled = !document.getElementById("launch-btn").disabled;
 const ghFailModelGets = fetches.filter((f) => f.url === "/api/models").length - modelGetsBeforeGhFail;
 
-return {{ postsWhileLoading, pickerOpenedOnLoad, urlRefsShown, hiddenBeforeArchive, pickerAfterFailure, ghFailReenabled, ghFailModelGets }};
+// 5. Explicit project selection survives a refresh that later maps the same ref to a different project.
+curModels = restoredModels;
+await refreshModels(true);
+ta.value = "PROJ-99";
+ta.dispatch("input");
+const pickSel = box.querySelector('select[data-ref="PROJ-99"]');
+pickSel.value = "p-web";
+pickSel.dispatch("change");
+curModels = afterMapped;
+await refreshModels(true);
+const keptVisible = !box.hidden;
+const keptValue = box.querySelector('select[data-ref="PROJ-99"]') && box.querySelector('select[data-ref="PROJ-99"]').value;
+form.dispatch("submit");
+await tick();
+const keptPost = JSON.parse(fetches.filter((f) => f.url === "/api/launch").slice(-1)[0].body);
+
+// Clearing an explicit selection lets the new mapping take over and hides the picker.
+curModels = restoredModels;
+curModels = {{ ...restoredModels, modelsRev: 5 }};
+await refreshModels(true);
+ta.value = "PROJ-100";
+ta.dispatch("input");
+const clearSel = box.querySelector('select[data-ref="PROJ-100"]');
+clearSel.value = "p-web";
+clearSel.dispatch("change");
+curModels = {{ ...afterMapped, modelsRev: 6 }};
+await refreshModels(true);
+const clearSelAfter = box.querySelector('select[data-ref="PROJ-100"]');
+clearSelAfter.value = "";
+clearSelAfter.dispatch("change");
+const clearHidden = box.hidden;
+
+return {{ postsWhileLoading, pickerOpenedOnLoad, urlRefsShown, hiddenBeforeArchive, pickerAfterFailure, ghFailReenabled, ghFailModelGets, keptVisible, keptValue, keptPost, clearHidden }};
 }}"##
         ),
     );
@@ -999,4 +1038,8 @@ return {{ postsWhileLoading, pickerOpenedOnLoad, urlRefsShown, hiddenBeforeArchi
     assert_eq!(r["pickerAfterFailure"], json!(["MAPPED-7"]), "{r}");
     assert_eq!(r["ghFailReenabled"], true, "{r}");
     assert_eq!(r["ghFailModelGets"], 0, "{r}");
+    assert_eq!(r["keptVisible"], true, "{r}");
+    assert_eq!(r["keptValue"], "p-web", "{r}");
+    assert_eq!(r["keptPost"], json!({"issues": [{"issue": "PROJ-99", "project": "p-web"}]}), "{r}");
+    assert_eq!(r["clearHidden"], true, "{r}");
 }
