@@ -374,7 +374,7 @@ impl Wf {
     fn tracked(&self, floor: &str) -> Result<BTreeMap<(String, u64), Tracked>> {
         let mut map = BTreeMap::new();
         for ln in self.store.links_open()?.into_iter().filter(|l| l.role == "worker") {
-            let live = self.live.lock().unwrap_or_else(|e| e.into_inner()).get(&ln.child).cloned();
+            let live = self.live_of(&ln.child);
             let urls: Vec<String> = live
                 .as_ref()
                 .map(|l| {

@@ -1369,6 +1369,99 @@ async fn close_ticket_optionally_notifies_the_thread() {
     );
 }
 
+#[tokio::test]
+async fn close_ticket_refuses_when_a_newer_running_observation_overtakes_a_stale_idle_read() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use t3_codemode::app::App;
+    use t3_codemode::clock::FakeClock;
+    use t3_codemode::fake::{FakeDesktop, FakeGitHub, FakeRemotes, FakeT3, FakeTailscale};
+    use t3_codemode::store::Store;
+    use t3_codemode::t3::{BoxFut, T3Client, T3Error};
+
+    struct BlockingPrListT3 {
+        inner: Arc<FakeT3>,
+        arm: AtomicBool,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl T3Client for BlockingPrListT3 {
+        fn call<'a>(&'a self, tool: &'a str, args: Value) -> BoxFut<'a, Result<Value, T3Error>> {
+            Box::pin(async move {
+                if tool == "list_thread_pull_requests" && self.arm.swap(false, Ordering::AcqRel) {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                self.inner.call(tool, args).await
+            })
+        }
+
+        fn list_tools(&self) -> BoxFut<'_, Result<Vec<Value>, T3Error>> {
+            self.inner.list_tools()
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Arc::new(FakeT3::new());
+    fake.put(thread(TICKET, "idle", T0));
+    fake.set_prs(
+        TICKET,
+        vec![json!({"number": 1, "url": "https://github.com/acme/widgets/pull/1", "state": "merged", "repository": "acme/widgets"})],
+    );
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let t3 = Arc::new(BlockingPrListT3 {
+        inner: fake.clone(),
+        arm: AtomicBool::new(false),
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    let app = App::with_host_and_tailscale(
+        Config::default(),
+        Arc::new(Store::open(dir.path()).unwrap()),
+        t3.clone(),
+        Arc::new(FakeClock::at(T0)),
+        Arc::new(FakeRemotes::default()),
+        Arc::new(FakeGitHub::default()),
+        Arc::new(FakeDesktop::default()),
+        Arc::new(FakeTailscale::default()),
+    );
+    app.wf
+        .dispatch("join", Some(TICKET), json!({"parent": "board", "label": "widgets#41", "role": "ticket"}))
+        .await
+        .unwrap();
+    app.wf.dispatch("send", Some(TICKET), json!({"kind": "report", "body": "open report"})).await.unwrap();
+
+    // Arm the pause on the close request's closed-PR lookup, after it has read "idle" from T3.
+    fake.set_prs(
+        TICKET,
+        vec![
+            json!({"number": 1, "url": "https://github.com/acme/widgets/pull/1", "state": "merged", "repository": "acme/widgets"}),
+            json!({"number": 2, "url": "https://github.com/acme/widgets/pull/2", "state": "closed", "repository": "acme/widgets"}),
+        ],
+    );
+    t3.arm.store(true, Ordering::Release);
+
+    let wf_close = app.wf.clone();
+    let close_task = tokio::spawn(async move { wf_close.close_ticket(TICKET, false).await });
+    entered.notified().await;
+
+    // A newer read observes the ticket running and publishes that status before the stale idle read finishes.
+    fake.update(TICKET, json!({"status": "running"}));
+    app.wf.board_view("board", false).await.unwrap();
+    assert_eq!(app.wf.snapshot().unwrap()["tree"][0]["status"], "running");
+
+    // Release the older read; it must not overwrite "running" or close the ticket.
+    release.notify_one();
+    let err = close_task.await.unwrap().expect_err("stale idle read must not close a running ticket");
+    assert!(err.to_string().contains("running"), "{err:#}");
+
+    let st = app.wf.snapshot().unwrap();
+    assert_eq!((st["tree"][0]["done"].clone(), st["tree"][0]["status"].clone()), (json!(false), json!("running")));
+    assert_eq!(st["cards"].as_array().unwrap().len(), 1);
+}
+
 fn run_page(html: &str, scenario: &str) -> Value {
     let open = html.find("<script>").unwrap() + "<script>".len();
     let close = html.rfind("</script>").unwrap();
