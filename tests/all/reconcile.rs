@@ -65,6 +65,14 @@ fn worker_pr_state(h: &H) -> Value {
     h.app.wf.tree().unwrap()[0]["workers"][0]["pr"]["state"].clone()
 }
 
+fn worker_readiness(h: &H) -> Value {
+    h.app.wf.tree().unwrap()[0]["workers"][0]["pr"]["readiness"].clone()
+}
+
+fn readiness(draft: bool, merge_state: &str, review: Value, checks: Value) -> Value {
+    json!({"isDraft": draft, "mergeStateStatus": merge_state, "reviewDecision": review, "checks": checks})
+}
+
 #[tokio::test]
 async fn a_pr_merged_by_hand_resolves_its_gate_card_and_wakes_the_ticket_once() {
     let h = H::new();
@@ -1534,4 +1542,85 @@ async fn a_reconcile_card_carries_its_approvals_id_and_unrelated_cards_do_not() 
     let a2_cards: Vec<&Value> = open.iter().filter(|c| c["approval"].as_str() == Some(a2.as_str())).collect();
     assert_eq!(a2_cards.len(), 1, "{open:?}");
     assert!(a2_cards[0]["text"].as_str().unwrap().contains("has a failing check"), "{}", a2_cards[0]);
+}
+
+#[tokio::test]
+async fn the_reconcile_read_reports_each_open_prs_readiness_with_no_extra_call() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+    h.github.update_pr(REPO, 7, json!({"isDraft": true, "reviewDecision": "REVIEW_REQUIRED"}));
+    let running = json!({"__typename": "CheckRun", "name": "e2e", "status": "IN_PROGRESS", "conclusion": null});
+    h.github.set_checks(REPO, 7, json!([check_run("build", "SUCCESS"), running]));
+    assert_eq!(worker_readiness(&h), Value::Null, "no readiness before the first read");
+
+    check(&h, 1).await;
+
+    assert_eq!(h.github.operations(), ["reconcile"]);
+    let query = h.github.calls()[0]["query"].as_str().unwrap().to_string();
+    assert!(query.contains(" reviewDecision "), "{query}");
+    assert_eq!(worker_pr_state(&h), "open");
+    assert_eq!(worker_readiness(&h), readiness(true, "BLOCKED", json!("REVIEW_REQUIRED"), json!("pending")));
+
+    let rev = h.app.wf.revision();
+    check(&h, 2).await;
+    assert_eq!(h.app.wf.revision(), rev, "an unchanged read leaves the board revision alone");
+    h.github.update_pr(REPO, 7, json!({"isDraft": false, "mergeStateStatus": "CLEAN", "reviewDecision": "APPROVED"}));
+    h.github.set_checks(REPO, 7, json!([check_run("build", "SUCCESS"), check_run("CodeRabbit", "SKIPPED")]));
+    check(&h, 3).await;
+    assert!(h.app.wf.revision() > rev, "a readiness change bumps the board revision");
+    assert_eq!(worker_readiness(&h), readiness(false, "CLEAN", json!("APPROVED"), json!("passing")));
+
+    h.github.update_pr(REPO, 7, json!({"mergeStateStatus": "UNSTABLE", "reviewDecision": null}));
+    h.github.set_checks(REPO, 7, json!([check_run("build", "FAILURE")]));
+    check(&h, 5).await;
+    assert_eq!(worker_readiness(&h), readiness(false, "UNSTABLE", Value::Null, json!("failing")));
+    assert_eq!(h.github.operations(), ["reconcile"; 4]);
+}
+
+#[tokio::test]
+async fn a_pr_with_no_checks_at_its_head_reports_no_check_rollup() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", false));
+    check(&h, 1).await;
+    assert_eq!(worker_readiness(&h)["checks"], Value::Null);
+
+    h.github.set_checks(REPO, 7, json!([check_run("build", "SUCCESS")]));
+    h.github.update_pr(REPO, 7, json!({"headRefOid": MOVED}));
+    check(&h, 3).await;
+    assert_eq!(worker_readiness(&h)["checks"], Value::Null, "checks read at an older head are not this head's");
+}
+
+#[tokio::test]
+async fn a_merged_pr_carries_no_readiness() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", false));
+    check(&h, 1).await;
+    assert_eq!(worker_readiness(&h)["checks"], Value::Null);
+    assert_eq!(worker_readiness(&h)["mergeStateStatus"], "CLEAN");
+
+    h.github.update_pr(REPO, 7, json!({"state": "MERGED", "mergeCommit": {"oid": MERGED}, "mergedAt": at(2)}));
+    check(&h, 3).await;
+    assert_eq!(worker_readiness(&h), Value::Null);
+}
+
+#[tokio::test]
+async fn a_row_saved_before_readiness_was_read_shows_no_readiness_but_keeps_queued() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.app
+        .store
+        .pr_seen_put(&t3_codemode::store::PrSeen {
+            repo: REPO.into(),
+            pr: 7,
+            state: "OPEN".into(),
+            head: HEAD.into(),
+            queued: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(worker_pr_state(&h), "queued");
+    assert_eq!(worker_readiness(&h), Value::Null);
 }

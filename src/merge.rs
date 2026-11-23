@@ -33,19 +33,18 @@ pub enum Ready {
     Failing(String),
 }
 
-pub fn ready(pr: &Value) -> Ready {
-    let state = pr["mergeStateStatus"].as_str().unwrap_or("UNKNOWN");
-    match state {
-        "CLEAN" | "HAS_HOOKS" => return Ready::Yes,
-        "UNSTABLE" => {}
-        s => return Ready::Not(format!("merge state {s}")),
-    }
+struct Tally {
+    failing: Vec<String>,
+    pending: Vec<String>,
+    complete: bool,
+}
+
+fn tally(pr: &Value) -> Option<Tally> {
     let commit = &pr["commits"]["nodes"][0]["commit"];
     let contexts = &commit["statusCheckRollup"]["contexts"];
     let head = pr["headRefOid"].as_str().unwrap_or_default();
     let at_head = commit["oid"].as_str().is_some_and(|o| !o.is_empty() && o.eq_ignore_ascii_case(head));
-    let unread = || Ready::Not("merge state UNSTABLE, and its checks could not be read".into());
-    let Some(nodes) = contexts["nodes"].as_array().filter(|_| at_head) else { return unread() };
+    let nodes = contexts["nodes"].as_array().filter(|_| at_head)?;
     let mut failing = Vec::new();
     let mut pending = Vec::new();
     for c in nodes {
@@ -62,14 +61,40 @@ pub fn ready(pr: &Value) -> Ready {
             failing.push(format!("{} ({})", text("name"), text("conclusion")));
         }
     }
-    if !failing.is_empty() {
-        Ready::Failing(failing.join(", "))
-    } else if nodes.is_empty() || contexts["pageInfo"]["hasNextPage"] == true {
+    let complete = !nodes.is_empty() && contexts["pageInfo"]["hasNextPage"] != true;
+    Some(Tally { failing, pending, complete })
+}
+
+pub fn ready(pr: &Value) -> Ready {
+    let state = pr["mergeStateStatus"].as_str().unwrap_or("UNKNOWN");
+    match state {
+        "CLEAN" | "HAS_HOOKS" => return Ready::Yes,
+        "UNSTABLE" => {}
+        s => return Ready::Not(format!("merge state {s}")),
+    }
+    let unread = || Ready::Not("merge state UNSTABLE, and its checks could not be read".into());
+    let Some(t) = tally(pr) else { return unread() };
+    if !t.failing.is_empty() {
+        Ready::Failing(t.failing.join(", "))
+    } else if !t.complete {
         unread()
-    } else if !pending.is_empty() {
-        Ready::Not(format!("merge state UNSTABLE, checks still running: {}", pending.join(", ")))
+    } else if !t.pending.is_empty() {
+        Ready::Not(format!("merge state UNSTABLE, checks still running: {}", t.pending.join(", ")))
     } else {
         Ready::Yes
+    }
+}
+
+pub fn checks(pr: &Value) -> Option<&'static str> {
+    let t = tally(pr)?;
+    if !t.failing.is_empty() {
+        Some("failing")
+    } else if !t.complete {
+        None
+    } else if !t.pending.is_empty() {
+        Some("pending")
+    } else {
+        Some("passing")
     }
 }
 
