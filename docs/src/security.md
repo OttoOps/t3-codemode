@@ -109,7 +109,7 @@ code cannot call the route directly.
   board request must satisfy all of the following on both read routes (`/`,
   `/manifest.webmanifest`, `/icon.svg`, `/icon-192.png`, `/icon-512.png`,
   `/api/state`, `/api/events`, `/api/msg/*`, `/api/contexts`,
-  `/api/new-issues`) and mutating routes:
+  `/api/new-issues`, `/api/flow`) and mutating routes:
   - `X-Forwarded-Proto`, when present, must be `https`.
   - `Host` must match the configured `origin`, or `Host` must be the service's
     own loopback host while `X-Forwarded-Host` matches the configured `origin`.

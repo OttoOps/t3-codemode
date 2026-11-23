@@ -598,3 +598,197 @@ async fn an_auto_pick_does_not_launch_a_sub_issue_after_launching_its_parent() {
     let launched: Vec<String> = h.fake.launched().iter().map(|l| l["title"].as_str().unwrap().to_string()).collect();
     assert_eq!(launched, ["widgets#1: Issue 1"]);
 }
+
+async fn board_queue(h: &H) {
+    issue(h, REPO, 1, &[FLOW, "priority: high"], 1);
+    issue(h, REPO, 2, &[FLOW], 2);
+    issue(h, REPO, 3, &[], 3);
+    issue(h, REPO, 4, &[FLOW, "priority: low"], 4);
+    issue(h, TOOLS, 5, &[], 5);
+    issue(h, REPO, 6, &[FLOW, "blocked: external"], 6);
+    issue(h, REPO, 7, &[FLOW], 7);
+    h.github.set_blockers(REPO, 2, &[(REPO, 3)]);
+    h.github.close_issue(REPO, 3);
+    h.github.set_blockers(REPO, 4, &[(TOOLS, 5)]);
+    h.github.set_blockers(REPO, 6, &[(TOOLS, 5)]);
+    h.github.set_milestone(REPO, 7, "v0.7.0", Some("2026-11-30T00:00:00Z"));
+    let first = next(h).await;
+    let id = first["picked"][0]["card"].as_str().unwrap().to_string();
+    h.app.wf.answer(&id, "skip").await.unwrap();
+}
+
+#[tokio::test]
+async fn the_board_route_returns_the_queue_wf_flow_returns() {
+    let h = flowing(1);
+    board_queue(&h).await;
+    let want = flow(&h).await;
+    let s = crate::board::start(h).await;
+
+    let got = s.get("/api/flow").await;
+
+    assert_eq!(got, want);
+    assert_eq!(labels(&got["queue"]), ["widgets#7", "widgets#2"]);
+    assert_eq!(labels(&got["blocked"]), ["widgets#4", "widgets#6"]);
+    assert_eq!(labels(&got["skipped"]), ["widgets#1"]);
+    assert_eq!(s.get("/api/state").await["flow"], true);
+}
+
+#[tokio::test]
+async fn the_board_route_writes_no_skip_state_and_launches_nothing() {
+    let h = flowing(2);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    let first = next(&h).await;
+    let id = first["picked"][0]["card"].as_str().unwrap().to_string();
+    h.app.wf.answer(&id, "skip").await.unwrap();
+    for c in flow_cards(&h) {
+        h.app.wf.dismiss(c["id"].as_str().unwrap()).unwrap();
+    }
+    h.github.update_issue(REPO, 1, json!({"labels": {"nodes": [{"name": FLOW}, {"name": "priority: high"}]}}));
+    let s = crate::board::start(h).await;
+
+    let got = s.get("/api/flow").await;
+
+    assert_eq!(labels(&got["queue"]), ["widgets#1", "widgets#2"]);
+    assert_eq!(got["free"], 2);
+    assert!(s.h.app.store.meta_get("flow_skip:acme/widgets#1").unwrap().is_some());
+    assert!(flow_cards(&s.h).is_empty());
+    assert!(s.h.fake.launched().is_empty());
+}
+
+const PANEL: &str = r##"
+const q = (sel) => document.querySelector(sel);
+const tick = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+const reply = (status, body) => Promise.resolve({ ok: status < 400, status, json: async () => body });
+const rows = (id) => document.querySelectorAll("#" + id + " li").map((li) => ({
+  n: li.querySelector(".fn").textContent,
+  label: li.querySelector(".tl").textContent,
+  href: (li.querySelector(".tl a") || { getAttribute: () => null }).getAttribute("href"),
+  title: li.querySelector(".ttl").textContent,
+  why: li.querySelector(".f2").textContent,
+}));
+const flowFetches = () => fetches.filter((f) => f.url === "/api/flow").length;
+"##;
+
+async fn panel_page(h: H) -> (String, Value, Value) {
+    let s = crate::board::start(h).await;
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st = s.get("/api/state").await;
+    let view = s.get("/api/flow").await;
+    (html, st, view)
+}
+
+fn panel(html: &str, st: &Value, view: &Value, body: &str) -> Value {
+    crate::board::run_page_async_with(
+        html,
+        "",
+        &format!("async () => {{\n{PANEL}\nconst base = {st};\nconst view = {view};\n{body}\n}}"),
+    )
+}
+
+#[tokio::test]
+async fn the_up_next_panel_lists_the_queue_and_folds_blocked_and_skipped_issues() {
+    let h = flowing(1);
+    board_queue(&h).await;
+    let (html, st, view) = panel_page(h).await;
+
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        r##"
+fetchReply = (url) => url === "/api/flow" ? reply(200, view) : new Promise(() => {});
+emitState(base);
+await tick();
+const shown = {
+  hidden: q("#p-flow").hidden, pill: q("#n-flow").textContent, slots: q("#flow-slots").textContent,
+  queue: rows("flow-q"), empty: q("#flow-empty").hidden,
+  blocked: { open: q("#flow-blocked-btn").getAttribute("aria-expanded"), list: q("#flow-b").hidden, n: q("#n-flow-b").textContent, rows: rows("flow-b") },
+  skipped: { open: q("#flow-skipped-btn").getAttribute("aria-expanded"), list: q("#flow-s").hidden, n: q("#n-flow-s").textContent, rows: rows("flow-s") },
+};
+q("#flow-blocked-btn").dispatch("click");
+const unfolded = { open: q("#flow-blocked-btn").getAttribute("aria-expanded"), list: q("#flow-b").hidden };
+emitState(base);
+await tick();
+const again = flowFetches();
+emitState({ ...base, tree: [...base.tree, { label: "widgets#9", done: false }] });
+await tick();
+const link = document.querySelectorAll("#flow-b li")[1].querySelectorAll("a").find((x) => x.textContent === "tools#5");
+link.focus();
+paintFlow({ ...view, free: 0 });
+const now = document.activeElement;
+const kept = { focused: now.getAttribute("href"), row: now.closest("li").getAttribute("data-issue"), fresh: now !== link, slots: q("#flow-slots").textContent };
+return { shown, unfolded, fetched: [again, flowFetches()], kept };
+"##,
+    );
+
+    let s = &r["shown"];
+    assert_eq!(s["hidden"], false, "{r}");
+    assert_eq!(s["pill"], "2", "{r}");
+    assert_eq!(s["slots"], "1 of 1 slot free · launch: ask", "{r}");
+    assert_eq!(
+        s["queue"],
+        json!([
+            {"n": "1", "label": "widgets#7", "href": "https://github.com/acme/widgets/issues/7", "title": "Issue 7",
+             "why": "priority: none · v0.7.0, due 2026-11-30"},
+            {"n": "2", "label": "widgets#2", "href": "https://github.com/acme/widgets/issues/2", "title": "Issue 2",
+             "why": "priority: none · unblocked by #3"},
+        ]),
+        "{r}"
+    );
+    assert_eq!(s["empty"], true, "{r}");
+    assert_eq!(s["blocked"]["open"], "false", "{r}");
+    assert_eq!(s["blocked"]["list"], true, "{r}");
+    assert_eq!(s["blocked"]["n"], "2", "{r}");
+    let blocked: Vec<&str> =
+        s["blocked"]["rows"].as_array().unwrap().iter().map(|x| x["why"].as_str().unwrap()).collect();
+    assert_eq!(
+        blocked,
+        ["blocked by tools#5 · priority: low", "blocked: external; blocked by tools#5 · priority: none"],
+        "{r}"
+    );
+    assert_eq!(s["skipped"]["n"], "1", "{r}");
+    assert_eq!(s["skipped"]["list"], true, "{r}");
+    assert_eq!(s["skipped"]["rows"][0]["label"], "widgets#1", "{r}");
+    assert_eq!(s["skipped"]["rows"][0]["why"], "priority: high", "{r}");
+    assert_eq!(r["unfolded"], json!({"open": "true", "list": false}), "{r}");
+    assert_eq!(r["fetched"], json!([1, 2]), "{r}");
+    assert_eq!(
+        r["kept"],
+        json!({"focused": "https://github.com/acme/tools/issues/5", "row": "acme/widgets#6", "fresh": true, "slots": "0 of 1 slot free · launch: ask"}),
+        "{r}"
+    );
+}
+
+#[tokio::test]
+async fn the_up_next_panel_hides_without_a_flow_and_says_when_github_fails() {
+    let (html, st, view) = panel_page(H::new()).await;
+    assert_eq!(st["flow"], false);
+    assert_eq!(view["enabled"], false);
+
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        r##"
+fetchReply = (url) => url === "/api/flow" ? reply(502, { error: "wf.flow: GitHub said no" }) : new Promise(() => {});
+emitState(base);
+await tick();
+const off = { hidden: q("#p-flow").hidden, fetched: flowFetches() };
+emitState({ ...base, flow: true });
+await tick();
+const failed = { hidden: q("#p-flow").hidden, err: q("#flow-err").hidden, text: q("#flow-err-text").textContent };
+emitState(base);
+await tick();
+return { off, failed, gone: { hidden: q("#p-flow").hidden, err: q("#flow-err").hidden } };
+"##,
+    );
+
+    assert_eq!(r["off"], json!({"hidden": true, "fetched": 0}), "{r}");
+    assert_eq!(
+        r["failed"],
+        json!({"hidden": false, "err": false, "text": "Could not read the up-next queue: wf.flow: GitHub said no"}),
+        "{r}"
+    );
+    assert_eq!(r["gone"], json!({"hidden": true, "err": true}), "{r}");
+}

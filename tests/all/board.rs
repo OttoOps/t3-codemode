@@ -606,10 +606,10 @@ async fn an_ask_launches_a_scratch_thread_and_captures_its_answer() {
     assert!(h.sent().is_empty());
 }
 
-struct Srv {
-    base: String,
-    http: reqwest::Client,
-    h: H,
+pub(crate) struct Srv {
+    pub(crate) base: String,
+    pub(crate) http: reqwest::Client,
+    pub(crate) h: H,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -621,7 +621,7 @@ impl Drop for Srv {
     }
 }
 
-async fn start(h: H) -> Srv {
+pub(crate) async fn start(h: H) -> Srv {
     let (listener, addr) = server::bind(0).await.unwrap();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let app = h.app.clone();
@@ -664,7 +664,7 @@ impl Srv {
         self.h.app.csrf.clone()
     }
 
-    async fn get(&self, path: &str) -> Value {
+    pub(crate) async fn get(&self, path: &str) -> Value {
         self.http.get(format!("{}{path}", self.base)).send().await.unwrap().json().await.unwrap()
     }
 
@@ -4380,13 +4380,13 @@ return {
     );
     assert_eq!(
         r["start"],
-        json!({"where": [["p-dec"], ["p-new", "p-tix"], ["composer", "p-act"]], "grips": 5, "reset": true, "saved": null}),
+        json!({"where": [["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-act"]], "grips": 5, "reset": true, "saved": null}),
         "{r}"
     );
-    assert_eq!(r["moved"]["where"], json!([[], ["p-dec", "p-new", "p-tix"], ["composer", "p-act"]]), "{r}");
+    assert_eq!(r["moved"]["where"], json!([[], ["p-dec", "p-new", "p-flow", "p-tix"], ["composer", "p-act"]]), "{r}");
     assert_eq!(r["moved"]["focus"], true, "{r}");
     assert_eq!(r["moved"]["said"], "Needs you moved to column 2, position 1 of 3.", "{r}");
-    assert_eq!(r["edge"]["where"], json!([["p-dec"], ["p-new", "p-tix"], ["composer", "p-act"]]), "{r}");
+    assert_eq!(r["edge"]["where"], json!([["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-act"]]), "{r}");
     assert_eq!(r["edge"]["said"], "Needs you is already at column 1, position 1 of 1.", "{r}");
     assert_eq!(r["after"]["up"], json!(["p-act", "composer"]), "{r}");
     assert_eq!(r["after"]["collapsed"], true, "{r}");
@@ -4396,9 +4396,32 @@ return {
     assert_eq!(r["after"]["reset"], false, "{r}");
     assert_eq!(
         r["after"]["saved"],
-        json!({"cols": [{"w": null, "p": ["dec"]}, {"w": null, "p": ["new", "tix"]}, {"w": null, "p": ["act", "cmd"]}], "h": {}, "c": {"new": true}}),
+        json!({"cols": [{"w": null, "p": ["dec"]}, {"w": null, "p": ["new", "flow", "tix"]}, {"w": null, "p": ["act", "cmd"]}], "h": {}, "c": {"new": true}}),
         "{r}"
     );
+}
+
+#[tokio::test]
+async fn dropping_a_panel_where_it_already_shows_leaves_a_hidden_panel_in_place() {
+    let (html, st) = new_issue_page().await;
+    let r = layout_scenario(
+        &html,
+        &st,
+        "{}",
+        r##"
+heads();
+setWide(true);
+const col = main().children.filter((c) => c.classList.contains("lcol"))[1];
+col.rect = { left: 0, right: 500, top: 0, bottom: 800, width: 500, height: 800 };
+q("#p-new").rect = { top: 0, height: 200 };
+q("#p-tix").rect = { top: 200, height: 400 };
+layDragBegin("new", q("#p-new .ph"), { clientX: 10, clientY: 10 });
+layDragTo(10, 300);
+layDragEnd(true);
+return { hidden: q("#p-flow").hidden, where: where()[1], saved: saved() };
+"##,
+    );
+    assert_eq!(r, json!({"hidden": true, "where": ["p-new", "p-flow", "p-tix"], "saved": null}), "{r}");
 }
 
 #[tokio::test]
@@ -4424,13 +4447,13 @@ return { back, reset: { where: where(), act: q("#p-act").classList.contains("col
     );
     assert_eq!(
         r["back"],
-        json!({"where": [[], ["p-new", "p-dec", "p-tix"], ["p-act", "composer"]], "act": true, "tix": false,
+        json!({"where": [[], ["p-new", "p-dec", "p-flow", "p-tix"], ["p-act", "composer"]], "act": true, "tix": false,
                "flex": ["500 1 0px", "900 1 0px"], "vacant": true, "reset": false}),
         "{r}"
     );
     assert_eq!(
         r["reset"],
-        json!({"where": [["p-dec"], ["p-new", "p-tix"], ["composer", "p-act"]], "act": false, "saved": null, "hidden": true}),
+        json!({"where": [["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-act"]], "act": false, "saved": null, "hidden": true}),
         "{r}"
     );
     for bad in [
@@ -4439,7 +4462,7 @@ return { back, reset: { where: where(), act: q("#p-act").classList.contains("col
         r#"{"t3board.layout": "not json"}"#,
     ] {
         let r = layout_scenario(&html, &st, bad, "heads();\nsetWide(true);\nreturn where();");
-        assert_eq!(r, json!([["p-dec"], ["p-new", "p-tix"], ["composer", "p-act"]]), "{bad}");
+        assert_eq!(r, json!([["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-act"]]), "{bad}");
     }
 }
 
@@ -4470,10 +4493,10 @@ setWide(true);
 return { wide, narrow, again: where(), tix: q("#p-tix").classList.contains("collapsed") };
 "##,
     );
-    assert_eq!(r["wide"], json!([["p-dec"], ["p-new", "p-act", "p-tix"], ["composer"]]), "{r}");
+    assert_eq!(r["wide"], json!([["p-dec"], ["p-new", "p-flow", "p-tix", "p-act"], ["composer"]]), "{r}");
     assert_eq!(
         r["narrow"],
-        json!({"cols": 0, "tixcol": ["p-new", "p-tix"], "top": ["p-dec", "tixcol", "p-act", "composer"],
+        json!({"cols": 0, "tixcol": ["p-new", "p-flow", "p-tix"], "top": ["p-dec", "tixcol", "p-act", "composer"],
                "collapsed": 0, "splits": 0, "lay": false, "reset": true}),
         "{r}"
     );
@@ -4521,7 +4544,7 @@ return { shut, open: q("#p-act").classList.contains("collapsed"), splits, flat, 
     assert_eq!(r["flat"], Value::Null, "{r}");
     assert_eq!(
         r["small"],
-        json!({"cols": [{"w": null, "p": ["dec"]}, {"w": null, "p": ["new", "tix"]}, {"w": null, "p": ["cmd", "act"]}], "h": {"new": 224, "tix": 126}, "c": {}}),
+        json!({"cols": [{"w": null, "p": ["dec"]}, {"w": null, "p": ["new", "flow", "tix"]}, {"w": null, "p": ["cmd", "act"]}], "h": {"new": 224, "tix": 126}, "c": {}}),
         "{r}"
     );
     assert_eq!(r["sized"], json!({"new": 224, "tix": 476}), "{r}");
@@ -4556,10 +4579,10 @@ return { narrow, emptied, back };
     );
     assert_eq!(html.matches(r#"class="lay-only" hidden"#).count(), 8);
     assert_eq!(r["narrow"], json!({"cols": 0, "collapsed": 0}), "{r}");
-    assert_eq!(r["emptied"], json!([]), "{r}");
+    assert_eq!(r["emptied"], json!(["p-flow"]), "{r}");
     assert_eq!(
         r["back"],
-        json!({"where": ["p-tix"], "flex": "382 1 0px", "min": "320px", "w": [424, 382, 340]}),
+        json!({"where": ["p-flow", "p-tix"], "flex": "382 1 0px", "min": "320px", "w": [424, 382, 340]}),
         "{r}"
     );
 }
@@ -4828,9 +4851,9 @@ return {{ shown, hidden, back: kids() }};
 "##
         ),
     );
-    assert_eq!(r["shown"], json!(["p-new", "hsplit", "p-tix"]), "{r}");
-    assert_eq!(r["hidden"], json!({"kids": ["p-new", "p-tix"], "vacant": false}), "{r}");
-    assert_eq!(r["back"], json!(["p-new", "hsplit", "p-tix"]), "{r}");
+    assert_eq!(r["shown"], json!(["p-new", "p-flow", "hsplit", "p-tix"]), "{r}");
+    assert_eq!(r["hidden"], json!({"kids": ["p-new", "p-flow", "p-tix"], "vacant": false}), "{r}");
+    assert_eq!(r["back"], json!(["p-new", "p-flow", "hsplit", "p-tix"]), "{r}");
 }
 
 fn skills_home(h: &H) -> std::path::PathBuf {
@@ -6682,7 +6705,7 @@ async fn pairing_flow_sets_secure_cookie_and_authenticates_remote_board() {
     assert_eq!(r.status(), 401);
 
     // 8. With the session cookie, every remote board read route succeeds, and /mcp + /healthz stay 403.
-    for route in ["/", "/api/state", &format!("/api/msg/{handle}"), "/api/contexts", "/api/new-issues"] {
+    for route in ["/", "/api/state", &format!("/api/msg/{handle}"), "/api/contexts", "/api/new-issues", "/api/flow"] {
         let r = s
             .http
             .get(format!("{}{route}", s.base))
@@ -6928,7 +6951,7 @@ async fn tailscale_mode_authenticates_host_login_and_allow_users() {
     let csrf = s.csrf();
 
     // Host login gets into every board read route and mutating route (with CSRF).
-    for route in ["/", "/api/state", &format!("/api/msg/{handle}"), "/api/contexts", "/api/new-issues"] {
+    for route in ["/", "/api/state", &format!("/api/msg/{handle}"), "/api/contexts", "/api/new-issues", "/api/flow"] {
         let r = s
             .http
             .get(format!("{}{route}", s.base))

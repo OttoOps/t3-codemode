@@ -1160,6 +1160,13 @@ async fn list_new_issues(State(web): State<Web>) -> Response {
     }
 }
 
+async fn get_flow(State(web): State<Web>) -> Response {
+    match web.app.wf.flow().await {
+        Ok(v) => json_ok(StatusCode::OK, v),
+        Err(e) => error(StatusCode::BAD_GATEWAY, web.app.t3.redact(format!("{e:#}"))),
+    }
+}
+
 async fn launch_new_issue(State(web): State<Web>, Path(id): Path<String>) -> Response {
     match web.app.wf.launch_new_issue(&id).await {
         Ok(v) => json_ok(StatusCode::OK, v),
@@ -1320,6 +1327,7 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/new-issues/{id}/launch", post(launch_new_issue))
         .route("/api/new-issues/{id}/dismiss", post(dismiss_new_issue))
         .route("/api/new-issues/{id}/restore", post(restore_new_issue))
+        .route("/api/flow", get(get_flow))
         .route("/api/open", post(open_link))
         .route("/api/contexts", get(list_contexts))
         .route("/api/contexts/{id}", put(put_context).delete(delete_context))

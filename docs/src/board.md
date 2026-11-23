@@ -39,6 +39,9 @@ and the threads running. Only the lists scroll.
   while none do. Show dismissed, beside the heading when any are dismissed,
   swaps the list for the dismissed issues, each with Restore. [New issues](#new-issues) covers what each button
   does.
+- **Up next,** under New issues when the config has a [`flow` block](config.md#flow):
+  the flow's ready queue, in the order the board launches it.
+  [The up-next panel](#the-up-next-panel) covers what each row shows.
 - **Tickets,** in Open, Done and Settled tabs, grouped by state. A ticket
   takes the most urgent state of its own thread and its workers, so a ticket
   whose worker runs reads running:
@@ -535,6 +538,32 @@ launch-card answers and every other ticket launch run one at a time, and a pick
 holds the board lock while it counts the open tickets and decides, so two
 launches can't both fill the same slot. A launch from the Launch tickets box
 waits for a pick in progress to finish.
+
+### The up-next panel
+
+With a `flow` block in the config, the Up next panel sits under New issues and
+shows what the flow will launch next. It reads `GET /api/flow`, which returns
+what [`wf.flow()`](globals.md#wfflow) returns. Reading the panel never records
+a skip, raises a card or launches anything.
+
+- The heading counts the ready issues and shows the free slots and the launch
+  mode, such as "1 of 3 slots free · launch: ask".
+- Each ready issue is a numbered row in queue order: its `repo#n` linked to
+  GitHub, its title, its priority (`none` without a priority label), the
+  blockers that closed (unblocked by #115), and its milestone and due date.
+  A blocker in another repository shows as `repo#n`.
+- **Blocked** folds the opted-in issues that still wait on something. Each row
+  names its open blockers, adds "and more" when GitHub lists more than 100,
+  or reads "blocked: external" for an issue with that label. Click Blocked to
+  open or close the list.
+- **Skipped** folds the issues the flow skipped ([skip memory](#the-flow)),
+  each with the same details as a ready row.
+
+The panel reads the queue when the page loads, when a ticket opens or
+finishes, when a launch card opens or closes, and once a minute while the tab
+is open. Refresh reads it again now. A GitHub error shows under the panel. The
+panel is gone while the config has no `flow` block, and the page then reads
+nothing for it.
 
 ## GitHub reconcile
 
@@ -1086,7 +1115,7 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `GET /icon.svg`, `/icon-192.png`, `/icon-512.png` | Embedded board icons for browser tabs, notifications, and Add to Home Screen (same board auth guards) |
 | `GET /pair` | Remote browser pairing page (enabled when `board.remote.mode` is `"pairing"`, or `"tailscale"` with `requirePairing: true`); reads the token from `#<token>`, clears the fragment, and posts to `POST /api/pair` |
 | `POST /api/pair` `{token, label?}` | Redeem a single-use 5-minute pairing token (`Content-Type: application/json`) over the remote HTTPS origin and set a 30-day `HttpOnly; Secure; SameSite=Strict; Path=/` session cookie |
-| `GET /api/state` | `{rev, cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, counts, service}`, with `counts.newIssues`. `rev` is the board revision: it goes up with every change, keeps going up across a restart, and a state whose `rev` is at least a write's `rev` already holds that write; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. A ticket's or worker's open `pr` carries `readiness` once a [GitHub reconcile](#github-reconcile) has read it open: `isDraft`, `mergeStateStatus` and `reviewDecision` as GitHub gives them, and `checks`. `reviewDecision` is `null` when the repository requires no review. `checks` is `failing` when a check at the head failed, `pending` while one runs, `passing` when every check succeeded or was cancelled, skipped or neutral, and `null` when the head has no checks or has more than 100 and none of the first 100 failed. A pull request that no reconcile has read yet has no `readiness`. Tickets and workers carry `paused`, `pausedAt` while paused, and `status: "paused"` in place of `idle` ([pausing](#pausing)). Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` while `updateCheck` is `false` or until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
+| `GET /api/state` | `{rev, cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, flow, counts, service}`, with `counts.newIssues`. `flow` is `true` when the config has a `flow` block. `rev` is the board revision: it goes up with every change, keeps going up across a restart, and a state whose `rev` is at least a write's `rev` already holds that write; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. A ticket's or worker's open `pr` carries `readiness` once a [GitHub reconcile](#github-reconcile) has read it open: `isDraft`, `mergeStateStatus` and `reviewDecision` as GitHub gives them, and `checks`. `reviewDecision` is `null` when the repository requires no review. `checks` is `failing` when a check at the head failed, `pending` while one runs, `passing` when every check succeeded or was cancelled, skipped or neutral, and `null` when the head has no checks or has more than 100 and none of the first 100 failed. A pull request that no reconcile has read yet has no `readiness`. Tickets and workers carry `paused`, `pausedAt` while paused, and `status: "paused"` in place of `idle` ([pausing](#pausing)). Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` while `updateCheck` is `false` or until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
 | `GET /api/events` | SSE: a `state` event on every change, carrying the same `rev` (closes when a remote pairing session is revoked or expires, or when a Tailscale login is no longer allowed) |
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it; a flow launch card takes `launch` or `skip` instead ([The flow](#the-flow)) |
@@ -1103,6 +1132,7 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `POST /api/links/{thread}/pause`, `/resume` | [Pause](#pausing) an open ticket or worker link, or resume it; returns `{thread, paused}` (404 for a thread that is neither, 400 for a done one) |
 | `POST /api/asks/{id}/settle`, `/restore` | The same for a closed ask; `id` is `q<n>` |
 | `GET /api/new-issues` | `{issues, dismissed}`, newest first; an issue that has a board ticket is in neither |
+| `GET /api/flow` | What `wf.flow()` returns: `{enabled, launch, maxTickets, free, running, queue, blocked, skipped}`, read-only ([The up-next panel](#the-up-next-panel)); 502 with `error` when GitHub fails |
 | `POST /api/new-issues/{id}/launch` | Launch a ticket for the entry, as `POST /api/launch` does for one issue; the result adds `id` (404 for no such entry) |
 | `POST /api/new-issues/{id}/dismiss`, `/restore` | Dismiss the entry, or bring a dismissed one back (400 if already dismissed, or not dismissed) |
 | `POST /api/settle-done` | Settle every done ticket and closed ask; returns `{tickets, asks}` counts |
