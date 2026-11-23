@@ -38,6 +38,14 @@ the root and talks to the user itself.
   `pr`-scoped stage returns to that worker as a follow-up PR. Stages scoped
   to `ticket` run once on `main` after the last PR hands off, and a failure
   there launches a targeted fix worker on `main`.
+- A worker thread works one issue. Follow-up work that has its own GitHub
+  issue gets a fresh worker: when a worker reports one, show it to the user
+  as an addition to the split, and once approved, launch it through step 3
+  after the current worker hands off, with its own label, branch and
+  `issue`. A failed `pr`-scoped stage has no issue of its own, so its fix
+  stays with its worker as a follow-up PR. A worker reused for another
+  issue anyway renames itself first, as "One thread, one issue" in the
+  `t3-worker` procedure says.
 - Workers run one at a time. Each PR branches from `main` after the
   previous PR's `pr`-scoped delivery stages have finished, and targets
   `main`. PRs are never stacked on one another.
@@ -147,7 +155,9 @@ three more rules hold:
 ## 2. Read the work and split it
 
 With tracker `github-issues`, read the issue:
-`gh issue view <n> -R <repo> --json number,title,body,labels,assignees,milestone,comments,url`.
+`gh issue view <n> -R <repo> --json number,title,body,labels,assignees,milestone,comments,url`,
+and its sub-issues:
+`gh api repos/<repo>/issues/<n>/sub_issues --jq '.[] | {number, title, state, html_url}'`.
 With `none`, the user's request is the work.
 
 Look up the delivery slot with `await wf.slot("delivery")` as
@@ -166,10 +176,13 @@ and the remaining steps still run.
 
 Write the split: a numbered list of N PRs, in merge order. Each entry
 carries a title (Conventional Commits), the scope, one acceptance line (a
-checkable condition the PR makes true), and a branch name: `<type>/<n>-<slug>`
-with an issue, `<type>/<slug>` without, where `<type>` is the Conventional
-Commits type. Keep N small: a PR is a unit someone can review and revert
-alone.
+checkable condition the PR makes true), its sub-issue when the PR closes one
+of the issue's open sub-issues, and a branch name: `<type>/<s>-<slug>` for a
+PR with sub-issue `#<s>`, `<type>/<n>-<slug>` for a PR with only the issue,
+`<type>/<slug>` without an issue, where `<type>` is the Conventional Commits
+type. The PR title stays plain Conventional Commits: the worker's linked
+issue and the board's chips carry the issue mapping. Keep N small: a PR is a
+unit someone can review and revert alone.
 
 A PR's entry carries a `Passes:` line only when the repo's rules
 (`AGENTS.md`, `docs/agents/`) name passes for its kind of change, such as a
@@ -230,11 +243,21 @@ For PR n:
    the instance now with `await wf.pick({ pool: "<name>" })`, as
    [A pool on a model slot](../t3-workflow/slots.md#a-pool-on-a-model-slot)
    says.
-3. `const { brief } = await wf.openChild({ role: "worker", label: "<#n or slug> PR n/N" })`.
-   Put `brief` verbatim in the launch brief. The worker binds the link when
-   it joins.
+3. `const { brief } = await wf.openChild({ role: "worker", label, issue, parentIssue, part })`,
+   with the worker's **label** and identity:
+
+   | Field | PR with sub-issue `#<s>` | PR with only the issue, or no issue |
+   |---|---|---|
+   | `label` | `#<s> (#<n> n/N)` | `<#n or slug> PR n/N` |
+   | `issue` | `<owner>/<repo>#<s>` | `<owner>/<repo>#<n>`; left out with no issue |
+   | `parentIssue` | `<owner>/<repo>#<n>` | left out |
+   | `part` | `n/N` | `n/N` |
+
+   The sub-issue leads the label because T3's sidebar shows only about 28
+   characters of a title. Put `brief` verbatim in the launch brief. The
+   worker binds the link when it joins.
 4. Call `t3_thread_launch` with:
-   - `title`: `<#n or slug> PR n/N: <PR title>`
+   - `title`: `<label>: <PR title>`
    - `modelSelection`: for a pool, the pick's `modelSelection`, as it
      is; otherwise `worker.modelSelection` when non-null; leave
      `modelSelection` out for provider default.
@@ -257,6 +280,7 @@ For PR n:
 # <#n: issue title, or the request in one line>
 
 Issue: <issue URL, or "none">
+Sub-issue: <the PR's sub-issue URL, or "none">
 PR <n> of <N>: <PR title>
 Acceptance: <the PR's acceptance line>
 Branch: <branch>
@@ -318,7 +342,8 @@ description (`gh pr view <number> -R <repo> --json body`) has every
 section and required element the format sets (for the `pr` skill: the
 Summary, Evidence and Merge Danger headings, a fenced block under Summary,
 `Before:` and `After:` under Evidence, and `Door:` and `Blast Radius:` under
-Merge Danger), plus `Refs #<n>` when there is an issue. When either fails,
+Merge Danger), plus `Refs #<n>` when there is an issue and `Refs #<s>`
+when the PR has a sub-issue. When either fails,
 send the worker "Rewrite #<number>'s description through the Publishing
 section of the t3-worker procedure: <what is missing>."
 
@@ -548,8 +573,8 @@ The merge watch serves three cases:
 - the reconcile-off case "The merge wait" names (`board.reconcileIdleMinutes`
   `0`), after `queued` or `waiting`.
 
-Create it as items 1 and 2 of "The deploy watch" say, with `title` `<#n or
-slug> PR n/N merge watch`, and a prompt that names the task id, the PR
+Create it as items 1 and 2 of "The deploy watch" say, with `title` `<worker
+label> merge watch`, and a prompt that names the task id, the PR
 number and URL, its approved head SHA (full 40-character SHA) and branch,
 the main workspace root, the approved delivery chain from the user's reply
 (such as `"merge"`, `"merge and deploy"`, or `"merge, deploy and verify"`),
@@ -738,9 +763,9 @@ ticket's combined changed paths across all PRs for `ticket`-scoped and
 Use this watch for every delivery stage with `watch: true` (`pr`, `ticket`,
 or `closeAfter: "all"` `post-handoff`).
 
-1. Create the task with `schedule_task`: `title` `<#n or slug> <PR n/N or
-   ticket> <stage id> watch` (for a `pr`-scoped deploy stage, `<#n or slug>
-   PR n/N deploy watch`), `schedule` `{type: "interval", everyMs: 300000}`,
+1. Create the task with `schedule_task`: `title` `<worker label, or "<#n or
+   slug> ticket"> <stage id> watch` (for a `pr`-scoped deploy stage,
+   `<worker label> deploy watch`), `schedule` `{type: "interval", everyMs: 300000}`,
    `bindToCurrentThread` `true`, `enabled` `false`, and a placeholder
    `prompt`. The prompt needs the task's own id, which exists only after
    this call.
@@ -820,7 +845,9 @@ the first time. The handoff has already closed the worker's link.
 3. With an issue: comment on it with the PR, any follow-up PR, what it
    changed, and the `pr`-scoped delivery result (noting any `ticket` or
    `post-handoff` stages still to come). Publish through the Publishing
-   section.
+   section. With a sub-issue, close it with the same comment:
+   `gh issue close <s> -R <repo> --comment "<text>"`. Its work is this PR
+   alone, so it closes now, not in step 5.
 4. Remove the worker's worktree from the main workspace root once GitHub
    shows the PR merged: `git -C <main workspace root> worktree remove
    <worktree path>`. The path is in `t3_worktree_list`. When git refuses

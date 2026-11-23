@@ -52,11 +52,15 @@ with `await wf.gate({ clear: true })` when the answer, "Merged", or
 
 ## 1. Orient
 
-Read the brief: the issue (or "no issue"), which PR this is ("PR n of N"),
-its acceptance line, its passes, the delivery (legacy `merge` or
-`tag-deploy`, or ordered delivery steps noting which are `pr`-scoped),
+Read the brief: the issue (or "no issue"), its sub-issue, which PR this is
+("PR n of N"), its acceptance line, its passes, the delivery (legacy `merge`
+or `tag-deploy`, or ordered delivery steps noting which are `pr`-scoped),
 the previous worker's handoff, and the link block. Pick up the handoff's
 state and decisions as settled.
+
+The **issue this thread implements** is the brief's `Sub-issue:`, else its
+`Issue:`. Call `link_issue` with its URL, so T3's sidebar shows it beside
+the PR. With no issue, link none.
 
 Call `t3_worktree_status`. The thread must be attached to a worktree on the
 brief's branch. When it reports the project root, the main workspace, or
@@ -77,7 +81,7 @@ Build exactly the PR's scope. Its acceptance line is the completion
 criterion: the PR is done when that line holds and the repo's done-checks
 pass. Work the brief assigns to a later PR stays out of this one. When the
 brief names an issue, every commit carries the trailer
-`--trailer "Github-Issue:#<number>"`. Stage explicit paths only.
+`--trailer "Github-Issue:#<number>"` for the issue this thread implements. Stage explicit paths only.
 
 When the brief lists `Passes:`, they are part of the scope: after the build,
 run each pass's skill as its `how` from `wf.slot("passes")` says (the Skill
@@ -137,7 +141,8 @@ does not.
 
 1. Write the PR description through the Publishing section below, all three
    steps, before you push. When the brief names an issue, the description
-   carries `Refs #<number>`, never `Closes` or `Fixes`: the orchestrator
+   carries `Refs #<number>` for each issue the brief names (sub-issue and
+   issue), never `Closes` or `Fixes`: the orchestrator
    closes the issue after delivery, not at merge.
 2. Push the branch and open the PR against `main` with that description:
    `gh pr create --base main --head <branch> --title <title> --body-file
@@ -233,6 +238,24 @@ this thread and this worktree:
 You own the change until the fix passes its `pr`-scoped delivery stages.
 (`ticket`-scoped failures on `main` run after you hand off and are handled
 by a separate fix worker the orchestrator launches.)
+
+### One thread, one issue
+
+The follow-up PR fixes this PR's own failed stage, so it stays in this
+thread under this thread's title. Work that has its own GitHub issue, such
+as a follow-up issue filed from a review, gets a fresh worker: send the
+orchestrator an `event` naming the issue, and the orchestrator launches
+one for it.
+
+When the user has this thread take on another issue anyway, first make the
+thread name it:
+
+1. Build the new label as `t3-ticket` step 3 does, then
+   `t3_thread_update` with `action: "rename"` and `title`
+   `<label>: <PR title>`.
+2. Rerun the brief's `wf.join` call with the new `label`, `issue`,
+   `parentIssue` and `part`. A field left out keeps its old value.
+3. `link_issue` with the new issue's URL.
 
 ## 6. Delivered: hand off
 
