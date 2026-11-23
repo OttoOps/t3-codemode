@@ -308,20 +308,28 @@ panel is open and which range it shows.
   reasons picks passed it over, such as limited, at reserve and disabled.
 - **Picks over time.** 24 bars across the range, each stacked by member, with
   a key.
+- **Tokens over time.** The input and output tokens of the runs that ended in
+  the range and have recorded counts, with the run count, then the same
+  totals per provider. Below them, 24 bars cover the range, each stacked by
+  instance in the picks chart's colors, with a key that gives each instance's
+  total. When no token source reports counts, which is always the case against
+  T3 today, the section says T3 reports no token counts yet and shows no
+  numbers. When counts are reported but none fall in the range, it says so and
+  shows no chart.
 - **Pick and skip reasons.** The same counts for the whole pool.
 - **Running now.** Running threads per instance, from the live board state.
 - **Recent picks.** The last five, with the time, instance and reason.
 
 Without a pool, the panel names the one instance with its model, effort and
-running threads, and shows no chart.
+running threads, and shows no picks chart. Its token section still shows.
 
 The panel reads `GET /api/usage-stats?window=` when it opens, when you pick
 another range, and when the routing in the board state changes, so a new
-pick, a limit or a change in running threads shows without a reload. The
-running counts always come from the live board state, even when a read fails.
-A collapsed panel reads nothing, and the panel stays hidden until the
-watcher's first routing pass. A failed read shows under the panel with a Retry
-button.
+pick, a limit, a change in running threads or a newly counted run shows
+without a reload. The running counts always come from the live board state,
+even when a read fails. A collapsed panel reads nothing, and the panel stays
+hidden until the watcher's first routing pass. A failed read shows under the
+panel with a Retry button.
 
 ## Reply buttons
 

@@ -505,23 +505,31 @@ const panel = () => ({
 });
 "##;
 
-async fn panel(h: H, prelude: &str, scenario: &str) -> Value {
-    let b = Board::start(h).await;
-    b.h.app.wf.refresh_routing().await.unwrap();
-    let html = b.page().await;
+async fn snapshot(b: &Board) -> (Value, Value) {
     let (_, st) = b.get("/api/state").await;
     let mut views = serde_json::Map::new();
     for w in ["1h", "24h", "7d", "all"] {
         views.insert(w.into(), b.get(&format!("/api/usage-stats?window={w}")).await.1);
     }
-    let views = Value::Object(views);
+    (st, Value::Object(views))
+}
+
+fn panel_page(html: &str, prelude: &str, st: &Value, views: &Value, extra: &str, scenario: &str) -> Value {
     run_page_async_with(
-        &html,
+        html,
         prelude,
         &format!(
-            "async () => {{\n{PANEL}\nconst base = {st};\nconst views = {views};\nfetchReply = (url) => {{ const m = /^\\/api\\/usage-stats\\?window=(\\w+)$/.exec(url); return m ? reply(200, views[m[1]]) : new Promise(() => {{}}); }};\n{scenario}\n}}"
+            "async () => {{\n{PANEL}\nconst base = {st};\nlet views = {views};\n{extra}\nfetchReply = (url) => {{ const m = /^\\/api\\/usage-stats\\?window=(\\w+)$/.exec(url); return m ? reply(200, views[m[1]]) : new Promise(() => {{}}); }};\n{scenario}\n}}"
         ),
     )
+}
+
+async fn panel(h: H, prelude: &str, scenario: &str) -> Value {
+    let b = Board::start(h).await;
+    b.h.app.wf.refresh_routing().await.unwrap();
+    let html = b.page().await;
+    let (st, views) = snapshot(&b).await;
+    panel_page(&html, prelude, &st, &views, "", scenario)
 }
 
 #[tokio::test]
@@ -758,5 +766,132 @@ return { failed, retried, stale, left };
         json!({"top": "claude-b75%ready · 0 picks · 0 running",
                "totals": "0 picks in the last 24h · share is the configured weight · 0 running"}),
         "{r}"
+    );
+}
+
+const TOKENS: &str = r##"
+const tok = () => ({
+  sec: q("#rp-tok-sec").hidden, totals: q("#rp-tok-totals").textContent,
+  prov: q("#rp-tok-prov").hidden ? null : q("#rp-tok-prov").textContent,
+  chart: q("#rp-tok-chart").hidden, key: document.querySelectorAll("#rp-tok-key li").map((li) => li.textContent),
+});
+"##;
+
+#[tokio::test]
+async fn the_routing_panel_charts_token_volume_per_instance_with_provider_totals() {
+    let h = one_to_three();
+    let t = tokens(&h);
+    t.set(&ended(&h, "a:1", "claude-a", &at(-30)), 1000, 200);
+    t.set(&ended(&h, "a:2", "claude-a", &at(-90)), 500, 50);
+    t.set(&ended(&h, "b:1", "claude-b", &at(-10)), 300, 30);
+    h.app.wf.record_tokens().await.unwrap();
+    let r = panel(
+        h,
+        "",
+        &format!(
+            r##"{TOKENS}
+emitState(base);
+q("#rp-fold").dispatch("click");
+await tick();
+const cols = q("#rp-tok-series").children;
+const day = {{ ...tok(), bars: cols.length, last: cols[23].getAttribute("title"),
+  label: q("#rp-tok-series").getAttribute("aria-label"),
+  filled: document.querySelectorAll("#rp-tok-series .rp-col span").map((s) => [s.dataset.id, s.className, Math.round(parseFloat(s.style.height))]) }};
+q('#rp-windows [data-win="1h"]').dispatch("click");
+await tick();
+return {{ day, hour: tok() }};
+"##
+        ),
+    )
+    .await;
+    let d = &r["day"];
+    assert_eq!(
+        (d["sec"].clone(), d["chart"].clone(), d["bars"].clone()),
+        (json!(false), json!(false), json!(24)),
+        "{r}"
+    );
+    assert_eq!(d["totals"], "1.8k in · 280 out · 3 runs in the last 24h", "{r}");
+    assert_eq!(d["prov"], "By provider: claudeAgent 1.8k in · 280 out", "{r}");
+    assert_eq!(d["key"], json!(["claude-a 1.8k", "claude-b 330"]), "{r}");
+    assert_eq!(
+        d["filled"],
+        json!([["claude-a", "rp-c0", 36], ["claude-a", "rp-c0", 78], ["claude-b", "rp-c1", 22]]),
+        "{r}"
+    );
+    assert_eq!(d["last"], "1.5k tokens", "{r}");
+    assert_eq!(d["label"], "2.1k tokens in the last 24h in 24 bars of 1 h, at most 1.5k in one bar", "{r}");
+    let hr = &r["hour"];
+    assert_eq!(hr["totals"], "1.3k in · 230 out · 2 runs in the last 1h", "{r}");
+    assert_eq!(hr["key"], json!(["claude-a 1.2k", "claude-b 330"]), "{r}");
+}
+
+#[tokio::test]
+async fn the_routing_panel_says_when_no_token_counts_are_reported() {
+    let scenario = format!(
+        r##"{TOKENS}
+emitState(base);
+q("#rp-fold").dispatch("click");
+await tick();
+return {{ ...tok(), bars: document.getElementById("rp-tok-series").children.length }};
+"##
+    );
+    let none = json!({"sec": false, "totals": "T3 reports no token counts yet.", "prov": null, "chart": true, "key": [],
+                      "bars": 0});
+    let h = one_to_three();
+    launch(&h, 1).await;
+    assert_eq!(panel(h, "", &scenario).await, none);
+    assert_eq!(panel(H::new(), "", &scenario).await, none);
+    let quiet = one_to_three();
+    tokens(&quiet);
+    let r = panel(quiet, "", &scenario).await;
+    assert_eq!(
+        (r["totals"].clone(), r["chart"].clone()),
+        (json!("No token counts in the last 24h."), json!(true)),
+        "{r}"
+    );
+}
+
+#[tokio::test]
+async fn the_routing_panel_reads_new_token_counts_when_the_board_state_moves() {
+    let b = Board::start(one_to_three()).await;
+    let t = tokens(&b.h);
+    t.set(&ended(&b.h, "a:1", "claude-a", &at(-30)), 1000, 200);
+    b.h.app.wf.record_tokens().await.unwrap();
+    b.h.app.wf.refresh_routing().await.unwrap();
+    let html = b.page().await;
+    let (st, views) = snapshot(&b).await;
+    t.set(&ended(&b.h, "b:1", "claude-b", &at(-5)), 300, 30);
+    assert_eq!(b.h.app.wf.record_tokens().await.unwrap().len(), 1);
+    assert!(b.h.app.wf.refresh_routing().await.unwrap());
+    let (later, later_views) = snapshot(&b).await;
+    let r = panel_page(
+        &html,
+        "",
+        &st,
+        &views,
+        &format!("const later = {later};\nconst laterViews = {later_views};"),
+        &format!(
+            r##"{TOKENS}
+emitState(base);
+q("#rp-fold").dispatch("click");
+await tick();
+const before = {{ ...tok(), asked: asked().length }};
+views = laterViews;
+emitState(later);
+await tick();
+const after = {{ ...tok(), asked: asked().length }};
+emitState(later);
+await tick();
+return {{ before, after, again: asked().length }};
+"##
+        ),
+    );
+    assert_eq!(r["before"]["totals"], "1k in · 200 out · 1 run in the last 24h", "{r}");
+    assert_eq!(r["before"]["key"], json!(["claude-a 1.2k"]), "{r}");
+    assert_eq!(r["after"]["totals"], "1.3k in · 230 out · 2 runs in the last 24h", "{r}");
+    assert_eq!(r["after"]["key"], json!(["claude-a 1.2k", "claude-b 330"]), "{r}");
+    assert_eq!(
+        (r["before"]["asked"].clone(), r["after"]["asked"].clone(), r["again"].clone()),
+        (json!(1), json!(2), json!(2))
     );
 }

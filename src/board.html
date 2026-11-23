@@ -1201,6 +1201,16 @@ kbd { font-family: var(--mono); font-size: 12px; }
           <div class="rp-axis meta"><span id="rp-from"></span><span id="rp-to"></span></div>
           <ul class="rp-key meta" id="rp-key"></ul>
         </div>
+        <div class="rp-sec" id="rp-tok-sec" hidden>
+          <h3>Tokens over time</h3>
+          <p class="meta" id="rp-tok-totals"></p>
+          <p class="meta" id="rp-tok-prov" hidden></p>
+          <div id="rp-tok-chart" hidden>
+            <div class="rp-series" id="rp-tok-series" role="img"></div>
+            <div class="rp-axis meta"><span id="rp-tok-from"></span><span>now</span></div>
+            <ul class="rp-key meta" id="rp-tok-key"></ul>
+          </div>
+        </div>
         <div class="rp-sec" id="rp-why-sec" hidden>
           <h3>Pick and skip reasons</h3>
           <p class="meta" id="rp-why"></p>
@@ -4430,7 +4440,7 @@ function paintRouting(s) {
   const wrap = $("route");
   wrap.hidden = !r;
   if (!r) { routing.key = ""; routing.pinned = false; setRouteTip(false); rpShow(false); return; }
-  const key = JSON.stringify([r.mode, r.source, r.pool, r.strategy, r.error, r.picks, r.shareBasis, r.window, r.members, r.running, r.runningError]);
+  const key = JSON.stringify([r.mode, r.source, r.pool, r.strategy, r.error, r.picks, r.shareBasis, r.window, r.members, r.running, r.runningError, r.tokens]);
   if (key === routing.key) return;
   routing.key = key;
   const ms = routeMembers(r);
@@ -4611,32 +4621,93 @@ function rpBar(pct) {
   return b;
 }
 
+function rpColor(ids, id) {
+  const i = ids.indexOf(id);
+  return "rp-c" + (i < 0 ? 4 : Math.min(4, i));
+}
+
+function rpBars(el, buckets, ids, colors, value, title) {
+  const sums = buckets.map((b) => ids.reduce((a, id) => a + value(b, id), 0));
+  const peak = Math.max(1, ...sums);
+  el.replaceChildren(...buckets.map((b, i) => {
+    const col = h("span", { class: "rp-col", title: title(sums[i]) });
+    for (const id of ids) {
+      const n = value(b, id);
+      if (!n) continue;
+      const seg = h("span", { class: rpColor(colors, id), "data-id": id });
+      seg.style.height = (n / peak * 100) + "%";
+      col.append(seg);
+    }
+    return col;
+  }));
+  return Math.max(0, ...sums);
+}
+
+function rpWidth(mins) {
+  return mins >= 60 ? Math.round(mins / 60 * 10) / 10 + " h" : Math.round(mins) + " min";
+}
+
 function rpSeries(d, ids) {
   const sec = $("rp-series-sec");
   const s = d.series;
   const buckets = s && Array.isArray(s.buckets) ? s.buckets : [];
   if (d.mode !== "pool" || !buckets.length || !d.picks) { sec.hidden = true; return; }
   sec.hidden = false;
-  const sums = buckets.map((b) => Object.values(b.counts || {}).reduce((a, n) => a + n, 0));
-  const peak = Math.max(1, ...sums);
-  const color = (id) => "rp-c" + Math.min(4, Math.max(0, ids.indexOf(id) < 0 ? 4 : ids.indexOf(id)));
-  $("rp-series").replaceChildren(...buckets.map((b, i) => {
-    const col = h("span", { class: "rp-col", title: sums[i] + (sums[i] === 1 ? " pick" : " picks") });
-    for (const id of ids) {
-      const n = (b.counts || {})[id] || 0;
-      if (!n) continue;
-      const seg = h("span", { class: color(id), "data-id": id });
-      seg.style.height = (n / peak * 100) + "%";
-      col.append(seg);
-    }
-    return col;
-  }));
-  const mins = s.bucketMinutes;
-  const width = mins >= 60 ? Math.round(mins / 60 * 10) / 10 + " h" : Math.round(mins) + " min";
-  setAttr($("rp-series"), "aria-label", d.picks + (d.picks === 1 ? " pick" : " picks") + " " + rpSpan(d) + " in " + buckets.length + " bars of " + width + ", at most " + Math.max(...sums) + " in one bar");
+  const most = rpBars($("rp-series"), buckets, ids, ids, (b, id) => (b.counts || {})[id] || 0, (n) => n + (n === 1 ? " pick" : " picks"));
+  setAttr($("rp-series"), "aria-label", d.picks + (d.picks === 1 ? " pick" : " picks") + " " + rpSpan(d) + " in " + buckets.length + " bars of " + rpWidth(s.bucketMinutes) + ", at most " + most + " in one bar");
   setText($("rp-from"), d.sinceLocal ? clock(d.sinceLocal) : "first pick");
   setText($("rp-to"), "now");
-  $("rp-key").replaceChildren(...ids.map((id) => h("li", {}, h("span", { class: "rp-sw " + color(id), "aria-hidden": "true" }), id)));
+  $("rp-key").replaceChildren(...ids.map((id) => h("li", {}, h("span", { class: "rp-sw " + rpColor(ids, id), "aria-hidden": "true" }), id)));
+}
+
+function rpTok(n) {
+  if (n < 1000) return String(n);
+  for (const [div, unit] of [[1e3, "k"], [1e6, "M"], [1e9, "B"]]) {
+    const v = n / div;
+    const shown = v < 100 ? Math.round(v * 10) / 10 : Math.round(v);
+    if (shown < 1000 || unit === "B") return shown + unit;
+  }
+}
+
+function rpTokPair(t) {
+  return rpTok(t.input || 0) + " in · " + rpTok(t.output || 0) + " out";
+}
+
+function rpTokens(d, colors) {
+  const t = d.tokens;
+  const span = d.window === "all" ? "in all kept runs" : "in the last " + d.window;
+  $("rp-tok-sec").hidden = false;
+  const chart = $("rp-tok-chart");
+  const prov = $("rp-tok-prov");
+  if (!t) {
+    setText($("rp-tok-totals"), "T3 reports no token counts yet.");
+    prov.hidden = true;
+    chart.hidden = true;
+    return;
+  }
+  if (!t.runs) {
+    setText($("rp-tok-totals"), "No token counts " + span + ".");
+    prov.hidden = true;
+    chart.hidden = true;
+    return;
+  }
+  setText($("rp-tok-totals"), rpTokPair(t) + " · " + t.runs + (t.runs === 1 ? " run " : " runs ") + span);
+  const provs = Object.entries(t.byProvider || {}).filter(([, p]) => p.runs > 0).sort((a, b) => a[0].localeCompare(b[0]));
+  prov.hidden = !provs.length;
+  setText(prov, provs.length ? "By provider: " + provs.map(([k, p]) => k + " " + rpTokPair(p)).join("; ") : "");
+  const s = d.tokenSeries;
+  const buckets = s && Array.isArray(s.buckets) ? s.buckets : [];
+  const by = t.byInstance || {};
+  const sum = (x) => (x.input || 0) + (x.output || 0);
+  const ids = colors.filter((id) => by[id] && sum(by[id]) > 0)
+    .concat(Object.keys(by).filter((id) => !colors.includes(id) && sum(by[id]) > 0).sort());
+  chart.hidden = !buckets.length || !ids.length;
+  if (chart.hidden) return;
+  const value = (b, id) => ((b.input || {})[id] || 0) + ((b.output || {})[id] || 0);
+  const most = rpBars($("rp-tok-series"), buckets, ids, colors, value, (n) => rpTok(n) + " tokens");
+  setAttr($("rp-tok-series"), "aria-label", rpTok(sum(t)) + " tokens " + span + " in " + buckets.length + " bars of " + rpWidth(s.bucketMinutes) + ", at most " + rpTok(most) + " in one bar");
+  setText($("rp-tok-from"), d.sinceLocal ? clock(d.sinceLocal) : "first run");
+  $("rp-tok-key").replaceChildren(...ids.map((id) => h("li", {}, h("span", { class: "rp-sw " + rpColor(colors, id), "aria-hidden": "true" }), id + " " + rpTok(sum(by[id])))));
 }
 
 function rpPaint(d) {
@@ -4660,7 +4731,9 @@ function rpPaint(d) {
     h("span", { class: "rp-name" }, "Routing unknown"), h("span", {}), d.error ? h("span", { class: "meta" }, d.error) : null));
   else if (d.error) members.push(h("li", { class: "rp-mem" }, h("span", {}), h("span", { class: "meta" }, d.error)));
   $("rp-members").replaceChildren(...members);
-  rpSeries(d, (d.members || []).map((m) => m.instanceId).concat((d.former || []).map((f) => f.instanceId)).filter(Boolean));
+  const ids = (d.members || []).map((m) => m.instanceId).concat((d.former || []).map((f) => f.instanceId)).filter(Boolean);
+  rpSeries(d, ids);
+  rpTokens(d, ids);
   const picks = rpCounts(d.reasons, RP_PICK);
   const skipTotals = {};
   for (const m of d.members || []) for (const [k, n] of Object.entries(m.skips || {})) skipTotals[k] = (skipTotals[k] || 0) + n;
