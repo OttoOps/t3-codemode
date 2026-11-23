@@ -4468,10 +4468,16 @@ fn install_skills(home: &std::path::Path, release: &str) {
     skills::sync(&Paths::under(home, None), &Bundle::new(release, files), opts).unwrap();
 }
 
-fn legacy_setup(home: &std::path::Path) {
+fn setup_done(home: &std::path::Path) {
     std::fs::create_dir_all(home.join(".claude")).unwrap();
     let cfg = home.join(".config").join("t3-workflow").join("config.json");
-    std::fs::write(cfg, r#"{"version":1,"passes":["pr"]}"#).unwrap();
+    let steps: Vec<String> = t3_codemode::steps::catalog(&t3_codemode::skills::Bundle::embedded())
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.kind == t3_codemode::steps::Kind::Interview)
+        .map(|s| s.id)
+        .collect();
+    std::fs::write(cfg, json!({"version": 1, "passes": ["pr"], "steps": steps}).to_string()).unwrap();
 }
 
 async fn state_and_health(s: &Srv) -> (Value, Value) {
@@ -4505,7 +4511,7 @@ async fn stale_skills_and_a_missing_rule_show_in_healthz_and_the_header() {
     let s = start(H::new()).await;
     let home = skills_home(&s.h);
     install_skills(&home, "0.0.1");
-    legacy_setup(&home);
+    setup_done(&home);
     s.h.app.wf.refresh_skills();
     let (st, health) = state_and_health(&s).await;
     let k = &health["skills"];
@@ -4541,7 +4547,7 @@ async fn the_rule_alone_missing_is_a_setup_step_and_clears_after_update() {
     let s = start(H::new()).await;
     let home = skills_home(&s.h);
     install_skills(&home, env!("CARGO_PKG_VERSION"));
-    legacy_setup(&home);
+    setup_done(&home);
     let st = s.h.exec("async () => wf.status()").await;
     let k = result(&st)["skills"].clone();
     assert_eq!((k["fix"].is_null(), k["current"].as_bool()), (true, Some(false)), "{k}");
@@ -4602,7 +4608,7 @@ async fn a_new_slot_or_a_broken_config_names_the_setup_skill() {
     let s = start(H::new()).await;
     let home = skills_home(&s.h);
     install_skills(&home, env!("CARGO_PKG_VERSION"));
-    legacy_setup(&home);
+    setup_done(&home);
     let env = t3_codemode::steps::Env::under(&home, None);
     t3_codemode::steps::apply(&env, &t3_codemode::skills::Bundle::embedded()).unwrap();
     let mut cfg: Value = serde_json::from_str(&std::fs::read_to_string(&env.config).unwrap()).unwrap();

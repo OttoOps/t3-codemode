@@ -156,3 +156,166 @@ board launches use the t3cm config's `board.pool`, not this slot.
 (`effort` only when the model lists effort values, or the user gave one
 while T3 did not answer), or `"models": {"ticket": {"pool": "<name>"}}` for a
 pool; `worker` the same way.
+
+## Remote board
+
+**What it is.** Whether the board opens from another device, such as a
+phone, over HTTPS. It is set up here but is not a workflow slot: it lives in
+t3cm's own `config.json` under `board.remote`, which the commands below
+write. The book is the reference for every detail this section leaves out:
+[Remote access](https://ottoops.com/t3-codemode/board.html#remote-access)
+and [the `board.remote` keys](https://ottoops.com/t3-codemode/config.html#remote-board).
+
+**The current setting** is the `remote` object that `t3cm status` prints:
+`mode`, `enabled`, `origin`. When the service is not running,
+`t3cm config get board.remote` shows what it will start with. When the
+service runs on a port other than the default (`T3CM_PORT`), pass the same
+`--port <port>` to every `t3cm status`, `t3cm board expose` and
+`t3cm board unexpose` below.
+
+**Offer** three settings, with who each one suits:
+
+- **off** (the default): the board answers on this machine only.
+- **Tailscale Serve**: every device that opens the board is on the user's
+  tailnet. Tailscale issues the certificate and names each caller, so no
+  browser needs pairing.
+- **a reverse proxy** (Caddy, nginx, or Cloudflare Tunnel with
+  `cloudflared`): a device that opens the board is off the tailnet. Each
+  browser is paired.
+
+**Records** nothing in the workflow config: the write is `{}` with
+`--asked remote`. The setup is done when its check passes.
+
+### Tailscale Serve
+
+1. Ask who gets in. The default is the host's own Tailscale login. A list
+   of logins replaces that default, one `--allow-user <login>` each, so the
+   list includes the user's own login.
+2. Ask whether to also require pairing. Explain that it is not needed here:
+   Tailscale Serve authenticates each request and adds its
+   `Tailscale-User-Login` header, and the board admits each allowed login.
+   `--require-pairing` adds a per-browser pairing cookie on top of that.
+   Suggest no.
+3. Run the expose:
+
+   ```bash
+   t3cm board expose --tailscale --json [--allow-user <login>]... [--require-pairing]
+   ```
+
+   It checks that Tailscale is up and that MagicDNS and HTTPS certificates
+   are on. When one is missing it stops and names the fix; show the user,
+   and run the same command again once they have made it.
+4. **Sudo** (Linux, and WSL with a Linux `tailscale`): when the expose
+   fails, read its error in this order.
+   - **Root needed to serve a path or Unix socket:** another Serve handler
+     on this machine makes every Serve change root-only, `unexpose`
+     included, and the operator setting does not help. When the error names
+     a root `tailscale serve` command, show the user what it does, run it
+     the sudo way below once they agree, then run the same expose again.
+     When it names none, show the user the error and
+     `tailscale serve status`, and let them decide.
+   - **Access denied, naming `sudo tailscale set --operator=$USER`:** make
+     the user the operator the sudo way below, then run the same expose
+     again.
+
+   The sudo way: run the command with `sudo -n` first, which succeeds where
+   sudo needs no password. When sudo wants a password, call
+   `request_secret` with `delivery: "file"` for the user's sudo password,
+   then run `sudo -S -p '' <command> < "$file"`, for example
+   `sudo -S -p '' tailscale set --operator="$USER" < "$file"`. With no
+   `request_secret` tool, give the user the command to run in their own
+   terminal, and go on when they say it ran.
+
+   When the expose fails again, show the user its error and whether
+   `t3cm status` still shows the earlier remote access as enabled, leave
+   `board.remote` as it is, and let them decide.
+
+   Under WSL with no Linux `tailscale`, t3cm drives Windows'
+   `tailscale.exe`, and the operator step does not apply.
+5. Restart the service with the expose output's `restartHint`, because
+   `board.remote` is restart-only. This session's t3cm calls fail until the
+   service is back; `t3cm status` answers once it is.
+6. With `--require-pairing`, pair each browser ([Pair](#pair)). Then
+   [check](#check).
+
+To change the logins or the pairing choice later, run the expose again with
+the new flags and restart. Pass `--https-port` with the port in
+`remote.origin` when it is not `47732`, or the expose adds a second route.
+The expose rewrites `board.remote` whole, which drops `settingsUsers`.
+Before it runs, read `t3cm config get board.remote`. When `settingsUsers`
+is a non-empty list, the list to keep is that list without each login the
+new allowlist leaves out (with no `--allow-user`, it admits the host login
+alone; compare ignoring case). When that drops a login or leaves the list
+empty, which gives Settings to the host login, tell the user and wait for
+their go-ahead before the expose. After the expose, and before the restart,
+set a non-empty list to keep with
+`t3cm config set board.remote.settingsUsers '<list>'`.
+
+### A reverse proxy
+
+1. Ask which proxy, and the board's public HTTPS origin with no path, such
+   as `https://board.example.com`. Point the user at that proxy's example in
+   [Reverse-proxy examples](https://ottoops.com/t3-codemode/board.html#reverse-proxy-examples):
+   the board's protection depends on the proxy following the rules there,
+   and the user sets the proxy up. When `remote.mode` is `tailscale` now,
+   [turn it off](#turn-it-off) first, so its Serve route goes too.
+2. Write the setting as one value, which sets `origin` and `mode` together:
+
+   ```bash
+   t3cm config set board.remote '{"mode": "pairing", "origin": "<origin>"}'
+   ```
+
+3. Restart the service with the command `t3cm config set` prints.
+4. [Pair](#pair) each browser, then [check](#check).
+
+### Pair
+
+Run `t3cm board pair --label "<device>"`, once per browser. It prints a
+single-use link and a QR code that work for 5 minutes. Show the user both,
+whole, in a code block so the QR code keeps its shape (`send_to_user` when
+the session has it), and have them scan the code or open the link on the
+device. The link lets one browser in, so it goes to the user alone: keep it
+out of PRs, issues, commits and workflow messages.
+
+### Check
+
+1. `t3cm status`: `remote.enabled` is `true`, `remote.mode` and
+   `requirePairing` are what the user chose, and `remote.origin` is the URL
+   to open. `enabled: false` means the service has not restarted onto
+   the new config; restart it. In Tailscale mode, `allowUsersSource:
+   "unavailable"` means the service refuses every caller; show the user its
+   `tailscaleError`.
+2. Request the origin over HTTPS and read the page title:
+
+   ```bash
+   curl -sS -H 'Accept: text/html' "<origin>/" | grep -o '<title>[^<]*</title>'
+   ```
+
+   The board answers with a title that ends in `t3 board`:
+   - `t3 board`: the board let this caller in. Expected in Tailscale mode
+     without pairing.
+   - `Sign in to t3 board - t3 board`: the board wants a pairing session.
+     Expected behind a proxy and with `requirePairing`; anywhere else it
+     means the config is not the one the user chose.
+   - a title that starts with `Access denied` or
+     `Tailscale sign-in required`: the board refused
+     this machine's Tailscale identity, or got none. Show the user the
+     title; the other device's check below settles it.
+
+   A certificate or connection error, or no `t3 board` title, means the
+   route or proxy does not reach the board; `t3cm doctor` names what
+   disagrees. When this machine cannot resolve the origin's name (WSL with
+   Tailscale on Windows may not), go to the next step.
+3. Give the user the origin to open on the other device, and have them say
+   what it shows: the board, or the pairing page until they pair.
+
+### Turn it off
+
+- **Tailscale mode:** run `t3cm board unexpose --json`, with the same
+  `--port` the expose used. With a different port, it misses the board's
+  Serve route, and can turn the config off while the route stays up.
+- **Pairing mode:** run `t3cm config set board.remote '{"mode": "off"}'`,
+  then offer `t3cm board revoke --all` to end the paired sessions.
+
+Restart the service with the printed restart command, then check that
+`t3cm status` shows `remote.enabled: false`.

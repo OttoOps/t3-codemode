@@ -526,12 +526,25 @@ fn merge_config(old: &Map<String, Value>, new: &Map<String, Value>, unset: &[Str
     Ok(out)
 }
 
-fn asked_slots(asked: &[String], new: &Map<String, Value>, unset: &[String]) -> Result<HashSet<String>> {
+fn asked_slots(
+    asked: &[String],
+    new: &Map<String, Value>,
+    unset: &[String],
+    catalog: &[steps::Step],
+) -> Result<HashSet<String>> {
+    let mut known: Vec<&str> = SLOTS.to_vec();
+    for s in catalog.iter().filter(|s| s.kind == Kind::Interview) {
+        if let Some(slot) = s.slot.as_deref()
+            && !known.contains(&slot)
+        {
+            known.push(slot);
+        }
+    }
     let names: Vec<String> =
         asked.iter().flat_map(|v| v.split(',')).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-    let bad: Vec<&str> = names.iter().map(String::as_str).filter(|n| !SLOTS.contains(n)).collect();
+    let bad: Vec<&str> = names.iter().map(String::as_str).filter(|n| !known.contains(n)).collect();
     if !bad.is_empty() {
-        bail!("--asked {}: name a slot ({})", bad.join(", "), SLOTS.join(", "));
+        bail!("--asked {}: name a slot ({})", bad.join(", "), known.join(", "));
     }
     let mut out: HashSet<String> = names.into_iter().collect();
     for k in new.keys() {
@@ -660,7 +673,7 @@ pub fn write_config(
     if !opts.repo_config {
         let catalog = steps::catalog(bundle)?;
         let mut done = if path.exists() && !opts.replace { done_steps(&old, &catalog) } else { Vec::new() };
-        let asked = asked_slots(&opts.asked, new, &opts.unset)?;
+        let asked = asked_slots(&opts.asked, new, &opts.unset, &catalog)?;
         let mut asked_sorted: Vec<String> = asked.into_iter().collect();
         asked_sorted.sort();
         for slot in asked_sorted {

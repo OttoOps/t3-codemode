@@ -1,3 +1,4 @@
+import json
 import pathlib
 import re
 import unittest
@@ -305,6 +306,79 @@ class DeliveryStepsTests(unittest.TestCase):
         self.assertIn("closeAfter", self.adr)
         for forbidden in TEAM_SKILLS:
             self.assertNotIn(forbidden, self.adr, f"ADR mentions {forbidden}")
+
+
+class RemoteBoardSetupTests(unittest.TestCase):
+    setup_skill = (SKILLS / "setup-t3-workflow" / "SKILL.md").read_text()
+    interview = (SKILLS / "setup-t3-workflow" / "references" / "interview.md").read_text()
+    steps = json.loads((SKILLS / "setup-t3-workflow" / "steps.json").read_text())["steps"]
+    board = (ROOT / "docs" / "src" / "board.md").read_text()
+
+    def remote(self):
+        return " ".join(section(self.interview, "## Remote board").split())
+
+    def test_the_remote_step_is_an_interview_step_newer_than_0_7_0(self):
+        step = next(s for s in self.steps if s["id"] == "board:remote")
+        self.assertEqual((step["kind"], step["slot"]), ("interview", "remote"))
+        self.assertNotIn("legacy", step)
+        self.assertGreater(tuple(int(n) for n in step["since"].split(".")), (0, 7, 0))
+
+    def test_setup_asks_about_the_remote_board_last_and_records_it(self):
+        text = " ".join(self.setup_skill.split())
+        self.assertIn("model ticket, model worker, remote board.", text)
+        self.assertIn("--asked review,passes,credentials,delivery,models,remote", text)
+        self.assertIn("records only `--asked remote`", text)
+
+    def test_the_remote_interview_offers_off_tailscale_and_a_proxy(self):
+        text = self.remote()
+        self.assertIn("**off** (the default)", text)
+        self.assertIn("**Tailscale Serve**", text)
+        for proxy in ("Caddy", "nginx", "cloudflared"):
+            self.assertIn(proxy, text)
+        self.assertIn("""t3cm config set board.remote '{"mode": "pairing", "origin": "<origin>"}'""", text)
+
+    def test_tailscale_runs_expose_and_explains_pairing_is_not_needed(self):
+        text = self.remote()
+        self.assertIn("t3cm board expose --tailscale", text)
+        self.assertIn("--allow-user <login>", text)
+        self.assertIn("--require-pairing", text)
+        self.assertIn("`Tailscale-User-Login` header", text)
+        self.assertIn("it is not needed here", text)
+        self.assertIn('t3cm board pair --label "<device>"', text)
+        self.assertIn("QR code", text)
+
+    def test_the_operator_step_runs_through_the_sudo_flow(self):
+        text = self.remote()
+        self.assertIn("sudo tailscale set --operator=$USER", text)
+        self.assertIn("run the command with `sudo -n` first", text)
+        self.assertIn("then run the same expose again", text)
+        self.assertIn('`request_secret` with `delivery: "file"`', text)
+        self.assertIn('sudo -S -p \'\' tailscale set --operator="$USER" < "$file"', text)
+        self.assertIn("`tailscale.exe`, and the operator step does not apply", text)
+
+    def test_every_change_restarts_and_is_checked(self):
+        text = self.remote()
+        self.assertIn("`restartHint`", text)
+        self.assertIn("restart-only", text)
+        self.assertIn("`remote.enabled` is `true`", text)
+        self.assertIn("`remote.origin`", text)
+        self.assertIn('curl -sS -H \'Accept: text/html\' "<origin>/"', text)
+        self.assertIn("`Sign in to t3 board - t3 board`", text)
+        self.assertIn("`t3cm status` shows `remote.enabled: false`", text)
+
+    def test_turning_it_off_reuses_the_expose_port(self):
+        off = " ".join(section(self.interview, "### Turn it off").split())
+        self.assertIn("t3cm board unexpose", off)
+        self.assertIn("same `--port` the expose used", off)
+        self.assertIn("""t3cm config set board.remote '{"mode": "off"}'""", off)
+
+    def test_the_remote_interview_links_the_book(self):
+        text = self.remote()
+        self.assertIn("https://ottoops.com/t3-codemode/board.html#remote-access", text)
+        self.assertIn("https://ottoops.com/t3-codemode/config.html#remote-board", text)
+        self.assertIn("https://ottoops.com/t3-codemode/board.html#reverse-proxy-examples", text)
+        heads = {anchor(h) for h in re.findall(r"^#+ (.+)$", self.board, re.M)}
+        self.assertTrue({"remote-access", "reverse-proxy-examples"} <= heads)
 
 
 if __name__ == "__main__":

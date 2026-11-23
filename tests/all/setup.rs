@@ -32,6 +32,7 @@ fn serve_health(body: String) -> u16 {
 }
 
 const SLOT_STEPS: &[&str] = &["slot:review", "slot:passes", "slot:credentials", "slot:delivery", "slot:models"];
+const REMOTE_STEP: &str = "board:remote";
 
 fn rule_text() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/t3-workflow/rules/report-filed-issues.md");
@@ -994,14 +995,14 @@ fn steps_first_write_records_only_the_slots_it_covers() {
     s.write_ok(&json!({"review": null}), &["--no-t3", "--asked", "passes,delivery"]);
     assert_eq!(s.raw_saved()["steps"], json!(["slot:review", "slot:passes", "slot:delivery"]));
     assert_eq!(s.raw_saved()["writtenBy"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(s.missing_steps(), vec!["slot:credentials", "slot:models"]);
+    assert_eq!(s.missing_steps(), vec!["slot:credentials", "slot:models", REMOTE_STEP]);
 }
 
 #[test]
 fn steps_config_from_before_steps_counts_every_slot_as_asked() {
     let s = SetupEnv::new();
     s.write_config(&json!({"version": 1, "passes": ["pr"]}));
-    assert_eq!(s.missing_steps(), Vec::<String>::new());
+    assert_eq!(s.missing_steps(), vec![REMOTE_STEP], "a slot newer than the record is still asked about");
     s.write_ok(&json!({"review": null}), &["--no-t3"]);
     assert_eq!(s.raw_saved()["steps"], json!(SLOT_STEPS));
 }
@@ -1012,7 +1013,10 @@ fn steps_reports_a_slot_recorded_by_no_run_as_missing() {
     s.write_config(&json!({"version": 1, "steps": &SLOT_STEPS[..4]}));
     assert_eq!(
         s.detect(&[])["steps"]["missing"],
-        json!([{"id": "slot:models", "kind": "interview", "slot": "models"}])
+        json!([
+            {"id": "slot:models", "kind": "interview", "slot": "models"},
+            {"id": REMOTE_STEP, "kind": "interview", "slot": "remote"}
+        ])
     );
     s.write_ok(&json!({}), &["--no-t3", "--asked", "models"]);
     assert_eq!(s.raw_saved()["steps"], json!(SLOT_STEPS));
@@ -1023,7 +1027,7 @@ fn steps_no_config_misses_every_slot_and_a_missing_rule() {
     let s = SetupEnv::new();
     std::fs::create_dir_all(&s.claude).unwrap();
     let mut want: Vec<&str> = SLOT_STEPS.to_vec();
-    want.push("rule:filed-issues");
+    want.extend(["rule:filed-issues", REMOTE_STEP]);
     assert_eq!(s.missing_steps(), want);
 }
 
@@ -1032,14 +1036,14 @@ fn steps_rule_step_is_recorded_in_an_existing_config() {
     let s = SetupEnv::new();
     s.write_config(&json!({"version": 1, "passes": ["pr"]}));
     std::fs::create_dir_all(&s.claude).unwrap();
-    assert_eq!(s.missing_steps(), vec!["rule:filed-issues"]);
+    assert_eq!(s.missing_steps(), vec!["rule:filed-issues", REMOTE_STEP]);
     let out = s.rule_ok(&[]);
     assert!(String::from_utf8_lossy(&out.stdout).contains("recorded rule:filed-issues"));
     let mut want: Vec<&str> = SLOT_STEPS.to_vec();
     want.push("rule:filed-issues");
     assert_eq!(s.raw_saved()["steps"], json!(want));
     assert_eq!(s.saved(), json!({"version": 1, "passes": ["pr"]}));
-    assert_eq!(s.missing_steps(), Vec::<String>::new());
+    assert_eq!(s.missing_steps(), vec![REMOTE_STEP]);
 }
 
 #[test]
@@ -1064,6 +1068,19 @@ fn steps_stdin_cannot_set_the_record() {
     let s = SetupEnv::new();
     let out = s.write_err(&json!({"steps": []}), &["--no-t3"]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("setup records those itself"));
+}
+
+#[test]
+fn steps_asked_records_a_setup_only_slot() {
+    let s = SetupEnv::new();
+    s.write_config(&json!({"version": 1, "steps": SLOT_STEPS}));
+    assert_eq!(s.missing_steps(), vec![REMOTE_STEP]);
+    s.write_ok(&json!({}), &["--no-t3", "--asked", "remote"]);
+    let mut want: Vec<&str> = SLOT_STEPS.to_vec();
+    want.push(REMOTE_STEP);
+    assert_eq!(s.raw_saved()["steps"], json!(want));
+    assert_eq!(s.missing_steps(), Vec::<String>::new());
+    assert_eq!(s.saved(), json!({"version": 1}), "remote access lives in the t3cm config, not here");
 }
 
 #[test]
