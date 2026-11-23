@@ -111,7 +111,14 @@ impl Issue {
     pub fn slug(&self) -> String {
         match self.tracker {
             Tracker::Github => format!("{}#{}", self.scope, self.key),
-            Tracker::Gitlab => format!("{}/{}#{}", self.host.as_deref().unwrap_or("gitlab.com"), self.scope, self.key),
+            Tracker::Gitlab => match (&self.host, &self.url) {
+                (Some(host), Some(url)) if url == &format!("https://{host}/{}/-/issues/{}", self.scope, self.key) => {
+                    format!("{host}/{}#{}", self.scope, self.key)
+                }
+                (_, Some(url)) => url.clone(),
+                (Some(host), None) => format!("{host}/{}#{}", self.scope, self.key),
+                (None, None) => format!("{}#{}", self.scope, self.key),
+            },
             Tracker::Jira => match (&self.host, &self.url) {
                 (Some(host), Some(url)) if url == &format!("https://{host}/browse/{}", self.key) => {
                     format!("{host}/{}", self.key)
@@ -866,9 +873,16 @@ pub fn identity_repo(project: &Value) -> Option<String> {
 
 fn same_issue_slug(a: &str, b: &str) -> bool {
     match (parse_issue_only(a), parse_issue_only(b)) {
-        (Some(ia), Some(ib)) if ia.tracker == Tracker::Jira && ib.tracker == Tracker::Jira => ia.slug() == ib.slug(),
+        (Some(ia), Some(ib)) if ia.tracker == Tracker::Jira && ib.tracker == Tracker::Jira => {
+            if ia.host.is_none() || ib.host.is_none() { false } else { ia.slug() == ib.slug() }
+        }
         _ => a.eq_ignore_ascii_case(b),
     }
+}
+
+fn web_port(url: &str) -> Option<u16> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    matches!(parsed.scheme(), "http" | "https").then(|| parsed.port_or_known_default()).flatten()
 }
 
 impl Wf {
@@ -1486,10 +1500,16 @@ impl Wf {
         if matches!(issue.tracker, Tracker::Github | Tracker::Gitlab)
             && let Some(host) = issue.host.as_deref()
         {
+            let issue_web_port = issue.url().and_then(web_port);
             for p in &projects {
                 let Some(root) = p["workspaceRoot"].as_str() else { continue };
                 let Some(url) = self.remotes.origin(root).await else { continue };
-                if let Some(remote) = parse_remote(&url)
+                let port_ok = match (issue_web_port, web_port(&url)) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => true,
+                };
+                if port_ok
+                    && let Some(remote) = parse_remote(&url)
                     && remote.host.eq_ignore_ascii_case(host)
                     && remote.path.eq_ignore_ascii_case(&issue.scope)
                 {
@@ -1857,19 +1877,19 @@ impl Wf {
             ..checked_identity("launchTicket", None, a.parent_issue.as_deref(), a.part.as_deref())?
         };
         self.ensure_not_on_board(&issue.label(), identity.issue.as_deref())?;
-        let label = if self.open_labels()?.contains(&issue.label()) { issue.slug() } else { issue.label() };
+        let err_label = if self.open_labels()?.contains(&issue.label()) { issue.slug() } else { issue.label() };
         let wanted = nonempty(a.project);
         let model_arg = nonempty(a.model);
         let effort_arg = nonempty(a.effort);
         let found = match self.find_project(&issue, wanted.as_deref()).await {
             Ok(found) => found,
-            Err(e) => return self.launch_failed(&label, &format!("Cannot launch {label}: {e:#}")),
+            Err(e) => return self.launch_failed(&err_label, &format!("Cannot launch {err_label}: {e:#}")),
         };
         let project = match found {
             Some(p) => p,
             None => {
-                let text = unmapped_project_error(&label, &issue);
-                return self.launch_failed(&label, &text);
+                let text = unmapped_project_error(&err_label, &issue);
+                return self.launch_failed(&err_label, &text);
             }
         };
         let project_id = project["id"].as_str().unwrap_or_default().to_string();
@@ -1885,9 +1905,9 @@ impl Wf {
         let resolved =
             match self.resolve_ticket_model(workspace_root, model_arg.as_deref(), effort_arg.as_deref()).await {
                 Ok(r) => r,
-                Err(e) => return self.launch_failed(&label, &format!("Cannot launch {label}: {e:#}")),
+                Err(e) => return self.launch_failed(&err_label, &format!("Cannot launch {err_label}: {e:#}")),
             };
-        self.reserve_label(&label, false, Some(&project_id), &identity).await?;
+        let label = self.reserve_label(&issue.label(), false, Some(&project_id), Some(&issue), &identity).await?;
         let title = match nonempty(a.title) {
             Some(t) => format!("{label}: {t}"),
             None => match issue.url() {
@@ -1935,7 +1955,7 @@ impl Wf {
             Ok(r) => r,
             Err(e) => return self.launch_failed(&base, &format!("Cannot dispatch {base}: {e:#}")),
         };
-        let label = self.reserve_label(&base, true, Some(&project_id), &Identity::default()).await?;
+        let label = self.reserve_label(&base, true, Some(&project_id), None, &Identity::default()).await?;
         let message = dispatch_brief(request, &label);
         let out = match self.launch_reserved(&label, &label, &project_id, message, &resolved).await? {
             Ok(out) => out,
@@ -1998,6 +2018,7 @@ impl Wf {
         wanted: &str,
         suffix: bool,
         project: Option<&str>,
+        issue: Option<&Issue>,
         identity: &Identity,
     ) -> Result<String> {
         let params = self.config().link_params("overseer", "ticket")?;
@@ -2010,10 +2031,24 @@ impl Wf {
                 .unwrap_or_default()
         } else {
             self.ensure_not_on_board(wanted, identity.issue.as_deref())?;
-            if self.open_labels()?.contains(wanted) {
+            if let (Some(iss), Some(pid)) = (issue, project) {
+                self.ensure_jira_not_in_project(iss, pid)?;
+            }
+            let open = self.open_labels()?;
+            if !open.contains(wanted) {
+                wanted.to_string()
+            } else if let Some(iss) = issue {
+                let slug = iss.slug();
+                if !open.contains(&slug) {
+                    slug
+                } else if iss.tracker == Tracker::Jira && iss.host.is_none() {
+                    (2..).map(|n| format!("{wanted} ({n})")).find(|l| !open.contains(l)).unwrap_or_default()
+                } else {
+                    bail!("{wanted} is already on the board; close or finish it before launching it again");
+                }
+            } else {
                 bail!("{wanted} is already on the board; close or finish it before launching it again");
             }
-            wanted.to_string()
         };
         self.store.pending_put(&Pending {
             parent: BOARD.into(),
