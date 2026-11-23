@@ -19,7 +19,7 @@ use crate::reconcile::{CardPr, card_pr};
 use crate::slots::{self, Caps, REPO_CONFIG_FILE};
 use crate::store::{Identity, Link, Pending};
 use crate::t3::{BoxFut, truncate_chars};
-use crate::wf::{ACTIVE, ENDED_BADLY, WATCHER, Wf, capped, count, header};
+use crate::wf::{ACTIVE, ENDED_BADLY, HANDLED, WATCHER, Wf, capped, count, header};
 
 #[derive(Debug)]
 pub struct T3Unreachable(pub String);
@@ -41,7 +41,7 @@ const ASKS_SHOWN: usize = 8;
 const SETTLED_SHOWN: usize = 200;
 const MAX_OPTIONS: usize = 8;
 const MAX_OPTION_CHARS: usize = 60;
-const NO_BUTTONS: &str = "this gate's card has no reply buttons, so the user must type an answer; \
+pub(crate) const NO_BUTTONS: &str = "this gate's card has no reply buttons, so the user must type an answer; \
     send it again with options: [\"<answer>\", ...], or quote each answer after reply on its **ACTION NEEDED:** line";
 const MAX_TEXT: usize = 2000;
 const DISPATCH_TOPIC: usize = 40;
@@ -368,6 +368,17 @@ pub struct Card {
     pub offer: Option<Offer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flow: Option<FlowPick>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker: Option<CardWorker>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CardWorker {
+    pub thread: String,
+    pub label: String,
+    pub link: Option<String>,
+    pub gate: String,
 }
 
 pub struct NewCard<'a> {
@@ -381,6 +392,7 @@ pub struct NewCard<'a> {
     pub pr: Option<CardPr>,
     pub approval: Option<&'a str>,
     pub offer: Option<&'a Offer>,
+    pub worker: Option<&'a CardWorker>,
 }
 
 #[derive(Deserialize)]
@@ -867,6 +879,7 @@ impl Wf {
                     pr: serde_json::from_value(d["pr"].clone()).ok().flatten(),
                     offer: serde_json::from_value(d["move"].clone()).ok().flatten(),
                     flow: serde_json::from_value(d["flow"].clone()).ok().flatten(),
+                    worker: serde_json::from_value(d["worker"].clone()).ok().flatten(),
                 }
             })
             .collect())
@@ -897,6 +910,9 @@ impl Wf {
         if let Some(o) = c.offer {
             data["move"] = json!(o);
         }
+        if let Some(w) = c.worker {
+            data["worker"] = json!(w);
+        }
         let id = self.alloc_waiting(
             BOARD,
             &card_text(c.body),
@@ -922,14 +938,24 @@ impl Wf {
     }
 
     pub(crate) fn resolve_ticket_cards(&self, ticket: &str, note: &str) -> Result<Vec<String>> {
-        self.resolve_cards(|c| c.ticket.as_deref() == Some(ticket), note)
+        let done = self.resolve_cards(|c| c.ticket.as_deref() == Some(ticket), note)?;
+        self.release_worker_holds(ticket)?;
+        Ok(done)
     }
 
     pub(crate) fn board_card(&self, c: NewCard) -> Result<String> {
         if c.kind == "gate"
             && let Some(t) = c.ticket
         {
-            self.resolve_cards(|o| o.kind == "gate" && o.ticket.as_deref() == Some(t), "superseded by a newer gate")?;
+            let from = c.worker.map(|w| w.thread.as_str());
+            self.resolve_cards(
+                |o| {
+                    o.kind == "gate"
+                        && o.ticket.as_deref() == Some(t)
+                        && o.worker.as_ref().map(|w| w.thread.as_str()) == from
+                },
+                "superseded by a newer gate",
+            )?;
         }
         self.card_add(c)
     }
@@ -961,6 +987,7 @@ impl Wf {
                 pr: None,
                 approval: None,
                 offer: None,
+                worker: None,
             })?;
             let mut out = json!({"handle": handle, "delivery": "board", "card": id, "options": options,
                 "detail": format!("on the user's board as {id}; the answer arrives here as a [t3cm reply]")});
@@ -1003,20 +1030,65 @@ impl Wf {
             .ticket
             .clone()
             .ok_or_else(|| anyhow!("card {id} has no ticket thread to answer; dismiss it instead"))?;
-        let body = format!("The user says {} about {id}: {}", json!(text), card.text);
+        if let Some(w) = card.worker.clone()
+            && let Some(out) = self.answer_relayed(&card, &w, text).await?
+        {
+            return Ok(out);
+        }
+        let body = match &card.worker {
+            Some(w) => format!(
+                "The user says {} about {id}, which {} sent past you to the board and still waits on \
+                 (answer it with wf.reply to {}): {}",
+                json!(text),
+                w.label,
+                json!(w.label),
+                card.text
+            ),
+            None => format!("The user says {} about {id}: {}", json!(text), card.text),
+        };
         let handle = self.store.msg_new(BOARD, &ticket, "reply", &body, &self.now())?;
         let msg =
             format!("{}\n{}", header("reply", BOARD, &handle, None), capped(&body, &handle, self.config().reply_cap));
         let mut out = self.send_wake(&ticket, &msg, &handle).await?;
         self.store.waiting_resolve_seq(BOARD, card.seq, Some(&format!("answered: {text}")), &self.now())?;
+        self.release_relayed(&card)?;
         self.changed();
         out["card"] = json!(id);
         Ok(out)
     }
 
+    async fn answer_relayed(&self, card: &Card, w: &CardWorker, text: &str) -> Result<Option<Value>> {
+        let merge = text.get(..5).is_some_and(|w| w.eq_ignore_ascii_case("merge"));
+        let passes =
+            !merge && (text.eq_ignore_ascii_case("hold") || card.options.iter().any(|o| o.eq_ignore_ascii_case(text)));
+        let Some(mut wl) = self.store.link_get(&w.thread)?.filter(|l| !l.closed && passes) else {
+            return Ok(None);
+        };
+        let body = format!("The user says {} about {}: {}", json!(text), card.id, card.text);
+        let handle = self.store.msg_new(BOARD, &w.thread, "reply", &body, &self.now())?;
+        let msg =
+            format!("{}\n{}", header("reply", BOARD, &handle, None), capped(&body, &handle, self.config().reply_cap));
+        let mut out = self.send_wake(&w.thread, &msg, &handle).await?;
+        self.store.waiting_resolve_seq(BOARD, card.seq, Some(&format!("answered: {text}")), &self.now())?;
+        let note =
+            format!("the board's answer {} on card {} went straight to {} ({handle})", json!(text), card.id, w.label);
+        let h = self.store.msg_new(WATCHER, &wl.parent, HANDLED, &note, &self.now())?;
+        wl.unread.push(h);
+        self.store.link_save(&wl)?;
+        self.release_relayed(card)?;
+        self.changed();
+        out["card"] = json!(card.id);
+        out["relayed"] = json!(w.label);
+        Ok(Some(out))
+    }
+
     pub fn dismiss(&self, id: &str) -> Result<Value> {
+        let card = self.cards()?.into_iter().find(|c| c.id == id);
         match self.store.waiting_resolve(BOARD, id, Some("dismissed"), &self.now())? {
             Some(_) => {
+                if let Some(c) = &card {
+                    self.release_relayed(c)?;
+                }
                 self.changed();
                 Ok(json!({"card": id, "dismissed": true}))
             }
@@ -1032,6 +1104,7 @@ impl Wf {
         if !self.store.waiting_resolve_seq(BOARD, card.seq, Some("dismissed"), &self.now())? {
             bail!("no open board card {id:?}");
         }
+        self.release_relayed(&card)?;
         self.changed();
         Ok(json!({"card": id, "dismissed": true}))
     }
@@ -1457,6 +1530,7 @@ impl Wf {
             pr: None,
             approval: None,
             offer: None,
+            worker: None,
         })?;
         Ok(json!({"ok": false, "label": label, "error": text, "card": card}))
     }

@@ -2411,7 +2411,8 @@ function patchCard(card, c) {
   else if (rev.firstChild) rev.replaceChildren();
   if (rev.firstChild) setAttr(rev.firstChild, "class", "rev");
   const th = part(card, "th");
-  if (safeUrl(c.link)) setLink(th, c.link, "Open the thread", "Open thread " + (c.label || "") + " for " + c.id);
+  const from = c.worker ? c.worker.label : (c.label || "");
+  if (safeUrl(c.link)) setLink(th, c.link, c.worker ? "Open " + c.worker.label : "Open the thread", "Open thread " + from + " for " + c.id);
   else if (th.firstChild) th.replaceChildren();
   const opts = part(card, "opts");
   const sig = optionsSig(c);

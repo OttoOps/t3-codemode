@@ -15,6 +15,7 @@ mod memory;
 mod merge;
 mod pools;
 mod reconcile;
+mod relay;
 mod routing;
 mod sandbox;
 mod settings;

@@ -119,6 +119,7 @@ impl Wf {
                             pr: None,
                             approval: None,
                             offer: None,
+                            worker: None,
                         })?;
                         action.push_str(&format!("; {}, so reported it as {id}", warnings.join("; ")));
                     }
@@ -158,6 +159,7 @@ impl Wf {
             pr: None,
             approval: None,
             offer: Some(&offer),
+            worker: None,
         })?;
         self.store.meta_set(&key, &id)?;
         Ok(Some(match failed {

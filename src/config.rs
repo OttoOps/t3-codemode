@@ -49,6 +49,14 @@ pub struct ChildPolicy {
     pub stall: Option<i64>,
     pub wake: Option<Vec<String>>,
     pub body_cap: Option<usize>,
+    pub relay: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkPolicy {
+    pub wake: Vec<String>,
+    pub body_cap: usize,
+    pub relay: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -650,11 +658,13 @@ impl Config {
         Ok(p)
     }
 
-    pub fn link_policy(&self, parent_role: Option<&str>, child_role: &str) -> (Vec<String>, usize) {
+    pub fn link_policy(&self, parent_role: Option<&str>, child_role: &str) -> LinkPolicy {
         let child = parent_role.and_then(|r| self.roles.get(r)).and_then(|rc| rc.children.get(child_role));
-        let wake = child.and_then(|c| c.wake.clone()).unwrap_or_else(|| self.wake.clone());
-        let cap = child.and_then(|c| c.body_cap).unwrap_or(self.body_cap);
-        (wake, cap)
+        LinkPolicy {
+            wake: child.and_then(|c| c.wake.clone()).unwrap_or_else(|| self.wake.clone()),
+            body_cap: child.and_then(|c| c.body_cap).unwrap_or(self.body_cap),
+            relay: child.and_then(|c| c.relay).unwrap_or(true),
+        }
     }
 }
 

@@ -227,6 +227,70 @@ async fn a_merge_gate_whose_head_moved_is_replaced_once() {
     assert_eq!(cards(&h, true).len(), 2);
 }
 
+#[tokio::test]
+async fn a_head_move_leaves_a_relayed_review_card_alone() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+    merge_gate(&h, Some(HEAD)).await;
+    check(&h, 0).await;
+    let body = format!("**ACTION NEEDED:** reply \"fix it\" or \"ship as is\", here: {URL}");
+    h.wf(WORKER, "send", json!({"kind": "gate", "gate": "review", "body": body})).await;
+
+    h.github.update_pr(REPO, 7, json!({"headRefOid": MOVED}));
+    check(&h, 10).await;
+
+    let review: Vec<Value> = cards(&h, false).into_iter().filter(|c| c["worker"].is_object()).collect();
+    assert_eq!(review.len(), 1, "{review:?}");
+    assert_eq!(review[0]["options"], json!(["fix it", "ship as is"]));
+
+    h.github.update_pr(REPO, 7, json!({"state": "CLOSED"}));
+    check(&h, 20).await;
+    assert_eq!(cards(&h, false).into_iter().filter(|c| c["worker"].is_object()).count(), 1);
+}
+
+#[tokio::test]
+async fn a_finished_pr_releases_the_merge_gate_past_a_relayed_gate() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+    merge_gate(&h, Some(HEAD)).await;
+    check(&h, 0).await;
+    let body = format!("**ACTION NEEDED:** reply \"fix it\" or \"ship as is\", here: {URL}");
+    h.wf(WORKER, "send", json!({"kind": "gate", "gate": "review", "body": body})).await;
+    assert_eq!(h.app.store.link_get(TICKET).unwrap().unwrap().gate.as_deref(), Some("merge"));
+
+    h.github.update_pr(REPO, 7, json!({"state": "CLOSED"}));
+    check(&h, 10).await;
+
+    let open = cards(&h, false);
+    assert!(open.iter().all(|c| c["worker"].is_object()), "{open:?}");
+    assert_eq!(open.len(), 1);
+    assert_eq!(h.app.store.link_get(TICKET).unwrap().unwrap().gate.as_deref(), Some("relay:review"));
+}
+
+#[tokio::test]
+async fn a_new_merge_card_takes_the_gate_from_a_relay_hold() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+    let body = format!("**ACTION NEEDED:** reply \"fix it\" or \"ship as is\", here: {URL}");
+    h.wf(WORKER, "send", json!({"kind": "gate", "gate": "review", "body": body})).await;
+    let gate = |h: &H| h.app.store.link_get(TICKET).unwrap().unwrap().gate;
+    assert_eq!(gate(&h).as_deref(), Some("relay:review"));
+    wf_merge(&h, 7, HEAD).await;
+
+    h.github.update_pr(REPO, 7, json!({"headRefOid": MOVED, "mergeStateStatus": "CLEAN"}));
+    check(&h, 2).await;
+    assert_eq!(gate(&h).as_deref(), Some("merge"));
+
+    h.wf(WORKER, "gate", json!({"clear": true})).await;
+    assert_eq!(gate(&h).as_deref(), Some("merge"));
+    let open = cards(&h, false);
+    assert_eq!(open.len(), 1);
+    assert!(open[0]["worker"].is_null(), "{open:?}");
+}
+
 async fn crash_while_clearing_the_merge_gate(h: &mut H, minutes: i64) {
     let db = rusqlite::Connection::open(h.app.store.path()).unwrap();
     db.execute_batch(

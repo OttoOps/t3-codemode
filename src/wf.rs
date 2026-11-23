@@ -8,7 +8,10 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use crate::board::{BOARD, LaunchArgs, NewCard, Remotes, checked_identity, checked_options, identity_args};
+use crate::board::{
+    BOARD, CardWorker, LaunchArgs, NO_BUTTONS, NewCard, Remotes, checked_identity, checked_options, identity_args,
+    reply_options,
+};
 use crate::clock::{Clock, iso, local_clock, minutes_since};
 use crate::config::{CLOSING, Config, LinkParams, UP_KINDS};
 use crate::github::GitHub;
@@ -256,6 +259,22 @@ pub fn capped(body: &str, handle: &str, cap: usize) -> String {
     }
     let head: String = body.chars().take(cap).collect();
     format!("{}\n... ({} more chars; full: wf.show(\"{handle}\"))", head.trim_end(), n - cap)
+}
+
+pub const HANDLED: &str = "handled";
+const RELAY_GATE: &str = "relay:";
+const BLOCKER_GATE: &str = "relay:blocker";
+
+fn relays(kind: &str, gate: Option<&str>) -> bool {
+    let ticket_owned = |g: &str| g == "merge" || g.starts_with("delivery:");
+    kind == "blocker" || (kind == "gate" && !gate.is_some_and(ticket_owned))
+}
+
+fn release_hold(ln: &mut Link) {
+    if ln.gate.as_deref() == Some(BLOCKER_GATE) {
+        ln.gate = None;
+        ln.gate_since = None;
+    }
 }
 
 fn gate_name(s: &str) -> String {
@@ -829,9 +848,27 @@ impl Wf {
         ln.last_up = now.clone();
         ln.nudges = 0;
         ln.escalated = false;
-        let (wake_kinds, cap) = self.config().link_policy(ln.parent_role.as_deref(), &ln.role);
-        let mut wake = a.wake.unwrap_or_else(|| wake_kinds.contains(&a.kind));
+        let policy = self.config().link_policy(ln.parent_role.as_deref(), &ln.role);
+        let mut wake = a.wake.unwrap_or_else(|| policy.wake.contains(&a.kind));
         let closing = CLOSING.contains(&a.kind.as_str());
+        if closing && ln.parent != BOARD {
+            self.drop_relayed(&ln.child, &ln.parent, "the worker finished")?;
+        }
+        if a.kind == "gate" && ln.parent != BOARD && !relays(&a.kind, ln.gate.as_deref()) {
+            let worker = ln.child.as_str();
+            let older =
+                |c: &crate::board::Card| c.kind == "gate" && c.worker.as_ref().is_some_and(|w| w.thread == worker);
+            if !self.resolve_cards(older, "superseded by a newer gate")?.is_empty() {
+                self.sync_relay_gate(&ln.parent)?;
+            }
+        }
+        if wake
+            && policy.relay
+            && relays(&a.kind, ln.gate.as_deref())
+            && let Some(ticket) = self.store.link_get(&ln.parent)?.filter(|t| !t.closed && t.parent == BOARD)
+        {
+            return self.relay_up(ln, ticket, &a.kind, &handle, &a.body, options);
+        }
         if closing {
             ln.closed = true;
             ln.closed_at = Some(now.clone());
@@ -852,14 +889,118 @@ impl Wf {
             return Ok(json!({"handle": handle, "delivery": "noted",
                 "detail": "no wake; your parent sees it in the digest of its next wake"}));
         }
-        let text =
-            format!("{}\n{}", header(&a.kind, &ln.label, &handle, ln.gate.as_deref()), capped(&a.body, &handle, cap));
+        let text = format!(
+            "{}\n{}",
+            header(&a.kind, &ln.label, &handle, ln.gate.as_deref()),
+            capped(&a.body, &handle, policy.body_cap)
+        );
         self.store.link_save(&ln)?;
         let mut out = self.send_wake(&ln.parent, &text, &handle).await?;
         if closing {
             out["closed"] = json!(true);
         }
         Ok(out)
+    }
+
+    fn relay_up(
+        &self,
+        mut ln: Link,
+        ticket: Link,
+        kind: &str,
+        handle: &str,
+        body: &str,
+        options: Option<Vec<String>>,
+    ) -> Result<Value> {
+        let now = self.now();
+        let gate = ln.gate.clone().filter(|_| kind == "gate").unwrap_or_else(|| kind.to_string());
+        let worker = CardWorker { thread: ln.child.clone(), label: ln.label.clone(), link: ln.link.clone(), gate };
+        let options = options.unwrap_or_else(|| reply_options(body));
+        let card = self.board_card(NewCard {
+            kind,
+            label: Some(&ticket.label),
+            ticket: Some(&ticket.child),
+            link: ln.link.as_deref().or(ticket.link.as_deref()),
+            body,
+            handle: Some(handle),
+            options: Some(options.clone()),
+            pr: None,
+            approval: None,
+            offer: None,
+            worker: Some(&worker),
+        })?;
+        let what = if kind == "gate" { format!("{} gate", worker.gate) } else { kind.to_string() };
+        let note = format!(
+            "{what} from {} ({handle}) went straight to the board as card {card}: {}",
+            ln.label,
+            crate::t3::truncate_chars(&body.split_whitespace().collect::<Vec<_>>().join(" "), 120)
+        );
+        let h = self.store.msg_new(WATCHER, &ticket.child, HANDLED, &note, &now)?;
+        ln.unread.push(h);
+        if kind == "blocker" && ln.gate.is_none() {
+            ln.gate = Some(BLOCKER_GATE.into());
+            ln.gate_since = Some(now);
+        }
+        self.store.link_save(&ln)?;
+        self.sync_relay_gate(&ticket.child)?;
+        let mut out = json!({"handle": handle, "delivery": "board", "card": card, "options": options,
+            "detail": format!("on the user's board as {card}, past your parent; the answer arrives here as a [t3cm reply]")});
+        if kind == "gate" && options.is_empty() {
+            out["warning"] = json!(NO_BUTTONS);
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn sync_relay_gate(&self, ticket: &str) -> Result<()> {
+        let Some(mut t) = self.store.link_get(ticket)?.filter(|t| !t.closed) else { return Ok(()) };
+        if t.gate.as_deref().is_some_and(|g| !g.starts_with(RELAY_GATE)) {
+            return Ok(());
+        }
+        let cards = self.cards()?;
+        let held = cards.iter().rev().filter(|c| c.ticket.as_deref() == Some(ticket)).find_map(|c| c.worker.as_ref());
+        let want = held.map(|w| format!("{RELAY_GATE}{}", w.gate));
+        if t.gate != want {
+            t.gate_since = want.as_ref().map(|_| self.now());
+            t.gate = want;
+            t.nudges = 0;
+            t.escalated = false;
+            self.store.link_save(&t)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn release_relayed(&self, card: &crate::board::Card) -> Result<()> {
+        let (Some(w), Some(ticket)) = (&card.worker, &card.ticket) else { return Ok(()) };
+        if card.kind == "blocker"
+            && let Some(mut wl) = self.store.link_get(&w.thread)?
+            && wl.gate.as_deref() == Some(BLOCKER_GATE)
+            && !self
+                .cards()?
+                .iter()
+                .any(|c| c.kind == "blocker" && c.worker.as_ref().is_some_and(|o| o.thread == w.thread))
+        {
+            wl.gate = None;
+            wl.gate_since = None;
+            self.store.link_save(&wl)?;
+        }
+        self.sync_relay_gate(ticket)
+    }
+
+    pub(crate) fn release_worker_holds(&self, ticket: &str) -> Result<()> {
+        for mut w in self.store.children(ticket, true)? {
+            if w.gate.as_deref() == Some(BLOCKER_GATE) {
+                release_hold(&mut w);
+                self.store.link_save(&w)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn drop_relayed(&self, worker: &str, ticket: &str, note: &str) -> Result<()> {
+        let mine = |c: &crate::board::Card| c.worker.as_ref().is_some_and(|w| w.thread == worker);
+        if !self.resolve_cards(mine, note)?.is_empty() {
+            self.sync_relay_gate(ticket)?;
+        }
+        Ok(())
     }
 
     async fn reply(&self, me: &str, a: ReplyArgs) -> Result<Value> {
@@ -897,11 +1038,15 @@ impl Wf {
         self.store.link_save(&ln)?;
         if a.clear && ln.parent == BOARD {
             self.resolve_cards(
-                |c| c.kind == "gate" && c.ticket.as_deref() == Some(ln.child.as_str()),
+                |c| c.kind == "gate" && c.worker.is_none() && c.ticket.as_deref() == Some(ln.child.as_str()),
                 "gate cleared in the ticket",
             )?;
+            self.sync_relay_gate(&ln.child)?;
+        } else if a.clear {
+            self.drop_relayed(&ln.child, &ln.parent, "gate cleared by the worker")?;
         }
-        Ok(json!({"gate": ln.gate}))
+        let gate = self.store.link_get(me)?.and_then(|l| l.gate);
+        Ok(json!({"gate": gate}))
     }
 
     async fn pause(&self, me: &str, a: PauseArgs) -> Result<Value> {
@@ -946,9 +1091,12 @@ impl Wf {
         ln.closed = true;
         ln.closed_at = Some(self.now());
         ln.closed_how = Some("closed-by-parent".into());
+        release_hold(&mut ln);
         self.store.link_save(&ln)?;
         if ln.parent == BOARD {
             self.flow_soon();
+        } else {
+            self.drop_relayed(&ln.child, &ln.parent, "the worker's link closed")?;
         }
         Ok(json!({"closed": ln.label}))
     }
@@ -1011,10 +1159,28 @@ impl Wf {
     async fn adopt(&self, me: &str, from: &str) -> Result<Value> {
         let _g = self.lock.lock().await;
         let mut adopted = Vec::new();
+        let mut workers = Vec::new();
         for mut ln in self.store.children(from, true)? {
             ln.parent = me.into();
             self.store.link_save(&ln)?;
+            workers.push(ln.child);
             adopted.push(ln.label);
+        }
+        let relayed = |c: &crate::board::Card| {
+            c.ticket.as_deref() == Some(from) && c.worker.as_ref().is_some_and(|w| workers.contains(&w.thread))
+        };
+        let moved: Vec<crate::board::Card> = self.cards()?.into_iter().filter(relayed).collect();
+        for c in &moved {
+            let mut data = self.store.waiting_data(BOARD, false)?.into_iter().find(|r| r.3 == c.seq).and_then(|r| r.1);
+            if let Some(d) = data.as_mut() {
+                d["ticket"] = json!(me);
+                self.store.waiting_set_data(BOARD, c.seq, d)?;
+            }
+        }
+        if !moved.is_empty() {
+            self.sync_relay_gate(from)?;
+            self.sync_relay_gate(me)?;
+            self.changed();
         }
         let pending = self.store.pending_retarget(from, me)?;
         self.store.outbox_retarget(from, me)?;
@@ -1067,27 +1233,44 @@ impl Wf {
     }
 
     fn digest_for(&self, parent: &str, exclude: &[String]) -> Result<(String, Consumed)> {
+        let cap = self.config().digest_lines;
         let mut lines = Vec::new();
         let mut consumed = Vec::new();
         let mut overflow = 0;
         for ln in self.store.children(parent, false)? {
-            let mut unread = Vec::new();
+            let mut notes = Vec::new();
+            let mut entries = Vec::new();
             for h in ln.unread.iter().filter(|h| !exclude.contains(h)) {
-                if let Some(m) = self.store.msg_get(h)? {
-                    unread.push(m);
+                match self.store.msg_get(h)? {
+                    Some(m) if m.kind == HANDLED => entries.push((
+                        format!("- handled for you {}: {} [{}]", local_clock(&m.at), m.head(200), m.handle),
+                        vec![m.handle],
+                    )),
+                    Some(m) => notes.push(m),
+                    None => {}
                 }
             }
-            let Some(last) = unread.last() else { continue };
-            if lines.len() >= self.config().digest_lines {
-                overflow += 1;
-                continue;
+            if let Some(last) = notes.last() {
+                let more = if notes.len() > 1 { format!(" (+{} earlier)", notes.len() - 1) } else { String::new() };
+                let line =
+                    format!("- {} {} {} [{}]{more}", ln.label, local_clock(&last.at), last.head(120), last.handle);
+                entries.push((line, notes.iter().map(|m| m.handle.clone()).collect()));
             }
-            let more = if unread.len() > 1 { format!(" (+{} earlier)", unread.len() - 1) } else { String::new() };
-            lines.push(format!("- {} {} {} [{}]{more}", ln.label, local_clock(&last.at), last.head(120), last.handle));
-            consumed.push((ln.child.clone(), unread.iter().map(|m| m.handle.clone()).collect()));
+            let mut done = Vec::new();
+            for (line, handles) in entries {
+                if lines.len() >= cap {
+                    overflow += 1;
+                    continue;
+                }
+                lines.push(line);
+                done.extend(handles);
+            }
+            if !done.is_empty() {
+                consumed.push((ln.child.clone(), done));
+            }
         }
         if overflow > 0 {
-            lines.push(format!("- ... {overflow} more threads with notes: wf.inbox()"));
+            lines.push(format!("- ... {overflow} more lines: wf.inbox()"));
         }
         if lines.is_empty() {
             return Ok((String::new(), consumed));
@@ -1163,6 +1346,7 @@ impl Wf {
                 pr: None,
                 approval: None,
                 offer: None,
+                worker: None,
             })?;
             return Ok(());
         }
@@ -1183,6 +1367,7 @@ impl Wf {
                 ln.closed = true;
                 ln.closed_at = Some(now.clone());
                 ln.closed_how = Some("thread-gone".into());
+                release_hold(ln);
                 let body = format!("{}'s thread is gone; its link is closed.", ln.label);
                 let h = self.store.msg_new(WATCHER, &ln.parent, "note", &body, &now)?;
                 if ln.parent == BOARD {
@@ -1190,6 +1375,7 @@ impl Wf {
                     self.resolve_ticket_cards(&ln.child, "ticket thread gone")?;
                 } else {
                     ln.unread.push(h);
+                    self.drop_relayed(&ln.child, &ln.parent, "worker thread gone")?;
                 }
                 actions.push(format!("closed {}: thread gone", ln.label));
                 return Ok(());
@@ -1200,9 +1386,12 @@ impl Wf {
             ln.closed = true;
             ln.closed_at = Some(now);
             ln.closed_how = Some("archived".into());
+            release_hold(ln);
             if ln.parent == BOARD {
                 self.flow_soon();
                 self.resolve_ticket_cards(&ln.child, "ticket archived")?;
+            } else {
+                self.drop_relayed(&ln.child, &ln.parent, "worker archived")?;
             }
             actions.push(format!("closed {}: archived", ln.label));
             return Ok(());
@@ -1310,7 +1499,8 @@ impl Wf {
             self.changed();
             return Ok(actions);
         }
-        for mut ln in links {
+        for ln in links {
+            let Some(mut ln) = self.store.link_get(&ln.child)?.filter(|l| !l.closed) else { continue };
             self.tick_link(&mut ln, &mut actions).await?;
             self.store.link_save(&ln)?;
         }
@@ -1344,6 +1534,7 @@ impl Wf {
                     pr: None,
                     approval: None,
                     offer: None,
+                    worker: None,
                 })?;
             } else {
                 let msg = format!("{}\n{body}", header("report", &p.label, &handle, None));

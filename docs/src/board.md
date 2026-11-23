@@ -32,6 +32,14 @@ to filter the board to its tickets, and click it again to clear that filter.
   Answering a card sends the ticket one reply and resolves the card. A ticket
   that clears its gate, or sends a newer `gate` message, resolves its older
   gate cards, and its handoff resolves all of its open cards.
+  A worker's blocker, or any gate it opens other than `merge` and
+  `delivery:<id>`, comes to the board past its ticket, as
+  [`relay`](config.md#workflow-layer) describes. Its card sits under the
+  ticket and links to the worker's thread. Answering it with one of its
+  buttons or "hold" sends the worker the reply. Any other answer goes to the
+  ticket, and so does an answer that starts with "merge". The worker resolves its own cards when it clears its gate or
+  hands off, and a ticket's gate clear leaves them open. While one waits,
+  neither the ticket nor a blocked worker is nudged.
   A pool thread that stops on a usage limit gets a `move`/`wait` card, unless
   its pool's [`moveOnLimit`](config.md#moving-a-limited-thread) is `auto`,
   which moves the thread with no card, or `never`, which leaves it. A failed
