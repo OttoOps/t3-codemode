@@ -1023,11 +1023,25 @@ impl Store {
             "SELECT seq, data FROM waiting WHERE owner = ?1 AND resolved_at IS NULL AND data IS NOT NULL",
             [board],
         )?;
-        for (seq, mut d) in cards.into_iter().filter(|(_, d)| d["ticket"] == old && d["move"].is_null()) {
-            d["ticket"] = Value::from(new);
+        for (seq, mut d) in cards {
+            let ticket = d["ticket"] == old && d["move"].is_null();
+            let worker = d["worker"]["thread"] == old;
+            if !ticket && !worker {
+                continue;
+            }
+            if ticket {
+                d["ticket"] = Value::from(new);
+            }
+            if worker {
+                d["worker"]["thread"] = Value::from(new);
+                if let Some(l) = link {
+                    d["worker"]["link"] = Value::from(l);
+                }
+            }
+            let relink = worker || d["worker"].is_null();
             tx.execute(
                 "UPDATE waiting SET data = ?2, link = COALESCE(?3, link) WHERE seq = ?1",
-                params![seq, d.to_string(), link],
+                params![seq, d.to_string(), link.filter(|_| relink)],
             )?;
         }
         tx.execute("UPDATE outbox SET to_id = ?2 WHERE to_id = ?1", params![old, new])?;
@@ -1169,7 +1183,8 @@ impl Store {
         let release = "UPDATE links SET data = json_set(data, '$.gate', NULL, '$.gateSince', NULL) \
                        WHERE child = ?1 AND closed = 0 AND json_extract(data, '$.gate') = 'merge' \
                        AND NOT EXISTS (SELECT 1 FROM waiting w WHERE w.owner = ?2 AND w.resolved_at IS NULL \
-                       AND json_extract(w.data, '$.kind') = 'gate' AND json_extract(w.data, '$.ticket') = ?1)";
+                       AND json_extract(w.data, '$.kind') = 'gate' AND json_extract(w.data, '$.ticket') = ?1 \
+                       AND json_extract(w.data, '$.worker') IS NULL)";
         let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut resolved = 0;

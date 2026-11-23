@@ -398,7 +398,7 @@ impl Wf {
                 add(&mut map, &format!("{o}/{r}"), n).unnamed.push(ln.child.clone());
             }
         }
-        for card in self.cards()? {
+        for card in self.cards()?.into_iter().filter(|c| c.worker.is_none()) {
             if let Some(p) = &card.pr {
                 let t = add(&mut map, &p.repo, p.number);
                 t.add(card.ticket.as_deref(), &card.at);
@@ -599,6 +599,9 @@ impl Wf {
 
     fn resolve_releasing(&self, seqs: &[i64], tickets: &[&str], note: &str) -> Result<usize> {
         let resolved = self.store.waiting_resolve_releasing(BOARD, seqs, tickets, note, &self.now())?;
+        for ticket in tickets {
+            self.sync_relay_gate(ticket)?;
+        }
         if resolved > 0 {
             self.changed();
         }
@@ -968,8 +971,9 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
                     pr: Some(t.pr(head)),
                     approval,
                     offer: None,
+                    worker: None,
                 })?;
-                if kind == "gate" && l.gate.as_deref().is_none_or(|g| g == "merge") {
+                if kind == "gate" && l.gate.as_deref().is_none_or(|g| g == "merge" || g.starts_with("relay:")) {
                     l.gate = Some("merge".into());
                     l.gate_since = Some(self.now());
                     l.nudges = 0;
@@ -1009,6 +1013,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
                     pr: Some(t.pr(head)),
                     approval,
                     offer: None,
+                    worker: None,
                 })?;
                 mark(ticket.unwrap_or(BOARD))
             }

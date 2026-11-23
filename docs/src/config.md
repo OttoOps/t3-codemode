@@ -168,13 +168,27 @@ the service is counted. On Linux, raise it only with `MemoryHigh` and
 | `link` | `{"down": 45, "miss": 2, "stall": 240}` | Default link policy: idle minutes before a nudge, unanswered nudges before an escalation, busy minutes with nothing sent before the parent hears of it |
 | `wake` | `["event", "gate", "blocker", "handoff", "closed", "report", "escalate", "reply"]` | Message kinds that wake the receiver. Other kinds are stored as notes. |
 | `bodyCap`, `replyCap` | `1500`, `1500` | Characters of a wake or reply body sent inline; the rest stays behind its handle |
-| `digestLines` | `6` | Note lines in the digest that rides on the next wake |
+| `digestLines` | `6` | Note and "handled for you" lines in the digest that rides on the next wake |
 | `roles` | see below | Per-role overrides for each child role |
 
 The built-in `roles` give an overseer's `ticket` children `down` 75, `stall`
 480, `bodyCap` 600, and a `wake` list without `event` and `reply`, so a
 ticket's routine events reach an overseer as notes. `ticket` has `worker`
 children with the default policy, and `worker` has none.
+
+A child policy also takes `relay`, `true` by default. With it on, a child's
+`blocker`, and each `gate` it opens other than `merge` and `delivery:<id>`,
+skip its parent when that parent's own link goes to the board: the message
+becomes a board card tagged with the child, and the card's answer goes
+straight back to the child when it is one of the card's buttons or `hold`.
+Any other answer goes to the parent, and so does any answer that starts with
+`merge`. Neither step
+wakes the parent, which reads each one as a "handled for you" line in the
+digest of its next wake. A parent under an overseer thread keeps the usual
+path whatever `relay` says, so the switch matters on `ticket` -> `worker` for
+board tickets. Set `"relay": false` on a child policy to send those messages
+through the parent again. See
+[ADR 0013](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0013-relay-worker-gates-past-the-ticket.md).
 
 ### Board
 

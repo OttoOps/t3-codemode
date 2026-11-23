@@ -110,7 +110,10 @@ parent and a child, and the service keeps every link and message in its store.
   board. When the message opened a decision card, the result also carries the
   `card` id and the card's reply buttons as `options`, plus a `warning` when a
   gate's card has no buttons. `gate` also opens a gate, which stops nudges
-  until the sender clears it. `handoff` and `closed` close the link.
+  until the sender clears it. `handoff` and `closed` close the link. A
+  worker's `blocker`, or any gate it opens other than `merge` and
+  `delivery:<id>`, goes to the board past a board ticket, with `delivery: "board"`, as
+  [`relay`](config.md#workflow-layer) describes.
 - `options`, a list of answers on a `gate`, `blocker` or `report`, sets the
   board card's buttons in place of the ones parsed from the body. The limits
   and the parsing rules are in [Reply buttons](board.md#reply-buttons). A bad
@@ -238,7 +241,9 @@ async () => wf.send({ kind: "note", body: "tests green at d4db97c" })
 ```
 
 The service stores a note without waking anyone, and the note reaches the
-parent as a digest line on its next wake. The kinds in the config's `wake` list
+parent as a digest line on its next wake. Each message the service relayed
+past the parent, and each answer it routed back, reaches it the same way, as a
+"handled for you" line. The kinds in the config's `wake` list
 wake the receiver. `wake: true` on a send forces a wake for any kind, notes
 included, and `wake: false` suppresses one, except that `handoff` and `closed`
 always wake a thread parent. A send to the board ignores `wake`, since the board
