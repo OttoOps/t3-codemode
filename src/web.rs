@@ -998,7 +998,15 @@ async fn launch(State(web): State<Web>, raw: Bytes) -> Response {
     }
     let mut results = Vec::new();
     for issue in issues {
-        let args = LaunchArgs { issue: issue.clone(), project: None, title: None, model: None, effort: None };
+        let args = LaunchArgs {
+            issue: issue.clone(),
+            parent_issue: None,
+            part: None,
+            project: None,
+            title: None,
+            model: None,
+            effort: None,
+        };
         let mut r = match web.app.wf.launch_ticket(args).await {
             Ok(v) => v,
             Err(e) => json!({"ok": false, "error": web.app.t3.redact(format!("{e:#}"))}),

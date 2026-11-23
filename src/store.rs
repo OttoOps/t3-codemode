@@ -112,6 +112,29 @@ pub struct Link {
     pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_at: Option<String>,
+    #[serde(flatten)]
+    pub identity: Identity,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Identity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+}
+
+impl Identity {
+    pub fn or(self, other: Identity) -> Identity {
+        Identity {
+            issue: self.issue.or(other.issue),
+            parent_issue: self.parent_issue.or(other.parent_issue),
+            part: self.part.or(other.part),
+        }
+    }
 }
 
 impl Link {
@@ -152,6 +175,8 @@ pub struct Pending {
     pub thread: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    #[serde(flatten)]
+    pub identity: Identity,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]

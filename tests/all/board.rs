@@ -267,7 +267,10 @@ async fn launch_ticket_maps_the_repo_to_a_project_and_preregisters_the_link() {
     assert_eq!(l["modelSelection"]["options"], json!([{"id": "effort", "value": "high"}]));
     let msg = l["message"].as_str().unwrap();
     assert!(msg.starts_with("Work https://github.com/Acme/widgets/issues/41 with the t3-ticket skill."), "{msg}");
-    assert!(msg.contains(r#"wf.join({ parent: "board", label: "widgets#41", role: "ticket" })"#), "{msg}");
+    assert!(
+        msg.contains(r#"wf.join({ parent: "board", label: "widgets#41", role: "ticket", issue: "Acme/widgets#41" })"#),
+        "{msg}"
+    );
     let pending = h.app.store.pending_all().unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].parent, BOARD);
@@ -278,11 +281,56 @@ async fn launch_ticket_maps_the_repo_to_a_project_and_preregisters_the_link() {
     assert_eq!(tree[0]["repo"], "acme/WIDGETS");
     assert_eq!(tree[0]["project"], json!({"id": "p-widgets", "title": "p-widgets"}));
     assert_eq!(tree[0]["title"], "widgets#41: Fix the grader");
+    assert_eq!(tree[0]["issue"], "Acme/widgets#41");
     let again = h.exec("async () => wf.launchTicket({ issue: 'Acme/widgets#41' })").await;
     assert!(err_text(&again).contains("has not joined yet"), "{}", again.text);
     h.wf("launch:1", "join", json!({"parent": BOARD, "label": "widgets#41", "role": "ticket"})).await;
     assert!(h.app.store.pending_all().unwrap().is_empty());
-    assert_eq!(h.app.store.link_get("launch:1").unwrap().unwrap().params.down, 75);
+    let ln = h.app.store.link_get("launch:1").unwrap().unwrap();
+    assert_eq!(ln.params.down, 75);
+    assert_eq!(ln.identity.issue.as_deref(), Some("Acme/widgets#41"));
+}
+
+#[tokio::test]
+async fn launch_ticket_carries_the_parent_issue_and_part_to_the_ticket_link() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/widgets", "https://github.com/acme/widgets.git");
+    let out = h
+        .exec(
+            "async () => wf.launchTicket({ issue: 'acme/widgets#115', \
+             parentIssue: 'https://github.com/acme/widgets/issues/105', part: '1/4' })",
+        )
+        .await;
+    assert_eq!(result(&out)["ok"], true, "{}", out.text);
+    let msg = h.fake.launched()[0]["message"].as_str().unwrap().to_string();
+    let call = msg.lines().find(|l| l.starts_with("async () =>")).expect("join call in brief");
+    assert!(
+        call.contains(r#"role: "ticket", issue: "acme/widgets#115", parentIssue: "acme/widgets#105", part: "1/4" })"#),
+        "{call}"
+    );
+    let tree = h.app.wf.tree().unwrap();
+    assert_eq!(
+        (&tree[0]["issue"], &tree[0]["parentIssue"], &tree[0]["part"]),
+        (&json!("acme/widgets#115"), &json!("acme/widgets#105"), &json!("1/4"))
+    );
+    h.exec_as("launch:1", call).await;
+    let tree = h.app.wf.tree().unwrap();
+    assert_eq!(tree[0]["joined"], true);
+    assert_eq!(tree[0]["issue"], "acme/widgets#115");
+    assert_eq!(tree[0]["parentIssue"], "acme/widgets#105");
+    assert_eq!(tree[0]["part"], "1/4");
+}
+
+#[tokio::test]
+async fn launch_ticket_refuses_a_bad_part_before_launching() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/widgets", "https://github.com/acme/widgets.git");
+    let out = h.exec("async () => wf.launchTicket({ issue: 'acme/widgets#115', part: '5/4' })").await;
+    assert!(err_text(&out).contains("part \"5/4\" must be n/N"), "{}", out.text);
+    assert!(h.fake.launched().is_empty());
+    assert!(h.app.store.pending_all().unwrap().is_empty());
 }
 
 fn dispatch_projects(h: &H) {
@@ -494,7 +542,9 @@ async fn a_ticket_that_joins_before_its_launch_returns_is_not_reported() {
     h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
     h.remotes.set("/src/widgets", "git@github.com:o/widgets.git");
     h.wf("launch:1", "init", json!({"role": "ticket"})).await;
-    h.exec("async () => wf.launchTicket({ issue: 'o/widgets#9' })").await;
+    h.exec("async () => wf.launchTicket({ issue: 'o/widgets#9', part: '2/3' })").await;
+    let ln = h.app.store.link_get("launch:1").unwrap().unwrap();
+    assert_eq!((ln.identity.issue.as_deref(), ln.identity.part.as_deref()), (Some("o/widgets#9"), Some("2/3")));
     let again = h.exec("async () => wf.launchTicket({ issue: 'o/widgets#9' })").await;
     assert!(err_text(&again).contains("widgets#9 is already on the board"), "{}", again.text);
     assert!(!h.tick(76).await.iter().any(|a| a.starts_with("report never-joined")));

@@ -17,7 +17,7 @@ use crate::moves::Offer;
 use crate::pools::Picked;
 use crate::reconcile::{CardPr, card_pr};
 use crate::slots::{self, Caps, REPO_CONFIG_FILE};
-use crate::store::{Link, Pending};
+use crate::store::{Identity, Link, Pending};
 use crate::t3::{BoxFut, truncate_chars};
 use crate::wf::{ACTIVE, ENDED_BADLY, WATCHER, Wf, capped, count, header};
 
@@ -86,6 +86,42 @@ impl Issue {
     pub fn label(&self) -> String {
         format!("{}#{}", self.repo, self.number)
     }
+
+    pub fn slug(&self) -> String {
+        format!("{}/{}#{}", self.owner, self.repo, self.number)
+    }
+}
+
+pub fn checked_identity(
+    method: &str,
+    issue: Option<&str>,
+    parent_issue: Option<&str>,
+    part: Option<&str>,
+) -> Result<Identity> {
+    fn given(v: Option<&str>) -> Option<&str> {
+        v.map(str::trim).filter(|v| !v.is_empty())
+    }
+    let issue_ref = |field: &str, v: Option<&str>| -> Result<Option<String>> {
+        given(v)
+            .map(|raw| {
+                parse_issue_only(raw).map(|i| i.slug()).ok_or_else(|| {
+                    anyhow!("wf.{method}: {field} {raw:?} is not a GitHub issue; use <owner>/<repo>#<n> or its URL")
+                })
+            })
+            .transpose()
+    };
+    let part = given(part)
+        .map(|raw| {
+            let n = raw
+                .split_once('/')
+                .and_then(|(a, b)| Some((a.trim().parse::<u32>().ok()?, b.trim().parse::<u32>().ok()?)));
+            match n {
+                Some((n, of)) if n >= 1 && n <= of => Ok(format!("{n}/{of}")),
+                _ => Err(anyhow!("wf.{method}: part {raw:?} must be n/N with 1 <= n <= N, such as \"1/4\"")),
+            }
+        })
+        .transpose()?;
+    Ok(Identity { issue: issue_ref("issue", issue)?, parent_issue: issue_ref("parentIssue", parent_issue)?, part })
 }
 
 pub(crate) fn gh_name(s: &str) -> bool {
@@ -351,6 +387,9 @@ pub struct NewCard<'a> {
 #[serde(deny_unknown_fields)]
 pub struct LaunchArgs {
     pub issue: String,
+    #[serde(rename = "parentIssue")]
+    pub parent_issue: Option<String>,
+    pub part: Option<String>,
     pub project: Option<String>,
     pub title: Option<String>,
     pub model: Option<String>,
@@ -453,20 +492,28 @@ fn nonempty(s: Option<String>) -> Option<String> {
     s.map(|x| x.trim().to_string()).filter(|x| !x.is_empty())
 }
 
-fn board_link(label: &str) -> String {
+pub fn identity_args(id: &Identity) -> String {
+    [("issue", &id.issue), ("parentIssue", &id.parent_issue), ("part", &id.part)]
+        .into_iter()
+        .filter_map(|(k, v)| v.as_ref().map(|v| format!(", {k}: {}", json!(v))))
+        .collect()
+}
+
+fn board_link(label: &str, id: &Identity) -> String {
     format!(
         "## t3-codemode link\n\
          This thread reports to the t3-codemode board, not to a parent thread. Before anything else, call \
          mcp__t3cm__execute with:\n\
-         async () => {{ await wf.join({{ parent: \"board\", label: {}, role: \"ticket\" }}); return \"joined\"; }}\n\
+         async () => {{ await wf.join({{ parent: \"board\", label: {}, role: \"ticket\"{} }}); return \"joined\"; }}\n\
          Send gates, blockers and the handoff with wf.send; the user answers them on the board and the answer \
          arrives here as a [t3cm reply]. Progress is wf.send({{ kind: \"note\" }}).",
-        json!(label)
+        json!(label),
+        identity_args(id)
     )
 }
 
-pub fn ticket_brief(url: &str, label: &str) -> String {
-    format!("Work {url} with the t3-ticket skill.\n\n{}", board_link(label))
+pub fn ticket_brief(url: &str, label: &str, id: &Identity) -> String {
+    format!("Work {url} with the t3-ticket skill.\n\n{}", board_link(label, id))
 }
 
 fn pick_project(projects: Vec<Value>, wanted: &str) -> Option<Value> {
@@ -476,7 +523,7 @@ fn pick_project(projects: Vec<Value>, wanted: &str) -> Option<Value> {
 }
 
 pub fn dispatch_brief(request: &str, label: &str) -> String {
-    format!("{request}\n\n{}", board_link(label))
+    format!("{request}\n\n{}", board_link(label, &Identity::default()))
 }
 
 fn dispatch_topic(request: &str) -> String {
@@ -1421,6 +1468,10 @@ impl Wf {
             )
         })?;
         let label = issue.label();
+        let identity = Identity {
+            issue: Some(issue.slug()),
+            ..checked_identity("launchTicket", None, a.parent_issue.as_deref(), a.part.as_deref())?
+        };
         self.ensure_not_on_board(&label)?;
         let wanted = nonempty(a.project);
         let model_arg = nonempty(a.model);
@@ -1454,9 +1505,9 @@ impl Wf {
                 Ok(r) => r,
                 Err(e) => return self.launch_failed(&label, &format!("Cannot launch {label}: {e:#}")),
             };
-        self.reserve_label(&label, false).await?;
+        self.reserve_label(&label, false, &identity).await?;
         let title = format!("{label}: {}", nonempty(a.title).unwrap_or_else(|| issue.url()));
-        let message = ticket_brief(&issue.url(), &label);
+        let message = ticket_brief(&issue.url(), &label, &identity);
         let out = match self.launch_reserved(&label, &title, &project_id, message, &resolved).await? {
             Ok(out) => out,
             Err(failed) => return Ok(failed),
@@ -1494,7 +1545,7 @@ impl Wf {
             Ok(r) => r,
             Err(e) => return self.launch_failed(&base, &format!("Cannot dispatch {base}: {e:#}")),
         };
-        let label = self.reserve_label(&base, true).await?;
+        let label = self.reserve_label(&base, true, &Identity::default()).await?;
         let message = dispatch_brief(request, &label);
         let out = match self.launch_reserved(&label, &label, &project_id, message, &resolved).await? {
             Ok(out) => out,
@@ -1545,7 +1596,7 @@ impl Wf {
         Ok(taken)
     }
 
-    async fn reserve_label(&self, wanted: &str, suffix: bool) -> Result<String> {
+    async fn reserve_label(&self, wanted: &str, suffix: bool, identity: &Identity) -> Result<String> {
         let params = self.config().link_params("overseer", "ticket")?;
         let _g = self.lock.lock().await;
         let label = if suffix {
@@ -1567,6 +1618,7 @@ impl Wf {
             reported: false,
             thread: None,
             link: None,
+            identity: identity.clone(),
         })?;
         drop(_g);
         self.changed();
@@ -1612,8 +1664,12 @@ impl Wf {
             let _g = self.lock.lock().await;
             let early = self.store.link_get(&thread)?.filter(|l| l.parent == BOARD);
             if let Some(mut ln) = early {
+                let reserved = self.store.pending_all()?.into_iter().find(|p| p.parent == BOARD && p.label == label);
                 self.store.pending_remove(BOARD, label)?;
                 ln.label = label.to_string();
+                if let Some(p) = reserved {
+                    ln.identity = ln.identity.clone().or(p.identity);
+                }
                 self.store.link_save(&ln)?;
             } else if let Some(mut p) =
                 self.store.pending_all()?.into_iter().find(|p| p.parent == BOARD && p.label == label)
@@ -2077,6 +2133,7 @@ impl Wf {
             "thread": ln.child, "label": ln.label, "status": status, "t3Status": live["status"],
             "gate": if ln.closed { None } else { ln.gate.clone() },
             "paused": paused, "pausedAt": if paused { ln.paused_at.clone() } else { None },
+            "issue": ln.identity.issue, "parentIssue": ln.identity.parent_issue, "part": ln.identity.part,
             "link": web_link(ln.link.clone().or_else(|| live["link"].as_str().map(String::from))),
             "pr": self.pr_view(&live["pr"]), "done": ln.closed, "closedHow": ln.closed_how, "lastUp": local_clock(&ln.last_up),
             "upAt": ln.last_up,
@@ -2147,6 +2204,7 @@ impl Wf {
                 "t3Status": live["status"], "gate": null,
                 "link": web_link(p.link.clone().or_else(|| live["link"].as_str().map(String::from))),
                 "pr": live["pr"], "done": false, "closedHow": null, "joined": false, "workers": [],
+                "issue": p.identity.issue, "parentIssue": p.identity.parent_issue, "part": p.identity.part,
                 "lastUp": local_clock(&p.at), "upAt": p.at, "last": null,
             }));
         }

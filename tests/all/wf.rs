@@ -562,6 +562,7 @@ fn bare_link(child: &str, parent: &str, label: &str) -> Link {
         restored_at: None,
         project: None,
         paused_at: None,
+        identity: Default::default(),
     }
 }
 
@@ -612,11 +613,13 @@ async fn init_leaves_another_launchs_pending_row_alone() {
                 reported: false,
                 thread: thread.map(String::from),
                 link: thread.map(|t| format!("https://t3/{t}")),
+                identity: t3_codemode::store::Identity { issue: Some("acme/widgets#41".into()), ..Default::default() },
             })
             .unwrap();
         h.fake.update(TICKET, json!({"title": "widgets#41"}));
         let r = h.wf(TICKET, "init", json!({"role": "ticket"})).await;
         assert_eq!(r["label"], "widgets#41", "{r}");
+        assert_eq!(link(&h, TICKET).identity.issue, None, "launched as {thread:?}");
         assert!(h.tick(76).await.contains(&"report never-joined widgets#41".to_string()), "launched as {thread:?}");
     }
 }
@@ -694,4 +697,105 @@ async fn options_on_a_send_to_a_thread_parent_are_checked_and_leave_the_body_alo
         .await;
     assert!(e.contains("options[1]") && e.contains("repeats"), "{e}");
     assert_eq!(link(&h, WORKER).gate.as_deref(), Some("merge"));
+}
+
+async fn board_ticket_with_named_worker(h: &H) -> String {
+    h.wf(TICKET, "join", json!({"parent": "board", "label": "widgets#105", "role": "ticket"})).await;
+    let r = h
+        .wf(
+            TICKET,
+            "openChild",
+            json!({"role": "worker", "label": "#115 (#105 1/4)", "issue": "acme/widgets#115",
+                   "parentIssue": "https://github.com/acme/widgets/issues/105", "part": "1/4"}),
+        )
+        .await;
+    let brief = r["brief"].as_str().unwrap().to_string();
+    let call = brief.lines().find(|l| l.starts_with("async () => wf.join(")).expect("join call in brief").to_string();
+    result(&h.exec_as(WORKER, &call).await);
+    call
+}
+
+#[tokio::test]
+async fn a_worker_opened_with_its_issue_shows_it_on_the_board_and_in_the_state() {
+    let h = H::new();
+    let call = board_ticket_with_named_worker(&h).await;
+    assert!(
+        call.ends_with(r#"stall: 240, issue: "acme/widgets#115", parentIssue: "acme/widgets#105", part: "1/4" })"#),
+        "{call}"
+    );
+    let want = (json!("acme/widgets#115"), json!("acme/widgets#105"), json!("1/4"));
+    let kid = &h.wf(TICKET, "board", json!({})).await["children"][0];
+    assert_eq!((kid["issue"].clone(), kid["parentIssue"].clone(), kid["part"].clone()), want);
+    let state = h.app.wf.snapshot().unwrap();
+    let w = &state["tree"][0]["workers"][0];
+    assert_eq!((w["issue"].clone(), w["parentIssue"].clone(), w["part"].clone()), want);
+    assert_eq!(state["tree"][0]["issue"], Value::Null);
+    let tree = &h.wf(TICKET, "board", json!({"parent": "board"})).await;
+    assert_eq!(tree["children"][0]["workers"][0]["part"], "1/4", "{tree}");
+}
+
+#[tokio::test]
+async fn a_rejoin_without_identity_keeps_the_links_issue() {
+    let h = H::new();
+    board_ticket_with_named_worker(&h).await;
+    h.wf(WORKER, "join", json!({"parent": TICKET, "label": "#115 (#105 1/4)", "role": "worker"})).await;
+    let ln = link(&h, WORKER);
+    assert_eq!(ln.identity.issue.as_deref(), Some("acme/widgets#115"));
+    assert_eq!(ln.identity.parent_issue.as_deref(), Some("acme/widgets#105"));
+    assert_eq!(ln.identity.part.as_deref(), Some("1/4"));
+}
+
+#[tokio::test]
+async fn a_rejoin_keeps_its_issue_over_another_launch_under_the_same_label() {
+    let h = H::new();
+    h.wf(TICKET, "join", json!({"parent": "board", "label": "widgets#105", "role": "ticket"})).await;
+    h.wf(WORKER, "join", json!({"parent": TICKET, "label": "w", "role": "worker", "issue": "acme/widgets#115"})).await;
+    h.wf(
+        TICKET,
+        "openChild",
+        json!({"role": "worker", "label": "w", "issue": "acme/widgets#999", "parentIssue": "acme/widgets#9", "part": "2/2"}),
+    )
+    .await;
+    h.wf(WORKER, "join", json!({"parent": TICKET, "label": "w", "role": "worker"})).await;
+    let id = link(&h, WORKER).identity;
+    assert_eq!(id.issue.as_deref(), Some("acme/widgets#115"));
+    assert_eq!((id.parent_issue, id.part), (None, None));
+}
+
+#[tokio::test]
+async fn init_stores_the_issue_on_the_board_link_it_joins() {
+    let h = H::new();
+    h.fake.update(TICKET, json!({"title": "widgets#105"}));
+    h.wf(TICKET, "init", json!({"role": "ticket", "issue": "acme/widgets#105"})).await;
+    assert_eq!(link(&h, TICKET).identity.issue.as_deref(), Some("acme/widgets#105"));
+}
+
+#[tokio::test]
+async fn a_malformed_issue_or_part_is_refused() {
+    let h = H::new();
+    h.wf(TICKET, "init", json!({"role": "ticket", "root": true})).await;
+    let e = h.wf_err(TICKET, "openChild", json!({"role": "worker", "label": "w", "issue": "widgets 115"})).await;
+    assert!(e.contains("issue \"widgets 115\" is not a GitHub issue"), "{e}");
+    let e = h.wf_err(TICKET, "openChild", json!({"role": "worker", "label": "w", "part": "0/4"})).await;
+    assert!(e.contains("part \"0/4\" must be n/N"), "{e}");
+    let e = h
+        .wf_err(
+            WORKER,
+            "join",
+            json!({"parent": TICKET, "label": "w", "role": "worker", "parentIssue": "acme/widgets/pull/9"}),
+        )
+        .await;
+    assert!(e.contains("parentIssue"), "{e}");
+    assert!(h.app.store.link_get(WORKER).unwrap().is_none());
+}
+
+#[test]
+fn a_link_row_from_before_identity_still_reads() {
+    let mut row = serde_json::to_value(bare_link(WORKER, TICKET, "#41 PR 1/2")).unwrap();
+    for k in ["issue", "parentIssue", "part"] {
+        assert!(row.get(k).is_none(), "{row}");
+    }
+    row.as_object_mut().unwrap().remove("project");
+    let ln: Link = serde_json::from_value(row).unwrap();
+    assert_eq!(ln.identity, Default::default());
 }

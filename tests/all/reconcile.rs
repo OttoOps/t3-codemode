@@ -1624,3 +1624,71 @@ async fn a_row_saved_before_readiness_was_read_shows_no_readiness_but_keeps_queu
     assert_eq!(worker_pr_state(&h), "queued");
     assert_eq!(worker_readiness(&h), Value::Null);
 }
+
+fn closing(issues: &[(&str, u64)]) -> Value {
+    let nodes: Vec<Value> =
+        issues.iter().map(|(repo, n)| json!({"number": n, "repository": {"nameWithOwner": repo}})).collect();
+    json!({"nodes": nodes})
+}
+
+#[tokio::test]
+async fn a_worker_opened_without_an_issue_takes_it_from_its_prs_closing_reference() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    let mut pr = github_pr(HEAD, "BLOCKED", true);
+    pr["closingIssuesReferences"] = closing(&[("acme/widgets", 115), ("acme/widgets", 116)]);
+    h.github.set_pr(REPO, 7, pr);
+    assert!(h.app.store.link_get(WORKER).unwrap().unwrap().identity.issue.is_none());
+
+    check(&h, 1).await;
+
+    let ln = h.app.store.link_get(WORKER).unwrap().unwrap();
+    assert_eq!(ln.identity.issue.as_deref(), Some("acme/widgets#115"));
+    assert_eq!(h.app.wf.snapshot().unwrap()["tree"][0]["workers"][0]["issue"], "acme/widgets#115");
+}
+
+#[tokio::test]
+async fn a_worker_takes_its_issue_from_the_pr_it_shows_now() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.fake.set_prs(WORKER, vec![pull_request(REPO, 3, "closed"), pull_request(REPO, 7, "open")]);
+    h.tick(0).await;
+    let mut old = github_pr(HEAD, "BLOCKED", true);
+    old["state"] = json!("CLOSED");
+    old["closingIssuesReferences"] = closing(&[("acme/widgets", 114)]);
+    h.github.set_pr(REPO, 3, old);
+    let mut pr = github_pr(HEAD, "BLOCKED", true);
+    pr["closingIssuesReferences"] = closing(&[("acme/widgets", 115)]);
+    h.github.set_pr(REPO, 7, pr);
+    assert!(worker_pr_url(&h).ends_with("/pull/7"), "{}", worker_pr_url(&h));
+
+    check(&h, 1).await;
+
+    assert_eq!(h.app.store.link_get(WORKER).unwrap().unwrap().identity.issue.as_deref(), Some("acme/widgets#115"));
+}
+
+fn worker_pr_url(h: &H) -> String {
+    h.app.wf.tree().unwrap()[0]["workers"][0]["pr"]["url"].as_str().unwrap_or_default().to_string()
+}
+
+#[tokio::test]
+async fn a_worker_opened_with_an_issue_keeps_it_over_its_prs_closing_reference() {
+    let h = H::new();
+    h.wf(TICKET, "join", json!({"parent": BOARD, "label": "widgets#105", "role": "ticket"})).await;
+    h.wf(
+        WORKER,
+        "join",
+        json!({"parent": TICKET, "label": "#115 (#105 1/4)", "role": "worker", "issue": "acme/widgets#115"}),
+    )
+    .await;
+    h.fake.set_prs(WORKER, vec![pull_request(REPO, 7, "open")]);
+    h.tick(0).await;
+    let mut pr = github_pr(HEAD, "BLOCKED", true);
+    pr["closingIssuesReferences"] = closing(&[("acme/widgets", 999)]);
+    h.github.set_pr(REPO, 7, pr);
+
+    check(&h, 1).await;
+
+    let ln = h.app.store.link_get(WORKER).unwrap().unwrap();
+    assert_eq!(ln.identity.issue.as_deref(), Some("acme/widgets#115"));
+}

@@ -144,6 +144,7 @@ async fn a_launch_not_yet_joined_takes_a_slot_and_free_slots_never_go_below_zero
         reported: false,
         thread: None,
         link: None,
+        identity: Default::default(),
     };
     h.app.store.pending_put(&pending).unwrap();
 
@@ -597,6 +598,23 @@ async fn an_auto_pick_does_not_launch_a_sub_issue_after_launching_its_parent() {
 
     let launched: Vec<String> = h.fake.launched().iter().map(|l| l["title"].as_str().unwrap().to_string()).collect();
     assert_eq!(launched, ["widgets#1: Issue 1"]);
+}
+
+#[tokio::test]
+async fn an_auto_launched_sub_issue_names_its_parent_on_the_ticket() {
+    let h = flowing_with(1, "auto");
+    issue(&h, REPO, 1, &[], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    h.github.set_parent(REPO, 2, (REPO, 1));
+
+    reconcile(&h).await;
+
+    let msg = h.fake.launched()[0]["message"].as_str().unwrap().to_string();
+    assert!(msg.contains(r#"issue: "acme/widgets#2", parentIssue: "acme/widgets#1" })"#), "{msg}");
+    let tree = h.app.wf.tree().unwrap();
+    assert_eq!(tree[0]["issue"], "acme/widgets#2");
+    assert_eq!(tree[0]["parentIssue"], "acme/widgets#1");
+    assert_eq!(tree[0]["part"], Value::Null);
 }
 
 async fn board_queue(h: &H) {
