@@ -189,6 +189,10 @@ path whatever `relay` says, so the switch matters on `ticket` -> `worker` for
 board tickets. Set `"relay": false` on a child policy to send those messages
 through the parent again. See
 [ADR 0013](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0013-relay-worker-gates-past-the-ticket.md).
+The same switch covers a worker's [`wf.pr`](globals.md#wfpr) events: with
+`relay` on, the service checks an opened PR, records a new head and opens
+the merge card for a board ticket, and with it off each event wakes the
+ticket.
 
 ### Board
 
