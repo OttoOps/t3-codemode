@@ -15,6 +15,7 @@ use crate::wf_slots::Reported;
 
 const PR_READ: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { \
 pullRequest(number: $number) { state isDraft headRefOid mergeStateStatus reviewDecision body \
+latestOpinionatedReviews(first: 100) { nodes { state author { login } commit { oid } } } \
 files(first: 100) { pageInfo { hasNextPage } nodes { path } } ...Checks } } }";
 const PR_FORMAT: &[(&str, &[&str])] =
     &[("Summary", &["```"]), ("Evidence", &["Before:", "After:"]), ("Merge Danger", &["Door:", "Blast Radius:"])];
@@ -465,6 +466,27 @@ fn action_line(e: &Event, head: &str, options: &[String], blocker: Option<&str>)
         reply,
         e.url()
     )
+}
+
+fn change_requests(pr: &Value, head: &str) -> String {
+    let reviews = pr["latestOpinionatedReviews"]["nodes"].as_array().into_iter().flatten();
+    let named: Vec<String> = reviews
+        .filter(|r| r["state"] == "CHANGES_REQUESTED")
+        .map(|r| {
+            let who = r["author"]["login"].as_str().unwrap_or("a deleted account");
+            let at = match r["commit"]["oid"].as_str().filter(|c| !c.is_empty()) {
+                Some(c) if same_head(&c.to_ascii_lowercase(), head) => format!("the current head {}", short(head)),
+                Some(c) => format!("earlier head {}", short(c)),
+                None => "a commit GitHub no longer shows".to_string(),
+            };
+            format!("by {who} at {at}")
+        })
+        .collect();
+    match named.as_slice() {
+        [] => String::new(),
+        [one] => format!(", with changes requested {one}"),
+        [init @ .., last] => format!(", with changes requested {} and {last}", init.join(", ")),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -939,7 +961,7 @@ impl Wf {
         }
         let blocker = matches!(state, "BLOCKED" | "BEHIND").then(|| {
             let review = pr["reviewDecision"].as_str().map(|r| format!(", review decision {r}")).unwrap_or_default();
-            format!("merge state {state}{review}")
+            format!("merge state {state}{review}{}", change_requests(&pr, &head))
         });
         let nodes = pr["files"]["nodes"].as_array().cloned().unwrap_or_default();
         let files: Vec<String> = nodes.iter().filter_map(|f| f["path"].as_str().map(String::from)).collect();

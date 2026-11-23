@@ -305,6 +305,97 @@ async fn a_blocked_merge_state_names_the_blocker_on_the_card() {
     assert!(to(&h, TICKET).is_empty());
 }
 
+fn change_request(login: &str, commit: &str) -> Value {
+    json!({"state": "CHANGES_REQUESTED", "author": {"login": login}, "commit": {"oid": commit}})
+}
+
+fn blocked_by(h: &H, reviews: Value) {
+    h.github.update_pr(
+        REPO,
+        7,
+        json!({"mergeStateStatus": "BLOCKED", "reviewDecision": "CHANGES_REQUESTED",
+               "latestOpinionatedReviews": {"nodes": reviews}}),
+    );
+}
+
+#[tokio::test]
+async fn a_change_request_on_the_head_is_named_on_the_card_as_the_current_head() {
+    let h = setup(merge_and_deploy());
+    ticket_and_worker(&h, "1/2", Some(pr_format())).await;
+    open_pr(&h, HEAD, GOOD, &["src/lib.rs"]);
+    blocked_by(
+        &h,
+        json!([change_request("coderabbitai", HEAD),
+               {"state": "APPROVED", "author": {"login": "alice"}, "commit": {"oid": MOVED}}]),
+    );
+
+    let r = pr_event(&h, ready(HEAD)).await;
+
+    assert_eq!(r["status"], "gated", "{r}");
+    let text = cards(&h)[0]["text"].as_str().unwrap().to_string();
+    assert!(
+        text.contains(
+            "(GitHub blocks it: merge state BLOCKED, review decision CHANGES_REQUESTED, \
+             with changes requested by coderabbitai at the current head 1111111; an admin can merge"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("earlier head"), "{text}");
+    assert!(!text.contains("alice"), "{text}");
+}
+
+#[tokio::test]
+async fn a_change_request_on_an_earlier_commit_is_named_on_the_card_as_an_earlier_head() {
+    let h = setup(merge_and_deploy());
+    ticket_and_worker(&h, "1/2", Some(pr_format())).await;
+    open_pr(&h, HEAD, GOOD, &["src/lib.rs"]);
+    blocked_by(&h, json!([change_request("coderabbitai", MOVED), change_request("alice", HEAD)]));
+
+    let r = pr_event(&h, ready(HEAD)).await;
+
+    assert_eq!(r["status"], "gated", "{r}");
+    let text = cards(&h)[0]["text"].as_str().unwrap().to_string();
+    assert!(
+        text.contains(
+            "review decision CHANGES_REQUESTED, with changes requested by coderabbitai at earlier head 2222222 \
+             and by alice at the current head 1111111; an admin can merge"
+        ),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_running_coderabbit_check_holds_the_merge_card_until_it_finishes() {
+    let h = setup(merge_and_deploy());
+    ticket_and_worker(&h, "1/2", Some(pr_format())).await;
+    open_pr(&h, HEAD, GOOD, &["src/lib.rs"]);
+    h.github.set_checks(
+        REPO,
+        7,
+        json!([check_run("DCO", "SUCCESS"), check_run("check", "SUCCESS"), pending_check("CodeRabbit")]),
+    );
+
+    let r = pr_event(&h, ready(HEAD)).await;
+    assert_eq!(r["status"], "waiting", "{r}");
+    assert_eq!(r["pending"], "checks still running: CodeRabbit");
+    assert!(cards(&h).is_empty(), "no merge card while CodeRabbit reviews the head");
+    assert_eq!(gate_of(&h, TICKET), None);
+
+    h.app.wf.reconcile().await.unwrap();
+    assert!(cards(&h).is_empty(), "still reviewing: no card yet");
+
+    h.github.set_checks(
+        REPO,
+        7,
+        json!([check_run("DCO", "SUCCESS"), check_run("check", "SUCCESS"), check_run("CodeRabbit", "SUCCESS")]),
+    );
+    h.app.wf.reconcile().await.unwrap();
+    let open = cards(&h);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert!(open[0]["text"].as_str().unwrap().starts_with("merge #7 at head 1111111"), "{open:?}");
+    assert_eq!(gate_of(&h, TICKET).as_deref(), Some("merge"));
+}
+
 #[tokio::test]
 async fn a_failing_check_goes_back_to_the_worker() {
     let h = setup(merge_and_deploy());
