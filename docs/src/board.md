@@ -448,6 +448,58 @@ new" gets it when you reveal it. Rows already there when the page loads, and
 rows a filter change brings back, don't flash. With reduced motion set, the
 tint holds still for a moment and then goes, with no fade.
 
+## The flow
+
+With a [`flow` block](config.md#flow) in the config, the board starts the next
+ready issue when a ticket slot opens. A slot opens when a flow ticket sends its
+handoff or `closed`, when its link closes because its thread is gone or
+archived, and when its issue closes. The board also picks again on each
+[GitHub reconcile](#github-reconcile) pass, so an issue whose last blocker
+closed outside the board, or whose ticket's issue closed, is picked up within
+one reconcile interval. With `board.reconcileIdleMinutes` at `0`, only a
+ticket's handoff or close and `wf.flow.next()` pick.
+
+Each pick reads the queue from GitHub, the same queue
+[`wf.flow()`](globals.md#wfflow) returns, and fills the free slots in queue
+order. What it does with each issue depends on `flow.launch`:
+
+- **`ask`**, the default, raises a launch card such as "Launch widgets#60
+  next? (priority: medium, unblocked by #115)", with **launch** and **skip**
+  buttons and a link to the issue. **launch** starts the ticket through
+  `wf.launchTicket`, with the same model choice as any board launch. The board
+  reads the queue again first: when the flow is off, the issue is no longer
+  ready, or no slot is free, the card closes and nothing launches. **skip**
+  takes the issue out of the picks and offers the next ready issue in its
+  place.
+- **`auto`** launches the issue through `wf.launchTicket` and posts "Flow
+  launched widgets#60 (priority: medium, unblocked by #115)" to the activity
+  feed. `auto` treats a `priority: high` issue like any other. A launch that
+  fails leaves its error card, posts a feed event, and skips the issue, so the
+  board doesn't retry it on every pass.
+- **`off`** launches nothing and reads nothing from GitHub.
+
+An open launch card holds its slot, so a pick never raises more cards than
+there are free slots. A pick resolves a launch card whose issue is no longer
+ready, for example because it closed, gained an open blocker, or got a ticket
+some other way. It also resolves the newest cards when tickets launched
+elsewhere took their slots. Switching `flow.launch` to `off` or `auto` resolves every
+open launch card on the next pick, and `auto` then launches into the freed
+slots. Dismissing a launch card leaves the issue in
+the queue, so the next pick offers it again.
+
+A skipped issue stays out of the picks until its labels or blockers change:
+adding or removing a label, adding or removing a blocked-by link, or a blocker
+reopening puts it back in the queue once a pick sees the change. An issue that is still open after its own board ticket has
+finished is skipped the same way, so a ticket that stopped short isn't
+relaunched on its own. Skipped issues show in `wf.flow()`'s `skipped` list, and
+the Launch tickets box still launches one by hand.
+
+A ticket takes one slot, however many sub-issues or workers it runs. Picks,
+launch-card answers and every other ticket launch run one at a time, and a pick
+holds the board lock while it counts the open tickets and decides, so two
+launches can't both fill the same slot. A launch from the Launch tickets box
+waits for a pick in progress to finish.
+
 ## GitHub reconcile
 
 The board checks what it believes against GitHub on a timer, so a pull request
@@ -969,7 +1021,7 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `GET /api/state` | `{rev, cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, counts, service}`, with `counts.newIssues`. `rev` is the board revision: it goes up with every change, keeps going up across a restart, and a state whose `rev` is at least a write's `rev` already holds that write; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` while `updateCheck` is `false` or until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
 | `GET /api/events` | SSE: a `state` event on every change, carrying the same `rev` (closes when a remote pairing session is revoked or expires, or when a Tailscale login is no longer allowed) |
 | `GET /api/msg/{handle}` | One stored message in full |
-| `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it |
+| `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it; a flow launch card takes `launch` or `skip` instead ([The flow](#the-flow)) |
 | `POST /api/cards/{id}/dismiss` | Resolve without messaging |
 | `POST /api/launch` `{issues: [...]}` | `wf.launchTicket` for each (at most 20) |
 | `POST /api/ask` `{question}` | Ask a scratch thread about the board using `board.askPool` or `board.askInstanceId`/`askModel`/`askEffort`; returns the ask view with `instanceId`, `model`, `effort`, `modelSource` (and `pool`, `reason` for pools) |

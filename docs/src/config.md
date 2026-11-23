@@ -472,9 +472,10 @@ loses its card, and a move refuses a thread that is running.
 ### Flow
 
 `flow` turns on the project flow, the board's queue of issues that are ready
-to work next. Without a `flow` block the flow is off. For now the flow only
-computes the queue, which [`wf.flow()`](globals.md#wfflow) returns, and
-nothing launches from it yet.
+to work next. Without a `flow` block the flow is off.
+[`wf.flow()`](globals.md#wfflow) returns the queue, and when a ticket slot
+opens the board offers or launches the next ready issue, as
+[The flow](board.md#the-flow) describes.
 
 ```json
 {
@@ -492,7 +493,7 @@ nothing launches from it yet.
 | `repos` | required | The `owner/name` repositories the flow covers. Two repos can't share a name, because a board ticket's label, such as `widgets#41`, doesn't name the owner. |
 | `optIn.label` | required | The label that puts an issue in the flow. Issues without it are never queued. |
 | `maxTickets` | required | How many flow tickets can be open on the board at once, at least 1. |
-| `launch` | `ask` | `ask`, `auto` or `off`, the way a free slot will launch the next ready issue. Config load checks it, but nothing reads it yet. |
+| `launch` | `ask` | How a free slot launches the next ready issue: `ask` raises a launch card, `auto` launches it, and `off` launches nothing. |
 
 An issue is ready when all of these hold:
 
@@ -500,6 +501,8 @@ An issue is ready when all of these hold:
 - No open issue blocks it through GitHub's blocked-by links.
 - It is not labelled `blocked: external`.
 - No board ticket is open for it.
+- It isn't skipped. A skipped issue, or one still open after its board ticket
+  finished, comes back once its labels or blockers change.
 - It is not a sub-issue whose parent has an open board ticket. That ticket
   works its sub-issues itself.
 
@@ -509,7 +512,8 @@ milestone due date, with issues that have no due date last, and then to the
 oldest issue.
 
 A flow ticket is an open board ticket, or a launch still waiting to join, for
-an issue in a covered repo. Tickets are matched by label, which carries no
+an open issue in a covered repo. A ticket whose issue has closed no longer takes
+a slot. Tickets are matched by label, which carries no
 owner, so a ticket for `other/widgets#41` counts as `acme/widgets#41` when
 `acme/widgets` is covered. A ticket takes one slot however many sub-issues or
 workers it runs. The free slots are `maxTickets` minus the flow tickets, and

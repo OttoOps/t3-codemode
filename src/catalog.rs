@@ -293,10 +293,17 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.flow",
             "wf",
-            "The project flow's ready queue, read live from GitHub: each covered repo's open issues that carry the opt-in label, have no open blocker (GitHub blocked-by links), are not labelled \"blocked: external\", have no open board ticket, and are not sub-issues of an issue with an open board ticket. queue is in launch order: priority label (priority: high, medium, low, then none), then milestone due date (none last), then oldest. blocked lists the opt-in issues held by an open blocker or the external label, each with its open blockers. running is the open board tickets for issues in covered repos; free is maxTickets minus running. With no flow block in the config, enabled is false and the lists are empty. Read-only; throws when gh cannot read a covered repo.",
+            "The project flow's ready queue, read live from GitHub: each covered repo's open issues that carry the opt-in label, have no open blocker (GitHub blocked-by links), are not labelled \"blocked: external\", have no open board ticket, and are not sub-issues of an issue with an open board ticket. queue is in launch order: priority label (priority: high, medium, low, then none), then milestone due date (none last), then oldest. blocked lists the opt-in issues held by an open blocker or the external label, each with its open blockers. skipped lists the ready issues someone skipped on a launch card; each stays out of queue until its labels or blockers change. running is the open board tickets for issues in covered repos, leaving out a ticket whose issue is closed; free is maxTickets minus running. With no flow block in the config, enabled is false and the lists are empty. Read-only; throws when gh cannot read a covered repo.",
             &format!(
-                "wf.flow(): Promise<{{ enabled: boolean; launch: \"ask\" | \"auto\" | \"off\" | null; maxTickets: number; free: number; running: {FLOW_TICKET}[]; queue: {FLOW_ISSUE}[]; blocked: ({FLOW_ISSUE} & {{ blockers: {ISSUE_REF}[]; moreBlockers: boolean; external: boolean }})[] }}>;"
+                "wf.flow(): Promise<{{ enabled: boolean; launch: \"ask\" | \"auto\" | \"off\" | null; maxTickets: number; free: number; running: {FLOW_TICKET}[]; queue: {FLOW_ISSUE}[]; blocked: ({FLOW_ISSUE} & {{ blockers: {ISSUE_REF}[]; moreBlockers: boolean; external: boolean }})[]; skipped: {FLOW_ISSUE}[] }}>;"
             ),
+            obj(json!({}), &[]),
+        ),
+        builtin(
+            "wf.flow.next",
+            "wf",
+            "Run one flow pick by hand, under the rules the board applies when a slot opens. With launch \"ask\" it raises a board card \"Launch <label> next? (priority: X, unblocked by #N)\" with launch and skip buttons for the first ready issue that has no card yet; with \"auto\" it launches that issue through wf.launchTicket and posts a feed event; with \"off\", or no flow block, it reads nothing and launches nothing. An open launch card holds its slot, so nothing is picked when every free slot already has a card; reason says why picked is empty. offered lists the launch cards still open, and retired the cards this pick closed because their issue is no longer ready or no slot is free. An auto launch that fails leaves its error card and skips the issue until its labels or blockers change. Throws when gh cannot read a covered repo.",
+            "wf.flow.next(): Promise<{ launch: \"ask\" | \"auto\" | \"off\" | null; free: number; picked: { label: string; url: string; title: string; priority: \"high\" | \"medium\" | \"low\" | null; why: string; card?: string; launched?: object; error?: string }[]; offered: { label: string; card: string }[]; retired?: string[]; reason?: string }>;",
             obj(json!({}), &[]),
         ),
         builtin(

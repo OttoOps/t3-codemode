@@ -245,6 +245,8 @@ pub struct Wf {
     pub(crate) asks_lock: tokio::sync::Mutex<()>,
     pub(crate) pool_lock: tokio::sync::Mutex<()>,
     pub(crate) reconcile_lock: tokio::sync::Mutex<()>,
+    pub(crate) flow_lock: tokio::sync::Mutex<()>,
+    pub(crate) flow_due: std::sync::atomic::AtomicBool,
     pub(crate) usage: Mutex<Option<Arc<dyn UsageSource>>>,
     pub(crate) release: Mutex<Option<crate::release::Version>>,
     pub(crate) skills: crate::drift::Cache,
@@ -301,6 +303,8 @@ impl Wf {
             asks_lock: tokio::sync::Mutex::new(()),
             pool_lock: tokio::sync::Mutex::new(()),
             reconcile_lock: tokio::sync::Mutex::new(()),
+            flow_lock: tokio::sync::Mutex::new(()),
+            flow_due: std::sync::atomic::AtomicBool::new(false),
             usage: Mutex::new(None),
             release: Mutex::new(None),
             skills: crate::drift::Cache::default(),
@@ -435,6 +439,9 @@ impl Wf {
             return self.slot_call(method, caller.filter(|c| !c.is_empty()), reported, args).await;
         }
         let out = self.dispatch_inner(method, caller, args).await;
+        if matches!(method, "send" | "close") {
+            self.flow_if_due().await;
+        }
         if out.is_ok()
             && !matches!(
                 method,
@@ -475,6 +482,10 @@ impl Wf {
             "flow" => {
                 parse::<Empty>(method, args)?;
                 return self.flow().await;
+            }
+            "flow.next" => {
+                parse::<Empty>(method, args)?;
+                return self.flow_next().await;
             }
             "status" => {
                 parse::<Empty>(method, args)?;
@@ -735,6 +746,9 @@ impl Wf {
             wake = true;
         }
         if ln.parent == BOARD {
+            if closing {
+                self.flow_soon();
+            }
             self.store.link_save(&ln)?;
             return self.board_receive(&ln, &a.kind, &handle, &a.body, options);
         }
@@ -812,6 +826,9 @@ impl Wf {
         ln.closed_at = Some(self.now());
         ln.closed_how = Some("closed-by-parent".into());
         self.store.link_save(&ln)?;
+        if ln.parent == BOARD {
+            self.flow_soon();
+        }
         Ok(json!({"closed": ln.label}))
     }
 
@@ -1046,6 +1063,7 @@ impl Wf {
                 let body = format!("{}'s thread is gone; its link is closed.", ln.label);
                 let h = self.store.msg_new(WATCHER, &ln.parent, "note", &body, &now)?;
                 if ln.parent == BOARD {
+                    self.flow_soon();
                     self.resolve_ticket_cards(&ln.child, "ticket thread gone")?;
                 } else {
                     ln.unread.push(h);
@@ -1060,6 +1078,7 @@ impl Wf {
             ln.closed_at = Some(now);
             ln.closed_how = Some("archived".into());
             if ln.parent == BOARD {
+                self.flow_soon();
                 self.resolve_ticket_cards(&ln.child, "ticket archived")?;
             }
             actions.push(format!("closed {}: archived", ln.label));

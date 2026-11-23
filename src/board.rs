@@ -11,6 +11,7 @@ use crate::clock::{local_clock, parse_ts};
 use crate::config::Config;
 use crate::config_edit::{Document, Edit};
 use crate::contexts::ProjectFilter;
+use crate::flow::FlowPick;
 use crate::issues::issue_key;
 use crate::moves::Offer;
 use crate::pools::Picked;
@@ -317,6 +318,8 @@ pub struct Card {
     pub pr: Option<CardPr>,
     #[serde(skip)]
     pub offer: Option<Offer>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow: Option<FlowPick>,
 }
 
 pub struct NewCard<'a> {
@@ -744,6 +747,7 @@ impl Wf {
                     seq,
                     pr: serde_json::from_value(d["pr"].clone()).ok().flatten(),
                     offer: serde_json::from_value(d["move"].clone()).ok().flatten(),
+                    flow: serde_json::from_value(d["flow"].clone()).ok().flatten(),
                 }
             })
             .collect())
@@ -862,13 +866,17 @@ impl Wf {
         if text.chars().count() > MAX_TEXT {
             bail!("wf.answer: the answer is over {MAX_TEXT} chars");
         }
-        let _g = self.lock.lock().await;
+        let g = self.lock.lock().await;
         let card = self
             .cards()?
             .into_iter()
             .find(|c| c.id == id)
             .ok_or_else(|| anyhow!("no open board card {id:?}; wf.cards() lists the open ones"))?;
         same_card(&card, id, want)?;
+        if let Some(pick) = card.flow.clone() {
+            drop(g);
+            return self.answer_flow(&card, &pick, text).await;
+        }
         if let Some(offer) = card.offer.clone() {
             return self.answer_offer(&card, &offer, text).await;
         }
@@ -1333,6 +1341,11 @@ impl Wf {
     }
 
     pub async fn launch_ticket(&self, a: LaunchArgs) -> Result<Value> {
+        let _flow = self.flow_lock.lock().await;
+        self.launch_unlocked(a).await
+    }
+
+    pub(crate) async fn launch_unlocked(&self, a: LaunchArgs) -> Result<Value> {
         let issue = parse_issue(&a.issue).ok_or_else(|| {
             anyhow!(
                 "{:?} is not a GitHub issue; use https://github.com/<owner>/<repo>/issues/<n> or <owner>/<repo>#<n>",
@@ -1595,6 +1608,7 @@ impl Wf {
     }
 
     pub async fn board_tick(&self) -> Result<()> {
+        self.flow_if_due().await;
         let launched: Vec<String> =
             self.store.pending_all()?.into_iter().filter(|p| p.parent == BOARD).filter_map(|p| p.thread).collect();
         for t in launched {
