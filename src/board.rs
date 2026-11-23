@@ -617,7 +617,15 @@ impl Wf {
         crate::release::view(&crate::release::Version::current(), latest.as_ref(), &releases)
     }
 
+    pub(crate) fn next_live_seq(&self) -> u64 {
+        self.live_seq.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
     pub(crate) fn note_live(&self, id: &str, th: &Value) {
+        self.note_live_at(id, th, self.next_live_seq());
+    }
+
+    pub(crate) fn note_live_at(&self, id: &str, th: &Value, seq: u64) {
         let v = json!({
             "status": th["status"], "asks": count(&th["pendingRequestCount"]), "link": th["link"],
             "pr": pr_of(th), "title": th["title"], "prStale": th["pullRequestsStale"] == true,
@@ -625,15 +633,21 @@ impl Wf {
             "project": th["projectId"],
         });
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
-        if live.get(id) != Some(&v) {
-            live.insert(id.to_string(), v);
+        if let Some((cur, _)) = live.get(id)
+            && *cur > seq
+        {
+            return;
+        }
+        let changed = live.get(id).map(|(_, old)| old) != Some(&v);
+        live.insert(id.to_string(), (seq, v));
+        if changed {
             drop(live);
             self.changed();
         }
     }
 
     pub(crate) fn live_of(&self, id: &str) -> Option<Value> {
-        self.live.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
+        self.live.lock().unwrap_or_else(|e| e.into_inner()).get(id).map(|(_, v)| v.clone())
     }
 
     fn known_project(&self, id: &str) -> Option<Value> {
@@ -713,7 +727,7 @@ impl Wf {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .values()
-                .filter_map(|v| v["project"].as_str())
+                .filter_map(|(_, v)| v["project"].as_str())
                 .map(String::from),
         );
         ids.sort();

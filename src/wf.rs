@@ -251,7 +251,8 @@ pub struct Wf {
     pub(crate) lock: tokio::sync::Mutex<()>,
     pub(crate) remotes: Arc<dyn Remotes>,
     pub(crate) github: Arc<dyn GitHub>,
-    pub(crate) live: Mutex<HashMap<String, Value>>,
+    pub(crate) live: Mutex<HashMap<String, (u64, Value)>>,
+    pub(crate) live_seq: AtomicU64,
     pub(crate) closed_prs: Mutex<HashMap<String, ClosedPrs>>,
     pub(crate) known_projects: Mutex<HashMap<String, Value>>,
     pub(crate) changes: tokio::sync::broadcast::Sender<()>,
@@ -311,6 +312,7 @@ impl Wf {
             remotes,
             github,
             live: Mutex::new(HashMap::new()),
+            live_seq: AtomicU64::new(0),
             closed_prs: Mutex::new(HashMap::new()),
             known_projects: Mutex::new(HashMap::new()),
             changes: tokio::sync::broadcast::channel(64).0,
@@ -378,15 +380,16 @@ impl Wf {
     }
 
     pub(crate) async fn read_thread(&self, id: &str) -> Result<Value, T3Error> {
+        let seq = self.next_live_seq();
         match self.t3.call("t3_thread_read", json!({"threadId": id, "limit": 1, "maxCharsPerItem": 1})).await {
             Ok(r) => {
                 let th = self.with_closed_prs(id, r["thread"].clone()).await;
-                self.note_live(id, &th);
+                self.note_live_at(id, &th, seq);
                 Ok(th)
             }
             Err(e) => {
                 if e.is_not_found() {
-                    self.note_live(id, &json!({"status": "gone"}));
+                    self.note_live_at(id, &json!({"status": "gone"}), seq);
                 }
                 Err(e)
             }
