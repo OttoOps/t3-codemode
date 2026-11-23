@@ -34,6 +34,8 @@ pub struct CardPr {
     pub number: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ready: bool,
 }
 
 pub fn pr_refs(text: &str) -> Vec<(String, String, u64)> {
@@ -91,7 +93,12 @@ pub fn card_pr(body: &str) -> Option<CardPr> {
         refs = pr_refs(body);
     }
     let [(owner, name, number)] = refs.as_slice() else { return None };
-    Some(CardPr { repo: format!("{owner}/{name}").to_ascii_lowercase(), number: *number, head: approved_head(body) })
+    Some(CardPr {
+        repo: format!("{owner}/{name}").to_ascii_lowercase(),
+        number: *number,
+        head: approved_head(body),
+        ready: false,
+    })
 }
 
 fn readiness(seen: &PrSeen) -> Value {
@@ -204,7 +211,7 @@ impl Tracked {
     }
 
     fn pr(&self, head: &str) -> CardPr {
-        CardPr { repo: self.repo.clone(), number: self.number, head: Some(head.into()) }
+        CardPr { repo: self.repo.clone(), number: self.number, head: Some(head.into()), ready: false }
     }
 }
 
@@ -271,7 +278,9 @@ impl Wf {
         if b.reconcile_idle_minutes == 0 {
             return Ok(Vec::new());
         }
-        let active = !self.store.merge_waits()?.is_empty() || self.store.pr_seen_any_queued()?;
+        let active = !self.store.merge_waits()?.is_empty()
+            || self.store.pr_seen_any_queued()?
+            || !self.ready_waiting()?.is_empty();
         let every = if active { b.reconcile_active_minutes } else { b.reconcile_idle_minutes } as f64;
         self.reconcile_after(every).await
     }
@@ -298,6 +307,7 @@ impl Wf {
         let tracked = self.tracked(&floor)?;
         let mut pass = Pass::default();
         let mut failed = Vec::new();
+        let mut unread: Vec<(String, u64)> = Vec::new();
         let list: Vec<&Tracked> = tracked.values().collect();
         for chunk in list.chunks(BATCH) {
             let (query, vars) = batch_query(chunk);
@@ -318,7 +328,7 @@ impl Wf {
                 let why = errs.iter().filter_map(|e| e["message"].as_str()).collect::<Vec<_>>().join("; ");
                 let found = repo["pullRequest"].is_object();
                 let done = if found && errs.is_empty() {
-                    self.fix(t, repo, &read_at, &mut pass).await
+                    self.fix(t, repo, &read_at, &floor, &mut pass).await
                 } else if !found && errs.iter().any(|e| e["type"] == "NOT_FOUND") {
                     self.missing(t, &why, &mut pass).await
                 } else {
@@ -328,6 +338,7 @@ impl Wf {
                     ))
                 };
                 if let Err(e) = done {
+                    unread.push((t.repo.clone(), t.number));
                     failed.push(format!("{}: {e:#}", t.label()));
                 }
             }
@@ -335,6 +346,33 @@ impl Wf {
         for row in self.store.pr_seen_all()? {
             if !tracked.contains_key(&(row.repo.clone(), row.pr)) {
                 self.store.pr_seen_remove(&row.repo, row.pr)?;
+            }
+        }
+        for (worker, p) in self.ready_waiting()? {
+            if unread.contains(&(p.repo.clone(), p.number)) {
+                continue;
+            }
+            let due = match self.store.pr_seen_get(&p.repo, p.number)? {
+                None => true,
+                Some(s) => {
+                    s.state != "OPEN"
+                        || s.draft
+                        || !crate::wf_pr::same_head(&s.head, &p.head)
+                        || matches!(s.checks.as_deref(), None | Some("failing"))
+                        || (s.checks.as_deref() != Some("pending") && s.merge_state.as_deref() != Some("UNKNOWN"))
+                }
+            };
+            if !due {
+                continue;
+            }
+            match self.retry_ready(&worker, &p).await {
+                Ok((action, told)) => {
+                    pass.actions.push(action);
+                    if told {
+                        pass.woken.push(worker.child.clone());
+                    }
+                }
+                Err(e) => failed.push(format!("{}#{}: {e:#}", p.repo, p.number)),
             }
         }
         pass.woken.sort();
@@ -392,6 +430,9 @@ impl Wf {
                 .unwrap_or_default();
             for (o, r, n) in urls.iter().flat_map(|u| pr_refs(u)) {
                 add(&mut map, &format!("{o}/{r}"), n).add(Some(&ln.parent), &ln.opened);
+            }
+            if let Some(p) = ln.pr.as_ref().filter(|p| p.waiting) {
+                add(&mut map, &p.repo, p.number).add(Some(&ln.parent), &ln.opened);
             }
             let shown = live.as_ref().and_then(|l| l["pr"]["url"].as_str()).and_then(|u| pr_refs(u).into_iter().next());
             if let Some((o, r, n)) = shown.filter(|_| ln.identity.issue.is_none()) {
@@ -457,7 +498,61 @@ impl Wf {
         Ok(())
     }
 
-    async fn fix(&self, t: &Tracked, repo: &Value, read_at: &str, pass: &mut Pass) -> Result<()> {
+    fn live_tickets(
+        &self,
+        t: &Tracked,
+        cards: &[Card],
+        wait: Option<&MergeWait>,
+        prev: Option<&PrSeen>,
+        floor: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut add_ticket = |ticket: Option<&str>, since: &str| {
+            let Some(ticket) = ticket.filter(|x| *x != BOARD && !x.is_empty()) else { return };
+            if since.is_empty() {
+                return;
+            }
+            match out.iter_mut().find(|(x, _)| x == ticket) {
+                Some((_, s)) if since < s.as_str() => *s = since.into(),
+                Some(_) => {}
+                None => out.push((ticket.into(), since.into())),
+            }
+        };
+        for c in cards {
+            add_ticket(c.ticket.as_deref(), &c.at);
+        }
+        if let Some(w) = wait {
+            add_ticket(w.thread.as_deref(), &w.at);
+        }
+        for wl in self.store.links_open()?.into_iter().filter(|l| l.role == "worker") {
+            let pr_matches = wl.pr.as_ref().is_some_and(|p| {
+                (p.repo == t.repo && p.number == t.number)
+                    || p.followups.iter().any(|(r, n)| r == &t.repo && *n == t.number)
+            });
+            let live_matches = !pr_matches
+                && self.live_of(&wl.child).is_some_and(|l| {
+                    let prs = l["prs"].as_array().into_iter().flatten();
+                    prs.chain([&l["pr"]["url"]])
+                        .filter_map(Value::as_str)
+                        .flat_map(pr_refs)
+                        .any(|(o, r, n)| n == t.number && format!("{o}/{r}").eq_ignore_ascii_case(&t.repo))
+                });
+            if pr_matches || live_matches {
+                add_ticket(Some(&wl.parent), &wl.opened);
+            }
+        }
+        if let Some(p) = prev {
+            for (ticket, since) in &p.tickets {
+                add_ticket(Some(ticket), since);
+            }
+        }
+        for (_, s) in out.iter_mut().filter(|(_, s)| s.as_str() < floor) {
+            *s = floor.into();
+        }
+        Ok(out)
+    }
+
+    async fn fix(&self, t: &Tracked, repo: &Value, read_at: &str, floor: &str, pass: &mut Pass) -> Result<()> {
         self.name_workers(t, repo).await?;
         let o = Obs::read(repo);
         let advance = {
@@ -467,6 +562,7 @@ impl Wf {
             let sent = wait.as_ref().filter(|w| w.status == WaitStatus::Sent).map(|w| w.at.clone());
             let status = wait.as_ref().map(|w| w.status);
             let prev = self.store.pr_seen_get(&t.repo, t.number)?;
+            let live_tickets = self.live_tickets(t, &cards, wait.as_ref(), prev.as_ref(), floor)?;
             let left = if o.state != "OPEN" || o.queued {
                 None
             } else if prev.as_ref().is_some_and(|p| p.queued) {
@@ -484,10 +580,10 @@ impl Wf {
             };
             let advance = match o.state.as_str() {
                 "MERGED" | "CLOSED" => {
-                    self.finished(t, &o, &cards, wait.as_ref(), pass)?;
+                    self.finished(t, &o, &cards, wait.as_ref(), &live_tickets, pass)?;
                     None
                 }
-                "OPEN" => self.open(t, &o, &cards, wait, after, left.as_deref(), pass)?,
+                "OPEN" => self.open(t, &o, &cards, wait, &live_tickets, after, left.as_deref(), pass)?,
                 _ => None,
             };
             let queued_at = match &prev {
@@ -496,7 +592,7 @@ impl Wf {
                 None => None,
             };
             let left = match left {
-                Some(l) => self.exited(t, &o, &l, after, status, pass)?,
+                Some(l) => self.exited(t, &o, &l, &live_tickets, after, status, pass)?,
                 None => None,
             };
             let seen = PrSeen {
@@ -506,7 +602,7 @@ impl Wf {
                 head: o.head.clone(),
                 queued: o.queued,
                 since: t.since.clone(),
-                tickets: t.tickets.clone(),
+                tickets: live_tickets,
                 at: self.now(),
                 left,
                 queued_at,
@@ -543,7 +639,15 @@ impl Wf {
         Ok(w.filter(|w| t.approval.as_ref() == Some(&w.approval)))
     }
 
-    fn finished(&self, t: &Tracked, o: &Obs, cards: &[Card], wait: Option<&MergeWait>, pass: &mut Pass) -> Result<()> {
+    fn finished(
+        &self,
+        t: &Tracked,
+        o: &Obs,
+        cards: &[Card],
+        wait: Option<&MergeWait>,
+        live_tickets: &[(String, String)],
+        pass: &mut Pass,
+    ) -> Result<()> {
         let merged = o.state == "MERGED";
         let end = o.ended.clone().unwrap_or_else(|| self.now());
         let when = local_clock(&end);
@@ -570,8 +674,9 @@ impl Wf {
         } else {
             format!("{} was closed on GitHub without merging, {when}. {}", t.label(), t.url())
         };
+        let targets: Vec<&str> = live_tickets.iter().filter(|(_, s)| later(&end, s)).map(|(x, _)| x.as_str()).collect();
         let mut told = 0;
-        for (ticket, _) in t.tickets.iter().filter(|(_, s)| later(&end, s)) {
+        for ticket in &targets {
             if self.store.link_get(ticket)?.is_some_and(|l| !l.closed) {
                 told += self.wake(t, &event, ticket, "event", &body, pass)? as usize;
             }
@@ -589,7 +694,8 @@ impl Wf {
         if on_feed {
             self.feed_note(None, &body)?;
         } else if told == 0 && resolved > 0 {
-            self.feed_note(t.tickets.first().map(|(x, _)| x.as_str()), &format!("{}: {note}", t.label()))?;
+            let who = targets.first().copied().or_else(|| live_tickets.first().map(|(x, _)| x.as_str()));
+            self.feed_note(who, &format!("{}: {note}", t.label()))?;
         }
         if told > 0 || on_feed || resolved > 0 {
             pass.actions.push(format!("{} {note}", t.label()));
@@ -600,6 +706,7 @@ impl Wf {
     fn resolve_releasing(&self, seqs: &[i64], tickets: &[&str], note: &str) -> Result<usize> {
         let resolved = self.store.waiting_resolve_releasing(BOARD, seqs, tickets, note, &self.now())?;
         for ticket in tickets {
+            self.sync_merge_gate_pr(ticket)?;
             self.sync_relay_gate(ticket)?;
         }
         if resolved > 0 {
@@ -615,11 +722,12 @@ impl Wf {
         o: &Obs,
         cards: &[Card],
         mut wait: Option<MergeWait>,
+        live_tickets: &[(String, String)],
         after: &str,
         left: Option<&str>,
         pass: &mut Pass,
     ) -> Result<Option<MergeWait>> {
-        if self.dropped(t, o, wait.as_ref(), after, pass)?
+        if self.dropped(t, o, wait.as_ref(), live_tickets, after, pass)?
             && let Some(w) = wait.take()
         {
             self.store.merge_wait_retire(&w)?;
@@ -627,7 +735,7 @@ impl Wf {
         let this_pr = |c: &Card| c.pr.as_ref().is_some_and(|p| p.repo == t.repo && p.number == t.number);
         let behind = |c: &Card| {
             let held_at = c.pr.as_ref().and_then(|p| p.head.as_deref());
-            held_at.is_some_and(|head| !o.head.starts_with(head))
+            held_at.is_some_and(|head| !crate::wf_pr::same_head(&o.head, head))
         };
         let note = format!("head moved to {} after this hold", short(&o.head));
         self.resolve_cards(|c| c.kind == "report" && this_pr(c) && c.text.contains(HELD) && behind(c), &note)?;
@@ -639,6 +747,27 @@ impl Wf {
         let mut moved: Vec<(Option<String>, String, Vec<i64>)> = Vec::new();
         for c in cards.iter().filter(|c| c.kind == "gate") {
             let Some(ticket) = c.ticket.as_deref() else { continue };
+            let ready_at = c.pr.as_ref().filter(|p| p.ready).and_then(|p| p.head.as_deref());
+            if let Some(base) = ready_at.filter(|b| {
+                !crate::wf_pr::same_head(&o.head, b)
+                    && !wait
+                        .as_ref()
+                        .is_some_and(|w| w.thread.as_deref() == Some(ticket) && crate::wf_pr::same_head(&w.head, b))
+            }) {
+                let note = format!(
+                    "head moved to {} before the merge was approved at {}; the worker sends ready for it",
+                    short(&o.head),
+                    short(base)
+                );
+                self.resolve_releasing(&[c.seq], &[ticket], &note)?;
+                pass.woken.extend(self.release_ready_worker(ticket, &t.repo, t.number, &o.head)?);
+                self.feed_note(
+                    Some(ticket),
+                    &format!("{} merge card dropped: the head moved to {}", t.label(), short(&o.head)),
+                )?;
+                pass.actions.push(format!("{} merge card dropped: head moved to {}", t.label(), short(&o.head)));
+                continue;
+            }
             if !self.store.link_get(ticket)?.is_some_and(|l| !l.closed && l.gate.as_deref() == Some("merge")) {
                 continue;
             }
@@ -646,7 +775,7 @@ impl Wf {
                 self.set_card_pr(c, t.pr(&o.head))?;
                 continue;
             };
-            if o.head.starts_with(&base) {
+            if crate::wf_pr::same_head(&o.head, &base) {
                 continue;
             }
             match moved.iter_mut().find(|(x, _, _)| x.as_deref() == Some(ticket)) {
@@ -740,7 +869,16 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         Ok(())
     }
 
-    fn dropped(&self, t: &Tracked, o: &Obs, wait: Option<&MergeWait>, after: &str, pass: &mut Pass) -> Result<bool> {
+    #[allow(clippy::too_many_arguments)]
+    fn dropped(
+        &self,
+        t: &Tracked,
+        o: &Obs,
+        wait: Option<&MergeWait>,
+        live_tickets: &[(String, String)],
+        after: &str,
+        pass: &mut Pass,
+    ) -> Result<bool> {
         let Some((reason, at)) = o.removal.as_ref().filter(|(r, _)| !o.queued && r != "merged") else {
             return Ok(false);
         };
@@ -750,7 +888,17 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         }
         let why = why_dropped(reason);
         let what = format!("{} was dropped from the merge queue ({why}) at {}", t.label(), local_clock(at));
-        if self.report_exit(t, o, wait, at, &format!("removed:{at}"), exit_ask(what, String::new()), &why, pass)? {
+        if self.report_exit(
+            t,
+            o,
+            wait,
+            live_tickets,
+            at,
+            &format!("removed:{at}"),
+            exit_ask(what, String::new()),
+            &why,
+            pass,
+        )? {
             let this_pr = |c: &Card| c.pr.as_ref().is_some_and(|p| p.repo == t.repo && p.number == t.number);
             let note = format!("GitHub recorded the reason: {why}");
             self.resolve_cards(|c| c.kind == "report" && this_pr(c) && c.text.contains(NO_REASON), &note)?;
@@ -758,11 +906,13 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         Ok(true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn exited(
         &self,
         t: &Tracked,
         o: &Obs,
         left: &str,
+        live_tickets: &[(String, String)],
         after: &str,
         status: Option<WaitStatus>,
         pass: &mut Pass,
@@ -778,7 +928,17 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         }
         let what = format!("{} left the merge queue at {}, {NO_REASON}", t.label(), local_clock(left));
         let context = format!("GitHub still showed no removal reason {EXIT_WINDOW_MINS} minutes after the exit.");
-        self.report_exit(t, o, None, left, &format!("left:{left}"), exit_ask(what, context), NO_REASON, pass)?;
+        self.report_exit(
+            t,
+            o,
+            None,
+            live_tickets,
+            left,
+            &format!("left:{left}"),
+            exit_ask(what, context),
+            NO_REASON,
+            pass,
+        )?;
         Ok(None)
     }
 
@@ -788,6 +948,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         t: &Tracked,
         o: &Obs,
         wait: Option<&MergeWait>,
+        live_tickets: &[(String, String)],
         at: &str,
         event: &str,
         ask: Ask,
@@ -796,7 +957,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
     ) -> Result<bool> {
         let mut raised = false;
         let mut to: Vec<Option<&str>> =
-            t.tickets.iter().filter(|(_, s)| later(at, s)).map(|(x, _)| Some(x.as_str())).collect();
+            live_tickets.iter().filter(|(_, s)| later(at, s)).map(|(x, _)| Some(x.as_str())).collect();
         if to.is_empty() {
             to.push(None);
         }
@@ -974,8 +1135,12 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
                     worker: None,
                 })?;
                 if kind == "gate" && l.gate.as_deref().is_none_or(|g| g == "merge" || g.starts_with("relay:")) {
+                    let already_merge = l.gate.as_deref() == Some("merge");
                     l.gate = Some("merge".into());
                     l.gate_since = Some(self.now());
+                    if !already_merge {
+                        l.gate_pr = Some((t.repo.clone(), t.number));
+                    }
                     l.nudges = 0;
                     l.escalated = false;
                     self.store.link_save(&l)?;

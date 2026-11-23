@@ -1210,6 +1210,7 @@ impl Wf {
                     o.kind == "gate"
                         && o.ticket.as_deref() == Some(t)
                         && o.worker.as_ref().map(|w| w.thread.as_str()) == from
+                        && !o.pr.as_ref().is_some_and(|p| p.ready)
                 },
                 "superseded by a newer gate",
             )?;
@@ -1308,6 +1309,17 @@ impl Wf {
             format!("{}\n{}", header("reply", BOARD, &handle, None), capped(&body, &handle, self.config().reply_cap));
         let mut out = self.send_wake(&ticket, &msg, &handle).await?;
         self.store.waiting_resolve_seq(BOARD, card.seq, Some(&format!("answered: {text}")), &self.now())?;
+        if card.kind == "gate"
+            && card.worker.is_none()
+            && card.pr.as_ref().is_some_and(|p| p.ready)
+            && let Some(mut tl) = self
+                .store
+                .link_get(&ticket)?
+                .filter(|l| !l.closed && l.gate.as_deref() == Some("merge") && l.gate_pr.is_some())
+        {
+            tl.gate_pr = None;
+            self.store.link_save(&tl)?;
+        }
         self.release_relayed(&card)?;
         self.changed();
         out["card"] = json!(id);
@@ -1344,6 +1356,11 @@ impl Wf {
         match self.store.waiting_resolve(BOARD, id, Some("dismissed"), &self.now())? {
             Some(_) => {
                 if let Some(c) = &card {
+                    if c.worker.is_none()
+                        && let Some(ticket) = c.ticket.as_deref()
+                    {
+                        self.sync_merge_gate_pr(ticket)?;
+                    }
                     self.release_relayed(c)?;
                 }
                 self.changed();
@@ -1360,6 +1377,11 @@ impl Wf {
         same_card(&card, id, want)?;
         if !self.store.waiting_resolve_seq(BOARD, card.seq, Some("dismissed"), &self.now())? {
             bail!("no open board card {id:?}");
+        }
+        if card.worker.is_none()
+            && let Some(ticket) = card.ticket.as_deref()
+        {
+            self.sync_merge_gate_pr(ticket)?;
         }
         self.release_relayed(&card)?;
         self.changed();
@@ -2061,6 +2083,7 @@ impl Wf {
             link: None,
             project: project.map(String::from),
             identity: identity.clone(),
+            brief: None,
         })?;
         drop(_g);
         self.changed();

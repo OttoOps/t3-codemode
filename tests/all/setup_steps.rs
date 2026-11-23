@@ -474,6 +474,7 @@ fn retire_t3wf_warns_and_nudges_open_links_without_blocking() {
             reported: Vec::new(),
             gate: None,
             gate_since: None,
+            gate_pr: None,
             closed: false,
             closed_at: None,
             closed_how: None,
@@ -484,6 +485,8 @@ fn retire_t3wf_warns_and_nudges_open_links_without_blocking() {
             project: None,
             paused_at: None,
             identity: Default::default(),
+            brief: None,
+            pr: None,
         })
         .unwrap();
 

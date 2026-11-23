@@ -48,4 +48,5 @@ pub mod usage;
 pub mod watcher;
 pub mod web;
 pub mod wf;
+pub mod wf_pr;
 pub mod wf_slots;

@@ -128,9 +128,23 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.openChild",
             "wf",
-            "Prepare a link to a child thread you are about to launch. Paste the returned brief, verbatim, at the end of the child's launch brief; the child binds the link with wf.join, whose call in the brief carries any issue, parentIssue and part given here. issue and parentIssue (a GitHub issue ref, GitLab issue URL, or Jira key/URL) name the issue the child works and the epic it belongs to, and part (n/N, such as \"1/4\") says which of the epic's PRs it is; wf.board() and the board return all three.",
-            "wf.openChild(input: { role: string; label: string; issue?: string; parentIssue?: string; part?: string }): Promise<{ brief: string; params: { down: number; miss: number; stall: number } }>;",
-            obj(with_identity(json!({"role": {"type": "string"}, "label": {"type": "string"}})), &["role", "label"]),
+            "Prepare a link to a child thread you are about to launch. Paste the returned brief, verbatim, at the end of the child's launch brief; the child binds the link with wf.join, whose call in the brief carries any issue, parentIssue and part given here. pr stores the PR description format on the child's link, so wf.pr can check a worker's opened event without the ticket. issue and parentIssue (a GitHub issue ref, GitLab issue URL, or Jira key/URL) name the issue the child works and the epic it belongs to, and part (n/N, such as \"1/4\") says which of the epic's PRs it is; wf.board() and the board return all three.",
+            "wf.openChild(input: { role: string; label: string; issue?: string; parentIssue?: string; part?: string; pr?: { format?: string; sections?: Record<string, string[]>; passes?: string[]; mergeOnly?: boolean } }): Promise<{ brief: string; params: { down: number; miss: number; stall: number } }>;",
+            obj(
+                with_identity(json!({"role": {"type": "string"}, "label": {"type": "string"}, "pr": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "the PR description format wf.pr checks a worker's opened event against",
+                    "properties": {
+                        "format": {"type": "string", "description": "the format skill the Publishing line must name; \"pr\" also requires the pr skill's sections. Required unless mergeOnly is true"},
+                        "sections": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}},
+                                     "description": "more headings the description needs, each with the text it must hold"},
+                        "passes": {"type": "array", "items": {"type": "string"}, "description": "the PR's own passes from the split"},
+                        "mergeOnly": {"type": "boolean", "description": "a targeted fix PR: its ready event wakes the ticket"}
+                    }
+                }})),
+                &["role", "label"],
+            ),
         ),
         builtin(
             "wf.join",
@@ -358,6 +372,20 @@ pub fn builtins() -> Vec<Entry> {
                        "head": {"type": "string", "description": "the approved head commit, full 40-character SHA"},
                        "method": {"enum": ["merge", "squash", "rebase"]}}),
                 &["repo", "pr", "head"],
+            ),
+        ),
+        builtin(
+            "wf.pr",
+            "wf",
+            "A worker reports its PR. opened (with publishing, the Publishing line, and checks \"none\" in a repo with no CI) checks the Publishing line and the description on GitHub against the format the ticket's wf.openChild stored, and returns status rewrite with the rewrite request when one falls short. updated records a new head and drops any merge card for the old one. ready checks the PR on GitHub (open, not a draft, at head, every check finished with none failed), resolves the delivery slot for its changed files and opens the merge card on the board with the answers the slot calls for. A pending check returns waiting, and GitHub reconcile opens the card once the checks finish; a failing one returns failing. None of these wakes the ticket. Each lands in its digest as a handled-for-you line. Where t3cm cannot decide (no board ticket, relay off, a follow-up PR, a targeted fix PR, no builtin merge stage, or a PR it cannot read), the event goes to the ticket as before and returns status ticket with why.",
+            "wf.pr(input: { event: \"opened\" | \"updated\" | \"ready\"; repo: string; pr: number; head: string; publishing?: string; checks?: \"pending\" | \"none\"; body?: string }): Promise<{ status: \"open\" | \"rewrite\" | \"recorded\" | \"gated\" | \"waiting\" | \"failing\" | \"refused\" | \"ticket\"; handle?: string; message?: string; missing?: string[]; dropped?: string[]; card?: string; options?: string[]; head?: string; pending?: string; checks?: string; reason?: string; why?: string; detail?: string }>;",
+            obj(
+                json!({"event": {"enum": ["opened", "updated", "ready"]}, "repo": {"type": "string", "description": "owner/name"},
+                       "pr": {"type": "integer"}, "head": {"type": "string", "description": "the PR's head commit SHA"},
+                       "publishing": {"type": "string", "description": "opened: the Publishing line"},
+                       "checks": {"enum": ["pending", "none"], "description": "opened: none in a repo that runs no CI on PRs"},
+                       "body": {"type": "string", "description": "what changed, for the ticket's digest"}}),
+                &["event", "repo", "pr", "head"],
             ),
         ),
         builtin(

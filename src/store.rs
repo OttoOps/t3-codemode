@@ -99,6 +99,8 @@ pub struct Link {
     pub reported: Vec<String>,
     pub gate: Option<String>,
     pub gate_since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_pr: Option<(String, u64)>,
     pub closed: bool,
     pub closed_at: Option<String>,
     pub closed_how: Option<String>,
@@ -114,6 +116,37 @@ pub struct Link {
     pub paused_at: Option<String>,
     #[serde(flatten)]
     pub identity: Identity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<PrBrief>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<LinkPr>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrBrief {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub format: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sections: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub passes: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub merge_only: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkPr {
+    pub repo: String,
+    pub number: u64,
+    pub head: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waiting: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_ci: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub followups: Vec<(String, u64)>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -179,6 +212,8 @@ pub struct Pending {
     pub project: Option<String>,
     #[serde(flatten)]
     pub identity: Identity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<PrBrief>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -1163,6 +1198,23 @@ impl Store {
         Ok(())
     }
 
+    pub fn waiting_retarget(
+        &self,
+        owner: &str,
+        seq: i64,
+        from_label: Option<&str>,
+        link: Option<&str>,
+        data: &Value,
+    ) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE waiting SET from_label = ?3, link = ?4, data = ?5 WHERE owner = ?1 AND seq = ?2",
+                params![owner, seq, from_label, link, data.to_string()],
+            )
+        })?;
+        Ok(())
+    }
+
     pub fn waiting_resolve_seq(&self, owner: &str, seq: i64, note: Option<&str>, at: &str) -> Result<bool> {
         self.with(|c| Self::resolve_seq(c, owner, seq, note, at)).map(|n| n > 0)
     }
@@ -1182,7 +1234,7 @@ impl Store {
         note: &str,
         at: &str,
     ) -> Result<usize> {
-        let release = "UPDATE links SET data = json_set(data, '$.gate', NULL, '$.gateSince', NULL) \
+        let release = "UPDATE links SET data = json_set(data, '$.gate', NULL, '$.gateSince', NULL, '$.gatePr', NULL) \
                        WHERE child = ?1 AND closed = 0 AND json_extract(data, '$.gate') = 'merge' \
                        AND NOT EXISTS (SELECT 1 FROM waiting w WHERE w.owner = ?2 AND w.resolved_at IS NULL \
                        AND json_extract(w.data, '$.kind') = 'gate' AND json_extract(w.data, '$.ticket') = ?1 \

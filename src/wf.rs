@@ -17,7 +17,7 @@ use crate::config::{CLOSING, Config, LinkParams, UP_KINDS};
 use crate::github::GitHub;
 use crate::issues::IssueArgs;
 use crate::merge::MergeArgs;
-use crate::store::{Bind, Identity, Link, Pending, Store};
+use crate::store::{Bind, Identity, Link, Pending, PrBrief, Store};
 use crate::t3::{T3Client, T3Error};
 use crate::tokens::{T3Tokens, TokenSource};
 use crate::usage::UsageSource;
@@ -27,7 +27,7 @@ pub const ENDED_BADLY: &[&str] = &["failed", "interrupted", "cancelled"];
 pub const WATCHER: &str = "t3cm";
 const OPTION_KINDS: &[&str] = &["gate", "blocker", "report"];
 pub const LAST_PASS: &str = "watcher_last_pass";
-const NO_CALLER: &str = "wf needs the caller's T3 thread id: connect with the X-T3-Thread header \
+pub(crate) const NO_CALLER: &str = "wf needs the caller's T3 thread id: connect with the X-T3-Thread header \
 (Claude Code: X-T3-Thread: ${T3CODE_THREAD_ID}) or pass `thread` to execute";
 
 pub fn waiting_ids() -> Vec<String> {
@@ -56,6 +56,7 @@ struct OpenChildArgs {
     #[serde(rename = "parentIssue")]
     parent_issue: Option<String>,
     part: Option<String>,
+    pr: Option<PrBrief>,
 }
 
 #[derive(Deserialize)]
@@ -75,12 +76,14 @@ struct JoinArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SendArgs {
-    kind: String,
-    body: String,
-    gate: Option<String>,
-    wake: Option<bool>,
-    options: Option<Vec<String>>,
+pub(crate) struct SendArgs {
+    pub(crate) kind: String,
+    pub(crate) body: String,
+    pub(crate) gate: Option<String>,
+    pub(crate) wake: Option<bool>,
+    pub(crate) options: Option<Vec<String>>,
+    #[serde(skip)]
+    pub(crate) expect_pr: Option<Option<crate::store::LinkPr>>,
 }
 
 #[derive(Deserialize)]
@@ -499,7 +502,10 @@ impl Wf {
         if matches!(method, "slot" | "slots" | "renewal") {
             return self.slot_call(method, caller.filter(|c| !c.is_empty()), reported, args).await;
         }
-        let out = self.dispatch_inner(method, caller, args).await;
+        let out = match method {
+            "pr" => self.pr_call(caller, reported, args).await,
+            _ => self.dispatch_inner(method, caller, args).await,
+        };
         if matches!(method, "send" | "close") {
             self.flow_if_due().await;
         }
@@ -599,7 +605,8 @@ impl Wf {
                 let a: OpenChildArgs = parse(method, args)?;
                 let id =
                     checked_identity("openChild", a.issue.as_deref(), a.parent_issue.as_deref(), a.part.as_deref())?;
-                self.open_child(me, &a.role, &a.label, id).await
+                let brief = a.pr.map(crate::wf_pr::checked_brief).transpose()?;
+                self.open_child(me, &a.role, &a.label, id, brief).await
             }
             "join" => self.join(me, parse(method, args)?).await,
             "issue" => self.report_issue(me, parse::<IssueArgs>(method, args)?).await,
@@ -674,7 +681,14 @@ impl Wf {
         Ok(out)
     }
 
-    async fn open_child(&self, me: &str, role: &str, label: &str, identity: Identity) -> Result<Value> {
+    async fn open_child(
+        &self,
+        me: &str,
+        role: &str,
+        label: &str,
+        identity: Identity,
+        brief: Option<PrBrief>,
+    ) -> Result<Value> {
         if label.trim().is_empty() {
             bail!("wf.openChild: label must not be empty");
         }
@@ -695,6 +709,7 @@ impl Wf {
             link: None,
             project: None,
             identity: identity.clone(),
+            brief,
         })?;
         let call = format!(
             "async () => wf.join({{ parent: {}, label: {}, role: {}, down: {}, miss: {}, stall: {}{} }})",
@@ -752,14 +767,14 @@ impl Wf {
         };
         params.validate().map_err(|e| anyhow!("the brief's link numbers are invalid: {e}"))?;
         let now = self.now();
-        let reserved = match auto {
-            true => Identity::default(),
+        let (reserved, reserved_brief) = match auto {
+            true => (Identity::default(), None),
             false => self
                 .store
                 .pending_all()?
                 .into_iter()
                 .find(|p| p.parent == a.parent && p.label == a.label)
-                .map(|p| p.identity)
+                .map(|p| (p.identity, p.brief))
                 .unwrap_or_default(),
         };
         let launched_by = auto.then_some(BOARD);
@@ -772,6 +787,10 @@ impl Wf {
                 Some(o) => o.identity.clone(),
                 None => reserved.clone(),
             });
+            let brief = launch
+                .and_then(|p| p.brief.clone())
+                .or_else(|| reserved_brief.clone())
+                .or_else(|| old.as_ref().and_then(|o| o.brief.clone()));
             Bind::Saved(Link {
                 child: me.into(),
                 parent: a.parent.clone(),
@@ -789,6 +808,7 @@ impl Wf {
                 reported: old.as_ref().filter(|_| !auto).map(|o| o.reported.clone()).unwrap_or_default(),
                 gate: old.as_ref().filter(|_| !auto).and_then(|o| o.gate.clone()),
                 gate_since: old.as_ref().filter(|_| !auto).and_then(|o| o.gate_since.clone()),
+                gate_pr: old.as_ref().filter(|_| !auto).and_then(|o| o.gate_pr.clone()),
                 closed: false,
                 closed_at: None,
                 closed_how: None,
@@ -802,6 +822,8 @@ impl Wf {
                     .or_else(|| self.live_of(me).and_then(|v| v["project"].as_str().map(String::from))),
                 paused_at: old.as_ref().filter(|_| !auto).and_then(|o| o.paused_at.clone()),
                 identity,
+                brief,
+                pr: old.as_ref().and_then(|o| o.pr.clone()),
             })
         })?;
         let ln = match bound {
@@ -815,7 +837,7 @@ impl Wf {
         }))
     }
 
-    async fn send(&self, me: &str, a: SendArgs) -> Result<Value> {
+    pub(crate) async fn send(&self, me: &str, a: SendArgs) -> Result<Value> {
         if !UP_KINDS.contains(&a.kind.as_str()) {
             bail!("wf.send: kind must be one of {}", UP_KINDS.join(", "));
         }
@@ -835,7 +857,18 @@ impl Wf {
             .link_get(me)?
             .ok_or_else(|| anyhow!("this thread has no parent link; it reports to the user directly"))?;
         if ln.closed {
+            if a.expect_pr.is_some() {
+                return Ok(json!({"status": "superseded", "detail": "the link closed while t3cm checked the PR"}));
+            }
             bail!("the link to your parent is closed; nothing to send on it");
+        }
+        if a.expect_pr.as_ref().is_some_and(|seen| ln.pr != *seen) {
+            return Ok(json!({"status": "superseded", "detail": "a newer head of this PR was recorded first"}));
+        }
+        if a.expect_pr.is_some()
+            && let Some(p) = ln.pr.as_mut()
+        {
+            p.waiting = false;
         }
         if CLOSING.contains(&a.kind.as_str())
             && let Err(e) = self.read_thread(me).await
@@ -845,7 +878,13 @@ impl Wf {
         }
         let now = self.now();
         if a.kind == "gate" {
-            ln.gate = Some(gate_name(a.gate.as_deref().unwrap_or("user")));
+            let name = gate_name(a.gate.as_deref().unwrap_or("user"));
+            ln.gate_pr = if ln.parent == BOARD && name == "merge" {
+                crate::reconcile::card_pr(&a.body).map(|p| (p.repo, p.number))
+            } else {
+                None
+            };
+            ln.gate = Some(name);
             ln.gate_since = Some(now.clone());
         }
         let handle = self.store.msg_new(me, &ln.parent, &a.kind, &a.body, &now)?;
@@ -878,6 +917,8 @@ impl Wf {
             ln.closed_at = Some(now.clone());
             ln.closed_how = Some(a.kind.clone());
             ln.gate = None;
+            ln.gate_since = None;
+            ln.gate_pr = None;
             wake = true;
         }
         if ln.parent == BOARD {
@@ -952,6 +993,25 @@ impl Wf {
             out["warning"] = json!(NO_BUTTONS);
         }
         Ok(out)
+    }
+
+    pub(crate) fn sync_merge_gate_pr(&self, ticket: &str) -> Result<()> {
+        let Some(mut t) = self.store.link_get(ticket)?.filter(|t| !t.closed && t.gate.as_deref() == Some("merge"))
+        else {
+            return Ok(());
+        };
+        let Some((repo, number)) = &t.gate_pr else { return Ok(()) };
+        let cards = self.cards()?;
+        let own =
+            |c: &crate::board::Card| c.kind == "gate" && c.worker.is_none() && c.ticket.as_deref() == Some(ticket);
+        if cards.iter().any(|c| own(c) && c.pr.as_ref().is_some_and(|p| p.repo == *repo && p.number == *number)) {
+            return Ok(());
+        }
+        t.gate_pr = cards
+            .iter()
+            .filter(|c| own(c))
+            .find_map(|c| c.pr.as_ref().filter(|p| p.ready).map(|p| (p.repo.clone(), p.number)));
+        self.store.link_save(&t)
     }
 
     pub(crate) fn sync_relay_gate(&self, ticket: &str) -> Result<()> {
@@ -1035,17 +1095,42 @@ impl Wf {
             .link_get(me)?
             .filter(|l| !l.closed)
             .ok_or_else(|| anyhow!("this thread has no open parent link to hold a gate on"))?;
+        let was_merge = ln.gate.as_deref() == Some("merge");
+        let prev_pr = ln.gate_pr.clone();
         ln.gate = a.open.as_deref().map(gate_name);
         ln.gate_since = ln.gate.as_ref().map(|_| self.now());
+        ln.gate_pr = None;
         ln.nudges = 0;
         ln.escalated = false;
         self.store.link_save(&ln)?;
         if a.clear && ln.parent == BOARD {
             self.resolve_cards(
-                |c| c.kind == "gate" && c.worker.is_none() && c.ticket.as_deref() == Some(ln.child.as_str()),
+                |c| {
+                    let is_ready = c.pr.as_ref().is_some_and(|p| p.ready);
+                    let matches_gate_pr = was_merge
+                        && prev_pr
+                            .as_ref()
+                            .is_some_and(|(r, n)| c.pr.as_ref().is_some_and(|p| p.repo == *r && p.number == *n));
+                    c.kind == "gate"
+                        && c.worker.is_none()
+                        && c.ticket.as_deref() == Some(ln.child.as_str())
+                        && (!is_ready || matches_gate_pr)
+                },
                 "gate cleared in the ticket",
             )?;
-            self.sync_relay_gate(&ln.child)?;
+            let next_ready = self.cards()?.into_iter().find_map(|c| {
+                (c.kind == "gate" && c.worker.is_none() && c.ticket.as_deref() == Some(ln.child.as_str()))
+                    .then(|| c.pr.filter(|p| p.ready).map(|p| (p.repo, p.number)))
+                    .flatten()
+            });
+            if let Some(next_pr) = next_ready {
+                ln.gate = Some("merge".into());
+                ln.gate_since = Some(self.now());
+                ln.gate_pr = Some(next_pr);
+                self.store.link_save(&ln)?;
+            } else {
+                self.sync_relay_gate(&ln.child)?;
+            }
         } else if a.clear {
             self.drop_relayed(&ln.child, &ln.parent, "gate cleared by the worker")?;
         }
@@ -1095,7 +1180,9 @@ impl Wf {
         ln.closed = true;
         ln.closed_at = Some(self.now());
         ln.closed_how = Some("closed-by-parent".into());
-        release_hold(&mut ln);
+        ln.gate = None;
+        ln.gate_since = None;
+        ln.gate_pr = None;
         self.store.link_save(&ln)?;
         if ln.parent == BOARD {
             self.flow_soon();
@@ -1162,26 +1249,118 @@ impl Wf {
 
     async fn adopt(&self, me: &str, from: &str) -> Result<Value> {
         let _g = self.lock.lock().await;
-        let mut adopted = Vec::new();
-        let mut workers = Vec::new();
-        for mut ln in self.store.children(from, true)? {
-            ln.parent = me.into();
-            self.store.link_save(&ln)?;
-            workers.push(ln.child);
-            adopted.push(ln.label);
-        }
+        let children = self.store.children(from, true)?;
+        let workers: Vec<String> = children.iter().map(|l| l.child.clone()).collect();
+        let adopted: Vec<String> = children.iter().map(|l| l.label.clone()).collect();
+        let prs: Vec<(String, u64)> =
+            children.iter().filter_map(|l| l.pr.as_ref().map(|p| (p.repo.clone(), p.number))).collect();
         let relayed = |c: &crate::board::Card| {
-            c.ticket.as_deref() == Some(from) && c.worker.as_ref().is_some_and(|w| workers.contains(&w.thread))
+            let ready_for = |p: &crate::reconcile::CardPr| p.ready && prs.contains(&(p.repo.clone(), p.number));
+            c.ticket.as_deref() == Some(from)
+                && (c.worker.as_ref().is_some_and(|w| workers.contains(&w.thread))
+                    || c.pr.as_ref().is_some_and(ready_for))
         };
         let moved: Vec<crate::board::Card> = self.cards()?.into_iter().filter(relayed).collect();
+        let heir = self.store.link_get(me)?;
         for c in &moved {
             let mut data = self.store.waiting_data(BOARD, false)?.into_iter().find(|r| r.3 == c.seq).and_then(|r| r.1);
             if let Some(d) = data.as_mut() {
                 d["ticket"] = json!(me);
-                self.store.waiting_set_data(BOARD, c.seq, d)?;
+                let label = heir.as_ref().map(|t| t.label.as_str()).or(c.label.as_deref());
+                let link = match &c.worker {
+                    Some(w) => w.link.as_deref().or_else(|| heir.as_ref().and_then(|t| t.link.as_deref())),
+                    None => heir.as_ref().and_then(|t| t.link.as_deref()),
+                };
+                self.store.waiting_retarget(BOARD, c.seq, label, link, d)?;
             }
         }
-        if !moved.is_empty() {
+        let mut seen_prs: Vec<(String, u64)> = prs.clone();
+        for ln in &children {
+            if let Some(p) = &ln.pr {
+                for (r, n) in &p.followups {
+                    if !seen_prs.iter().any(|(er, en)| er == r && en == n) {
+                        seen_prs.push((r.clone(), *n));
+                    }
+                }
+            }
+            if let Some(live) = self.live_of(&ln.child) {
+                let urls = live["prs"].as_array().into_iter().flatten().chain([&live["pr"]["url"]]);
+                for (o, r, n) in urls.filter_map(Value::as_str).flat_map(crate::reconcile::pr_refs) {
+                    let repo = format!("{o}/{r}").to_ascii_lowercase();
+                    if !seen_prs.iter().any(|(er, en)| er == &repo && *en == n) {
+                        seen_prs.push((repo, n));
+                    }
+                }
+            }
+        }
+        for c in &moved {
+            if let Some(p) = &c.pr
+                && !seen_prs.iter().any(|(er, en)| er == &p.repo && *en == p.number)
+            {
+                seen_prs.push((p.repo.clone(), p.number));
+            }
+        }
+        for mut ln in children {
+            ln.parent = me.into();
+            self.store.link_save(&ln)?;
+        }
+        let open_cards = self.cards()?;
+        for (repo, number) in &seen_prs {
+            let Some(mut seen) = self.store.pr_seen_get(repo, *number)? else { continue };
+            let Some(pos) = seen.tickets.iter().position(|(x, _)| x == from) else { continue };
+            let still_tracked_by_from =
+                open_cards.iter().any(|c| {
+                    c.worker.is_none()
+                        && c.ticket.as_deref() == Some(from)
+                        && c.pr.as_ref().is_some_and(|p| p.repo == *repo && p.number == *number)
+                }) || self.store.merge_wait_get(repo, *number)?.is_some_and(|w| w.thread.as_deref() == Some(from));
+            if still_tracked_by_from {
+                continue;
+            }
+            let (_, since) = seen.tickets.remove(pos);
+            if me != BOARD {
+                match seen.tickets.iter_mut().find(|(x, _)| x == me) {
+                    Some((_, s)) if since.as_str() < s.as_str() => *s = since,
+                    Some(_) => {}
+                    None => seen.tickets.push((me.into(), since)),
+                }
+            }
+            self.store.pr_seen_put(&seen)?;
+        }
+        let moved_merge_pr = moved
+            .iter()
+            .filter(|c| c.worker.is_none())
+            .find_map(|c| c.pr.as_ref().map(|p| (p.repo.clone(), p.number)))
+            .or_else(|| {
+                open_cards.iter().find_map(|c| {
+                    (c.ticket.as_deref() == Some(me) && c.worker.is_none())
+                        .then(|| {
+                            c.pr.as_ref()
+                                .filter(|p| p.ready && prs.contains(&(p.repo.clone(), p.number)))
+                                .map(|p| (p.repo.clone(), p.number))
+                        })
+                        .flatten()
+                })
+            });
+        let has_ready_merge = moved_merge_pr.is_some();
+        if has_ready_merge {
+            self.store.waiting_resolve_releasing(BOARD, &[], &[from], "moved to the adopting ticket", &self.now())?;
+            self.sync_merge_gate_pr(from)?;
+            if let Some(mut t) = heir.filter(|t| !t.closed)
+                && t.gate.as_deref().is_none_or(|g| g == "merge" || g.starts_with(RELAY_GATE))
+            {
+                let already_merge = t.gate.as_deref() == Some("merge");
+                t.gate = Some("merge".into());
+                t.gate_since = Some(self.now());
+                if !already_merge {
+                    t.gate_pr = moved_merge_pr;
+                }
+                t.nudges = 0;
+                t.escalated = false;
+                self.store.link_save(&t)?;
+            }
+        }
+        if !moved.is_empty() || has_ready_merge {
             self.sync_relay_gate(from)?;
             self.sync_relay_gate(me)?;
             self.changed();
@@ -1371,7 +1550,9 @@ impl Wf {
                 ln.closed = true;
                 ln.closed_at = Some(now.clone());
                 ln.closed_how = Some("thread-gone".into());
-                release_hold(ln);
+                ln.gate = None;
+                ln.gate_since = None;
+                ln.gate_pr = None;
                 let body = format!("{}'s thread is gone; its link is closed.", ln.label);
                 let h = self.store.msg_new(WATCHER, &ln.parent, "note", &body, &now)?;
                 if ln.parent == BOARD {
@@ -1390,7 +1571,9 @@ impl Wf {
             ln.closed = true;
             ln.closed_at = Some(now);
             ln.closed_how = Some("archived".into());
-            release_hold(ln);
+            ln.gate = None;
+            ln.gate_since = None;
+            ln.gate_pr = None;
             if ln.parent == BOARD {
                 self.flow_soon();
                 self.resolve_ticket_cards(&ln.child, "ticket archived")?;
@@ -1442,6 +1625,9 @@ impl Wf {
             return Ok(());
         }
         let bad_end = ENDED_BADLY.contains(&status) && ln.bad_run != latest_run;
+        if !bad_end && self.config().board.reconcile_idle_minutes > 0 && ln.pr.as_ref().is_some_and(|p| p.waiting) {
+            return Ok(());
+        }
         let since_nudge = ln.last_nudge.as_deref().and_then(|t| self.mins(Some(t)));
         let due = bad_end || (idle >= p.down as f64 && since_nudge.is_none_or(|s| s >= p.down as f64));
         if !due {

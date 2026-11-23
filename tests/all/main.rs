@@ -14,6 +14,8 @@ mod mcp_http;
 mod memory;
 mod merge;
 mod pools;
+mod pr_chaos;
+mod pr_events;
 mod reconcile;
 mod relay;
 mod routing;
