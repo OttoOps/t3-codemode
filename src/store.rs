@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS messages_from ON messages (from_id, seq);
 CREATE TABLE IF NOT EXISTS outbox (
   id INTEGER PRIMARY KEY AUTOINCREMENT, to_id TEXT NOT NULL, text TEXT NOT NULL,
-  handle TEXT NOT NULL, queued TEXT NOT NULL);
+  handle TEXT NOT NULL, queued TEXT NOT NULL, allow_closed INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS waiting (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, id TEXT NOT NULL, text TEXT NOT NULL,
   from_label TEXT, link TEXT, opened_at TEXT NOT NULL, resolved_at TEXT, note TEXT);
@@ -365,6 +365,7 @@ pub struct OutboxItem {
     pub text: String,
     pub handle: String,
     pub queued: String,
+    pub allow_closed: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -486,6 +487,13 @@ impl Store {
             conn.query_row("SELECT COUNT(*) FROM pragma_table_info('waiting') WHERE name = 'data'", [], |r| r.get(0))?;
         if has_data == 0 {
             conn.execute_batch("ALTER TABLE waiting ADD COLUMN data TEXT")?;
+        }
+        let has_allow_closed: i64 =
+            conn.query_row("SELECT COUNT(*) FROM pragma_table_info('outbox') WHERE name = 'allow_closed'", [], |r| {
+                r.get(0)
+            })?;
+        if has_allow_closed == 0 {
+            conn.execute_batch("ALTER TABLE outbox ADD COLUMN allow_closed INTEGER NOT NULL DEFAULT 0")?;
         }
         Ok(Store { conn: Mutex::new(conn), path })
     }
@@ -952,10 +960,14 @@ impl Store {
     }
 
     pub fn outbox_push(&self, to: &str, text: &str, handle: &str, queued: &str) -> Result<()> {
+        self.outbox_push_with(to, text, handle, queued, false)
+    }
+
+    pub fn outbox_push_with(&self, to: &str, text: &str, handle: &str, queued: &str, allow_closed: bool) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO outbox (to_id, text, handle, queued) VALUES (?1, ?2, ?3, ?4)",
-                params![to, text, handle, queued],
+                "INSERT INTO outbox (to_id, text, handle, queued, allow_closed) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![to, text, handle, queued, allow_closed as i64],
             )
         })?;
         Ok(())
@@ -963,9 +975,16 @@ impl Store {
 
     pub fn outbox_all(&self) -> Result<Vec<OutboxItem>> {
         self.with(|c| {
-            let mut st = c.prepare("SELECT id, to_id, text, handle, queued FROM outbox ORDER BY id")?;
+            let mut st = c.prepare("SELECT id, to_id, text, handle, queued, allow_closed FROM outbox ORDER BY id")?;
             st.query_map([], |r| {
-                Ok(OutboxItem { id: r.get(0)?, to: r.get(1)?, text: r.get(2)?, handle: r.get(3)?, queued: r.get(4)? })
+                Ok(OutboxItem {
+                    id: r.get(0)?,
+                    to: r.get(1)?,
+                    text: r.get(2)?,
+                    handle: r.get(3)?,
+                    queued: r.get(4)?,
+                    allow_closed: r.get::<_, i64>(5)? != 0,
+                })
             })?
             .collect()
         })

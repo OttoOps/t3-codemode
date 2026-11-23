@@ -109,7 +109,10 @@ async fn reply_reaches_the_child_and_a_closed_link_needs_reopen() {
     assert!(h.last_message().starts_with("[t3cm reply from=parent msg=m1]"));
     h.wf(TICKET, "close", json!({"child": WORKER})).await;
     assert!(h.wf_err(TICKET, "reply", json!({"to": WORKER, "body": "x"})).await.contains("reopen"));
-    h.wf(TICKET, "reply", json!({"to": WORKER, "body": "x", "reopen": true})).await;
+    let r = h.wf(TICKET, "reply", json!({"to": WORKER, "body": "x", "reopen": true})).await;
+    assert_eq!(r["delivery"], "sent");
+    assert_eq!(h.sent().last().unwrap()["threadId"], WORKER);
+    assert!(h.last_message().ends_with("\nx"), "{}", h.last_message());
 }
 
 #[tokio::test]
@@ -803,4 +806,238 @@ fn a_link_row_from_before_identity_still_reads() {
     row.as_object_mut().unwrap().remove("project");
     let ln: Link = serde_json::from_value(row).unwrap();
     assert_eq!(ln.identity, Default::default());
+}
+
+#[tokio::test]
+async fn a_held_reply_to_an_active_worker_is_dropped_when_it_hands_off() {
+    let h = H::new();
+    link_ticket_worker(&h).await;
+    h.app.store.meta_set(LAST_PASS, T0).unwrap();
+    h.fake.update(WORKER, json!({"status": "running"}));
+
+    let r = h.wf(TICKET, "reply", json!({"to": WORKER, "body": "wait for CI"})).await;
+    assert_eq!(r["delivery"], "queued");
+    assert_eq!(h.app.store.outbox_all().unwrap().len(), 1);
+    assert!(h.sent().is_empty());
+
+    let handoff = h.wf(WORKER, "send", json!({"kind": "handoff", "body": "done"})).await;
+    assert_eq!(handoff["closed"], true);
+    assert!(h.app.store.outbox_all().unwrap().is_empty());
+
+    h.fake.update(WORKER, json!({"status": "idle", "updatedAt": at(1)}));
+    h.tick(2).await;
+
+    let to_worker: Vec<_> = h.sent().into_iter().filter(|s| s["threadId"] == WORKER).collect();
+    assert!(to_worker.is_empty(), "closed worker received stale reply: {to_worker:?}");
+    assert!(h.app.store.outbox_all().unwrap().is_empty());
+    assert_eq!(h.sent().len(), 1);
+    assert_eq!(h.sent()[0]["threadId"], TICKET);
+}
+
+#[tokio::test]
+async fn wf_close_drops_queued_outbox_wakes_for_the_closed_child() {
+    let h = H::new();
+    link_ticket_worker(&h).await;
+    h.app.store.meta_set(LAST_PASS, T0).unwrap();
+    h.fake.update(WORKER, json!({"status": "running"}));
+
+    let r = h.wf(TICKET, "reply", json!({"to": WORKER, "body": "check lint"})).await;
+    assert_eq!(r["delivery"], "queued");
+    assert_eq!(h.app.store.outbox_all().unwrap().len(), 1);
+
+    h.wf(TICKET, "close", json!({"child": WORKER})).await;
+    assert!(h.app.store.outbox_all().unwrap().is_empty());
+
+    h.fake.update(WORKER, json!({"status": "idle", "updatedAt": at(1)}));
+    h.tick(2).await;
+
+    assert!(h.sent().is_empty(), "{:?}", h.sent());
+    assert!(h.app.store.outbox_all().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn terminal_tick_closures_drop_queued_outbox_wakes() {
+    for archive in [false, true] {
+        let h = H::new();
+        link_ticket_worker(&h).await;
+        h.app.store.meta_set(LAST_PASS, T0).unwrap();
+        h.fake.update(WORKER, json!({"status": "running"}));
+
+        let r = h.wf(TICKET, "reply", json!({"to": WORKER, "body": "still there?"})).await;
+        assert_eq!(r["delivery"], "queued");
+        assert_eq!(h.app.store.outbox_all().unwrap().len(), 1);
+
+        if archive {
+            h.fake.update(WORKER, json!({"status": "idle", "archived": true}));
+        } else {
+            h.fake.remove(WORKER);
+        }
+        h.tick(2).await;
+
+        assert!(link(&h, WORKER).closed);
+        assert!(h.sent().is_empty(), "archive={archive}: {:?}", h.sent());
+        assert!(h.app.store.outbox_all().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn flush_outbox_drops_unreopened_wakes_for_closed_links_but_delivers_reopened_ones() {
+    let h = H::new();
+    link_ticket_worker(&h).await;
+    h.app.store.meta_set(LAST_PASS, T0).unwrap();
+
+    // Passing reopen: true while the link is still open must NOT exempt the wake from a later close.
+    h.fake.update(WORKER, json!({"status": "running"}));
+    let held = h.wf(TICKET, "reply", json!({"to": WORKER, "body": "before close", "reopen": true})).await;
+    assert_eq!(held["delivery"], "queued");
+    h.wf(WORKER, "send", json!({"kind": "handoff", "body": "done"})).await;
+    assert!(h.app.store.outbox_all().unwrap().is_empty());
+
+    // Defense-in-depth: a stale outbox row for an already-closed link is dropped on tick.
+    h.app.store.outbox_push(WORKER, "[t3cm reply from=t3cm msg=m99]\nstale", "m99", T0).unwrap();
+    h.fake.update(WORKER, json!({"status": "idle", "updatedAt": at(1)}));
+    h.tick(2).await;
+    let to_worker: Vec<_> = h.sent().into_iter().filter(|s| s["threadId"] == WORKER).collect();
+    assert!(to_worker.is_empty(), "stale row delivered to closed worker: {to_worker:?}");
+    assert!(h.app.store.outbox_all().unwrap().is_empty());
+
+    // Explicit reopen: true on a closed link still delivers, even if held while ACTIVE and flushed on tick.
+    h.fake.update(WORKER, json!({"status": "running", "updatedAt": at(2)}));
+    let reopened = h.wf(TICKET, "reply", json!({"to": WORKER, "body": "one more thing", "reopen": true})).await;
+    assert_eq!(reopened["delivery"], "queued");
+    assert_eq!(h.app.store.outbox_all().unwrap().len(), 1);
+    h.fake.update(WORKER, json!({"status": "idle", "updatedAt": at(3)}));
+    h.tick(4).await;
+    let to_worker: Vec<_> = h.sent().into_iter().filter(|s| s["threadId"] == WORKER).collect();
+    assert_eq!(to_worker.len(), 1, "{to_worker:?}");
+    assert!(to_worker[0]["message"].as_str().unwrap().ends_with("\none more thing"));
+    assert!(h.app.store.outbox_all().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn close_ticket_drops_queued_outbox_wakes() {
+    let h = H::new();
+    h.wf(TICKET, "init", json!({"role": "ticket", "label": "widgets#41"})).await;
+    h.wf(TICKET, "openChild", json!({"role": "worker", "label": "#41 PR 1/1"})).await;
+    h.wf(WORKER, "join", json!({"parent": TICKET, "label": "#41 PR 1/1", "role": "worker"})).await;
+    h.app.store.meta_set(LAST_PASS, T0).unwrap();
+    h.fake.update(TICKET, json!({"status": "running"}));
+
+    let wake = h.wf(WORKER, "send", json!({"kind": "event", "body": "PR opened"})).await;
+    assert_eq!(wake["delivery"], "queued");
+    assert_eq!(h.app.store.outbox_all().unwrap().len(), 1);
+
+    h.fake.update(TICKET, json!({"status": "idle", "updatedAt": at(1)}));
+    h.app.wf.close_ticket(TICKET, false).await.unwrap();
+    assert!(h.app.store.outbox_all().unwrap().is_empty());
+
+    h.tick(2).await;
+    assert!(h.sent().is_empty(), "{:?}", h.sent());
+}
+
+#[tokio::test]
+async fn wake_to_a_closed_parent_is_dropped_and_not_reported_as_queued() {
+    let h = H::new();
+    h.wf(TICKET, "init", json!({"role": "ticket", "label": "widgets#41"})).await;
+    h.wf(TICKET, "openChild", json!({"role": "worker", "label": "#41 PR 1/1"})).await;
+    h.wf(WORKER, "join", json!({"parent": TICKET, "label": "#41 PR 1/1", "role": "worker"})).await;
+    h.wf(TICKET, "send", json!({"kind": "handoff", "body": "ticket done"})).await;
+
+    let r = h.wf(WORKER, "send", json!({"kind": "handoff", "body": "worker done"})).await;
+    assert_eq!(r["closed"], true);
+    assert_eq!(r["delivery"], "noted", "{r}");
+    assert!(r["detail"].as_str().unwrap_or("").contains("closed"), "{r}");
+    assert!(h.sent().is_empty(), "{:?}", h.sent());
+    assert!(h.app.store.outbox_all().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn dropped_wake_reports_noted_even_when_a_queued_reopen_reply_flushes_in_the_same_batch() {
+    let h = H::new();
+    link_boss_ticket(&h).await;
+    h.wf(TICKET, "openChild", json!({"role": "worker", "label": "#41 PR 1/1"})).await;
+    h.wf(WORKER, "join", json!({"parent": TICKET, "label": "#41 PR 1/1", "role": "worker"})).await;
+    h.app.store.meta_set(LAST_PASS, T0).unwrap();
+
+    h.wf(BOSS, "close", json!({"child": TICKET})).await;
+    h.fake.update(TICKET, json!({"status": "running"}));
+    let reopened = h.wf(BOSS, "reply", json!({"to": TICKET, "body": "reopen ticket", "reopen": true})).await;
+    assert_eq!(reopened["delivery"], "queued", "{reopened}");
+
+    h.fake.update(TICKET, json!({"status": "idle", "updatedAt": at(1)}));
+    let r = h.wf(WORKER, "send", json!({"kind": "handoff", "body": "worker done"})).await;
+    assert_eq!(r["closed"], true);
+    assert_eq!(r["delivery"], "noted", "{r}");
+    assert!(r["detail"].as_str().unwrap_or("").contains("closed"), "{r}");
+    let to_ticket: Vec<_> = h.sent().into_iter().filter(|s| s["threadId"] == TICKET).collect();
+    assert_eq!(to_ticket.len(), 1, "{to_ticket:?}");
+    let msg = to_ticket[0]["message"].as_str().unwrap();
+    assert!(msg.ends_with("\nreopen ticket") && !msg.contains("worker done"), "{msg}");
+    assert!(h.app.store.outbox_all().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn reopened_reply_held_alongside_a_stale_row_drops_only_the_stale_row() {
+    let h = H::new();
+    link_ticket_worker(&h).await;
+    h.app.store.meta_set(LAST_PASS, T0).unwrap();
+    h.wf(TICKET, "close", json!({"child": WORKER})).await;
+
+    h.app.store.outbox_push(WORKER, "[t3cm reply from=parent msg=m98]\nstale", "m98", T0).unwrap();
+    h.fake.update(WORKER, json!({"status": "running"}));
+
+    let r = h.wf(TICKET, "reply", json!({"to": WORKER, "body": "reopened", "reopen": true})).await;
+    assert_eq!(r["delivery"], "queued", "{r}");
+    let outbox = h.app.store.outbox_all().unwrap();
+    assert_eq!(outbox.len(), 1, "{outbox:?}");
+    assert!(outbox[0].allow_closed);
+    assert!(outbox[0].text.ends_with("\nreopened"), "{}", outbox[0].text);
+
+    h.fake.update(WORKER, json!({"status": "idle", "updatedAt": at(1)}));
+    h.tick(2).await;
+    let to_worker: Vec<_> = h.sent().into_iter().filter(|s| s["threadId"] == WORKER).collect();
+    assert_eq!(to_worker.len(), 1, "{to_worker:?}");
+    let msg = to_worker[0]["message"].as_str().unwrap();
+    assert!(msg.ends_with("\nreopened") && !msg.contains("stale"), "{msg}");
+    assert!(h.app.store.outbox_all().unwrap().is_empty());
+}
+
+#[test]
+fn opening_a_legacy_store_migrates_outbox_allow_closed_to_false() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("store.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, to_id TEXT NOT NULL, \
+         text TEXT NOT NULL, handle TEXT NOT NULL, queued TEXT NOT NULL);
+         INSERT INTO outbox (to_id, text, handle, queued) VALUES ('mcp:worker', 'stale', 'm1', '2026-11-17T12:00:00Z');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::open(dir.path()).unwrap();
+    let rows = store.outbox_all().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].to, WORKER);
+    assert!(!rows[0].allow_closed);
+}
+
+#[tokio::test]
+async fn answering_a_card_for_a_closed_ticket_errors_and_keeps_the_card_open() {
+    let h = H::new();
+    h.wf(TICKET, "init", json!({"role": "ticket", "label": "widgets#41"})).await;
+    let card = h.wf(TICKET, "send", json!({"kind": "gate", "gate": "merge", "body": "reply \"merge\""})).await;
+    let id = card["card"].as_str().unwrap().to_string();
+
+    let mut ln = link(&h, TICKET);
+    ln.closed = true;
+    h.app.store.link_save(&ln).unwrap();
+
+    let err = h.wf_err(BOSS, "answer", json!({"id": id, "text": "merge"})).await;
+    assert!(err.contains("closed") && err.contains("dismiss it instead"), "{err}");
+    let open = h.wf(BOSS, "cards", json!({})).await;
+    assert_eq!(open.as_array().unwrap().len(), 1, "{open}");
+    assert_eq!(open[0]["id"], id);
+    assert!(h.sent().is_empty(), "{:?}", h.sent());
+    assert!(h.app.store.outbox_all().unwrap().is_empty());
 }

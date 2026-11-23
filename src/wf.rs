@@ -328,6 +328,7 @@ type Consumed = Vec<(String, Vec<String>)>;
 
 struct Flush {
     sent: Vec<(String, Vec<String>)>,
+    dropped: Vec<(String, Vec<String>)>,
     errors: Vec<String>,
 }
 
@@ -926,6 +927,9 @@ impl Wf {
                 self.flow_soon();
             }
             self.store.link_save(&ln)?;
+            if closing {
+                self.store.outbox_drop_to(&ln.child)?;
+            }
             return self.board_receive(&ln, &a.kind, &handle, &a.body, options);
         }
         if !wake {
@@ -940,6 +944,9 @@ impl Wf {
             capped(&a.body, &handle, policy.body_cap)
         );
         self.store.link_save(&ln)?;
+        if closing {
+            self.store.outbox_drop_to(&ln.child)?;
+        }
         let mut out = self.send_wake(&ln.parent, &text, &handle).await?;
         if closing {
             out["closed"] = json!(true);
@@ -1082,7 +1089,7 @@ impl Wf {
             header("reply", "parent", &handle, None),
             capped(&a.body, &handle, self.config().reply_cap)
         );
-        self.send_wake(&ln.child, &text, &handle).await
+        self.send_wake_inner(&ln.child, &text, &handle, ln.closed && a.reopen).await
     }
 
     async fn gate(&self, me: &str, a: GateArgs) -> Result<Value> {
@@ -1184,6 +1191,7 @@ impl Wf {
         ln.gate_since = None;
         ln.gate_pr = None;
         self.store.link_save(&ln)?;
+        self.store.outbox_drop_to(&ln.child)?;
         if ln.parent == BOARD {
             self.flow_soon();
         } else {
@@ -1402,10 +1410,18 @@ impl Wf {
     }
 
     pub(crate) async fn send_wake(&self, to: &str, text: &str, handle: &str) -> Result<Value> {
-        self.store.outbox_push(to, text, handle, &self.now())?;
+        self.send_wake_inner(to, text, handle, false).await
+    }
+
+    async fn send_wake_inner(&self, to: &str, text: &str, handle: &str, allow_closed: bool) -> Result<Value> {
+        self.store.outbox_push_with(to, text, handle, &self.now(), allow_closed)?;
         let force = !self.watcher_alive();
         let f = self.flush_outbox(Some(to), force).await?;
-        if !f.sent.is_empty() {
+        if f.dropped.iter().any(|(_, hs)| hs.iter().any(|h| h == handle)) {
+            return Ok(json!({"handle": handle, "delivery": "noted",
+                "detail": "the recipient's link is closed; wake dropped"}));
+        }
+        if f.sent.iter().any(|(_, hs)| hs.iter().any(|h| h == handle)) {
             return Ok(json!({"handle": handle, "delivery": "sent"}));
         }
         let detail = match f.errors.first() {
@@ -1473,10 +1489,23 @@ impl Wf {
                 None => groups.push((item.to.clone(), vec![item])),
             }
         }
-        let mut f = Flush { sent: Vec::new(), errors: Vec::new() };
-        for (to, items) in groups {
+        let mut f = Flush { sent: Vec::new(), dropped: Vec::new(), errors: Vec::new() };
+        for (to, mut items) in groups {
             if only_to.is_some_and(|o| o != to) {
                 continue;
+            }
+            if self.store.link_get(&to)?.is_some_and(|l| l.closed) {
+                let (keep, drop): (Vec<_>, Vec<_>) = items.into_iter().partition(|i| i.allow_closed);
+                if !drop.is_empty() {
+                    let drop_ids: Vec<i64> = drop.iter().map(|i| i.id).collect();
+                    let drop_handles: Vec<String> = drop.into_iter().map(|i| i.handle).collect();
+                    self.store.outbox_delete(&drop_ids)?;
+                    f.dropped.push((to.clone(), drop_handles));
+                }
+                if keep.is_empty() {
+                    continue;
+                }
+                items = keep;
             }
             if !force && let Ok(th) = self.read_thread(&to).await {
                 let held = self.mins(Some(&items[0].queued)).unwrap_or(0.0);
@@ -1553,6 +1582,7 @@ impl Wf {
                 ln.gate = None;
                 ln.gate_since = None;
                 ln.gate_pr = None;
+                self.store.outbox_drop_to(&ln.child)?;
                 let body = format!("{}'s thread is gone; its link is closed.", ln.label);
                 let h = self.store.msg_new(WATCHER, &ln.parent, "note", &body, &now)?;
                 if ln.parent == BOARD {
@@ -1574,6 +1604,7 @@ impl Wf {
             ln.gate = None;
             ln.gate_since = None;
             ln.gate_pr = None;
+            self.store.outbox_drop_to(&ln.child)?;
             if ln.parent == BOARD {
                 self.flow_soon();
                 self.resolve_ticket_cards(&ln.child, "ticket archived")?;

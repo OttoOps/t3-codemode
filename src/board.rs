@@ -1293,6 +1293,9 @@ impl Wf {
         {
             return Ok(out);
         }
+        if let Some(ln) = self.store.link_get(&ticket)?.filter(|l| l.closed) {
+            bail!("card {id}'s ticket ({}) is closed; dismiss it instead", ln.label);
+        }
         let body = match &card.worker {
             Some(w) => format!(
                 "The user says {} about {id}, which {} sent past you to the board and still waits on \
@@ -1308,6 +1311,9 @@ impl Wf {
         let msg =
             format!("{}\n{}", header("reply", BOARD, &handle, None), capped(&body, &handle, self.config().reply_cap));
         let mut out = self.send_wake(&ticket, &msg, &handle).await?;
+        if out["delivery"] == "noted" {
+            bail!("card {id}'s ticket is closed; dismiss it instead");
+        }
         self.store.waiting_resolve_seq(BOARD, card.seq, Some(&format!("answered: {text}")), &self.now())?;
         if card.kind == "gate"
             && card.worker.is_none()
@@ -1338,6 +1344,9 @@ impl Wf {
         let msg =
             format!("{}\n{}", header("reply", BOARD, &handle, None), capped(&body, &handle, self.config().reply_cap));
         let mut out = self.send_wake(&w.thread, &msg, &handle).await?;
+        if out["delivery"] == "noted" {
+            return Ok(None);
+        }
         self.store.waiting_resolve_seq(BOARD, card.seq, Some(&format!("answered: {text}")), &self.now())?;
         let note =
             format!("the board's answer {} on card {} went straight to {} ({handle})", json!(text), card.id, w.label);
@@ -2453,6 +2462,7 @@ impl Wf {
             ln.gate_since = None;
             ln.paused_at = None;
             self.store.link_save(&ln)?;
+            self.store.outbox_drop_to(&ln.child)?;
             self.resolve_ticket_cards(&ln.child, "ticket closed from the board")?;
             self.flow_soon();
             ln.label
