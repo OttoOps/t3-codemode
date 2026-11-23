@@ -1192,6 +1192,18 @@ impl Store {
         row.map(|(open, d)| Ok((open, serde_json::from_str(&d)?))).transpose()
     }
 
+    pub fn ask_of_thread(&self, thread: &str) -> Result<Option<(i64, bool, Value)>> {
+        let row: Option<(i64, bool, String)> = self.with(|c| {
+            c.query_row(
+                "SELECT seq, open, data FROM asks WHERE thread = ?1 ORDER BY seq DESC LIMIT 1",
+                params![thread],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+        })?;
+        row.map(|(seq, open, d)| Ok((seq, open, serde_json::from_str(&d)?))).transpose()
+    }
+
     pub fn ask_thread(&self, thread: &str) -> Result<bool> {
         self.with(|c| {
             c.query_row("SELECT EXISTS (SELECT 1 FROM asks WHERE thread = ?1)", params![thread], |r| r.get(0))

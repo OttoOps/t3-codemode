@@ -285,6 +285,123 @@ async fn launch_ticket_maps_the_repo_to_a_project_and_preregisters_the_link() {
     assert_eq!(h.app.store.link_get("launch:1").unwrap().unwrap().params.down, 75);
 }
 
+fn dispatch_projects(h: &H) {
+    let mut codemode = project("p-codemode", "/src/t3-codemode");
+    codemode["title"] = json!("t3-codemode");
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets"), codemode]);
+    h.remotes.set("/src/t3-codemode", "git@github.com:Acme/t3-codemode.git");
+}
+
+#[tokio::test]
+async fn dispatch_launches_the_request_in_the_named_project_and_it_joins_the_board() {
+    let h = H::new();
+    dispatch_projects(&h);
+    let out = h
+        .exec("async () => wf.dispatch({ project: 'T3-Codemode', request: 'Cut a new release for t3-codemode.', title: 'release' })")
+        .await;
+    let r = result(&out);
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["label"], "t3-codemode: release");
+    assert_eq!(r["projectId"], "p-codemode");
+    assert_eq!(r["thread"], "launch:1");
+    assert_eq!(r["modelSource"], "default");
+    let l = &h.fake.launched()[0];
+    assert_eq!(l["projectId"], "p-codemode");
+    assert_eq!(l["title"], "t3-codemode: release");
+    assert_eq!(l["modelSelection"]["model"], "claude-opus-5-5");
+    let msg = l["message"].as_str().unwrap();
+    assert!(msg.starts_with("Cut a new release for t3-codemode.\n\n## t3-codemode link\n"), "{msg}");
+    assert!(msg.contains(r#"wf.join({ parent: "board", label: "t3-codemode: release", role: "ticket" })"#), "{msg}");
+    assert!(!msg.contains("t3-ticket skill"), "{msg}");
+    let pending = h.app.store.pending_all().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!((pending[0].parent.as_str(), pending[0].label.as_str()), (BOARD, "t3-codemode: release"));
+    assert_eq!(pending[0].thread.as_deref(), Some("launch:1"));
+    h.wf("launch:1", "join", json!({"parent": BOARD, "label": "t3-codemode: release", "role": "ticket"})).await;
+    assert!(h.app.store.pending_all().unwrap().is_empty());
+    let b = h.wf(BOSS, "board", json!({"parent": BOARD})).await;
+    assert_eq!(b["children"][0]["label"], "t3-codemode: release");
+    assert_eq!(b["children"][0]["thread"], "launch:1");
+}
+
+#[tokio::test]
+async fn dispatch_suffixes_a_label_already_on_the_board() {
+    let h = H::new();
+    dispatch_projects(&h);
+    let go = "async () => wf.dispatch({ project: 'p-codemode', request: 'Cut a new release.', title: 'release' })";
+    assert_eq!(result(&h.exec(go).await)["label"], "t3-codemode: release");
+    assert_eq!(result(&h.exec(go).await)["label"], "t3-codemode: release (2)");
+    h.wf("launch:1", "join", json!({"parent": BOARD, "label": "t3-codemode: release", "role": "ticket"})).await;
+    h.wf("launch:1", "send", json!({"kind": "handoff", "body": "done"})).await;
+    assert_eq!(result(&h.exec(go).await)["label"], "t3-codemode: release (3)");
+    let l = &h.fake.launched()[2];
+    assert!(l["message"].as_str().unwrap().contains(r#"label: "t3-codemode: release (3)""#));
+}
+
+#[tokio::test]
+async fn dispatch_without_a_title_labels_by_the_request() {
+    let h = H::new();
+    dispatch_projects(&h);
+    let r = result(
+        &h.exec("async () => wf.dispatch({ project: 'p-widgets', request: '  Bump   the grader to v2 and open a PR for it  ' })")
+            .await,
+    );
+    assert_eq!(r["label"], "p-widgets: Bump the grader to v2 and");
+    assert!(
+        h.fake.launched()[0]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("  Bump   the grader to v2 and open a PR for it  \n\n")
+    );
+}
+
+#[tokio::test]
+async fn dispatch_to_an_unknown_project_launches_nothing() {
+    let h = H::new();
+    dispatch_projects(&h);
+    let out = h.exec("async () => wf.dispatch({ project: 'gadgets', request: 'Cut a release.' })").await;
+    assert!(err_text(&out).contains(r#"no T3 project with id or title "gadgets""#), "{}", out.text);
+    let out = h.exec("async () => wf.dispatch({ project: 'p-widgets', request: '   ' })").await;
+    assert!(err_text(&out).contains("request must not be empty"), "{}", out.text);
+    assert!(h.fake.launched().is_empty());
+    assert!(h.app.store.pending_all().unwrap().is_empty());
+    assert!(cards(&h).is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_dispatch_launch_frees_its_label_and_leaves_an_error_card() {
+    let h = H::new();
+    dispatch_projects(&h);
+    h.fake.set_launch_fails(true);
+    let out =
+        h.exec("async () => wf.dispatch({ project: 'p-codemode', request: 'Cut a release.', title: 'release' })").await;
+    assert!(err_text(&out).contains("Launching t3-codemode: release failed"), "{}", out.text);
+    assert!(h.app.store.pending_all().unwrap().is_empty());
+    let c = cards(&h);
+    assert_eq!(c.len(), 1);
+    assert_eq!(c[0]["kind"], "error");
+    assert_eq!(c[0]["label"], "t3-codemode: release");
+}
+
+#[tokio::test]
+async fn an_ask_that_dispatches_records_the_launched_thread() {
+    let h = H::new();
+    dispatch_projects(&h);
+    h.app.wf.ask("Cut a new release for t3-codemode").await.unwrap();
+    let r = result(
+        &h.exec_as("launch:1", "async () => wf.dispatch({ project: 't3-codemode', request: 'Cut a new release for t3-codemode', title: 'release' })")
+            .await,
+    );
+    assert_eq!(r["thread"], "launch:2");
+    let asks = h.app.wf.asks().unwrap();
+    assert_eq!(
+        asks[0]["dispatched"],
+        json!({"thread": "launch:2", "link": r["link"], "projectId": "p-codemode", "label": "t3-codemode: release"})
+    );
+    result(&h.exec_as(WORKER, "async () => wf.dispatch({ project: 'p-widgets', request: 'Tidy up.' })").await);
+    assert_eq!(h.app.wf.asks().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn an_unmapped_repo_leaves_an_error_card() {
     let h = H::new();

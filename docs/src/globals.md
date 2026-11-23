@@ -105,8 +105,8 @@ parent and a child, and the service keeps every link and message in its store.
   entry fails the send. A thread parent gets only the body.
 - `wf.reply`, `wf.gate`, `wf.close`, `wf.inbox`, `wf.show`, `wf.board`,
   `wf.adopt` and `wf.sweep` cover the rest of a link's life.
-- `wf.launchTicket`, `wf.cards`, `wf.answer` and `wf.feed` work with the
-  [board](board.md).
+- `wf.launchTicket`, `wf.dispatch`, `wf.cards`, `wf.answer` and `wf.feed` work
+  with the [board](board.md).
 - `wf.issue({ url, title?, note? })` reports a GitHub issue the calling thread
   just filed. The board lists it under [new issues](board.md#new-issues) with
   the filing thread and the time. The call needs the caller's thread id but no
