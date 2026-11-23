@@ -1847,4 +1847,5 @@ async fn a_pre_tracking_merge_with_a_later_ready_card_does_not_trigger_after_mer
     );
     assert!(h.sent().is_empty(), "pre-tracking merge must not wake worker or ticket: {:?}", h.sent());
     assert_eq!(cards(&h, false).len(), 1, "ready card created after the pre-tracking merge must stay untouched");
+    assert_eq!(h.app.wf.reach().count(t3_codemode::reach::ReachPoint::MergeEventPredatesTracking), 1);
 }

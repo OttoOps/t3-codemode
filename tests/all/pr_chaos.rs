@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use t3_codemode::board::{BOARD, CardRef};
 use t3_codemode::clock::{Clock, iso, plus_minutes};
 use t3_codemode::fake::{check_run, github_pr, project, pull_request, thread};
+use t3_codemode::reach::ReachSnapshot;
 use t3_codemode::store::{MergeWait, WaitStatus};
 
 fn same_head(a: &str, b: &str) -> bool {
@@ -366,14 +367,7 @@ fn chaos_seeds(default: usize) -> usize {
 #[tokio::test]
 async fn seeded_sequential_chaos_holds_all_invariants() {
     let seeds = chaos_seeds(60);
-    let mut advance_merges = 0usize;
-    let mut advance_enqueues = 0usize;
-    let mut reassigned_id_rejects = 0usize;
-    let mut predates_finished_reconciled = 0usize;
-    let mut after_finished_reconciled = 0usize;
-    let mut predates_removed_reconciled = 0usize;
-    let mut after_removed_reconciled = 0usize;
-    let mut dismiss_at_calls = 0usize;
+    let mut reach = ReachSnapshot::default();
     for seed in 0..seeds as u64 {
         let mut rng = Rng::new(seed);
         let (h, mut gh) = setup_chaos();
@@ -514,14 +508,14 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
                                     0 => {
                                         m.state = "MERGED";
                                         m.queued = false;
-                                        let predates = rng.pick(3) == 0;
+                                        let predates = rng.coin();
                                         m.ended_at =
                                             Some(if predates { before_tracking(t0) } else { clock_now(&h) });
                                     }
                                     1 => {
                                         m.state = "CLOSED";
                                         m.queued = false;
-                                        let predates = rng.pick(3) == 0;
+                                        let predates = rng.coin();
                                         m.ended_at =
                                             Some(if predates { before_tracking(t0) } else { clock_now(&h) });
                                     }
@@ -570,9 +564,6 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
                                             seen.since,
                                             trace.join("\n")
                                         );
-                                        predates_finished_reconciled += 1;
-                                    } else if reported {
-                                        after_finished_reconciled += 1;
                                     }
                                 }
                                 if seen.state == "OPEN"
@@ -600,9 +591,6 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
                                              actions={actions:?}\nseed={seed}\n{}",
                                             trace.join("\n")
                                         );
-                                        predates_removed_reconciled += 1;
-                                    } else if reported {
-                                        after_removed_reconciled += 1;
                                     }
                                 }
                             }
@@ -703,6 +691,7 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
                             if rng.coin() {
                                 let ans = c.options.first().map(String::as_str).unwrap_or("ok");
                                 let _ = h.app.wf.answer(&c.id, ans).await;
+                                pull_gh_mutations(&h, &mut gh);
                                 trace.push(format!("#{step} answer {} with {ans:?}", c.id));
                             } else {
                                 let res = h
@@ -716,7 +705,6 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
                                     c.id,
                                     trace.join("\n")
                                 );
-                                dismiss_at_calls += 1;
                                 trace.push(format!("#{step} dismiss_at {}", c.id));
                             }
                         }
@@ -923,6 +911,7 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
                                 .collect();
                             let opt = chosen.options.first().map(String::as_str).unwrap_or("merge");
                             let _ = h.app.wf.answer(&chosen.id, opt).await;
+                            pull_gh_mutations(&h, &mut gh);
                             let _ = h.wf(&ticket, "gate", json!({"clear": true})).await;
                             trace.push(format!(
                                 "#{step} answer ready {} ({opt}) + {ticket} gate clear (others={others:?})",
@@ -946,38 +935,13 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
             assert!(res.is_ok(), "step timed out (possible deadlock) at seed={seed}\n{}", trace.join("\n"));
             assert_invariants(&h, seed, &trace, &closed_workers, healthy_reconcile, &gh);
         }
-        let (merges, enqueues) = advance_mutations(&h);
-        advance_merges += merges;
-        advance_enqueues += enqueues;
-        reassigned_id_rejects += h
-            .app
-            .store
-            .waiting_data(BOARD, true)
-            .unwrap()
-            .into_iter()
-            .filter(|(item, _, _, _)| item.text.contains("is no longer the pull request that was approved"))
-            .count();
+        reach.merge(&h.app.wf.reach().snapshot());
+    }
+    if std::env::var_os("CHAOS_REACH").is_some() {
+        eprintln!("{reach}");
     }
     if seeds >= 60 {
-        assert!(
-            advance_merges > 0 && advance_enqueues > 0,
-            "expected reconcile::advance to exercise both merge and enqueue across {seeds} seeds \
-             (merges={advance_merges}, enqueues={advance_enqueues})"
-        );
-        assert!(
-            reassigned_id_rejects > 0,
-            "expected deliberate reassigned-ID mismatch branch to fire across {seeds} seeds"
-        );
-        assert!(
-            predates_finished_reconciled > 0
-                && after_finished_reconciled > 0
-                && predates_removed_reconciled > 0
-                && after_removed_reconciled > 0,
-            "expected both pre-tracking and after-tracking GitHub events to be reconciled across {seeds} seeds \
-             (predates_finished={predates_finished_reconciled}, after_finished={after_finished_reconciled}, \
-              predates_removed={predates_removed_reconciled}, after_removed={after_removed_reconciled})"
-        );
-        assert!(dismiss_at_calls > 0, "expected op 11 dismiss_at path to run across {seeds} seeds");
+        reach.assert_tier1(&format!("seeded_sequential_chaos ({seeds} seeds)"));
     }
 }
 

@@ -8,6 +8,7 @@ use crate::board::{BOARD, Card, NewCard, gh_name, parse_github_issue_only};
 use crate::clock::{local_clock, parse_ts};
 use crate::github::errors;
 use crate::merge::{CHECKS, ENQUEUE_PR, MERGE_PR, Ready, checks, ready};
+use crate::reach::ReachPoint;
 use crate::store::{MergeWait, PrSeen, WaitStatus, Wake};
 use crate::wf::{Wf, header};
 
@@ -374,6 +375,7 @@ impl Wf {
             if !due {
                 continue;
             }
+            self.reach.hit(ReachPoint::ReadyWaitingRetried);
             match self.retry_ready(&worker, &p).await {
                 Ok((action, told)) => {
                     pass.actions.push(action);
@@ -572,6 +574,9 @@ impl Wf {
             let status = wait.as_ref().map(|w| w.status);
             let prev = self.store.pr_seen_get(&t.repo, t.number)?;
             let live_tickets = self.live_tickets(t, &cards, wait.as_ref(), prev.as_ref(), floor)?;
+            if self.reach.take_adopted(&t.repo, t.number, &live_tickets) {
+                self.reach.hit(ReachPoint::ReconcileAdoptedPr);
+            }
             let since = live_tickets
                 .iter()
                 .map(|(_, s)| s.as_str())
@@ -672,14 +677,6 @@ impl Wf {
     ) -> Result<Option<crate::merge_answer::Answered>> {
         let merged = o.state == "MERGED";
         let end = o.ended.clone().unwrap_or_else(|| self.now());
-        let code = match merged {
-            true if later(&end, since) => self.code_merged(&t.repo, t.number, &o.head, cards)?,
-            true => None,
-            false => {
-                self.answered_drop(&t.repo, t.number)?;
-                None
-            }
-        };
         let when = local_clock(&end);
         let note = if merged {
             format!("merged on GitHub at {}, {when}", short(&o.commit))
@@ -688,6 +685,14 @@ impl Wf {
         };
         let stale: Vec<&Card> =
             cards.iter().filter(|c| parse_ts(&c.at).zip(parse_ts(&end)).is_none_or(|(a, e)| a <= e)).collect();
+        let code = match merged {
+            true if later(&end, since) => self.code_merged(&t.repo, t.number, &o.head, cards)?,
+            true => None,
+            false => {
+                self.answered_drop(&t.repo, t.number)?;
+                None
+            }
+        };
         let event = match (merged, o.commit.as_str()) {
             (true, "") => format!("merged:{end}"),
             (true, commit) => format!("merged:{commit}"),
@@ -705,6 +710,13 @@ impl Wf {
             format!("{} was closed on GitHub without merging, {when}. {}", t.label(), t.url())
         };
         let targets: Vec<&str> = live_tickets.iter().filter(|(_, s)| later(&end, s)).map(|(x, _)| x.as_str()).collect();
+        if !later(&end, since) {
+            self.reach.hit(if merged {
+                ReachPoint::MergeEventPredatesTracking
+            } else {
+                ReachPoint::CloseEventPredatesTracking
+            });
+        }
         let mut told = 0;
         for ticket in &targets {
             if code.as_ref().is_some_and(|c| c.ticket == *ticket) {
@@ -731,6 +743,9 @@ impl Wf {
             self.feed_note(who, &format!("{}: {note}", t.label()))?;
         }
         if told > 0 || on_feed || resolved > 0 || code.is_some() {
+            if later(&end, since) {
+                self.reach.hit(ReachPoint::FinishedEventReported);
+            }
             pass.actions.push(format!("{} {note}", t.label()));
         }
         Ok(code)
@@ -793,6 +808,7 @@ impl Wf {
                     short(base)
                 );
                 self.resolve_releasing(&[c.seq], &[ticket], &note)?;
+                self.reach.hit(ReachPoint::ReadyCardDroppedHeadMoved);
                 pass.woken.extend(self.release_ready_worker(ticket, &t.repo, t.number, &o.head)?);
                 self.feed_note(
                     Some(ticket),
@@ -855,6 +871,7 @@ impl Wf {
                 if !w.pull_request_id.is_empty() && w.pull_request_id == o.id {
                     return Ok(Some(w));
                 }
+                self.reach.hit(ReachPoint::ReassignedIdRejected);
                 let ask = Ask {
                     what: format!("{} is no longer the pull request that was approved", t.label()),
                     reply: "reply \"merge\" to approve it again, or \"hold\" to leave it",
@@ -916,7 +933,11 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
             return Ok(false);
         };
         let newest = self.store.merge_wait_get(&t.repo, t.number)?;
-        if !later(at, after) || newest.is_some_and(|w| parse_ts(&w.at).zip(parse_ts(at)).is_some_and(|(w, r)| w > r)) {
+        if !later(at, after) {
+            self.reach.hit(ReachPoint::QueueDropPredatesTracking);
+            return Ok(false);
+        }
+        if newest.is_some_and(|w| parse_ts(&w.at).zip(parse_ts(at)).is_some_and(|(w, r)| w > r)) {
             return Ok(false);
         }
         let why = why_dropped(reason);
@@ -932,6 +953,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
             &why,
             pass,
         )? {
+            self.reach.hit(ReachPoint::QueueDropReported);
             let this_pr = |c: &Card| c.pr.as_ref().is_some_and(|p| p.repo == t.repo && p.number == t.number);
             let note = format!("GitHub recorded the reason: {why}");
             self.resolve_cards(|c| c.kind == "report" && this_pr(c) && c.text.contains(NO_REASON), &note)?;
@@ -1074,6 +1096,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         if !self.store.merge_wait_swap(&sent)? {
             return Ok(());
         }
+        self.reach.hit(if o.queue { ReachPoint::AdvanceEnqueued } else { ReachPoint::AdvanceMerged });
         if o.queue
             && let Some(mut seen) = self.store.pr_seen_get(&t.repo, t.number)?
         {

@@ -17,6 +17,7 @@ use crate::config::{CLOSING, Config, LinkParams, UP_KINDS};
 use crate::github::GitHub;
 use crate::issues::IssueArgs;
 use crate::merge::MergeArgs;
+use crate::reach::{Reach, ReachPoint};
 use crate::store::{Bind, Identity, Link, Pending, PrBrief, Store};
 use crate::t3::{T3Client, T3Error};
 use crate::tokens::{T3Tokens, TokenSource};
@@ -317,6 +318,7 @@ pub struct Wf {
     pub(crate) state_rev: AtomicU64,
     pub(crate) context_writes: Mutex<()>,
     pub(crate) routing: Mutex<Option<Value>>,
+    pub(crate) reach: Reach,
 }
 
 const MAX_PR_PAGES: usize = 20;
@@ -380,7 +382,12 @@ impl Wf {
             state_rev: AtomicU64::new(rev),
             context_writes: Mutex::new(()),
             routing: Mutex::new(None),
+            reach: Reach::new(),
         }
+    }
+
+    pub fn reach(&self) -> &Reach {
+        &self.reach
     }
 
     pub fn config(&self) -> Arc<Config> {
@@ -927,8 +934,8 @@ impl Wf {
                 self.flow_soon();
             }
             self.store.link_save(&ln)?;
-            if closing {
-                self.store.outbox_drop_to(&ln.child)?;
+            if closing && self.store.outbox_drop_to(&ln.child)? > 0 {
+                self.reach.hit(ReachPoint::OutboxHeldThenClosed);
             }
             return self.board_receive(&ln, &a.kind, &handle, &a.body, options);
         }
@@ -944,8 +951,8 @@ impl Wf {
             capped(&a.body, &handle, policy.body_cap)
         );
         self.store.link_save(&ln)?;
-        if closing {
-            self.store.outbox_drop_to(&ln.child)?;
+        if closing && self.store.outbox_drop_to(&ln.child)? > 0 {
+            self.reach.hit(ReachPoint::OutboxHeldThenClosed);
         }
         let mut out = self.send_wake(&ln.parent, &text, &handle).await?;
         if closing {
@@ -1131,6 +1138,7 @@ impl Wf {
                     .flatten()
             });
             if let Some(next_pr) = next_ready {
+                self.reach.hit(ReachPoint::GateClearPreservedReadyCard);
                 ln.gate = Some("merge".into());
                 ln.gate_since = Some(self.now());
                 ln.gate_pr = Some(next_pr);
@@ -1191,7 +1199,9 @@ impl Wf {
         ln.gate_since = None;
         ln.gate_pr = None;
         self.store.link_save(&ln)?;
-        self.store.outbox_drop_to(&ln.child)?;
+        if self.store.outbox_drop_to(&ln.child)? > 0 {
+            self.reach.hit(ReachPoint::OutboxHeldThenClosed);
+        }
         if ln.parent == BOARD {
             self.flow_soon();
         } else {
@@ -1314,6 +1324,9 @@ impl Wf {
         }
         let open_cards = self.cards()?;
         for (repo, number) in &seen_prs {
+            if me != BOARD && me != from {
+                self.reach.note_adopted(repo, *number, me);
+            }
             let Some(mut seen) = self.store.pr_seen_get(repo, *number)? else { continue };
             let Some(pos) = seen.tickets.iter().position(|(x, _)| x == from) else { continue };
             let still_tracked_by_from =
@@ -1352,6 +1365,18 @@ impl Wf {
             });
         let has_ready_merge = moved_merge_pr.is_some();
         if has_ready_merge {
+            let me_ready = open_cards
+                .iter()
+                .filter(|c| {
+                    c.kind == "gate"
+                        && c.worker.is_none()
+                        && c.ticket.as_deref() == Some(me)
+                        && c.pr.as_ref().is_some_and(|p| p.ready)
+                })
+                .count();
+            if me_ready >= 2 {
+                self.reach.hit(ReachPoint::TwoReadyCardsOneTicket);
+            }
             self.store.waiting_resolve_releasing(BOARD, &[], &[from], "moved to the adopting ticket", &self.now())?;
             self.sync_merge_gate_pr(from)?;
             if let Some(mut t) = heir.filter(|t| !t.closed)
@@ -1497,6 +1522,7 @@ impl Wf {
             if self.store.link_get(&to)?.is_some_and(|l| l.closed) {
                 let (keep, drop): (Vec<_>, Vec<_>) = items.into_iter().partition(|i| i.allow_closed);
                 if !drop.is_empty() {
+                    self.reach.hit(ReachPoint::OutboxHeldThenClosed);
                     let drop_ids: Vec<i64> = drop.iter().map(|i| i.id).collect();
                     let drop_handles: Vec<String> = drop.into_iter().map(|i| i.handle).collect();
                     self.store.outbox_delete(&drop_ids)?;
@@ -1582,7 +1608,9 @@ impl Wf {
                 ln.gate = None;
                 ln.gate_since = None;
                 ln.gate_pr = None;
-                self.store.outbox_drop_to(&ln.child)?;
+                if self.store.outbox_drop_to(&ln.child)? > 0 {
+                    self.reach.hit(ReachPoint::OutboxHeldThenClosed);
+                }
                 let body = format!("{}'s thread is gone; its link is closed.", ln.label);
                 let h = self.store.msg_new(WATCHER, &ln.parent, "note", &body, &now)?;
                 if ln.parent == BOARD {
@@ -1604,7 +1632,9 @@ impl Wf {
             ln.gate = None;
             ln.gate_since = None;
             ln.gate_pr = None;
-            self.store.outbox_drop_to(&ln.child)?;
+            if self.store.outbox_drop_to(&ln.child)? > 0 {
+                self.reach.hit(ReachPoint::OutboxHeldThenClosed);
+            }
             if ln.parent == BOARD {
                 self.flow_soon();
                 self.resolve_ticket_cards(&ln.child, "ticket archived")?;
