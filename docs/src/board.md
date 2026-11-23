@@ -109,6 +109,9 @@ to filter the board to its tickets, and click it again to clear that filter.
   project fits, or more than one could, the answer asks which one and nothing
   is launched. The scratch thread writes its answer under Ask, and then gets
   archived.
+- **Launch routing,** under Launch and Ask, collapsed until you open it: where
+  ticket launches go, over a time range you pick.
+  [The routing panel](#the-routing-panel) covers what it shows.
 
 Times show as ages (`36m`, `1h 32m`); hover one for the local time.
 
@@ -267,10 +270,11 @@ the default.
 A dot before each member shows its state: filled green for ready, amber for
 held at its reserve, a red square for limited, grey for disabled or unable to
 run its model, and a grey ring when T3 did not answer. Hovering over or
-focusing the indicator, or tapping it on a phone, opens a tooltip with the
-strategy, what the shares count, and each member's state, reason, running
-threads and limit reset time. Escape or a click elsewhere closes it. On a
-narrow screen the indicator shrinks to the arrow and the top member, or the
+focusing the indicator opens a tooltip with the strategy, what the shares
+count, and each member's state, reason, running threads and limit reset time.
+Escape or a click elsewhere closes it, and clicking or tapping the indicator
+opens the [routing panel](#the-routing-panel). On a narrow screen the
+indicator shrinks to the arrow and the top member, or the
 instance alone without a pool. When the members do not fit in the header,
 the line is cut off at the right, and the tooltip still lists every member.
 
@@ -278,6 +282,43 @@ The watcher refreshes the indicator on each pass and pushes it to the page
 over `/api/events` when a share, state or running count changes, so it
 updates without a reload. [`wf.usageStats`](globals.md#wf) and
 `GET /api/usage-stats` return the same view for any window.
+
+### The routing panel
+
+The Launch routing panel shows the same routing over a time range you pick.
+It starts collapsed, and clicking the header indicator opens it. On a wide
+screen it sits under Launch and Ask and moves, collapses and resizes like the
+other panels. On a narrower screen it sits under Up next in the Tickets column
+and has its own Show and Hide button. This browser remembers whether the
+panel is open and which range it shows.
+
+- **Time range.** 1h, 24h, 7d or All, with 24h as the default. All covers
+  every pick the store keeps.
+- **Totals.** The picks in the range, any picks by former members, and the
+  threads running now. With no picks in the range, the totals say the share is
+  the configured weight.
+- **Members.** One row per member, largest share first. Each row has the state
+  dot, the share and its bar, the state, picks, running threads, and usage
+  left once a usage source reports it. A limited member shows when its limit
+  resets and why. Below that, the row counts the reasons picks chose the
+  member, which are weight, priority, cheapest, last resort and moved, and the
+  reasons picks passed it over, such as limited, at reserve and disabled.
+- **Picks over time.** 24 bars across the range, each stacked by member, with
+  a key.
+- **Pick and skip reasons.** The same counts for the whole pool.
+- **Running now.** Running threads per instance, from the live board state.
+- **Recent picks.** The last five, with the time, instance and reason.
+
+Without a pool, the panel names the one instance with its model, effort and
+running threads, and shows no chart.
+
+The panel reads `GET /api/usage-stats?window=` when it opens, when you pick
+another range, and when the routing in the board state changes, so a new
+pick, a limit or a change in running threads shows without a reload. The
+running counts always come from the live board state, even when a read fails.
+A collapsed panel reads nothing, and the panel stays hidden until the
+watcher's first routing pass. A failed read shows under the panel with a Retry
+button.
 
 ## Reply buttons
 
@@ -1195,7 +1236,7 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `POST /api/cards/{id}/dismiss` | Resolve without messaging |
 | `POST /api/launch` `{issues: [...]}` | `wf.launchTicket` for each (at most 20) |
 | `POST /api/ask` `{question}` | Ask a scratch thread about the board, or for work it launches with `wf.dispatch`, using `board.askPool` or `board.askInstanceId`/`askModel`/`askEffort`; returns the ask view with `instanceId`, `model`, `effort`, `modelSource` (and `pool`, `reason` for pools) |
-| `GET /api/usage-stats?window=` | The `wf.usageStats({ window })` view of [launch routing](#launch-routing), computed fresh. `window` is optional: `all`, or a count of `m`, `h` or `d` such as `24h` (the default), and may be percent-encoded. Any other query parameter, a repeated `window`, or a bad duration is a 400 |
+| `GET /api/usage-stats?window=` | The `wf.usageStats({ window })` view of [launch routing](#launch-routing), computed fresh, which the [routing panel](#the-routing-panel) reads. `window` is optional: `all`, or a count of `m`, `h` or `d` such as `24h` (the default), and may be percent-encoded. Any other query parameter, a repeated `window`, or a bad duration is a 400 |
 | `GET /api/models` | Current ticket and ask model resolution (`ticket`, `ask`), enabled providers/models/efforts from `orchestrator_capabilities` (`providers`), configured pools (`pools`), and per-project repo overrides (`repoOverrides`) |
 | `PUT /api/models/ticket` `{mode, ...}` | Persist `models.ticket` to the user workflow config (`mode: "model"` with `provider`, `model`, `effort?`, or `mode: "pool"` with `pool`) after validating against live capabilities or configured pools; returns the updated `/api/models` view |
 | `PUT /api/models/ask` `{mode, ...}` | Persist the ask box mode to t3cm's `config.json` (`board.askInstanceId`/`askModel`/`askEffort` or `board.askPool`) and apply it live with no restart; returns the updated `/api/models` view |
