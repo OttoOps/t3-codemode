@@ -15,7 +15,8 @@ each new card while the tab is hidden.
 ## What the page shows
 
 The page has three panels under a header that counts the cards waiting on you
-and the threads running. Only the lists scroll.
+and the threads running, and shows where the next ticket launch goes, as
+[Launch routing](#launch-routing) describes. Only the lists scroll.
 
 Between the header and the filter bar, the pulse strip counts the open tickets
 in five slots, as [The pulse strip](#the-pulse-strip) describes. Click a slot
@@ -247,6 +248,36 @@ drifted and lists each command that fixes it, such as `t3cm skills update` or
 `run setup-t3-workflow: new slot models`, each with a copy button. The button
 goes away on the next check after the fix. A machine with no skills installed
 shows nothing.
+
+## Launch routing
+
+To the right of the connection status, the header shows where board ticket
+launches go. It follows the ticket model the board resolves: `models.ticket`
+in the user config, else legacy `board.pool` or the board ticket keys, else
+the default.
+
+- **With a pool**, it lists each member with its share of the last 24 hours'
+  picks, largest first, such as `→ claude-b 75% · claude-a 25%`. When the
+  pool made no picks in that time, the share is the member's configured
+  weight. A limited member also shows its reset time, as in
+  `claude-a 25% until 21:00`.
+- **Without a pool**, it names the one instance, model and effort launches
+  run on, such as `→ claudeAgent · claude-opus-5-5 · high (no pool)`.
+
+A dot before each member shows its state: filled green for ready, amber for
+held at its reserve, a red square for limited, grey for disabled or unable to
+run its model, and a grey ring when T3 did not answer. Hovering over or
+focusing the indicator, or tapping it on a phone, opens a tooltip with the
+strategy, what the shares count, and each member's state, reason, running
+threads and limit reset time. Escape or a click elsewhere closes it. On a
+narrow screen the indicator shrinks to the arrow and the top member, or the
+instance alone without a pool. When the members do not fit in the header,
+the line is cut off at the right, and the tooltip still lists every member.
+
+The watcher refreshes the indicator on each pass and pushes it to the page
+over `/api/events` when a share, state or running count changes, so it
+updates without a reload. [`wf.usageStats`](globals.md#wf) and
+`GET /api/usage-stats` return the same view for any window.
 
 ## Reply buttons
 
@@ -1157,13 +1188,14 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `GET /icon.svg`, `/icon-192.png`, `/icon-512.png` | Embedded board icons for browser tabs, notifications, and Add to Home Screen (same board auth guards) |
 | `GET /pair` | Remote browser pairing page (enabled when `board.remote.mode` is `"pairing"`, or `"tailscale"` with `requirePairing: true`); reads the token from `#<token>`, clears the fragment, and posts to `POST /api/pair` |
 | `POST /api/pair` `{token, label?}` | Redeem a single-use 5-minute pairing token (`Content-Type: application/json`) over the remote HTTPS origin and set a 30-day `HttpOnly; Secure; SameSite=Strict; Path=/` session cookie |
-| `GET /api/state` | `{rev, cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, flow, flowMaxTickets, counts, service}`, with `counts.newIssues`. `flow` is `true` when the config has a `flow` block. `flowMaxTickets` is that block's `maxTickets`, or `null` without one. `rev` is the board revision: it goes up with every change, keeps going up across a restart, and a state whose `rev` is at least a write's `rev` already holds that write; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. A ticket's or worker's open `pr` carries `readiness` once a [GitHub reconcile](#github-reconcile) has read it open: `isDraft`, `mergeStateStatus` and `reviewDecision` as GitHub gives them, and `checks`. `reviewDecision` is `null` when the repository requires no review. `checks` is `failing` when a check at the head failed, `pending` while one runs, `passing` when every check succeeded or was cancelled, skipped or neutral, and `null` when the head has no checks or has more than 100 and none of the first 100 failed. A pull request that no reconcile has read yet has no `readiness`. Tickets and workers carry `paused`, `pausedAt` while paused, and `status: "paused"` in place of `idle` ([pausing](#pausing)). Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` while `updateCheck` is `false` or until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
+| `GET /api/state` | `{rev, cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, flow, flowMaxTickets, counts, service, routing}`, with `counts.newIssues`. `flow` is `true` when the config has a `flow` block. `flowMaxTickets` is that block's `maxTickets`, or `null` without one. `routing` is the [launch routing](#launch-routing) view from the watcher's last pass, the `wf.usageStats()` result for the default 24-hour window, or `null` before the first pass. `rev` is the board revision: it goes up with every change, keeps going up across a restart, and a state whose `rev` is at least a write's `rev` already holds that write; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. A ticket's or worker's open `pr` carries `readiness` once a [GitHub reconcile](#github-reconcile) has read it open: `isDraft`, `mergeStateStatus` and `reviewDecision` as GitHub gives them, and `checks`. `reviewDecision` is `null` when the repository requires no review. `checks` is `failing` when a check at the head failed, `pending` while one runs, `passing` when every check succeeded or was cancelled, skipped or neutral, and `null` when the head has no checks or has more than 100 and none of the first 100 failed. A pull request that no reconcile has read yet has no `readiness`. Tickets and workers carry `paused`, `pausedAt` while paused, and `status: "paused"` in place of `idle` ([pausing](#pausing)). Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` while `updateCheck` is `false` or until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
 | `GET /api/events` | SSE: a `state` event on every change, carrying the same `rev` (closes when a remote pairing session is revoked or expires, or when a Tailscale login is no longer allowed) |
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it; a flow launch card takes `launch` or `skip` instead ([The flow](#the-flow)) |
 | `POST /api/cards/{id}/dismiss` | Resolve without messaging |
 | `POST /api/launch` `{issues: [...]}` | `wf.launchTicket` for each (at most 20) |
 | `POST /api/ask` `{question}` | Ask a scratch thread about the board, or for work it launches with `wf.dispatch`, using `board.askPool` or `board.askInstanceId`/`askModel`/`askEffort`; returns the ask view with `instanceId`, `model`, `effort`, `modelSource` (and `pool`, `reason` for pools) |
+| `GET /api/usage-stats?window=` | The `wf.usageStats({ window })` view of [launch routing](#launch-routing), computed fresh. `window` is optional: `all`, or a count of `m`, `h` or `d` such as `24h` (the default), and may be percent-encoded. Any other query parameter, a repeated `window`, or a bad duration is a 400 |
 | `GET /api/models` | Current ticket and ask model resolution (`ticket`, `ask`), enabled providers/models/efforts from `orchestrator_capabilities` (`providers`), configured pools (`pools`), and per-project repo overrides (`repoOverrides`) |
 | `PUT /api/models/ticket` `{mode, ...}` | Persist `models.ticket` to the user workflow config (`mode: "model"` with `provider`, `model`, `effort?`, or `mode: "pool"` with `pool`) after validating against live capabilities or configured pools; returns the updated `/api/models` view |
 | `PUT /api/models/ask` `{mode, ...}` | Persist the ask box mode to t3cm's `config.json` (`board.askInstanceId`/`askModel`/`askEffort` or `board.askPool`) and apply it live with no restart; returns the updated `/api/models` view |

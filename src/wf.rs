@@ -129,6 +129,12 @@ struct CardsArgs {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+struct UsageStatsArgs {
+    window: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct FeedArgs {
     limit: Option<usize>,
     context: Option<String>,
@@ -265,6 +271,7 @@ pub struct Wf {
     pub(crate) models_session: String,
     pub(crate) state_rev: AtomicU64,
     pub(crate) context_writes: Mutex<()>,
+    pub(crate) routing: Mutex<Option<Value>>,
 }
 
 const MAX_PR_PAGES: usize = 20;
@@ -323,6 +330,7 @@ impl Wf {
             models_session: crate::board::random_id(),
             state_rev: AtomicU64::new(rev),
             context_writes: Mutex::new(()),
+            routing: Mutex::new(None),
         }
     }
 
@@ -452,7 +460,16 @@ impl Wf {
         if out.is_ok()
             && !matches!(
                 method,
-                "show" | "inbox" | "board" | "cards" | "feed" | "waiting.list" | "pools" | "status" | "flow"
+                "show"
+                    | "inbox"
+                    | "board"
+                    | "cards"
+                    | "feed"
+                    | "waiting.list"
+                    | "pools"
+                    | "usageStats"
+                    | "status"
+                    | "flow"
             )
         {
             self.changed();
@@ -485,6 +502,10 @@ impl Wf {
             "pools" => {
                 parse::<Empty>(method, args)?;
                 return self.pools().await;
+            }
+            "usageStats" => {
+                let a: UsageStatsArgs = parse(method, args)?;
+                return self.usage_stats(a.window.as_deref()).await;
             }
             "flow" => {
                 parse::<Empty>(method, args)?;

@@ -2084,6 +2084,7 @@ impl Wf {
                        "newIssues": new_issues.len()},
             "flowMaxTickets": self.config().flow.as_ref().map(|f| f.max_tickets),
             "service": self.service_view(),
+            "routing": self.routing_view(),
         }))
     }
 

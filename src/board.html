@@ -224,6 +224,21 @@ a:hover > .spill, a:focus-visible > .spill { border-color: currentColor; }
 .conn .dot.bad { background: var(--fail); border-radius: 1px; }
 .conn .facts { display: flex; gap: 8px; min-width: 0; }
 .stale .conn { color: var(--fail); }
+.route { position: relative; display: inline-flex; flex: 0 0 auto; max-width: 60%; min-width: 0; }
+.route-btn { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; height: 28px; padding: 0 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.route-btn:hover, .route.tip .route-btn { background: var(--surface-2); color: var(--fg); }
+.route-wide { display: inline-flex; gap: 8px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.route-short { display: none; align-items: center; gap: 4px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.rm { display: inline-flex; align-items: center; gap: 4px; }
+.rdot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--fg-3); }
+.rdot.ready { background: var(--done); }
+.rdot.reserve { background: var(--need-fill); border: 1px solid var(--need); }
+.rdot.limited { background: var(--fail); border-radius: 1px; }
+.rdot.unknown { background: transparent; border: 2px solid var(--fg-3); }
+.route-tip { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; width: 340px; display: grid; gap: 8px; padding: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-size: 13px; line-height: 18px; white-space: normal; max-height: calc(100dvh - 64px); overflow-y: auto; overscroll-behavior: contain; }
+.route-tip p { margin: 0; }
+.rrow { display: grid; grid-template-columns: 8px minmax(0, 1fr); gap: 2px 8px; align-items: center; }
+.rrow .why { grid-column: 2; color: var(--fg-2); }
 .counts { display: flex; align-items: center; gap: 16px; font-size: 13px; color: var(--fg-2); white-space: nowrap; }
 .counts b { color: var(--fg); font-weight: 600; }
 .counts .needc { display: inline-flex; align-items: center; gap: 8px; color: var(--fg); font-weight: 600; }
@@ -880,6 +895,10 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .top .tools :focus-visible { outline-offset: -2px; }
   .counts .runc, #keys-btn, .conn .facts, .needc .w, .tools .btn .w { display: none !important; }
   .short { display: inline !important; }
+  .route-wide { display: none; }
+  .route-short { display: inline-flex; }
+  .route-btn { height: 44px; }
+  .route-tip { position: fixed; top: 52px; left: 12px; right: 12px; width: auto; }
   #svc-short { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .panes {
     grid-template-columns: minmax(0, 1fr);
@@ -978,6 +997,14 @@ kbd { font-family: var(--mono); font-size: 12px; }
     <span class="dot" id="svc-dot"></span>
     <span class="facts clip" id="svc-text">Connecting</span>
     <span class="short" id="svc-short">Connecting</span>
+    <span class="route" id="route" hidden>
+      <button class="route-btn" type="button" id="route-btn" aria-describedby="route-tip">
+        <span aria-hidden="true">→</span>
+        <span class="route-wide" id="route-wide"></span>
+        <span class="route-short" id="route-short"></span>
+      </button>
+      <div class="route-tip" id="route-tip" role="tooltip" tabindex="0" hidden></div>
+    </span>
   </div>
   <span class="counts num" id="counts"></span>
   <span class="tools">
@@ -4196,6 +4223,108 @@ function initDrift() {
   });
 }
 
+const routing = { open: null, pinned: false, key: "" };
+const ROUTE_STATUS = { ready: "ready", reserve: "at reserve", limited: "limited", disabled: "disabled", unknown: "unknown" };
+
+function routeMembers(r) {
+  const ms = (r.members || []).filter((m) => m.instanceId);
+  return r.mode === "pool" ? ms.slice().sort((a, b) => (b.share || 0) - (a.share || 0)) : ms;
+}
+
+function routePct(m) {
+  return typeof m.share === "number" ? Math.round(m.share * 100) + "%" : "";
+}
+
+function routeReset(m) {
+  return m.status === "limited" && m.limitedUntilLocal ? "until " + clock(m.limitedUntilLocal) : "";
+}
+
+function routeLabel(r, m, short) {
+  if (r.mode !== "pool") return [m.instanceId].concat(short ? [] : [m.model, m.effort]).filter(Boolean).join(" · ") + " (no pool)";
+  return [m.instanceId, routePct(m), routeReset(m)].filter(Boolean).join(" ");
+}
+
+function routeItem(r, m, short) {
+  return h("span", { class: "rm" }, h("span", { class: "rdot " + m.status, "aria-hidden": "true" }), routeLabel(r, m, short));
+}
+
+function routeSummary(r) {
+  const ms = routeMembers(r);
+  if (!ms.length) return "Launch routing unknown" + (r.error ? ": " + r.error : "");
+  return "Launch routing: " + ms.map((m) => routeLabel(r, m) + ", " + (ROUTE_STATUS[m.status] || m.status)).join("; ");
+}
+
+function routeTip(r) {
+  const rows = [];
+  const ms = routeMembers(r);
+  if (r.mode === "pool") {
+    const basis = r.shareBasis === "picks"
+      ? "share of the " + r.picks + (r.picks === 1 ? " pick" : " picks") + " in the last " + r.window
+      : "no picks in the last " + r.window + ", so share is the configured weight";
+    rows.push(h("p", {}, "Pool " + r.pool + ", strategy " + (r.strategy || "unknown") + "; " + basis + "."));
+  } else {
+    const m = ms[0];
+    rows.push(h("p", {}, m ? "No pool: launches run on " + m.instanceId + (m.model ? ", " + m.model : "") +
+      (m.effort ? ", effort " + m.effort : "") + "." : "No pool."));
+  }
+  for (const m of ms) {
+    const bits = [m.instanceId, ROUTE_STATUS[m.status] || m.status];
+    if (r.mode === "pool") bits.push(routePct(m));
+    if (typeof m.running === "number") bits.push(m.running + " running");
+    const why = [];
+    if (m.reason) why.push(m.reason);
+    if (m.status === "limited" && m.limitedUntilLocal) why.push("Limit resets " + clock(m.limitedUntilLocal) + (m.limitReason ? " (" + m.limitReason + ")" : ""));
+    rows.push(h("div", { class: "rrow" }, h("span", { class: "rdot " + m.status, "aria-hidden": "true" }), h("span", {}, bits.join(" · ")),
+      why.length ? h("span", { class: "why" }, why.join(". ")) : null));
+  }
+  if (r.error) rows.push(h("p", { class: "why" }, r.error));
+  if (r.runningError) rows.push(h("p", { class: "why" }, "Running threads unknown: " + r.runningError));
+  return rows;
+}
+
+function setRouteTip(on) {
+  $("route-tip").hidden = !on;
+  $("route").classList.toggle("tip", on);
+}
+
+function paintRouting(s) {
+  const r = s && s.routing;
+  const wrap = $("route");
+  wrap.hidden = !r;
+  if (!r) { routing.key = ""; routing.pinned = false; setRouteTip(false); return; }
+  const key = JSON.stringify([r.mode, r.source, r.pool, r.strategy, r.error, r.picks, r.shareBasis, r.window, r.members, r.runningError]);
+  if (key === routing.key) return;
+  routing.key = key;
+  const ms = routeMembers(r);
+  $("route-wide").replaceChildren(...(ms.length ? ms.map((m) => routeItem(r, m)) : ["routing unknown"]));
+  $("route-short").replaceChildren(ms.length ? routeItem(r, ms[0], true) : "?");
+  setAttr($("route-btn"), "aria-label", routeSummary(r));
+  $("route-tip").replaceChildren(...routeTip(r));
+}
+
+function initRouting() {
+  const wrap = $("route");
+  const btn = $("route-btn");
+  setRouteTip(false);
+  wrap.addEventListener("mouseenter", () => setRouteTip(true));
+  wrap.addEventListener("mouseleave", () => { if (!routing.pinned) setRouteTip(false); });
+  btn.addEventListener("focus", () => setRouteTip(true));
+  wrap.addEventListener("focusout", (e) => { if (!routing.pinned && !wrap.contains(e.relatedTarget)) setRouteTip(false); });
+  btn.addEventListener("click", () => {
+    if (routing.open) { routing.open(state && state.routing); return; }
+    routing.pinned = !routing.pinned;
+    setRouteTip(routing.pinned);
+  });
+  wrap.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || $("route-tip").hidden) return;
+    e.preventDefault();
+    e.stopPropagation();
+    routing.pinned = false;
+    setRouteTip(false);
+    btn.focus();
+  });
+}
+
 function runningIn(tree) {
   let n = 0;
   for (const t of tree) {
@@ -4260,6 +4389,7 @@ function render(s) {
   setAttr(c, "aria-label", (filtering() ? v.cards.length + " of " + s.cards.length : s.cards.length) + " need you, " +
     (filtering() ? running + " of " + runAll : runAll) + " threads running");
   paintService(s);
+  paintRouting(s);
   paintUpdate(s);
   paintDrift(s);
   syncModelsRev(s);
@@ -5284,9 +5414,11 @@ function wire() {
     if (!$("ctx").contains(e.target)) closeCtx(false);
     if (!$("upd").contains(e.target)) closeUpd(false);
     if (!$("drift").contains(e.target)) closeDrift(false);
+    if (!$("route").contains(e.target)) { routing.pinned = false; setRouteTip(false); }
   });
   initUpdate();
   initDrift();
+  initRouting();
   initModels();
   initSettings();
   $("settled-filter").addEventListener("input", () => {

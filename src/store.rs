@@ -70,7 +70,7 @@ CREATE INDEX IF NOT EXISTS board_sessions_expires ON board_sessions (expires_at)
 "#;
 
 const KEEP_MESSAGES: i64 = 5000;
-const KEEP_PICKS: i64 = 2000;
+pub const KEEP_PICKS: i64 = 2000;
 const UNSETTLED: &str = "json_extract(data, '$.settledAt') IS NULL";
 
 pub type WaitingRow = (WaitingItem, Option<Value>, Option<(String, Option<String>)>, i64);
