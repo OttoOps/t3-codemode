@@ -128,19 +128,20 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.openChild",
             "wf",
-            "Prepare a link to a child thread you are about to launch. Paste the returned brief, verbatim, at the end of the child's launch brief; the child binds the link with wf.join, whose call in the brief carries any issue, parentIssue and part given here. pr stores the PR description format on the child's link, so wf.pr can check a worker's opened event without the ticket. issue and parentIssue (a GitHub issue ref, GitLab issue URL, or Jira key/URL) name the issue the child works and the epic it belongs to, and part (n/N, such as \"1/4\") says which of the epic's PRs it is; wf.board() and the board return all three.",
-            "wf.openChild(input: { role: string; label: string; issue?: string; parentIssue?: string; part?: string; pr?: { format?: string; sections?: Record<string, string[]>; passes?: string[]; mergeOnly?: boolean } }): Promise<{ brief: string; params: { down: number; miss: number; stall: number } }>;",
+            "Prepare a link to a child thread you are about to launch. Paste the returned brief, verbatim, at the end of the child's launch brief; the child binds the link with wf.join, whose call in the brief carries any issue, parentIssue and part given here. pr stores the PR description format on the child's link, so wf.pr can check a worker's opened event without the ticket, and pr.method lets t3cm merge the PR on the board's \"merge\" answer without the ticket. issue and parentIssue (a GitHub issue ref, GitLab issue URL, or Jira key/URL) name the issue the child works and the epic it belongs to, and part (n/N, such as \"1/4\") says which of the epic's PRs it is; wf.board() and the board return all three.",
+            "wf.openChild(input: { role: string; label: string; issue?: string; parentIssue?: string; part?: string; pr?: { format?: string; sections?: Record<string, string[]>; passes?: string[]; mergeOnly?: boolean; method?: \"merge\" | \"squash\" | \"rebase\" } }): Promise<{ brief: string; params: { down: number; miss: number; stall: number } }>;",
             obj(
                 with_identity(json!({"role": {"type": "string"}, "label": {"type": "string"}, "pr": {
                     "type": "object",
                     "additionalProperties": false,
                     "description": "the PR description format wf.pr checks a worker's opened event against",
                     "properties": {
-                        "format": {"type": "string", "description": "the format skill the Publishing line must name; \"pr\" also requires the pr skill's sections. Required unless mergeOnly is true"},
+                        "format": {"type": "string", "description": "the format skill the Publishing line must name; \"pr\" also requires the pr skill's sections. Required unless mergeOnly or method is set"},
                         "sections": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}},
                                      "description": "more headings the description needs, each with the text it must hold"},
                         "passes": {"type": "array", "items": {"type": "string"}, "description": "the PR's own passes from the split"},
-                        "mergeOnly": {"type": "boolean", "description": "a targeted fix PR: its ready event wakes the ticket"}
+                        "mergeOnly": {"type": "boolean", "description": "a targeted fix PR: its ready event wakes the ticket"},
+                        "method": {"type": "string", "enum": ["merge", "squash", "rebase"], "description": "the repo's merge method; with it, t3cm merges the PR in code on the user's \"merge\" answer to its merge card"}
                     }
                 }})),
                 &["role", "label"],

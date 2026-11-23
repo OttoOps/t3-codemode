@@ -36,6 +36,14 @@ pub struct CardPr {
     pub head: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Vec<CardStage>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct CardStage {
+    pub id: String,
+    pub scope: String,
 }
 
 pub fn pr_refs(text: &str) -> Vec<(String, String, u64)> {
@@ -98,6 +106,7 @@ pub fn card_pr(body: &str) -> Option<CardPr> {
         number: *number,
         head: approved_head(body),
         ready: false,
+        after: None,
     })
 }
 
@@ -211,7 +220,7 @@ impl Tracked {
     }
 
     fn pr(&self, head: &str) -> CardPr {
-        CardPr { repo: self.repo.clone(), number: self.number, head: Some(head.into()), ready: false }
+        CardPr { repo: self.repo.clone(), number: self.number, head: Some(head.into()), ..CardPr::default() }
     }
 }
 
@@ -555,7 +564,7 @@ impl Wf {
     async fn fix(&self, t: &Tracked, repo: &Value, read_at: &str, floor: &str, pass: &mut Pass) -> Result<()> {
         self.name_workers(t, repo).await?;
         let o = Obs::read(repo);
-        let advance = {
+        let (advance, merged) = {
             let _g = self.lock.lock().await;
             let cards: Vec<Card> = self.cards()?.into_iter().filter(|c| t.cards.contains(&c.seq)).collect();
             let wait = self.wait(t)?;
@@ -578,9 +587,10 @@ impl Wf {
                 Some(q) if later(q, &t.since) => q,
                 _ => t.since.as_str(),
             };
+            let mut merged = None;
             let advance = match o.state.as_str() {
                 "MERGED" | "CLOSED" => {
-                    self.finished(t, &o, &cards, wait.as_ref(), &live_tickets, pass)?;
+                    merged = self.finished(t, &o, &cards, wait.as_ref(), &live_tickets, pass)?;
                     None
                 }
                 "OPEN" => self.open(t, &o, &cards, wait, &live_tickets, after, left.as_deref(), pass)?,
@@ -617,8 +627,11 @@ impl Wf {
             if moved {
                 self.changed();
             }
-            advance
+            (advance, merged)
         };
+        if let Some(rec) = merged {
+            pass.woken.extend(self.after_merge(&rec, &o.commit).await?);
+        }
         match advance {
             Some(w) => self.advance(t, &o, w, read_at, pass).await,
             None => Ok(()),
@@ -647,8 +660,15 @@ impl Wf {
         wait: Option<&MergeWait>,
         live_tickets: &[(String, String)],
         pass: &mut Pass,
-    ) -> Result<()> {
+    ) -> Result<Option<crate::merge_answer::Answered>> {
         let merged = o.state == "MERGED";
+        let code = match merged {
+            true => self.code_merged(&t.repo, t.number, &o.head, cards)?,
+            false => {
+                self.answered_drop(&t.repo, t.number)?;
+                None
+            }
+        };
         let end = o.ended.clone().unwrap_or_else(|| self.now());
         let when = local_clock(&end);
         let note = if merged {
@@ -677,11 +697,14 @@ impl Wf {
         let targets: Vec<&str> = live_tickets.iter().filter(|(_, s)| later(&end, s)).map(|(x, _)| x.as_str()).collect();
         let mut told = 0;
         for ticket in &targets {
-            if self.store.link_get(ticket)?.is_some_and(|l| !l.closed) {
+            if code.as_ref().is_some_and(|c| c.ticket == *ticket) {
+                self.store.pr_event_mark(&t.repo, t.number, &event, ticket, &self.now())?;
+            } else if self.store.link_get(ticket)?.is_some_and(|l| !l.closed) {
                 told += self.wake(t, &event, ticket, "event", &body, pass)? as usize;
             }
         }
         let on_feed = told == 0
+            && code.is_none()
             && later(&end, &t.since)
             && (wait.is_some() || !stale.is_empty())
             && self.store.pr_event_mark(&t.repo, t.number, &event, BOARD, &self.now())?;
@@ -697,10 +720,10 @@ impl Wf {
             let who = targets.first().copied().or_else(|| live_tickets.first().map(|(x, _)| x.as_str()));
             self.feed_note(who, &format!("{}: {note}", t.label()))?;
         }
-        if told > 0 || on_feed || resolved > 0 {
+        if told > 0 || on_feed || resolved > 0 || code.is_some() {
             pass.actions.push(format!("{} {note}", t.label()));
         }
-        Ok(())
+        Ok(code)
     }
 
     fn resolve_releasing(&self, seqs: &[i64], tickets: &[&str], note: &str) -> Result<usize> {

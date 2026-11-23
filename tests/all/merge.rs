@@ -162,7 +162,7 @@ async fn prs_that_cannot_merge_are_refused_with_a_reason() {
     closed["state"] = json!("CLOSED");
     h.github.set_pr(REPO, 2, closed);
     h.github.set_pr(REPO, 3, github_pr(HEAD, "DIRTY", false));
-    h.github.set_pr(REPO, 4, github_pr(HEAD, "BLOCKED", false));
+    h.github.set_pr(REPO, 4, github_pr(HEAD, "BEHIND", false));
 
     let mut reasons = Vec::new();
     for pr in [1, 2, 3, 4] {
@@ -174,7 +174,7 @@ async fn prs_that_cannot_merge_are_refused_with_a_reason() {
     assert!(reasons[0].contains("draft"), "{reasons:?}");
     assert!(reasons[1].contains("closed"), "{reasons:?}");
     assert!(reasons[2].contains("DIRTY"), "{reasons:?}");
-    assert!(reasons[3].contains("BLOCKED"), "{reasons:?}");
+    assert!(reasons[3].contains("BEHIND"), "{reasons:?}");
     assert!(mutations(&h).is_empty());
     assert!(h.app.store.merge_waits().unwrap().is_empty());
 }
@@ -367,9 +367,31 @@ async fn an_unstable_pr_with_a_running_check_waits_or_is_refused_until_it_finish
     assert_eq!(queued["status"], "waiting", "{queued}");
     assert_eq!(queued["mergeState"], "UNSTABLE");
     let direct = merge(&h, args(8)).await;
-    assert_eq!(direct["status"], "refused", "{direct}");
-    assert_eq!(direct["reason"], "not mergeable yet (merge state UNSTABLE, checks still running: ci/legacy)");
+    assert_eq!(direct["status"], "waiting", "{direct}");
+    assert_eq!(direct["mergeState"], "UNSTABLE");
     assert!(mutations(&h).is_empty());
+    let waits = h.app.store.merge_waits().unwrap();
+    assert_eq!(waits.len(), 2, "{waits:?}");
+    assert!(waits.iter().all(|w| w.head == HEAD), "{waits:?}");
+    assert_eq!(wait_status(&h), [json!("waiting"), json!("waiting")]);
+}
+
+#[tokio::test]
+async fn a_blocked_pr_without_a_merge_queue_waits_and_merges_once_github_allows() {
+    let h = H::new();
+    h.github.set_pr(REPO, 8, github_pr(HEAD, "BLOCKED", false));
+    h.github.set_checks(REPO, 8, json!([check_run("build", "SUCCESS")]));
+
+    let r = merge(&h, args(8)).await;
+    assert_eq!(r["status"], "waiting", "{r}");
+    assert_eq!(r["mergeState"], "BLOCKED");
+    h.app.wf.reconcile().await.unwrap();
+    assert!(mutations(&h).iter().all(|op| op == "reconcile"), "a blocked PR is never merged: {:?}", mutations(&h));
+
+    h.github.update_pr(REPO, 8, json!({"mergeStateStatus": "CLEAN"}));
+    h.app.wf.reconcile().await.unwrap();
+    assert!(mutations(&h).contains(&"mergePullRequest".to_string()), "{:?}", mutations(&h));
+    assert_eq!(h.github.pr(REPO, 8)["state"], "MERGED");
 }
 
 #[tokio::test]
@@ -385,5 +407,6 @@ async fn an_unstable_pr_whose_checks_are_missing_or_not_for_its_head_is_not_merg
         assert_eq!(r["status"], "refused");
         assert!(r["reason"].as_str().unwrap().contains("checks could not be read"), "{r}");
     }
+    assert!(h.app.store.merge_waits().unwrap().is_empty());
     assert!(mutations(&h).is_empty());
 }

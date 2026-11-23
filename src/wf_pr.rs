@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::board::{BOARD, Card, NewCard, Tracker, checked_options, gh_name, parse_issue_only};
 use crate::github::errors;
 use crate::merge::{CHECKS, CheckState, check_state};
-use crate::reconcile::CardPr;
+use crate::reconcile::{CardPr, CardStage};
 use crate::slots::{Caps, glob_matches};
 use crate::store::{Link, LinkPr, PrBrief};
 use crate::wf::{HANDLED, NO_CALLER, SendArgs, WATCHER, Wf, header};
@@ -125,9 +125,9 @@ pub(crate) fn same_head(a: &str, b: &str) -> bool {
 
 pub(crate) fn checked_brief(b: PrBrief) -> Result<PrBrief> {
     let format = b.format.trim().to_string();
-    if format.is_empty() && !b.merge_only {
+    if format.is_empty() && !b.merge_only && b.method.is_none() {
         bail!(
-            "wf.openChild: pr.format must name the PR description format, such as \"pr\", or pr.mergeOnly must be true"
+            "wf.openChild: pr.format must name the PR description format, such as \"pr\", or pr.mergeOnly or pr.method must be set"
         );
     }
     let blank = |s: &String| s.trim().is_empty();
@@ -148,7 +148,13 @@ pub(crate) fn checked_brief(b: PrBrief) -> Result<PrBrief> {
         }
     }
     let passes = b.passes.into_iter().map(|s| s.trim().to_string()).collect();
-    Ok(PrBrief { format, sections, passes, merge_only: b.merge_only })
+    let method = match b.method.map(|m| m.trim().to_ascii_lowercase()) {
+        Some(m) if !["merge", "squash", "rebase"].contains(&m.as_str()) => {
+            bail!("wf.openChild: pr.method must be merge, squash or rebase, got {m:?}")
+        }
+        m => m,
+    };
+    Ok(PrBrief { format, sections, passes, merge_only: b.merge_only, method })
 }
 
 fn names(text: &str, name: &str) -> bool {
@@ -336,7 +342,7 @@ fn superseded() -> Value {
     json!({"status": "superseded", "detail": "a newer head of this PR was recorded while t3cm checked this one"})
 }
 
-fn chain_label(ids: &[&str]) -> String {
+pub(crate) fn chain_label(ids: &[&str]) -> String {
     match ids {
         [] => String::new(),
         [one] => one.to_string(),
@@ -362,6 +368,7 @@ struct Plan {
     options: Vec<String>,
     skipped: Vec<String>,
     later: Vec<String>,
+    after: Vec<CardStage>,
 }
 
 fn matches_paths(step: &Value, files: &[String]) -> bool {
@@ -399,6 +406,11 @@ fn plan(delivery: &Value, files: &[String], combined: Option<&[String]>) -> std:
     if first.is_none() {
         return Err("the delivery slot has no builtin merge stage for this PR".into());
     }
+    let after: Vec<CardStage> = active[1..]
+        .iter()
+        .filter(|s| s.scope == "pr" || last)
+        .map(|s| CardStage { id: s.id.clone(), scope: s.scope.clone() })
+        .collect();
     let mut chain: Vec<&str> = vec!["merge"];
     let mut rest = active[1..].iter();
     let mut later = Vec::new();
@@ -429,7 +441,7 @@ fn plan(delivery: &Value, files: &[String], combined: Option<&[String]>) -> std:
         later = omitted;
     }
     let options = checked_options(&options).map_err(|e| format!("the delivery stages make no valid answers ({e})"))?;
-    Ok(Plan { options, skipped, later })
+    Ok(Plan { options, skipped, later, after })
 }
 
 fn action_line(e: &Event, head: &str, options: &[String], blocker: Option<&str>) -> String {
@@ -617,7 +629,7 @@ impl Wf {
         Ok(self.store.link_get(me)?.is_none_or(|l| l.closed || l.parent != seen.parent || l.pr != seen.pr))
     }
 
-    fn handled(&self, worker: &str, ticket: &str, note: &str) -> Result<String> {
+    pub(crate) fn handled(&self, worker: &str, ticket: &str, note: &str) -> Result<String> {
         let h = self.store.msg_new(WATCHER, ticket, HANDLED, note, &self.now())?;
         if let Some(mut wl) = self.store.link_get(worker)? {
             wl.unread.push(h.clone());
@@ -817,7 +829,7 @@ impl Wf {
             "detail": "t3cm recorded the new head; send wf.pr ready for it once its checks pass"}))
     }
 
-    fn queue_worker_reply(&self, worker: &str, body: &str) -> Result<()> {
+    pub(crate) fn queue_worker_reply(&self, worker: &str, body: &str) -> Result<()> {
         let h = self.store.msg_new(WATCHER, worker, "reply", body, &self.now())?;
         let text = format!("{}\n{body}", header("reply", WATCHER, &h, None));
         self.store.outbox_push(worker, &text, &h, &self.now())
@@ -1030,7 +1042,13 @@ impl Wf {
             body: &body,
             handle: Some(&h),
             options: Some(plan.options.clone()),
-            pr: Some(CardPr { repo: e.repo.clone(), number: e.number, head: Some(head.clone()), ready: true }),
+            pr: Some(CardPr {
+                repo: e.repo.clone(),
+                number: e.number,
+                head: Some(head.clone()),
+                ready: true,
+                after: Some(plan.after.clone()),
+            }),
             approval: None,
             offer: None,
             worker: None,
@@ -1069,7 +1087,7 @@ impl Wf {
         self.handled(me, &t.child, &note)?;
         self.changed();
         Ok(json!({"status": "gated", "card": card, "options": plan.options, "head": head,
-            "detail": format!("on the user's board as card {card}; the ticket sends \"Merged ... Hand off.\" once it merges")}))
+            "detail": format!("on the user's board as card {card}; \"Merged ... Hand off.\" arrives once it merges")}))
     }
 
     async fn ticket_files(
