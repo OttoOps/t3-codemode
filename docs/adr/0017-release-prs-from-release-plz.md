@@ -42,7 +42,8 @@ Chosen: option 1, the Rust ecosystem's common choice for this.
 - **Versions.** `git_only = true` reads the current version from `v*` tags.
   A `feat` commit bumps the minor version even in `0.x`
   (`features_always_increment_minor = true`), as this project's releases
-  have so far. A `fix` bumps the patch.
+  have so far. A breaking change also bumps the minor version in `0.x`.
+  Any other commit bumps the patch.
 - **The token.** Tags and PRs that the default `GITHUB_TOKEN` creates start
   no other workflows, so the tag would not start `release.yml` and CI would
   not run on the release PR. The workflow uses a GitHub App installation
