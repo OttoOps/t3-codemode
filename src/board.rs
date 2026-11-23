@@ -3107,17 +3107,6 @@ impl Wf {
                 project_origins.insert(pid.to_string(), origin);
                 projects_out.push(json!({ "id": pid, "title": title, "remote": remote }));
             }
-            projects_out.sort_by(|a, b| {
-                let ka = (
-                    a["title"].as_str().unwrap_or_default().to_lowercase(),
-                    a["id"].as_str().unwrap_or_default().to_string(),
-                );
-                let kb = (
-                    b["title"].as_str().unwrap_or_default().to_lowercase(),
-                    b["id"].as_str().unwrap_or_default().to_string(),
-                );
-                ka.cmp(&kb)
-            });
         }
 
         let mut attempt = 0usize;

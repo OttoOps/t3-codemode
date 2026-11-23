@@ -995,7 +995,6 @@ struct LaunchItemObj {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct LaunchBody {
     issues: Vec<LaunchItem>,
 }
