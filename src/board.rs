@@ -2452,6 +2452,7 @@ impl Wf {
             ln.closed_how = Some("closed-by-board".into());
             ln.gate = None;
             ln.gate_since = None;
+            ln.gate_pr = None;
             ln.paused_at = None;
             self.store.link_save(&ln)?;
             self.store.outbox_drop_to(&ln.child)?;
