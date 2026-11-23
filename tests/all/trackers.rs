@@ -65,6 +65,14 @@ fn parses_github_gitlab_and_jira_refs() {
     assert_eq!(gl_port.scope, "org/app");
     assert_eq!(gl_port.key, "9");
     assert_eq!(gl_port.url(), Some("http://gitlab.internal:8080/org/app/-/issues/9"));
+    assert_eq!(gl_port.slug(), "http://gitlab.internal:8080/org/app/-/issues/9");
+    assert_eq!(parse_issue_only(&gl_port.slug()), Some(gl_port));
+
+    let gl_8443 = parse_issue("https://gitlab.example:8443/team/app/-/issues/9#note_1").unwrap();
+    let gl_9443 = parse_issue("https://gitlab.example:9443/team/app/-/issues/9?tab=notes").unwrap();
+    assert_ne!(gl_8443.slug(), gl_9443.slug());
+    assert_eq!(parse_issue_only(&gl_8443.slug()), Some(gl_8443));
+    assert_eq!(parse_issue_only(&gl_9443.slug()), Some(gl_9443));
 
     // Rejects malformed GitLab URLs
     assert!(parse_issue("https://gitlab.example.com/org/app/issues/9").is_none());
@@ -446,6 +454,43 @@ async fn jira_urls_on_different_sites_do_not_collide_while_bare_key_dedupes_mapp
     h.reopen();
     let dup = h.exec("async () => wf.launchTicket({ issue: 'OPS-9' })").await;
     assert!(err_text(&dup).contains("OPS-9 was launched and has not joined yet"), "{}", dup.text);
+
+    // Bare key explicitly routed to a different project (p-c) launches with a distinct allocated label
+    h.fake.set_projects(vec![project("p-a", "/src/a"), project("p-b", "/src/b"), project("p-c", "/src/c")]);
+    let bare_other = result(&h.exec("async () => wf.launchTicket({ issue: 'OPS-9', project: 'p-c' })").await);
+    assert_eq!((&bare_other["projectId"], &bare_other["label"]), (&json!("p-c"), &json!("OPS-9 (2)")));
+    // Relaunching bare OPS-9 in p-c is still deduped, while routing bare OPS-9 to a fourth project succeeds
+    let dup_c = h.exec("async () => wf.launchTicket({ issue: 'OPS-9', project: 'p-c' })").await;
+    assert!(err_text(&dup_c).contains("OPS-9 (2) was launched and has not joined yet"), "{}", dup_c.text);
+    h.fake.set_projects(vec![
+        project("p-a", "/src/a"),
+        project("p-b", "/src/b"),
+        project("p-c", "/src/c"),
+        project("p-d", "/src/d"),
+    ]);
+    let bare_d = result(&h.exec("async () => wf.launchTicket({ issue: 'OPS-9', project: 'p-d' })").await);
+    assert_eq!((&bare_d["projectId"], &bare_d["label"]), (&json!("p-d"), &json!("OPS-9 (3)")));
+}
+
+#[tokio::test]
+async fn gitlab_instances_on_different_web_ports_match_their_own_https_origin_and_do_not_collide() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-8443", "/src/gl-8443"), project("p-9443", "/src/gl-9443")]);
+    h.remotes.set("/src/gl-8443", "https://gitlab.example:8443/team/app.git");
+    h.remotes.set("/src/gl-9443", "https://gitlab.example:9443/team/app.git");
+
+    let first = result(
+        &h.exec("async () => wf.launchTicket({ issue: 'https://gitlab.example:9443/team/app/-/issues/9' })").await,
+    );
+    assert_eq!((&first["projectId"], &first["label"]), (&json!("p-9443"), &json!("app#9")));
+
+    let second = result(
+        &h.exec("async () => wf.launchTicket({ issue: 'https://gitlab.example:8443/team/app/-/issues/9' })").await,
+    );
+    assert_eq!(
+        (&second["projectId"], &second["label"]),
+        (&json!("p-8443"), &json!("https://gitlab.example:8443/team/app/-/issues/9"))
+    );
 }
 
 #[tokio::test]
