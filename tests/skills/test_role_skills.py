@@ -117,7 +117,7 @@ class MergeRouteTests(unittest.TestCase):
         self.assertIn("head:", word)
         for status in ("merged", "queued", "waiting", "refused"):
             self.assertIn(f"- `{status}`:", word, status)
-        self.assertIn("A pending check is waited out", word)
+        self.assertIn("holds the approval as `waiting` until it finishes", " ".join(word.split()))
         self.assertNotIn("**Without t3cm**", word)
         self.assertNotIn("--match-head-commit", word)
 
@@ -155,7 +155,7 @@ class MergeRouteTests(unittest.TestCase):
     def test_the_ticket_hands_its_pr_format_to_the_worker_link(self):
         ticket = " ".join(self.ticket.split())
         self.assertIn("wf.openChild({ role: \"worker\", label, issue, parentIssue, part, pr })", ticket)
-        self.assertIn("{ format, sections, passes, mergeOnly }", ticket)
+        self.assertIn("{ format, sections, passes, mergeOnly, method }", ticket)
         between = " ".join(section(self.ticket, "## 4. Between workers").split())
         self.assertIn("t3cm left this to the ticket: <why>", between)
         self.assertIn("### PR updated", section(self.ticket, "## 4. Between workers"))
@@ -179,16 +179,27 @@ class MergeRouteTests(unittest.TestCase):
             self.assertIn(f'\\"{answer}\\"', self.reconcile, answer)
             self.assertIn(f'"{answer}"', wait, answer)
 
-    def test_a_pending_check_on_an_approved_head_starts_a_merge_watch(self):
+    def test_a_pending_check_on_an_approved_head_waits_in_wf_merge(self):
         word = " ".join(section(self.ticket, "### On the user's word").split())
         self.assertNotIn("end the turn; the worker reports again", word)
-        self.assertIn('outcome `"pending"`', word)
+        self.assertNotIn('outcome `"pending"`', word)
         self.assertIn('without a second "merge"', word)
         watch = " ".join(section(self.ticket, "#### The merge watch").split())
-        self.assertIn('with outcome `"pending"`', watch)
+        self.assertNotIn('"pending"', watch)
+        self.assertIn("The merge watch serves two cases", watch)
         self.assertIn("Approval never carries over to a new head", watch)
-        self.assertIn("Once every check has finished and none failed: call `wf.merge` at the approved head", watch)
-        self.assertIn('hand off to "The merge wait"', watch)
+
+    def test_the_board_merges_on_the_answer_in_code(self):
+        word = " ".join(section(self.ticket, "### On the user's word").split())
+        answer = (ROOT / "src" / "merge_answer.rs").read_text()
+        self.assertIn("t3cm runs this section in code", word)
+        self.assertIn("`[t3cm event from=t3cm]`", word)
+        for phrase in ("Remaining delivery stages for this PR, in order:", "Hand off.", "act on that outcome as"):
+            self.assertIn(phrase, answer, f"src/merge_answer.rs no longer sends {phrase!r}")
+        self.assertIn("Run them from item 4", word)
+        self.assertIn("act on it as item 2 says", word)
+        wait = " ".join(section(self.ticket, "#### The merge wait").split())
+        self.assertIn('it runs "merge", "requeue" and "ok" in code', wait)
 
     def test_the_merge_watch_retry_repeats_the_check_gate_when_reconcile_is_off(self):
         watch = " ".join(section(self.ticket, "#### The merge watch").split())

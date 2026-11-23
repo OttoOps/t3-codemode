@@ -207,8 +207,8 @@ does not.
 6. End the turn.
 
 The watcher wakes you on failed checks, passed checks, comments, reviews,
-and conflicts. It never wakes you on a merge or a deploy: the orchestrator
-does those and messages you. Never merge the PR yourself, through `gh`,
+and conflicts. It never wakes you on a merge or a deploy: t3cm or the
+orchestrator does those and messages you. Never merge the PR yourself, through `gh`,
 `wf.merge`, or T3's merge button or PR action.
 
 ## 4. On a wake
@@ -248,7 +248,8 @@ does those and messages you. Never merge the PR yourself, through `gh`,
   a `review` gate is open: call it after the user's answer clears that
   gate. Act on its `status`:
   - `gated`: the merge card is on the user's board, and your link holds
-    the `merge` gate. Wait for the orchestrator's "Merged" message.
+    the `merge` gate. Wait for the "Merged" message, which t3cm sends
+    itself when it merges on the user's answer.
   - `waiting`: a check is still running. t3cm opens the merge card once it
     finishes, or `detail` says to call ready again.
   - `failing`, or `refused`: for a draft with green checks, mark the PR
@@ -286,7 +287,8 @@ the turn.
 Each arrives as a `reply` on the link; act on its body:
 
 - **"Merged #<number> at <sha>. Hand off."**: step 6, whatever the
-  brief's delivery. The orchestrator sends it when `merge` is this PR's
+  brief's delivery. It may come from t3cm (`from=t3cm`), which has already
+  deleted the PR's remote branch. It is sent when `merge` is this PR's
   last `pr`-scoped stage (including when later stages are `ticket`-scoped
   or `post-handoff`, or when a later `pr`-scoped stage such as `deploy` was
   skipped).

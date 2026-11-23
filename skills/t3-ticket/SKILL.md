@@ -298,15 +298,17 @@ For PR n:
    hosts on the same key.
 
    `pr` is the PR description format from step 1, which t3cm checks the
-   worker's opened PR against: `{ format, sections, passes, mergeOnly }`.
+   worker's opened PR against: `{ format, sections, passes, mergeOnly, method }`.
    `format` names the format skill (`"pr"` for the `pr` skill, which also
    requires its Summary, Evidence and Merge Danger sections and their
    elements). `sections` maps each further heading the repo requires, such
    as a PR template's, to the text it must hold (`{ "Compatibility": [] }`).
    `passes` lists the PR's `Passes:` line. `mergeOnly: true` marks a
-   targeted fix PR (see "Ready to merge"). With no format set by the repo,
-   leave `format` out, and leave `pr` out too unless the PR is a targeted
-   fix (`pr: { mergeOnly: true }`).
+   targeted fix PR (see "Ready to merge"). `method` is the merge method
+   above; with it, t3cm merges the PR on the user's answer to its merge
+   card ("On the user's word"). With no format set by the repo, leave
+   `format` out and pass `pr: { method }`, or `pr: { mergeOnly: true,
+   method }` for a targeted fix.
 
    The sub-issue leads the label because T3's sidebar shows only about 28
    characters of a title. Put `brief` verbatim in the launch brief. The
@@ -458,9 +460,9 @@ turn.
 ### Ready to merge
 
 A worker's "ready to merge" message that reaches this thread (above), or
-"opened" in a repo with no CI, starts the merge gate. On the user's
-answer to a merge card t3cm opened, go straight to "On the user's word".
-Verify on GitHub first:
+"opened" in a repo with no CI, starts the merge gate. The user's answer to
+a merge card t3cm opened arrives only when t3cm could not merge on it
+("On the user's word"); go straight there. Verify on GitHub first:
 
 `gh pr view <number> -R <repo> --json state,isDraft,headRefOid,mergeStateStatus,statusCheckRollup,files`
 
@@ -546,6 +548,20 @@ End the turn.
 
 ### On the user's word
 
+On the board, t3cm runs this section in code when the user answers a merge
+card it opened with one of its buttons, and the worker's brief gave
+`method`. It calls `wf.merge` at the card's head, holds a running check, a
+queue or a review block in the merge wait, deletes the remote branch once
+GitHub shows the PR merged, and sends the worker "Merged #<number> at
+<merge commit sha>. Hand off." when no `pr`-scoped stage remains. Each step
+shows up as a "handled for you" line in the digest. This thread wakes only
+when stages remain, with a `[t3cm event from=t3cm]` that says the PR is
+merged, names the remaining stages and the ones the user's answer approved,
+and says whether t3cm told the worker. Run them from item 4. A merge t3cm
+could not decide arrives as the user's answer, as below. When t3cm ran
+`wf.merge` and the outcome was `refused`, or the call threw, the answer
+ends with that outcome: act on it as item 2 says.
+
 **"merge"** (or any approved chain prefix starting with `"merge"`, such as
 `"merge and deploy"` or `"merge, deploy and verify"`):
 
@@ -553,17 +569,12 @@ Record the approved stage ids from the user's reply so later `gate: "chain"`
 stages in that prefix run without a second gate.
 
 1. Check the PR against the head the answered gate names: it is open, not a
-   draft, and at that head, every check has finished and none failed, and
-   take the full SHA from its `headRefOid`. A pending check is waited out
-   on the approved head: do not call `wf.merge` yet, and do not rely on the
-   worker to report again (it sends "ready to merge" once per head). Start
-   "The merge watch" below with outcome `"pending"` (no `approval` id yet),
-   hold `wf.gate({ open: "merge" })` when this thread has a parent so the
-   watcher does not nudge it, tell the user which check is still running,
-   and end the turn; the watch wakes this thread when the check finishes so
-   the approved merge proceeds without a second "merge". A failing check
-   goes back to the worker, even when GitHub would merge the PR anyway
-   (`UNSTABLE`). `wf.merge` handles the merge state. A head that moved
+   draft, and at that head, and no check failed, and take the full SHA from
+   its `headRefOid`. A failing check goes back to the worker, even when
+   GitHub would merge the PR anyway (`UNSTABLE`). A check still running
+   needs nothing from this thread: `wf.merge` holds the approval as
+   `waiting` until it finishes, so the approved merge proceeds without a
+   second "merge". `wf.merge` handles the merge state. A head that moved
    since that gate gets a new gate, not a merge.
 2. Merge at that head with `wf.merge`. Never use `gh pr merge` or T3's
    merge button or PR action (Hard rules). Call
@@ -576,10 +587,13 @@ stages in that prefix run without a second gate.
    - `merged`: go on to item 3 with its `commit`.
    - `queued`: name its `position`, and keep its `approval` id if starting
      a merge watch. End the turn and wait as "The merge wait" says.
-   - `waiting`: GitHub does not show the PR mergeable yet; name its
-     `mergeState`, and keep its `approval` id if starting a merge watch.
-     The board queues it once GitHub shows it mergeable at this head. End
-     the turn and wait as "The merge wait" says.
+   - `waiting`: GitHub does not show the PR mergeable yet, because a check
+     is still running, GitHub has not computed the merge state, or a rule
+     such as a review blocks it; name its `mergeState`, and keep its
+     `approval` id if starting a merge watch. The board queues or merges it
+     once GitHub shows it mergeable at this head. A review block that the
+     user merges over as an admin on GitHub counts as the merge. End the
+     turn and wait as "The merge wait" says.
    - `refused`: name its `reason`. A moved head goes through "Ready to
      merge" again for a new gate. A draft, or a PR that is not mergeable
      yet, goes back to the worker. A closed PR gets the gate "reopen
@@ -588,8 +602,9 @@ stages in that prefix run without a second gate.
    - The call throws: the service's `gh` cannot reach GitHub. Tell the
      user what it says and end the turn. Their next "merge" runs this
      step again.
-3. Only now that GitHub shows it merged, delete its branch:
-   `git -C <main workspace root> push origin --delete <branch>`. Deleting
+3. Only now that GitHub shows it merged, delete its branch, unless
+   GitHub already did: `git -C <main workspace root> push origin --delete
+   <branch>`. Deleting
    the head branch of an open PR closes the PR. The worker's worktree still
    has the branch checked out, so the local branch waits for The handoff.
 4. Advance through the PR's remaining active `pr`-scoped delivery stages in
@@ -649,7 +664,9 @@ thread:
   text>". Under a thread parent (an overseer thread) there is no card:
   the board wakes this thread with the action line itself, as a `gate` or
   `report`. Send it up as a gate, as "On the link protocol" says, and act
-  on the relayed answer the same way:
+  on the relayed answer the same way. On the board, when t3cm approved the
+  merge itself, it runs "merge", "requeue" and "ok" in code, and only the
+  other answers reach this thread:
   - "merge" or "requeue": run "On the user's word" from item 1, at the
     head the card names, else at the head this thread last passed to
     `wf.merge`. With neither, run "Ready to merge" for the PR's current
@@ -673,10 +690,8 @@ the merge watch after `queued` or `waiting` instead when:
 
 #### The merge watch
 
-The merge watch serves three cases:
+The merge watch serves two cases:
 
-- a pending check on an approved head in "On the user's word" item 1
-  (outcome `"pending"`, before `wf.merge`), for any ticket,
 - the root-ticket case "The merge wait" names, after `queued` or `waiting`,
 - the reconcile-off case "The merge wait" names (`board.reconcileIdleMinutes`
   `0`), after `queued` or `waiting`.
@@ -686,9 +701,8 @@ label> merge watch`, and a prompt that names the task id, the PR
 number and URL, its approved head SHA (full 40-character SHA) and branch,
 the main workspace root, the approved delivery chain from the user's reply
 (such as `"merge"`, `"merge and deploy"`, or `"merge, deploy and verify"`),
-the outcome (`"pending"`, `"queued"`, or `"waiting"`), the `approval` id
-returned by `wf.merge` (or `"none"` while the outcome is `"pending"`),
-whether this ticket uses the reconcile (has a parent and
+the outcome (`"queued"` or `"waiting"`), the `approval` id returned by
+`wf.merge`, whether this ticket uses the reconcile (has a parent and
 `board.reconcileIdleMinutes` is not `0`), and the flag "Seen queued: no".
 End it with "Follow 'Each merge-watch run' in the t3-ticket skill."
 
@@ -716,24 +730,6 @@ statusCheckRollup` when `hasNextPage` is true):
   send a gate naming the new head. End the turn.
 - **Still queued, or waiting on auto-merge (at the approved head):** when
   the flag says "Seen queued: no", update it to "yes". End the turn quietly.
-- **`OPEN`, out of the queue, at the approved head, with outcome
-  `"pending"`:** repeat "On the user's word" item 1's check gate on the
-  approved head.
-  - When `isDraft` is true or any check failed (even at `UNSTABLE`): delete
-    the task, clear `wf.gate({ clear: true })` when this thread has a
-    parent, and send it back to the worker. End the turn.
-  - When any check is still pending (still running, queued, or expected):
-    end the turn quietly.
-  - Once every check has finished and none failed: call `wf.merge` at the
-    approved head (item 2) and act on its outcome:
-    - `merged` or `refused`: delete the task, clear
-      `wf.gate({ clear: true })` when this thread has a parent, and handle
-      the outcome as item 2 says.
-    - `queued` or `waiting`: when this ticket uses the reconcile (has a
-      parent and `board.reconcileIdleMinutes` is not `0`), delete the task,
-      keep `wf.gate({ open: "merge" })`, and hand off to "The merge wait".
-      Otherwise update this task's prompt with the new outcome and its
-      `approval` id and start no new watch. End the turn.
 - **`OPEN` and out of the queue, after a `waiting` outcome, at the
   approved head, with "Seen queued: no", and no open board card matches this
   watch's `approval` id:**
