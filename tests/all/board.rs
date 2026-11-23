@@ -2066,6 +2066,185 @@ return {{ before, after, posts: fetches.filter((f) => f.method === "POST").map((
 }
 
 #[tokio::test]
+async fn state_carries_the_flow_cap_only_when_a_flow_is_configured() {
+    assert_eq!(snapshot(&H::new())["flowMaxTickets"], Value::Null);
+    let cfg = Config::from_value(
+        json!({"flow": {"repos": ["acme/widgets"], "optIn": {"label": "flow"}, "maxTickets": 3, "launch": "off"}}),
+    )
+    .unwrap();
+    assert_eq!(snapshot(&H::build(Vec::new(), cfg))["flowMaxTickets"], 3);
+}
+
+#[tokio::test]
+async fn contexts_save_the_execution_statuses() {
+    use reqwest::Method;
+    let s = start(H::new()).await;
+    let spec = json!({"statuses": ["alert", "pr-review", "paused", "pr-green", "running"]});
+    let (code, r) = s.context(Method::PUT, "c1", json!({"name": "Shipping", "spec": spec}), Some(&s.csrf())).await;
+    assert_eq!(code, 201, "{r}");
+    assert_eq!(r["context"]["spec"]["statuses"], json!(["running", "paused", "pr-green", "pr-review", "alert"]), "{r}");
+}
+
+const PULSE_TREE: &str = r##"
+const pr = (n, extra) => ({ number: n, url: "https://github.com/acme/a/pull/" + n, state: "open", ...extra });
+const ready = (o) => ({ isDraft: false, mergeStateStatus: "CLEAN", reviewDecision: "APPROVED", checks: "passing", ...o });
+const tree = [
+  T("acme/a#1", { workers: [W("#1 PR 1/1", "running")] }),
+  T("acme/a#2", { pr: pr(2, { readiness: ready() }) }),
+  T("acme/a#3", { pr: pr(3, { state: "queued" }) }),
+  T("acme/a#4", { workers: [W("#4 PR 1/1", "idle", { pr: pr(4, { readiness: ready({ checks: "pending", reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED" }) }) })] }),
+  T("acme/a#5", { status: "paused", paused: true }),
+  T("acme/a#6", { status: "failed" }),
+  T("acme/a#7", { pr: pr(7, { readiness: ready({ checks: "failing", mergeStateStatus: "UNSTABLE" }) }) }),
+  T("acme/a#8", { pr: pr(8) }),
+  T("acme/a#9", { status: "running", paused: true, pr: pr(90, { readiness: ready({ checks: "failing" }) }), workers: [W("#9 PR 1/2", "idle", { pr: pr(90, { readiness: ready({ checks: "failing" }) }) }), W("#9 PR 2/2", "idle", { pr: pr(91, { readiness: ready() }) })] }),
+];
+const slot = (k) => q('#pslots [data-slot="' + k + '"]');
+const look = () => Object.fromEntries(["active", "green", "review", "held", "alert"].map((k) =>
+  [k, [slot(k).querySelector(".pn").textContent, slot(k).querySelector(".pd").textContent, slot(k).getAttribute("aria-pressed")]]));
+const open = () => [...document.getElementById("open").children].filter((e) => e.dataset.thread && !e.classList.contains("gone")).map((e) => e.dataset.thread.slice(2));
+const statusBtn = () => q('[data-facet="statuses"] [data-part="fbtn"]').textContent;
+"##;
+
+#[tokio::test]
+async fn the_pulse_strip_counts_execution_states_and_toggles_status_filters() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"{ROWS}
+{PULSE_TREE}
+const facet = (key) => q('[data-facet="' + key + '"]');
+const pick = (key, val) => {{
+  if (facet(key).querySelector('[data-part="fpop"]').hidden) facet(key).querySelector('[data-part="fbtn"]').dispatch("click");
+  const box = facet(key).querySelector('[data-val="' + val + '"] input');
+  box.checked = !box.checked;
+  box.dispatch("change");
+}};
+emitState({{ ...base, cards: [], tree, flowMaxTickets: 6 }});
+const before = look();
+slot("green").dispatch("click");
+const green = {{ open: open(), slots: look(), status: statusBtn() }};
+slot("held").dispatch("click");
+const both = open();
+slot("green").dispatch("click");
+slot("held").dispatch("click");
+const cleared = {{ open: open().length, status: statusBtn(), slots: look() }};
+pick("statuses", "blocked");
+const facetOnly = look().held[2];
+slot("held").dispatch("click");
+const composed = {{ open: open(), held: look().held }};
+slot("held").dispatch("click");
+const off = {{ open: open().length, status: statusBtn() }};
+emitState({{ ...base, cards: [], tree }});
+return {{ before, green, both, cleared, facetOnly, composed, off, uncapped: look().active[1] }};
+"##
+        ),
+    );
+    assert_eq!(
+        r["before"],
+        json!({
+            "active": ["6", "2 threads running, 9 of 6 tickets, 3 over the cap", "false"],
+            "green": ["3", "#2, #3, #91", "false"],
+            "review": ["1", "#4 CI", "false"],
+            "held": ["3", "2 paused, 1 blocked", "false"],
+            "alert": ["2", "#7, #90 failing after approval", "false"],
+        }),
+        "{r}"
+    );
+    assert_eq!(r["green"]["open"], json!(["acme/a#9", "acme/a#2", "acme/a#3"]), "{r}");
+    assert_eq!(r["green"]["status"], "Status: ready to merge", "{r}");
+    assert_eq!(
+        (&r["green"]["slots"]["green"], &r["green"]["slots"]["active"][0], &r["green"]["slots"]["review"][0]),
+        (&json!(["3/3", "#2, #3, #91", "true"]), &json!("2/6"), &json!("0/1")),
+        "{r}"
+    );
+    assert_eq!(r["both"], json!(["acme/a#6", "acme/a#9", "acme/a#2", "acme/a#3", "acme/a#5"]), "{r}");
+    assert_eq!((&r["cleared"]["open"], &r["cleared"]["status"]), (&json!(9), &json!("Status")), "{r}");
+    assert_eq!(r["cleared"]["slots"], r["before"], "{r}");
+    assert_eq!(r["facetOnly"], "false", "{r}");
+    assert_eq!(r["composed"]["open"], json!(["acme/a#6", "acme/a#9", "acme/a#5"]), "{r}");
+    assert_eq!(r["composed"]["held"][2], "true", "{r}");
+    assert_eq!(r["off"], json!({"open": 9, "status": "Status"}), "{r}");
+    assert_eq!(r["uncapped"], "2 threads running", "{r}");
+}
+
+#[tokio::test]
+async fn the_pulse_strip_folds_on_short_windows_until_the_viewer_picks() {
+    let (html, _) = two_gate_page().await;
+    let look = r##"async () => {
+const q = (sel) => document.querySelector(sel);
+const was = () => ({ folded: q("#pulse").classList.contains("folded"), app: q("#app").classList.contains("pfold"),
+  expanded: q("#pulse-fold").getAttribute("aria-expanded"), saved: localStorage.getItem("t3board.pulse") });
+const before = was();
+q("#pulse-fold").dispatch("click");
+return { before, after: was() };
+}"##;
+    let media = |short: bool| {
+        format!(
+            "globalThis.matchMedia = (q) => ({{ matches: {short} && q === \"(max-height: 999px)\", addEventListener() {{}}, addListener() {{}} }});"
+        )
+    };
+    let short = run_page_async_with(&html, &media(true), look);
+    assert_eq!(
+        short,
+        json!({
+            "before": {"folded": true, "app": true, "expanded": "false", "saved": null},
+            "after": {"folded": false, "app": false, "expanded": "true", "saved": "open"},
+        })
+    );
+    let tall = run_page_async_with(&html, &media(false), look);
+    assert_eq!(tall["before"], json!({"folded": false, "app": false, "expanded": "true", "saved": null}), "{tall}");
+    assert_eq!(tall["after"]["saved"], "folded", "{tall}");
+    let picked = run_page_async_with(
+        &html,
+        &format!("{}\nglobalThis.__storage = {{ \"t3board.pulse\": \"folded\" }};", media(false)),
+        look,
+    );
+    assert_eq!(picked["before"]["folded"], true, "{picked}");
+}
+
+#[tokio::test]
+async fn rows_and_pills_show_pr_readiness_and_the_pause_tone() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"{ROWS}
+{PULSE_TREE}
+emitState({{ ...base, cards: [], tree }});
+const pill = (label, sel) => {{
+  const p = row(label).querySelector(sel || ".side .pr .spill");
+  return [p.textContent, p.className.split(" ").find((c) => c.startsWith("s-")), p.parentNode.getAttribute("aria-label")];
+}};
+return {{
+  green: pill("acme/a#2"), queued: pill("acme/a#3"), worker: pill("acme/a#4", ".wi .spill"),
+  alert: pill("acme/a#7"), plain: pill("acme/a#8"), shownWorker: pill("acme/a#9", ".wi .prl .spill"),
+  paused: row("acme/a#5").querySelector(".mk .mark").className,
+}};
+"##
+        ),
+    );
+    assert_eq!(r["green"], json!(["#2 ready", "s-pr-green", "PR #2 ready to merge for acme/a#2"]), "{r}");
+    assert_eq!(r["queued"], json!(["#3 queued", "s-pr-green", "PR #3 ready to merge for acme/a#3"]), "{r}");
+    assert_eq!(r["worker"], json!(["#4", "s-pr-review", "PR #4 CI for #4 PR 1/1"]), "{r}");
+    assert_eq!(r["alert"], json!(["#7 failing", "s-alert", "PR #7 approved with failing checks for acme/a#7"]), "{r}");
+    assert_eq!(r["plain"], json!(["#8 open", "s-pr-open", "PR #8 open for acme/a#8"]), "{r}");
+    assert_eq!(r["paused"], "mark s-pause", "{r}");
+    assert_eq!(
+        r["shownWorker"],
+        json!(["#91", "s-pr-green", "PR #91 ready to merge for #9 PR 2/2"]),
+        "of two idle workers the row shows the one with a PR the ticket row does not already show: {r}"
+    );
+    let css =
+        |sel: &str| html.lines().find(|l| l.starts_with(sel)).unwrap_or_else(|| panic!("no rule {sel}")).to_string();
+    assert!(css(".s-pause {").contains("var(--pause)"), "paused has its own tone");
+    assert!(!css(".s-idle {").contains("s-pause"), "idle no longer shares its rule with paused");
+}
+
+#[tokio::test]
 async fn a_needs_you_row_links_to_its_card() {
     let (html, st) = two_gate_page().await;
     let r = page_scenario(

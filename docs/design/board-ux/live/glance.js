@@ -120,7 +120,7 @@ async (page) => {
         if (tk && tk.matches(".tk") && tk.dataset.state !== "need") G4.amberWithoutCard.push(tk.dataset.thread);
       }
       if ((same(fg, FAIL) && (own(el) || el.matches(".mark"))) || (same(rgb(cs.borderTopColor), FAIL) && parseFloat(cs.borderTopWidth) > 0)) {
-        if (!el.closest(".s-fail, .needs.r-fail, .k-fail, .err, .err-strip, .perr, .bad, .newbtn[data-urgent], .stale .conn")) G4.redOff.push(desc(el));
+        if (!el.closest(".s-fail, .s-alert, .needs.r-fail, .k-fail, .err, .err-strip, .perr, .bad, .newbtn[data-urgent], .stale .conn")) G4.redOff.push(desc(el));
       }
       if (same(fg, ACC) && own(el) && !el.closest("a, .linkish, .newbtn, button.btn")) G4.accentOff.push(desc(el));
       if (same(bg, GO) && !el.matches(".btn.go, .btn.answer")) G4.accentOff.push(desc(el));
