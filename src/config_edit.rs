@@ -253,7 +253,31 @@ fn remote_value(remote: &BoardRemoteConfig) -> Value {
         "origin": remote.origin,
         "allowUsers": remote.allow_users,
         "requirePairing": remote.require_pairing,
+        "settingsUsers": remote.settings_users,
     })
+}
+
+pub fn changed_keys(old: &Value, new: &Value) -> Vec<String> {
+    fn walk(old: Option<&Value>, new: Option<&Value>, at: &mut Vec<String>, out: &mut Vec<String>) {
+        if old == new {
+            return;
+        }
+        match (old.and_then(Value::as_object), new.and_then(Value::as_object)) {
+            (Some(o), Some(n)) => {
+                let mut names: Vec<&String> = o.keys().chain(n.keys().filter(|k| !o.contains_key(*k))).collect();
+                names.sort_unstable();
+                for name in names {
+                    at.push(name.clone());
+                    walk(o.get(name), n.get(name), at, out);
+                    at.pop();
+                }
+            }
+            _ => out.push(field::display(at)),
+        }
+    }
+    let mut out = Vec::new();
+    walk(Some(old), Some(new), &mut Vec::new(), &mut out);
+    out
 }
 
 pub fn lookup(effective: &Value, path: &[String]) -> Option<Value> {

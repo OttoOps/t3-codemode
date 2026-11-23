@@ -212,7 +212,8 @@ or edit `config.json` directly:
       "mode": "tailscale",
       "origin": "https://box.acme.ts.net:47732",
       "allowUsers": ["alice@acme.example"],
-      "requirePairing": false
+      "requirePairing": false,
+      "settingsUsers": []
     }
   }
 }
@@ -238,6 +239,7 @@ HTTPS origin:
 | `origin` | unset | Required when `mode` is not `"off"`. Canonical `https://` origin with no path, query, fragment, or credentials, such as `"https://box.acme.ts.net:47732"` or `"https://board.example.com"`. |
 | `allowUsers` | `[]` | Tailscale logins allowed in `"tailscale"` mode (matched case-insensitively). When omitted or empty, defaults to the host's own login from `tailscale status --json`. When non-empty, it replaces that default, so include your own login if you want to keep access. Ignored outside `"tailscale"` mode. |
 | `requirePairing` | `false` | When `true` in `"tailscale"` mode, requires both an allowed `Tailscale-User-Login` and a valid `__Host-t3cm_session` pairing cookie minted with `t3cm board pair`. Pairing is always required in `"pairing"` mode. |
+| `settingsUsers` | `[]` | Tailscale logins that may open [Settings](board.md#settings) from a remote board in `"tailscale"` mode (matched case-insensitively). When omitted or empty, only the host's own login may. When non-empty, it replaces that default. Each entry must also be in `allowUsers` when `allowUsers` is set. Ignored outside `"tailscale"` mode, where remote Settings stay closed. |
 
 `/mcp`, `/healthz` and `/reload` remain strictly loopback-only regardless of `board.remote`.
 See [Remote access](board.md#remote-access) for Tailscale Serve, pairing

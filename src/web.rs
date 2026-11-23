@@ -635,15 +635,55 @@ async fn board_guard(
     next.run(req).await
 }
 
-async fn loopback_only(
+#[derive(Clone, Debug)]
+struct SettingsLogin(String);
+
+async fn settings_guard(
+    State(web): State<Web>,
     Extension(kind): Extension<RequestKind>,
-    req: axum::extract::Request,
+    session: Option<Extension<AuthSession>>,
+    mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    if kind == RequestKind::Remote {
-        return error(StatusCode::FORBIDDEN, "board settings are only allowed from loopback");
+    if kind == RequestKind::Local {
+        return next.run(req).await;
     }
-    next.run(req).await
+    let login = session.and_then(|Extension(s)| s.tailscale_login);
+    match web.settings_owner(req.headers(), login).await {
+        Ok(login) => {
+            req.extensions_mut().insert(SettingsLogin(login));
+            next.run(req).await
+        }
+        Err(why) => error(StatusCode::FORBIDDEN, why),
+    }
+}
+
+impl Web {
+    async fn settings_owner(&self, headers: &HeaderMap, login: Option<String>) -> Result<String, &'static str> {
+        let Some((cfg, _)) = self.remote.as_ref().filter(|(cfg, _)| cfg.mode == RemoteMode::Tailscale) else {
+            return Err("board settings are only allowed from loopback or, in Tailscale mode, the board's owner");
+        };
+        if !matches!(single_header(headers, "x-forwarded-proto"), SingleHeader::Present(p) if p.eq_ignore_ascii_case("https"))
+        {
+            return Err("remote board settings need X-Forwarded-Proto: https");
+        }
+        let Some(login) = login else {
+            return Err("remote board settings need a Tailscale login");
+        };
+        let owner = if cfg.settings_users.is_empty() {
+            matches!(
+                self.app.tailscale_host_login_async().await,
+                Ok(Some(ref host)) if host.eq_ignore_ascii_case(&login)
+            )
+        } else {
+            cfg.settings_users.iter().any(|u| u.eq_ignore_ascii_case(&login))
+        };
+        if owner {
+            Ok(login)
+        } else {
+            Err("this Tailscale login may not open board settings; see board.remote.settingsUsers")
+        }
+    }
 }
 
 async fn pair_guard(State(web): State<Web>, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
@@ -1209,13 +1249,18 @@ async fn get_settings(State(web): State<Web>) -> Response {
     }
 }
 
-async fn put_settings(State(web): State<Web>, raw: Bytes) -> Response {
+async fn put_settings(State(web): State<Web>, remote: Option<Extension<SettingsLogin>>, raw: Bytes) -> Response {
     let b: SettingsBody = match body(&raw) {
         Ok(b) => b,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
     match web.app.wf.save_settings(b).await {
-        Ok(saved) => json_ok(StatusCode::OK, json!(saved)),
+        Ok(saved) => {
+            if let Some(Extension(SettingsLogin(login))) = remote {
+                tracing::info!(login = %login, keys = ?saved.changed, "remote board settings saved");
+            }
+            json_ok(StatusCode::OK, json!(saved))
+        }
         Err(e) => settings_failed(&web.app, e),
     }
 }
@@ -1233,7 +1278,7 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
     let settings = Router::new()
         .route("/api/settings", get(get_settings).put(put_settings))
         .route("/api/settings/pools", get(get_settings_pools))
-        .route_layer(axum::middleware::from_fn(loopback_only));
+        .route_layer(axum::middleware::from_fn_with_state(web.clone(), settings_guard));
     let board = Router::new()
         .route("/", get(page))
         .route("/manifest.webmanifest", get(manifest))

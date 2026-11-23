@@ -82,16 +82,29 @@ and the threads running. Only the lists scroll.
 
 Times show as ages (`36m`, `1h 32m`); hover one for the local time.
 
-On a local board, the gear button in the header opens [Settings](#settings).
+On a local board, and on a remote board opened by its Tailscale owner, the gear
+button in the header opens [Settings](#settings).
 
 A `handoff` or `closed` message marks a ticket done.
 
 ## Settings
 
 On a board you open at a loopback address, the gear button in the header opens
-Settings, which edits all of t3cm's `config.json`. A remote board shows no gear
-button, because settings are
-[local only](security.md#board-settings). Its **Models** control still works.
+Settings, which edits all of t3cm's `config.json`. A remote board shows the
+gear only when its own `GET /api/settings` answers 200, which needs all of
+these:
+
+- `board.remote.mode` is `"tailscale"`.
+- The Tailscale login is in `board.remote.settingsUsers` or, when that list is
+  empty, is the host's own Tailscale login.
+- The request arrives over HTTPS with `X-Forwarded-Proto: https`, as
+  Tailscale Serve sends it.
+
+Any other remote board, including a pairing-mode session and an allowed
+Tailscale user who is not a settings user, shows no gear and gets 403 from the
+[settings API](#settings-api). Its **Models** control still works. See
+[Board settings](security.md#board-settings) for why, and for what a remote
+read returns.
 
 | Section | Holds |
 |---|---|
@@ -647,11 +660,12 @@ without changing direct loopback behavior:
   `POST /api/open`; server-side, authenticated remote `POST /api/open` requests
   receive 403 while unauthenticated or disallowed requests receive the usual
   401/403 guard refusal.
-- **Settings stay on the host.** A remote board shows no
-  [Settings](#settings) button. The [settings API](#settings-api) refuses an
-  authenticated remote request with 403, reads included, and the board's guard
-  refuses any other remote request with its usual 401 or 403. The **Models**
-  control still works remotely.
+- **Settings open for the Tailscale owner only.** In `"tailscale"` mode, the
+  host's own login, or each login in `board.remote.settingsUsers`, sees the
+  [Settings](#settings) button over HTTPS. Every other remote board shows
+  none, and the [settings API](#settings-api) refuses its requests with 403,
+  reads included. The board's guard refuses an unauthenticated remote request
+  with its usual 401 or 403. The **Models** control still works remotely.
 - **Add to Home Screen.** The board serves an embedded `/manifest.webmanifest`
   and icons (`/icon.svg`, `/icon-192.png`, `/icon-512.png`) behind the same
   authentication guards and zero-external-request CSP. On iOS Safari, open the
@@ -782,8 +796,10 @@ server {
 ## Settings API
 
 `/api/settings` reads and saves all of t3cm's `config.json`. Its routes answer
-only direct loopback requests, reads included, so a signed-in remote browser
-gets 403.
+direct loopback requests, and remote requests from the Tailscale owner as
+[Settings](#settings) describes. Any other signed-in remote browser gets 403,
+reads included. A `PUT` needs the `X-T3CM-CSRF` token either way. The service
+logs each remote save with the Tailscale login and the keys it changed.
 
 `GET /api/settings` returns these fields:
 
@@ -856,9 +872,9 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `GET /api/models` | Current ticket and ask model resolution (`ticket`, `ask`), enabled providers/models/efforts from `orchestrator_capabilities` (`providers`), configured pools (`pools`), and per-project repo overrides (`repoOverrides`) |
 | `PUT /api/models/ticket` `{mode, ...}` | Persist `models.ticket` to the user workflow config (`mode: "model"` with `provider`, `model`, `effort?`, or `mode: "pool"` with `pool`) after validating against live capabilities or configured pools; returns the updated `/api/models` view |
 | `PUT /api/models/ask` `{mode, ...}` | Persist the ask box mode to t3cm's `config.json` (`board.askInstanceId`/`askModel`/`askEffort` or `board.askPool`) and apply it live with no restart; returns the updated `/api/models` view |
-| `GET /api/settings` | Loopback-only: the config file, its revision, the saved, default and running values, the keys that need a restart, and any errors. See [Settings API](#settings-api) |
-| `PUT /api/settings` `{revision, file}` | Loopback-only: check and save the whole config, then reload it; returns `{revision, restart, warnings}` (409 for a stale revision, 422 with per-field `errors` for an invalid result) |
-| `GET /api/settings/pools` | Loopback-only: `{pools}`, each pool's live member state as `wf.pools()` reports it |
+| `GET /api/settings` | Loopback or the Tailscale owner: the config file, its revision, the saved, default and running values, the keys that need a restart, and any errors. See [Settings API](#settings-api) |
+| `PUT /api/settings` `{revision, file}` | Loopback or the Tailscale owner: check and save the whole config, then reload it; returns `{revision, restart, warnings}` (409 for a stale revision, 422 with per-field `errors` for an invalid result) |
+| `GET /api/settings/pools` | Loopback or the Tailscale owner: `{pools}`, each pool's live member state as `wf.pools()` reports it |
 | `POST /api/tickets/{thread}/settle`, `/restore` | Settle a done ticket, or bring a settled one back (400 if open, or not settled) |
 | `POST /api/asks/{id}/settle`, `/restore` | The same for a closed ask; `id` is `q<n>` |
 | `GET /api/new-issues` | `{issues, dismissed}`, newest first; an issue that has a board ticket is in neither |

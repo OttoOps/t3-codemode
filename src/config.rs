@@ -143,6 +143,8 @@ pub struct BoardRemoteConfig {
     pub allow_users: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_pairing: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings_users: Vec<String>,
 }
 
 impl BoardRemoteConfig {
@@ -159,6 +161,16 @@ impl BoardRemoteConfig {
         for (i, user) in self.allow_users.iter().enumerate() {
             crate::tailscale::validate_login(user)
                 .map_err(|e| within(e, &format!("board.remote.allowUsers.{i}"), "board.remote.allowUsers"))?;
+        }
+        for (i, user) in self.settings_users.iter().enumerate() {
+            let at = format!("board.remote.settingsUsers.{i}");
+            crate::tailscale::validate_login(user).map_err(|e| within(e, &at, "board.remote.settingsUsers"))?;
+            if !self.allow_users.is_empty() && !self.allow_users.iter().any(|u| u.eq_ignore_ascii_case(user)) {
+                return Err(invalid(
+                    at,
+                    format!("board.remote.settingsUsers: {user:?} is not in board.remote.allowUsers"),
+                ));
+            }
         }
         Ok(())
     }

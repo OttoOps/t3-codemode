@@ -32,10 +32,26 @@ A config write can loosen `deny` immediately. It can also add a stdio upstream,
 which is a command the service runs after a restart, or change who may reach
 the remote board after a restart. The board's
 [settings routes](board.md#settings-api), `/api/settings` and
-`/api/settings/pools`, are therefore loopback-only for reads and writes, and
-refuse an authenticated remote request with 403. The page served to a remote
-request keeps Settings hidden and never starts it. The routes enforce the
-limit. A save also needs the CSRF token.
+`/api/settings/pools`, therefore answer only two kinds of request, for reads
+and writes alike:
+
+- a direct loopback request;
+- a remote request in `board.remote.mode: "tailscale"` that passed the
+  board's remote checks, carries `X-Forwarded-Proto: https`, and whose
+  `Tailscale-User-Login` is in `board.remote.settingsUsers` or, when that list
+  is empty, is the host's own Tailscale login.
+
+Every other remote request gets 403, including a pairing-mode session and an
+allowed Tailscale user who is not a settings user. A page served to a remote
+request shows Settings only after its own `GET /api/settings` answers 200. The
+routes enforce the limit. A save also needs the CSRF token, and the service
+logs each remote save at info level with the login and the dotted paths of
+the keys it changed, never their values.
+
+Whoever holds a device signed in to a settings login can therefore rewrite
+the config directly, including the commands the host runs and who may reach
+the board. Keep `settingsUsers` to accounts you would trust with a shell on
+the host.
 
 The `/api/models` routes still answer an authenticated remote board. They
 write only the ticket and ask model keys, and an ask save applies no other
@@ -43,7 +59,10 @@ change that waits in the file.
 
 `GET /api/settings` returns the file as written, so an `${env:..}` or
 `${file:..}` reference stays unresolved and a credential written literally
-into the file comes back literally.
+into the file comes back literally. A remote read is not redacted either: a
+settings user can already make the host run any command, and a save sends the
+whole file back, so placeholders would overwrite the real values. Use a
+reference to keep a credential off remote devices.
 
 `execute` has no config global, so sandboxed code cannot clear its own `deny`
 list through `wf`. Code that acts outside the sandbox can still change the
@@ -54,6 +73,8 @@ agent that receives it could edit the file. Both restrictions block direct
 edits only, as
 [ADR 0010](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0010-keep-config-edits-local.md)
 records.
+[ADR 0011](https://github.com/OttoOps/t3-codemode/blob/main/docs/adr/0011-settings-for-the-tailscale-owner.md)
+opens the settings routes to the Tailscale owner.
 
 ## Config reload
 
@@ -117,9 +138,10 @@ code cannot call the route directly.
       `"off"` or `"pairing"`.
   - Every mutating method (`POST`, `PUT`, `DELETE`) on authenticated board
     routes still requires the per-process `X-T3CM-CSRF` header.
-  - `GET` and `PUT /api/settings` and `GET /api/settings/pools` are strictly
-    loopback-only, as `POST /api/open` is, so authenticated remote requests
-    receive 403.
+  - `GET` and `PUT /api/settings` and `GET /api/settings/pools` answer a
+    remote request only from the Tailscale owner over
+    `X-Forwarded-Proto: https`, as [Board settings](#board-settings)
+    describes. Any other authenticated remote request receives 403.
   - `POST /api/open` is strictly loopback-only: authenticated remote requests
     receive 403, while unauthenticated or disallowed remote requests receive
     the usual 401/403 guard refusal, so remote clients cannot trigger desktop

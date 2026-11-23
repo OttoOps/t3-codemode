@@ -18,6 +18,8 @@ pub struct Saved {
     pub revision: Revision,
     pub restart: Option<Vec<&'static str>>,
     pub warnings: Vec<String>,
+    #[serde(skip)]
+    pub changed: Vec<String>,
 }
 
 impl Wf {
@@ -46,7 +48,9 @@ impl Wf {
         let path = self.config_path();
         let file = Document::read(&path)?;
         file.check_revision(&body.revision)?;
-        let draft = file.rewrite(Value::Object(body.file))?;
+        let new = Value::Object(body.file);
+        let changed = config_edit::changed_keys(&file.value().unwrap_or_else(|_| json!({})), &new);
+        let draft = file.rewrite(new)?;
         let mut warnings = Vec::new();
         if let Some(why) = self.check_changed_pools(draft.config(), &draft.changed_pools()).await? {
             warnings.push(format!("pool members not checked against T3 ({why}); each pick checks them"));
@@ -63,7 +67,7 @@ impl Wf {
                 None
             }
         };
-        Ok(Saved { revision, restart, warnings })
+        Ok(Saved { revision, restart, warnings, changed })
     }
 
     async fn check_changed_pools(&self, config: &Config, pools: &[&str]) -> Result<Option<String>, Rejected> {

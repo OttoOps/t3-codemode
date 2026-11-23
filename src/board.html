@@ -1183,6 +1183,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
 const CSRF = "{{CSRF}}";
 const PAGE_VERSION = "{{VERSION}}";
 const LOCAL = "{{LOCAL}}" === "true";
+let SETTINGS = LOCAL;
 const UPD_KEY = "t3board.update.hidden";
 const upd = { hidden: "", announced: "", reload: false };
 const drift = { key: "", announced: "" };
@@ -5247,7 +5248,7 @@ function closeDialog(dlg) {
 
 function openModelsDlg(focusSection) {
   const dlg = $("models-dlg");
-  if (LOCAL) placePickers(dlg);
+  if (SETTINGS) placePickers(dlg);
   if (dlg.showModal) dlg.showModal();
   else dlg.open = true;
   startPickers();
@@ -5843,7 +5844,7 @@ function confBoard() {
       })),
     h("div", { class: "conf-group" },
       h("h4", {}, "Remote board"),
-      h("p", { class: "meta" }, "Who can reach the board from another device. A change here, revoking a login included, waits for a restart. Settings stay local in every mode."),
+      h("p", { class: "meta" }, "Who can reach the board from another device. A change here, revoking a login included, waits for a restart. Settings open remotely only in Tailscale mode, for the logins below."),
       confSlot(sec, [["board", "remote"]]),
       h("div", { class: "conf-grid" },
         confSelect(sec, remote("mode"), {
@@ -5861,6 +5862,10 @@ function confBoard() {
         confToggle(sec, remote("requirePairing"), {
           label: "Also require pairing", restart: true, preset: false,
           help: "Applies in Tailscale mode.",
+        }),
+        confLines(sec, remote("settingsUsers"), {
+          label: "Tailscale logins that can open Settings", restart: true, preset: [],
+          help: "One per line, each also allowed above. Empty allows only this host's login. Applies in Tailscale mode.",
         }))),
   ];
 }
@@ -6632,26 +6637,36 @@ function closeSettings() {
 }
 
 function settingsModelsChanged() {
-  if (!LOCAL || !$("settings-dlg").open) return;
+  if (!SETTINGS || !$("settings-dlg").open) return;
   for (const f of conf.fields.get("pools") || []) if (f.choices) f.choices();
   paintPoolStates();
 }
 
 function settingsAskSaving() {
-  if (!LOCAL || !$("settings-dlg").open) return;
+  if (!SETTINGS || !$("settings-dlg").open) return;
   conf.asking = true;
   paintSettings();
 }
 
 async function settingsAskSaved() {
-  if (!LOCAL) return;
+  if (!SETTINGS) return;
   if ($("settings-dlg").open) await refreshSettings();
   conf.asking = false;
   if ($("settings-dlg").open) paintSettings();
 }
 
 function initSettings() {
-  if (!LOCAL) return;
+  if (LOCAL) return buildSettingsDialog();
+  fetch("/api/settings", { credentials: "same-origin", cache: "no-store" })
+    .then((r) => {
+      if (r.status !== 200 || SETTINGS) return;
+      SETTINGS = true;
+      buildSettingsDialog();
+    })
+    .catch(() => {});
+}
+
+function buildSettingsDialog() {
   const tabs = $("settings-tabs");
   const pick = $("settings-section");
   for (const [sec, label] of CONF_SECTIONS) {
