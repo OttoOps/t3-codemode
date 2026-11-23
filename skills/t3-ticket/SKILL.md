@@ -327,6 +327,15 @@ such as Antigravity, read `~/.agents/skills/t3-worker/SKILL.md` and the
 `procedure.md` beside it, and follow them.
 ```
 
+A brief never tells the worker to request a bot review without checking
+that reviews are paused.
+CodeRabbit reviews each push by itself until its status comment on the PR
+says reviews are paused, as the repo's `CONTRIBUTING.md` says; only then
+does an agent post `@coderabbitai review`, once after a push. When a brief
+lets the worker report ready whatever CodeRabbit's state, that covers its
+review decision, never its check: the worker reports ready only once that
+check on the head has finished.
+
 ## 4. Between workers
 
 Every worker message opens with a `[t3cm` header and needs no command
@@ -408,9 +417,11 @@ Verify on GitHub first:
 `gh pr view <number> -R <repo> --json state,isDraft,headRefOid,mergeStateStatus,statusCheckRollup,files`
 
 The PR is open and not a draft, `headRefOid` equals the head the worker
-named, every check passed, and `mergeStateStatus` is `CLEAN`. A pending
-check is waited out (end the turn; the worker reports again). A failing one
-goes back to the worker. In a repo with no CI, run the brief's checks on the
+named, every check passed, and `mergeStateStatus` is `CLEAN`. Every check
+means every check on the head, CodeRabbit's and any other bot reviewer's
+included, even where the repo does not require it. A pending check is
+waited out (end the turn; the worker reports again). A failing one goes
+back to the worker. In a repo with no CI, run the brief's checks on the
 PR head yourself, in a detached temporary worktree that you remove
 afterwards (`git -C <main workspace root> worktree add --detach <tmp path>
 <head sha>`, run, `git -C <main workspace root> worktree remove <tmp

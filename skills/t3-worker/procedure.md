@@ -207,11 +207,16 @@ does those and messages you. Never merge the PR yourself, through `gh`,
 - **A conflict:** `git fetch origin`, rebase on `origin/main`, re-run the
   done-checks, push with `--force-with-lease=<branch>:<old head sha>`. The
   PR targets `main`; it is never stacked on another PR.
-- **The required checks passed:** call
+- **The required checks passed:** call ready only once every check on
+  the head has finished, CodeRabbit's and any other bot reviewer's
+  included, even where the repo does not require it, and you have read
+  any review a bot posted of that head:
   `await wf.pr({ event: "ready", repo: "<owner>/<name>", pr: <number>, head: "<sha>" })`.
-  A merge approval holds only for the head it names. Call it once per head
-  sha, and never while a `review` gate is open: call it after the user's
-  answer clears that gate. Act on its `status`:
+  A brief that says to report ready whatever the bot's state means its
+  review decision, never a check still running. A merge approval holds
+  only for the head it names. Call it once per head sha, and never while
+  a `review` gate is open: call it after the user's answer clears that
+  gate. Act on its `status`:
   - `gated`: the merge card is on the user's board, and your link holds
     the `merge` gate. Wait for the orchestrator's "Merged" message.
   - `waiting`: a check is still running. t3cm opens the merge card once it
@@ -228,6 +233,12 @@ does those and messages you. Never merge the PR yourself, through `gh`,
   It records the head and drops any merge card for the old one, because the
   orchestrator merges only at the head you named. Then call ready again
   when the new head's checks pass.
+  CodeRabbit reviews each push on its own until its status comment on the
+  PR says reviews are paused; the repo's `CONTRIBUTING.md` says how its
+  pause works. Post `@coderabbitai review` once after a push, and only when
+  that comment says paused. Before that, CodeRabbit answers the command
+  with "applicable only when automatic reviews are paused", and that reply
+  is not a review starting.
 - **A `[t3cm reply from=t3cm` about your PR:** a check failed, or the PR
   changed, after a `waiting` ready. Treat it as the wake it names.
 
