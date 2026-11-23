@@ -308,3 +308,20 @@ return { wide: text("route-wide"), short: text("route-short"), tip: tip().textCo
     let tip = r["tip"].as_str().unwrap();
     assert!(tip.starts_with(&format!("No pool: launches run on claudeAgent, {OPUS}, effort high.")), "{tip}");
 }
+
+#[tokio::test]
+async fn a_failed_follow_up_capabilities_search_reports_the_instance_as_unknown() {
+    let c = json!({"board": {"instanceId": "claude-a", "ticketModel": "claude-catalog", "ticketEffort": "high"}});
+    let h = H::build(Vec::new(), Config::from_value(c).unwrap());
+    h.fake.set_providers(vec![provider("claude-a", "claudeAgent", &[OPUS, "claude-catalog"])]);
+    h.fake.set_short_list(1);
+    let found = &stats(&h, "").await["members"][0];
+    assert_eq!((found["status"].clone(), found["instanceId"].clone()), (json!("ready"), json!("claude-a")));
+    h.fake.set_search_fail(true);
+    let failed = &stats(&h, "").await["members"][0];
+    assert_eq!(failed["status"], "unknown");
+    assert!(failed["reason"].as_str().unwrap().starts_with("T3 capabilities unreachable"), "{failed}");
+    h.fake.set_search_fail(false);
+    h.fake.set_providers(vec![provider("claude-a", "claudeAgent", &[OPUS])]);
+    assert_eq!(stats(&h, "").await["members"][0]["status"], "disabled");
+}
