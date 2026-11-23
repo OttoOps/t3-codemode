@@ -2215,6 +2215,7 @@ dependencies = [
  "reqwest",
  "rquickjs",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -2224,6 +2225,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicase",
+ "webpki-roots",
  "windows-sys 0.61.2",
 ]
 

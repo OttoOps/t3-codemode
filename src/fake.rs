@@ -678,6 +678,7 @@ struct FakeTailscaleState {
     serve_status: Result<crate::tailscale::ServeStatus, String>,
     enable_err: Option<String>,
     disable_err: Option<String>,
+    listener_owner: Option<crate::tailscale::ListenerOwner>,
     calls: Vec<String>,
 }
 
@@ -689,6 +690,7 @@ impl Default for FakeTailscaleState {
             serve_status: Ok(crate::tailscale::ServeStatus::default()),
             enable_err: None,
             disable_err: None,
+            listener_owner: None,
             calls: Vec::new(),
         }
     }
@@ -721,6 +723,7 @@ impl FakeTailscale {
             dns_name: Some("box.acme.ts.net".into()),
             cert_domains: vec!["box.acme.ts.net".into()],
             host_login: Some(login.into()),
+            ipv4: None,
         });
     }
 
@@ -754,6 +757,16 @@ impl FakeTailscale {
 
     pub fn set_disable_error(&self, err: Option<&str>) {
         self.state.lock().unwrap().disable_err = err.map(String::from);
+    }
+
+    pub fn set_ipv4(&self, ip: Option<std::net::Ipv4Addr>) {
+        if let Ok(status) = &mut self.state.lock().unwrap().status {
+            status.ipv4 = ip;
+        }
+    }
+
+    pub fn set_listener_owner(&self, owner: Option<crate::tailscale::ListenerOwner>) {
+        self.state.lock().unwrap().listener_owner = owner;
     }
 
     pub fn calls(&self) -> Vec<String> {
@@ -794,6 +807,10 @@ impl crate::tailscale::TailscaleRunner for FakeTailscale {
             return Err(anyhow::Error::msg(e.clone()));
         }
         Ok(())
+    }
+
+    fn listener_owner(&self, _addr: std::net::SocketAddrV4) -> Option<crate::tailscale::ListenerOwner> {
+        self.state.lock().unwrap().listener_owner.clone()
     }
 
     fn cache_ttl(&self) -> std::time::Duration {

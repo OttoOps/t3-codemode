@@ -39,6 +39,7 @@ qrcode = { version = "0.15", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 rquickjs = { version = "0.14", features = ["futures", "parallel"] }
 rusqlite = { version = "0.42", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_path_to_error = "0.1"
@@ -47,6 +48,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "proce
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
 unicase = "2"
+webpki-roots = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
