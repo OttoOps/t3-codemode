@@ -1,0 +1,57 @@
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  release:
+    name: release
+    if: github.repository_owner == 'OttoOps'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.token.outputs.token }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+
+  release-pr:
+    name: release PR
+    if: github.repository_owner == 'OttoOps'
+    runs-on: ubuntu-latest
+    permissions: {}
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.token.outputs.token }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
