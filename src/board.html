@@ -3782,13 +3782,14 @@ function patchNew(el, i) {
 
 async function newAct(btn, path, i, done) {
   if (btn.getAttribute("aria-disabled") === "true") return;
-  btn._busy = true;
+  const sub = dr.sub;
+  const mine = { sub };
+  btn._busy = [...(btn._busy || []), mine];
   setAttr(btn, "aria-disabled", "true");
   const launch = done === "launched";
   if (launch) setText(btn, "Launching...");
   const errorId = btn.closest("#drawer") ? "dr-err" : "new-err";
   const said = btn.getAttribute("aria-label");
-  const sub = dr.sub;
   const error = $(errorId);
   error.hidden = true;
   try {
@@ -3804,7 +3805,8 @@ async function newAct(btn, path, i, done) {
     error.hidden = false;
     announce(e.message, true);
   } finally {
-    btn._busy = false;
+    btn._busy = btn._busy.filter((x) => x !== mine);
+    if (!btn._busy.length) btn._busy = null;
     if (launch) setText(btn, "Launch");
     const stale = !!btn.closest(".stale-item");
     setAttr(btn, "data-stale", stale ? "1" : null);
@@ -4955,11 +4957,12 @@ function closeErr(id) {
 }
 async function act(btn, path) {
   if (btn.getAttribute("aria-disabled") === "true") return;
-  btn._busy = true;
+  const sub = dr.sub;
+  const mine = { sub };
+  btn._busy = [...(btn._busy || []), mine];
   setAttr(btn, "aria-disabled", "true");
   const errorId = btn.closest("#drawer") ? "dr-err" : btn.closest("#composer") ? "composer-err" : "act-err";
   const said = btn.getAttribute("aria-label");
-  const sub = dr.sub;
   const error = $(errorId);
   error.hidden = true;
   try { await post(path); }
@@ -4970,7 +4973,8 @@ async function act(btn, path) {
     error.hidden = false;
     announce(e.message, true);
   } finally {
-    btn._busy = false;
+    btn._busy = btn._busy.filter((x) => x !== mine);
+    if (!btn._busy.length) btn._busy = null;
     const stale = !!btn.closest(".stale-item");
     setAttr(btn, "data-stale", stale ? "1" : null);
     setAttr(btn, "aria-disabled", stale ? "true" : null);
@@ -5060,18 +5064,18 @@ function jump(where) {
     $(where === "launch" ? "issues" : "question").focus();
     return;
   }
-  if (where === "decisions") { selectPanel("decisions"); return focusList($("cards")); }
-  if (where === "tickets") {
+  if (where === "decisions") { selectPanel("decisions"); focusList($("cards")); }
+  else if (where === "tickets") {
     selectPanel("tickets");
     const t = $("app").dataset.tab;
     if (t === "activity") selectTab("open");
-    return focusList($($("app").dataset.tab));
-  }
-  if (where === "activity") {
+    focusList($($("app").dataset.tab));
+  } else if (where === "activity") {
     if (phone()) selectPanel("activity");
     else if (!wide()) { selectPanel("tickets"); selectTab("activity"); }
-    return focusList($("feed"));
-  }
+    focusList($("feed"));
+  } else return;
+  drUncover(document.activeElement);
 }
 
 function focusList(list) {
@@ -5166,6 +5170,7 @@ function openDrawer(sub, from) {
     const c = state.cards.find((x) => x.id === sub.key);
     if (c && c.ticket && state.tree.some((t) => t.thread === c.ticket)) sub = { kind: "ticket", key: c.ticket, card: c.id };
   }
+  if (state && !drFind(sub, state)) return announce(drGoneSaid(sub));
   const fresh = !dr.open || !drSame(dr.sub, sub);
   dr.sub = { kind: sub.kind, key: sub.key, worker: sub.worker || null, card: sub.card || null };
   if (from) dr.from = from;
@@ -5328,7 +5333,8 @@ function drBtn(name, show, text, label, onclick) {
   if (!show) return;
   setText(b, text);
   setAttr(b, "aria-label", label);
-  setAttr(b, "aria-disabled", b._busy ? "true" : null);
+  const mine = b._busy && b._busy.some((x) => x.sub && x.sub.kind === dr.sub.kind && x.sub.key === dr.sub.key);
+  setAttr(b, "aria-disabled", mine ? "true" : null);
   b.onclick = () => { if (b.getAttribute("aria-disabled") !== "true") onclick(b); };
 }
 
@@ -5345,10 +5351,19 @@ function drSec(name, show, n) {
   return s;
 }
 
+function msgPut(hd, v) {
+  dr.msgs.set(hd, v);
+  while (dr.msgs.size > 64) dr.msgs.delete(dr.msgs.keys().next().value);
+}
+
 function loadMsg(hd) {
-  dr.msgs.set(hd, { loading: true });
-  if (dr.msgs.size > 64) dr.msgs.delete(dr.msgs.keys().next().value);
-  const done = (v) => { dr.msgs.set(hd, v); if (dr.open) paintDrawer(); };
+  const mine = { loading: true };
+  msgPut(hd, mine);
+  const done = (v) => {
+    if (dr.msgs.get(hd) !== mine) return;
+    msgPut(hd, v);
+    if (dr.open) paintDrawer();
+  };
   fetch("/api/msg/" + encodeURIComponent(hd), { credentials: "same-origin" })
     .then(async (r) => {
       let m = null;
@@ -5482,7 +5497,8 @@ function paintCardDrawer(c) {
   const k = drCard(c);
   drHead(c.label || "Card " + c.id, "", k.p.ask);
   drPills(k.mk, k.word, null, c.label || c.id, false, c);
-  drLink("gh-issue", k.p.link && k.p.link.href, k.p.link ? k.p.link.text + " on GitHub" : "", k.p.link ? k.p.link.text + " for card " + cardLabel(c) : "");
+  const l = k.p.link;
+  drLink("gh-issue", l && l.href, l ? l.text + (/^https:\/\/github\.com\//.test(l.href) ? " on GitHub" : "") : "", l ? l.text + " for card " + cardLabel(c) : "");
   drClear("gh-pr", "pause", "settle", "restore", "launch", "nisflip", "needs", "latest", "workers");
   drT3(c.link, cardLabel(c));
   drBtn("tocard", true, "Go to card " + c.id, "Go to card " + cardLabel(c) + " in Needs you", () => { jumpToCard(c.id); drUncover(cardEl(c.id)); });
@@ -5512,10 +5528,14 @@ function paintNewDrawer(i) {
   drMeta(drPart("note-m"), i.dismissed ? "Dismissed" : "Filed by " + who, i.dismissed ? i.dismissedAt : i.at, i.dismissed ? i.dismissedAtLocal : i.atLocal, "");
 }
 
+function drGoneSaid(sub) {
+  if (sub.kind === "new") return "This issue is no longer in New issues.";
+  if (sub.kind === "card") return "Card " + sub.key + " was resolved.";
+  return "This ticket is no longer on the board.";
+}
+
 function drGoneText(sub) {
-  if (sub.kind === "new") return "This issue is no longer in New issues. Its last known state is below.";
-  if (sub.kind === "card") return "Card " + sub.key + " was resolved. Its last known state is below.";
-  return "This ticket is no longer on the board. Its last known state is below.";
+  return drGoneSaid(sub) + " Its last known state is below.";
 }
 
 function paintDrawer() {
