@@ -676,7 +676,7 @@ a:hover > .spill, a:focus-visible > .spill { border-color: currentColor; }
 .tr .ttl { color: var(--fg); flex: 0 1 auto; }
 .tr .tag { font-size: 12px; line-height: 16px; color: var(--fg-2); white-space: nowrap; flex: none; }
 .tr .pr { font-size: 13px; line-height: 18px; white-space: nowrap; flex: none; }
-.tr .tn { grid-column: 2 / -1; display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.tr .tn { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 0 8px; align-items: baseline; min-width: 0; }
 .tr .tn[hidden] { display: none; }
 .tr .needs { flex: none; font-weight: 600; color: var(--need); }
 .tr .needs.r-fail { color: var(--fail); }
@@ -686,8 +686,14 @@ a:hover > .spill, a:focus-visible > .spill { border-color: currentColor; }
 .ws[hidden] { display: none; }
 .wl { display: contents; }
 .wi { display: inline-flex; gap: 4px; align-items: center; white-space: nowrap; }
+.ws:has(.ids:not([hidden])) { flex: 0 1 auto; min-width: 0; flex-wrap: wrap; row-gap: 4px; }
+.wi:has(> .ids:not([hidden])) { flex-wrap: wrap; min-width: 0; row-gap: 2px; }
 .wi .mark { font-weight: 500; }
 .wi a { color: var(--fg-2); }
+.ids { display: inline-flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; gap: 2px 4px; min-width: 0; color: var(--fg-2); font-size: 12px; line-height: 16px; white-space: nowrap; }
+.ids[hidden] { display: none; }
+.ids .sep { color: var(--fg-2); }
+.ids a.idl { color: var(--fg); }
 .wdone { display: inline-flex; align-items: center; gap: 4px; color: var(--fg-2); }
 .wmore { font-size: 13px; line-height: 18px; }
 .tk.wopen .tn { flex-wrap: wrap; }
@@ -1976,6 +1982,47 @@ function setPrChip(slot, pr, owner, withState) {
   let pill = a.firstChild;
   if (!pill || pill.tagName !== "SPAN") { pill = h("span", {}); a.replaceChildren(pill); }
   setStatusPill(pill, exec || "pr-" + prState(pr), "#" + pr.number + (withState ? " " + word : ""));
+}
+
+function ghIssue(ref) {
+  const m = /^([\w.-]+\/[\w.-]+)#(\d+)$/.exec(String(ref || ""));
+  return m ? { ref: m[1] + "#" + m[2], n: m[2], url: "https://github.com/" + m[1] + "/issues/" + m[2] } : null;
+}
+
+function livePr(pr) {
+  return pr && safeUrl(pr.url) && pr.number ? pr : null;
+}
+
+function hasIds(x) {
+  return !!(x && (ghIssue(x.issue) || ghIssue(x.parentIssue)));
+}
+
+function workerIds(w) {
+  return hasIds(w) ? { issue: ghIssue(w.issue), pr: livePr(w.pr), parent: ghIssue(w.parentIssue) } : null;
+}
+
+function ticketIds(t) {
+  const ws = (t.workers || []).filter(hasIds);
+  const w = ws.find((x) => livePr(x.pr) && livePr(t.pr) && x.pr.url === t.pr.url) || ws.filter((x) => !x.done).pop() || ws[ws.length - 1];
+  if (w) return { issue: ghIssue(w.issue), pr: livePr(w.pr), parent: ghIssue(w.parentIssue) || (w.issue !== t.issue ? ghIssue(t.issue) : null) };
+  return hasIds(t) ? { issue: ghIssue(t.issue), pr: livePr(t.pr), parent: ghIssue(t.parentIssue) } : null;
+}
+
+function setIds(slot, ids, owner) {
+  const of = owner ? " for " + owner : "";
+  const chips = !ids ? [] : [
+    ids.issue && { url: ids.issue.url, text: "#" + ids.issue.n, name: "Issue " + ids.issue.ref + of + " on GitHub" },
+    ids.pr && { url: ids.pr.url, text: "PR #" + ids.pr.number, name: "PR #" + ids.pr.number + of + " on GitHub" },
+    ids.parent && { url: ids.parent.url, text: "of #" + ids.parent.n, name: "Parent issue " + ids.parent.ref + of + " on GitHub" },
+  ].filter(Boolean);
+  slot.hidden = !chips.length;
+  const sig = JSON.stringify(chips);
+  if (slot._sig === sig) return;
+  slot._sig = sig;
+  slot.replaceChildren(...chips.flatMap((c, i) => [
+    i ? h("span", { class: "sep", "aria-hidden": "true" }, "·") : null,
+    h("a", { class: "idl", href: c.url, target: "_blank", rel: "noopener noreferrer", "aria-label": c.name, title: c.name }, h("span", { class: "chip" }, c.text)),
+  ]).filter(Boolean));
 }
 
 function ticketChip(label, o) {
@@ -3283,6 +3330,7 @@ function makeRow() {
     h("div", { class: "t1" },
       h("span", { class: "tl", "data-part": "label" }),
       h("span", { class: "ttl clip", "data-part": "title" }),
+      h("span", { class: "ids", "data-part": "ids", hidden: true }),
       h("span", { class: "tag", "data-part": "nj", hidden: true }, "not joined yet")),
     h("span", { class: "side" }, h("span", { class: "pr", "data-part": "pr" }), h("span", { class: "tm num", "data-part": "tm" })));
 }
@@ -3311,6 +3359,7 @@ function patchRow(row, t, cards, st) {
   setAttr(ttl, "title", title || null);
   part(row, "nj").hidden = t.joined !== false;
   setPrChip(part(row, "pr"), t.pr, t.label, true);
+  setIds(part(row, "ids"), ticketIds(t), t.label);
   const at = lastAt(t, cards);
   paintAge(part(row, "tm"), at.iso, at.local);
 }
@@ -3341,7 +3390,7 @@ function makeTicket() {
 }
 
 function makeWorker() {
-  return h("span", { class: "wi" }, mark("idle"), h("span", { "data-part": "wth" }), h("span", { "data-part": "wpr" }));
+  return h("span", { class: "wi" }, mark("idle"), h("span", { "data-part": "wth" }), h("span", { class: "ids", "data-part": "wids", hidden: true }), h("span", { "data-part": "wpr" }));
 }
 
 function patchWorker(el, w, t, cards) {
@@ -3355,6 +3404,7 @@ function patchWorker(el, w, t, cards) {
   else plainText(th, name);
   const same = !!(w.pr && t.pr && w.pr.url && w.pr.url === t.pr.url);
   setPrChip(part(el, "wpr"), same ? null : w.pr, w.label, false);
+  setIds(part(el, "wids"), workerIds(w), w.label);
   setPause(el, w, w.label, "wpaused", "wpause");
 }
 
@@ -5206,7 +5256,8 @@ function initDrawer() {
   document.body.append(h("aside", { id: "drawer", class: "drawer", "aria-labelledby": "dr-title" },
     h("div", { class: "dr-head" },
       h("div", { class: "dr-hl" },
-        h("p", { class: "dr-id" }, h("span", { class: "chip", "data-part": "id" }), h("span", { class: "tag", "data-part": "part", hidden: true })),
+        h("p", { class: "dr-id" }, h("span", { class: "chip", "data-part": "id" }), h("span", { class: "tag", "data-part": "part", hidden: true }),
+          h("span", { class: "ids", "data-part": "ids", hidden: true })),
         h("h2", { id: "dr-title", tabindex: "-1", "data-part": "title" })),
       h("button", { class: "btn quiet dr-x", type: "button", "data-part": "close", "aria-label": "Close details", title: "Close details (Esc)",
         onclick: () => closeDrawer(true) })),
@@ -5371,13 +5422,17 @@ function issueUrl(label, repo) {
 }
 
 function partTag(t, w) {
-  const ws = (t.workers || []).filter((x) => /\bPR \d+\/\d+\b/.test(x.label || ""));
+  const tagOf = (x) => {
+    const m = /\bPR \d+\/\d+\b/.exec(x.label || "");
+    return m ? m[0] : /^\d+\/\d+$/.test(x.part || "") ? "PR " + x.part : "";
+  };
+  const ws = (t.workers || []).filter(tagOf);
   const pick = w || ws.filter((x) => !x.done).pop() || ws[ws.length - 1];
-  const m = pick && /\bPR \d+\/\d+\b/.exec(pick.label || "");
-  return m ? m[0] : "";
+  return pick ? tagOf(pick) : "";
 }
 
-function drHead(id, tag, title) {
+function drHead(id, tag, title, ids) {
+  setIds(drPart("ids"), ids || null, id);
   const i = drPart("id");
   setText(i, id);
   setAttr(i, "title", id || null);
@@ -5550,7 +5605,7 @@ function paintTicketDrawer(t, settled) {
   const fw = sub.worker ? ws.find((w) => (w.thread || w.label) === sub.worker) || null : null;
   const live = ws.filter((w) => !w.done && w.pr && safeUrl(w.pr.url));
   const pr = (fw && fw.pr && safeUrl(fw.pr.url) ? fw.pr : null) || (t.pr && safeUrl(t.pr.url) ? t.pr : null) || (live.length ? live[live.length - 1].pr : null);
-  drHead(t.label, partTag(t, fw), titleOf(t));
+  drHead(t.label, partTag(t, fw), titleOf(t), fw ? workerIds(fw) : ticketIds(t));
   drPills(markOf(st, cards), settled ? "settled" : WORDS[st], pr, t.label, !settled && !t.done && !!t.paused, t);
   drLink("gh-issue", issueUrl(t.label, t.repo), "Open issue on GitHub", "Open issue " + t.label + " on GitHub");
   drLink("gh-pr", pr && pr.url, pr ? "Open PR #" + pr.number + " on GitHub" : "", pr ? "Open PR #" + pr.number + " for " + t.label + " on GitHub" : "");
