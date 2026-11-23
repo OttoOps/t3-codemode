@@ -200,7 +200,7 @@ async fn an_ask_can_see_finished_tickets_and_resolved_cards() {
     assert_eq!(all["c"][0][1], "gate");
     assert_eq!(all["c"][0][2], "string");
     assert!(all["c"][0][3].is_string());
-    assert!(t3_codemode::board::ask_brief("q").contains("all: true"));
+    assert!(t3_codemode::board::ask_brief("q", Some(&[])).contains("all: true"));
 }
 
 #[tokio::test]
@@ -407,10 +407,56 @@ async fn an_ask_that_dispatches_records_the_launched_thread() {
     let asks = h.app.wf.asks().unwrap();
     assert_eq!(
         asks[0]["dispatched"],
-        json!({"thread": "launch:2", "link": r["link"], "projectId": "p-codemode", "label": "t3-codemode: release"})
+        json!({"thread": "launch:2", "link": r["link"], "projectId": "p-codemode", "project": "t3-codemode", "label": "t3-codemode: release"})
     );
     result(&h.exec_as(WORKER, "async () => wf.dispatch({ project: 'p-widgets', request: 'Tidy up.' })").await);
     assert_eq!(h.app.wf.asks().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn an_ask_brief_lists_the_projects_and_sends_work_to_wf_dispatch() {
+    let h = H::new();
+    dispatch_projects(&h);
+    let mut named = project("p-gadgets", "/src/gadgets");
+    named["repositoryIdentity"] = json!({"owner": "Acme", "name": "gadgets"});
+    let mut gone = project("p-old", "/src/old");
+    gone["archivedAt"] = json!("2026-11-02T00:00:00Z");
+    let mut codemode = project("p-codemode", "/src/t3-codemode");
+    codemode["title"] = json!("t3-codemode");
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets"), codemode, named, gone]);
+    h.app.wf.ask("Cut a new release for t3-codemode").await.unwrap();
+    let l = &h.fake.launched()[0];
+    assert_eq!(l["scratch"], true);
+    assert!(l.get("projectId").is_none());
+    let msg = l["message"].as_str().unwrap();
+    assert!(msg.contains("\n\nCut a new release for t3-codemode\n\n"), "{msg}");
+    assert!(msg.contains(r#"- id "p-widgets", title "p-widgets", repository null"#), "{msg}");
+    assert!(msg.contains(r#"- id "p-codemode", title "t3-codemode", repository "Acme/t3-codemode""#), "{msg}");
+    assert!(msg.contains(r#"- id "p-gadgets", title "p-gadgets", repository "Acme/gadgets""#), "{msg}");
+    assert!(!msg.contains("p-old"), "{msg}");
+    assert!(msg.contains("wf.dispatch({ project: \"<project id>\""), "{msg}");
+    assert!(msg.contains("do not do it in this thread"), "{msg}");
+    assert!(msg.contains("or more than one could, launch nothing"), "{msg}");
+    assert!(msg.contains("answer it read-only"), "{msg}");
+    assert_eq!(h.fake.launched().len(), 1);
+    assert!(h.app.store.pending_all().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_ask_still_asks_when_t3_lists_no_projects() {
+    let h = H::new();
+    h.app.wf.ask("Which tickets wait on me?").await.unwrap();
+    h.fake.set_projects_fail(true);
+    h.app.wf.ask("Which tickets wait on me?").await.unwrap();
+    let msgs: Vec<String> = h.fake.launched().iter().map(|l| l["message"].as_str().unwrap().to_string()).collect();
+    assert_eq!(msgs.len(), 2);
+    assert!(msgs[0].contains("T3 projects:\n- (none: T3 listed no projects)\n"), "{}", msgs[0]);
+    assert!(
+        msgs[1].contains("T3 projects:\n- (unavailable: T3 could not list its projects, so launch nothing"),
+        "{}",
+        msgs[1]
+    );
+    assert!(msgs[1].contains("answer it read-only"), "{}", msgs[1]);
 }
 
 #[tokio::test]
@@ -8695,6 +8741,46 @@ return {{
         assert!(!t.contains("http") && !t.contains("](") && !t.contains("**"), "{key}: {t}");
     }
     assert!(r["live"].as_str().unwrap().contains("1. widgets#2 waits on a merge of a1.\n2. widgets#17"), "{r}");
+}
+
+#[tokio::test]
+async fn an_answer_that_dispatched_shows_the_thread_and_project_and_the_ticket_row() {
+    let s = start(H::new()).await;
+    dispatch_projects(&s.h);
+    let a = s.h.app.wf.ask("Cut a new release for t3-codemode").await.unwrap();
+    let thread = a["thread"].as_str().unwrap().to_string();
+    let go = "async () => wf.dispatch({ project: 'p-codemode', request: 'Cut a new release for t3-codemode', title: 'release' })";
+    let r = result(&s.h.exec_as(&thread, go).await);
+    s.h.fake.update(&thread, json!({"status": "completed"}));
+    s.h.fake.set_items(&thread, vec![json!({"type": "assistant_message", "position": 1, "text": "Launched it."})]);
+    s.h.app.wf.check_asks(None).await.unwrap();
+    answered_ask(&s.h, "Which tickets wait on me?", "None.").await;
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(st["asks"].as_array().unwrap().iter().filter(|a| a["dispatched"].is_object()).count(), 1, "{st}");
+    let link = r["link"].as_str().unwrap();
+    assert!(link.starts_with("https://"), "{link}");
+    assert!(html.contains(r#"<h2 id="h-ask">Ask your agent</h2>"#));
+    assert!(html.contains(r#"placeholder="Ask about the board, or ask for work: cut a release of t3-codemode""#));
+    let out = page_scenario(
+        &html,
+        &st,
+        r##"
+emitState(base);
+const rows = [...document.getElementById("asks").children];
+const row = (q) => rows.find((li) => li.querySelector(".aq").textContent === q);
+const d = row("Cut a new release for t3-codemode").querySelector('[data-part="d"]');
+const a = d.querySelector("a");
+return {
+  text: d.textContent, hidden: d.hidden, href: a && a.getAttribute("href"),
+  other: row("Which tickets wait on me?").querySelector('[data-part="d"]').hidden,
+  open: document.getElementById("open").textContent,
+};"##,
+    );
+    assert_eq!(out["text"], "Launched t3-codemode: release in t3-codemode", "{out}");
+    assert_eq!((&out["hidden"], &out["other"]), (&json!(false), &json!(true)));
+    assert_eq!(out["href"], link);
+    assert!(out["open"].as_str().unwrap().contains("t3-codemode: release"), "{out}");
 }
 
 #[tokio::test]

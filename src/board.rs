@@ -473,17 +473,37 @@ fn dispatch_topic(request: &str) -> String {
     truncate_chars(&words.join(" "), DISPATCH_TOPIC)
 }
 
-pub fn ask_brief(question: &str) -> String {
+pub fn ask_brief(question: &str, projects: Option<&[Value]>) -> String {
+    let listed: Vec<String> = projects
+        .unwrap_or_default()
+        .iter()
+        .map(|p| format!("- id {}, title {}, repository {}", json!(p["id"]), json!(p["title"]), json!(p["repo"])))
+        .collect();
+    let listed = match projects {
+        None => "- (unavailable: T3 could not list its projects, so launch nothing; say so if this is a request)"
+            .to_string(),
+        Some(_) if listed.is_empty() => "- (none: T3 listed no projects)".to_string(),
+        Some(_) => listed.join("\n"),
+    };
     format!(
-        "Answer this question about the t3-codemode board, then stop:\n\n{question}\n\n\
-         Use only the mcp__t3cm__execute tool, and only to read. These calls read the board:\n\
+        "You are the board's agent. Read this request from the user, do one of the two things below, then stop:\n\n\
+         {question}\n\n\
+         T3 projects:\n{listed}\n\n\
+         1. A question about the board: answer it read-only. Use only the mcp__t3cm__execute tool, and only to read. \
+         These calls read the board:\n\
          - wf.board({{ parent: \"board\", all: true }}): every ticket, finished ones included, with its status, gate, link and workers\n\
          - wf.cards({{ all: true }}): every decision card, open or resolved, with how each was resolved\n\
          - wf.feed(): the latest notes and events\n\
          - wf.show(\"<handle>\"): one stored message in full\n\
          For example: async () => ({{ board: await wf.board({{ parent: \"board\", all: true }}), cards: await wf.cards({{ all: true }}) }})\n\
-         Answer in at most 6 lines of plain text. Name a thread by its link. Do not message, launch, answer or \
-         change anything."
+         Answer in at most 6 lines of plain text. Name a thread by its link.\n\n\
+         2. A request to do something (cut a release, fix, change or write something): do not do it in this thread. \
+         Pick the one project above that the request is about, then launch the work there with mcp__t3cm__execute:\n\
+         async () => wf.dispatch({{ project: \"<project id>\", request: \"<the request, word for word>\", title: \"<a 2 to 5 word topic>\" }})\n\
+         Answer in one line that names the project and the launched thread by the link the call returns. \
+         When no project above fits, or more than one could, launch nothing: answer with the projects that could \
+         fit and ask which one.\n\n\
+         Do not message, answer, change or launch anything else."
     )
 }
 
@@ -1456,13 +1476,32 @@ impl Wf {
             Err(failed) => return Ok(failed),
         };
         if let Some(me) = caller.filter(|c| !c.is_empty()) {
-            let dispatched =
-                json!({"thread": out["thread"], "link": out["link"], "projectId": project_id, "label": label});
+            let dispatched = json!({"thread": out["thread"], "link": out["link"], "projectId": project_id, "project": name, "label": label});
             if let Err(e) = self.note_dispatched(me, dispatched).await {
                 tracing::warn!("{label} dispatched, but recording it on the ask failed: {e:#}");
             }
         }
         Ok(out)
+    }
+
+    async fn ask_projects(&self) -> Option<Vec<Value>> {
+        let all = match self.projects().await {
+            Ok(all) => all,
+            Err(e) => {
+                tracing::warn!("listing T3 projects for a board question failed: {e:#}");
+                return None;
+            }
+        };
+        let mut out = Vec::new();
+        for p in all {
+            let id = p["id"].as_str().unwrap_or_default().to_string();
+            let repo = match identity_repo(&p) {
+                Some(r) => Some(r),
+                None => self.origin_repo(&p).await,
+            };
+            out.push(json!({"id": id, "title": p["title"], "repo": repo}));
+        }
+        Some(out)
     }
 
     async fn note_dispatched(&self, ask_thread: &str, dispatched: Value) -> Result<()> {
@@ -1600,7 +1639,7 @@ impl Wf {
             "scratch": true,
             "title": format!("Board question: {}", truncate_chars(&q.split_whitespace().collect::<Vec<_>>().join(" "), 50)),
             "modelSelection": resolved.selection,
-            "message": ask_brief(q),
+            "message": ask_brief(q, self.ask_projects().await.as_deref()),
             "clientRequestId": format!("t3cm-ask-{}", random_id()),
         });
         if let Some(m) = &self.config().board.runtime_mode {
