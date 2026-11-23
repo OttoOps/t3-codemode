@@ -626,6 +626,161 @@ fn picked(i: &FlowIssue) -> Value {
     json!({"label": i.label, "url": i.url, "title": i.title, "priority": i.priority, "why": why(i)})
 }
 
+enum FlowMetaOp {
+    SetSkip(String, String),
+    SetHeld(String),
+    DelSkip(String),
+}
+
+struct FlowPlan {
+    view: FlowView,
+    meta_ops: Vec<FlowMetaOp>,
+}
+
+fn plan_flow(
+    cfg: &FlowConfig,
+    r: Reads,
+    tickets: Vec<Ticket>,
+    closed: &HashSet<String>,
+    done: &BTreeMap<String, Vec<String>>,
+    mut meta_get: impl FnMut(&str) -> Result<Option<String>>,
+    write: bool,
+) -> Result<FlowPlan> {
+    let open: HashSet<String> =
+        tickets.iter().filter_map(|t| ticket_repo(&r.covered, t)).map(|(repo, n)| node_key(&repo, n)).collect();
+    let running: Vec<FlowTicket> = tickets
+        .into_iter()
+        .filter_map(|t| {
+            let (repo, number) = ticket_repo(&r.covered, &t)?;
+            if !covers(&r.covered, &repo) || closed.contains(&node_key(&repo, number)) {
+                return None;
+            }
+            Some(FlowTicket {
+                url: format!("https://github.com/{repo}/issues/{number}"),
+                label: t.label,
+                repo,
+                number,
+                thread: t.thread,
+                link: t.link,
+            })
+        })
+        .collect();
+    let opt_in = cfg.opt_in.label.to_ascii_lowercase();
+    let (mut queue, mut blocked, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
+    let mut meta_ops = Vec::new();
+    let mut skip_overlay: BTreeMap<String, Option<String>> = BTreeMap::new();
+    let mut marked_held = HashSet::new();
+    for r in r.reads {
+        let has = |want: &str| r.labels.iter().any(|l| l.eq_ignore_ascii_case(want));
+        if !has(&opt_in) || open.contains(&node_key(&r.issue.repo, r.issue.number)) {
+            continue;
+        }
+        if r.issue.parent.as_ref().is_some_and(|p| open.contains(&node_key(&p.repo, p.number))) {
+            continue;
+        }
+        let key = skip_key(&r.issue.repo, r.issue.number);
+        let mut stored = match skip_overlay.get(&key) {
+            Some(v) => v.clone(),
+            None => meta_get(&key)?,
+        };
+        let mut unheld = Vec::new();
+        let slug_key = node_key(&r.issue.repo, r.issue.number);
+        let label_key = r.issue.label.to_ascii_lowercase();
+        for t in done.get(&slug_key).into_iter().chain(done.get(&label_key)).flatten() {
+            let held = format!("{HELD}{t}");
+            if (!write || !marked_held.contains(&held)) && meta_get(&held)?.is_none() {
+                unheld.push(held);
+            }
+        }
+        if !unheld.is_empty() {
+            if write {
+                skip_overlay.insert(key.clone(), Some(r.issue.key.clone()));
+                meta_ops.push(FlowMetaOp::SetSkip(key.clone(), r.issue.key.clone()));
+                for held in &unheld {
+                    marked_held.insert(held.clone());
+                    meta_ops.push(FlowMetaOp::SetHeld(held.clone()));
+                }
+            }
+            stored = Some(r.issue.key.clone());
+        }
+        let external = has(EXTERNAL);
+        if external || !r.open_blockers.is_empty() || r.more_blockers {
+            if write && stored.as_ref().is_some_and(|k| *k != r.issue.key) {
+                skip_overlay.insert(key.clone(), None);
+                meta_ops.push(FlowMetaOp::DelSkip(key));
+            }
+            blocked.push(BlockedIssue {
+                issue: r.issue,
+                blockers: r.open_blockers,
+                more_blockers: r.more_blockers,
+                external,
+            });
+            continue;
+        }
+        match stored {
+            Some(k) if k == r.issue.key => skipped.push(r.issue),
+            Some(_) => {
+                if write {
+                    skip_overlay.insert(key.clone(), None);
+                    meta_ops.push(FlowMetaOp::DelSkip(key));
+                }
+                queue.push(r.issue);
+            }
+            None => queue.push(r.issue),
+        }
+    }
+    queue.sort_by(queue_order);
+    skipped.sort_by(queue_order);
+    blocked.sort_by(|a, b| queue_order(&a.issue, &b.issue));
+    let view = FlowView {
+        enabled: true,
+        launch: Some(cfg.launch),
+        max_tickets: cfg.max_tickets,
+        free: cfg.max_tickets.saturating_sub(running.len()),
+        running,
+        queue,
+        blocked,
+        skipped,
+        graph: None,
+    };
+    Ok(FlowPlan { view, meta_ops })
+}
+
+struct PickPlan {
+    offered: Vec<(FlowPick, String)>,
+    retire: Vec<(usize, &'static str)>,
+    picks: Vec<FlowIssue>,
+}
+
+fn plan_picks(
+    launch: Launch,
+    queue: &[FlowIssue],
+    cards: &[(String, FlowPick)],
+    free: usize,
+    most: Option<usize>,
+) -> PickPlan {
+    let ready = |p: &FlowPick| queue.iter().any(|i| same(p, i));
+    let mut offered: Vec<(FlowPick, String)> = Vec::new();
+    let mut retire = Vec::new();
+    for (idx, (id, p)) in cards.iter().enumerate() {
+        let note = if launch == Launch::Auto {
+            "flow.launch is auto"
+        } else if !ready(p) {
+            "no longer ready"
+        } else if offered.len() >= free {
+            "no free slot"
+        } else {
+            offered.push((p.clone(), id.clone()));
+            continue;
+        };
+        retire.push((idx, note));
+    }
+    let room = free.saturating_sub(offered.len()).min(most.unwrap_or(usize::MAX));
+    let picks: Vec<FlowIssue> =
+        queue.iter().filter(|i| !offered.iter().any(|(p, _)| same(p, i))).take(room).cloned().collect();
+    PickPlan { offered, retire, picks }
+}
+
 impl Wf {
     fn open_tickets(&self) -> Result<Vec<Ticket>> {
         let mut out: Vec<Ticket> = self
@@ -783,25 +938,6 @@ impl Wf {
         closed: &HashSet<String>,
         write: bool,
     ) -> Result<FlowView> {
-        let open: HashSet<String> =
-            tickets.iter().filter_map(|t| ticket_repo(&r.covered, t)).map(|(repo, n)| node_key(&repo, n)).collect();
-        let running: Vec<FlowTicket> = tickets
-            .into_iter()
-            .filter_map(|t| {
-                let (repo, number) = ticket_repo(&r.covered, &t)?;
-                if !covers(&r.covered, &repo) || closed.contains(&node_key(&repo, number)) {
-                    return None;
-                }
-                Some(FlowTicket {
-                    url: format!("https://github.com/{repo}/issues/{number}"),
-                    label: t.label,
-                    repo,
-                    number,
-                    thread: t.thread,
-                    link: t.link,
-                })
-            })
-            .collect();
         let mut done: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for l in self.store.children(BOARD, false)?.into_iter().filter(|l| l.closed) {
             let key = match l.identity.issue.as_deref() {
@@ -813,74 +949,19 @@ impl Wf {
             };
             done.entry(key).or_default().push(l.child);
         }
-        let opt_in = cfg.opt_in.label.to_ascii_lowercase();
-        let (mut queue, mut blocked, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
-        for r in r.reads {
-            let has = |want: &str| r.labels.iter().any(|l| l.eq_ignore_ascii_case(want));
-            if !has(&opt_in) || open.contains(&node_key(&r.issue.repo, r.issue.number)) {
-                continue;
-            }
-            if r.issue.parent.as_ref().is_some_and(|p| open.contains(&node_key(&p.repo, p.number))) {
-                continue;
-            }
-            let key = skip_key(&r.issue.repo, r.issue.number);
-            let mut stored = self.store.meta_get(&key)?;
-            let mut unheld = Vec::new();
-            let slug_key = node_key(&r.issue.repo, r.issue.number);
-            let label_key = r.issue.label.to_ascii_lowercase();
-            for t in done.get(&slug_key).into_iter().chain(done.get(&label_key)).flatten() {
-                let held = format!("{HELD}{t}");
-                if self.store.meta_get(&held)?.is_none() {
-                    unheld.push(held);
-                }
-            }
-            if !unheld.is_empty() {
-                if write {
-                    self.store.meta_set(&key, &r.issue.key)?;
-                    for held in &unheld {
-                        self.store.meta_set(held, &self.now())?;
+        let plan = plan_flow(cfg, r, tickets, closed, &done, |k| self.store.meta_get(k), write)?;
+        if write {
+            for op in plan.meta_ops {
+                match op {
+                    FlowMetaOp::SetSkip(k, v) => self.store.meta_set(&k, &v)?,
+                    FlowMetaOp::SetHeld(k) => self.store.meta_set(&k, &self.now())?,
+                    FlowMetaOp::DelSkip(k) => {
+                        self.store.meta_del(&k)?;
                     }
                 }
-                stored = Some(r.issue.key.clone());
-            }
-            let external = has(EXTERNAL);
-            if external || !r.open_blockers.is_empty() || r.more_blockers {
-                if write && stored.as_ref().is_some_and(|k| *k != r.issue.key) {
-                    self.store.meta_del(&key)?;
-                }
-                blocked.push(BlockedIssue {
-                    issue: r.issue,
-                    blockers: r.open_blockers,
-                    more_blockers: r.more_blockers,
-                    external,
-                });
-                continue;
-            }
-            match stored {
-                Some(k) if k == r.issue.key => skipped.push(r.issue),
-                Some(_) => {
-                    if write {
-                        self.store.meta_del(&key)?;
-                    }
-                    queue.push(r.issue);
-                }
-                None => queue.push(r.issue),
             }
         }
-        queue.sort_by(queue_order);
-        skipped.sort_by(queue_order);
-        blocked.sort_by(|a, b| queue_order(&a.issue, &b.issue));
-        Ok(FlowView {
-            enabled: true,
-            launch: Some(cfg.launch),
-            max_tickets: cfg.max_tickets,
-            free: cfg.max_tickets.saturating_sub(running.len()),
-            running,
-            queue,
-            blocked,
-            skipped,
-            graph: None,
-        })
+        Ok(plan.view)
     }
 
     fn flow_cards(&self) -> Result<Vec<(Card, FlowPick)>> {
@@ -956,30 +1037,19 @@ impl Wf {
         let g = self.lock.lock().await;
         let covered = reads.covered.clone();
         let view = self.flow_build(&cfg, reads, self.open_tickets()?, &closed, true)?;
-        let ready = |p: &FlowPick| view.queue.iter().any(|i| same(p, i));
-        let mut offered: Vec<(FlowPick, String)> = Vec::new();
+        let flow_cards = self.flow_cards()?;
+        let card_refs: Vec<(String, FlowPick)> = flow_cards.iter().map(|(c, p)| (c.id.clone(), p.clone())).collect();
+        let PickPlan { offered, retire, picks } = plan_picks(cfg.launch, &view.queue, &card_refs, view.free, most);
         let mut retired = Vec::new();
-        for (c, p) in self.flow_cards()? {
-            let note = if cfg.launch == Launch::Auto {
-                "flow.launch is auto"
-            } else if !ready(&p) {
-                "no longer ready"
-            } else if offered.len() >= view.free {
-                "no free slot"
-            } else {
-                offered.push((p, c.id.clone()));
-                continue;
-            };
-            if self.retire_flow_card(&c, note)? {
+        for (idx, note) in retire {
+            let (c, _) = &flow_cards[idx];
+            if self.retire_flow_card(c, note)? {
                 retired.push(c.id.clone());
             }
         }
         if !retired.is_empty() {
             self.changed();
         }
-        let room = view.free.saturating_sub(offered.len()).min(most.unwrap_or(usize::MAX));
-        let picks: Vec<FlowIssue> =
-            view.queue.iter().filter(|i| !offered.iter().any(|(p, _)| same(p, i))).take(room).cloned().collect();
         let mut out = json!({"launch": cfg.launch, "free": view.free, "retired": retired,
             "offered": offered.iter().map(|(p, id)| json!({"label": p.label, "card": id})).collect::<Vec<_>>()});
         if picks.is_empty() {
@@ -1127,5 +1197,676 @@ impl Wf {
             Err(e) => json!({"error": format!("{e:#}")}),
         };
         Ok(json!({"card": card.id, "skipped": pick.label, "next": next}))
+    }
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use crate::config::OptIn;
+    use arbitrary::Unstructured;
+    use arbtest::arbtest;
+
+    const REPOS: &[&str] = &["acme/widgets", "acme/tools", "acme/gadgets"];
+    const MIXED_CASE_REPOS: &[&str] = &["acme/widgets", "Acme/Widgets", "acme/tools", "ACME/TOOLS", "acme/gadgets"];
+    const DUE_DATES: &[Option<&str>] =
+        &[None, None, Some("2026-11-01T00:00:00Z"), Some("2026-11-15T00:00:00Z"), Some("2026-12-01T00:00:00Z")];
+    const CREATED_AT: &[&str] =
+        &["2026-10-01T09:00:00Z", "2026-10-02T09:00:00Z", "2026-10-03T09:00:00Z", "2026-10-04T09:00:00Z"];
+    const PRIORITY_OPTS: &[Option<&'static str>] = &[Some("high"), Some("medium"), Some("low"), None, Some("urgent")];
+
+    fn prop<P>(budget_ms: u64, property: P)
+    where
+        P: FnMut(&mut Unstructured<'_>) -> arbitrary::Result<()>,
+    {
+        let mut test = arbtest(property).size_min(32).size_max(4096);
+        if std::env::var_os("ARBTEST_BUDGET_MS").is_none() {
+            test = test.budget_ms(budget_ms);
+        }
+        test.run();
+    }
+
+    fn shuffle<T>(u: &mut Unstructured<'_>, items: &mut [T]) -> arbitrary::Result<()> {
+        for i in (1..items.len()).rev() {
+            let j = u.int_in_range(0..=i)?;
+            items.swap(i, j);
+        }
+        Ok(())
+    }
+
+    fn issue_ref_for(repo: &str, number: u64) -> IssueRef {
+        IssueRef {
+            repo: repo.to_string(),
+            number,
+            label: label_of(repo, number),
+            url: format!("https://github.com/{repo}/issues/{number}"),
+            title: Some(format!("Issue {number}")),
+        }
+    }
+
+    fn gen_issue(u: &mut Unstructured<'_>, repo: &str, number: u64) -> arbitrary::Result<FlowIssue> {
+        let prio = *u.choose(PRIORITY_OPTS)?;
+        let milestone = match u.int_in_range(0..=3u8)? {
+            0 => None,
+            _ => Some(Milestone {
+                title: format!("m{}", u.int_in_range(0..=3u8)?),
+                due_on: (*u.choose(DUE_DATES)?).map(String::from),
+            }),
+        };
+        let created_at = (*u.choose(CREATED_AT)?).to_string();
+        let parent =
+            if u.int_in_range(0..=3u8)? == 0 { Some(issue_ref_for(repo, u.int_in_range(1..=20u64)?)) } else { None };
+        Ok(FlowIssue {
+            repo: repo.to_string(),
+            number,
+            label: label_of(repo, number),
+            url: format!("https://github.com/{repo}/issues/{number}"),
+            title: format!("T{}", u.int_in_range(0..=99u8)?),
+            priority: prio,
+            milestone,
+            created_at,
+            parent,
+            unblocked_by: Vec::new(),
+            key: format!("k-{repo}-{number}-{}", u.int_in_range(0..=9u8)?),
+        })
+    }
+
+    fn gen_distinct_issues(u: &mut Unstructured<'_>, max_n: usize) -> arbitrary::Result<Vec<FlowIssue>> {
+        let n = u.int_in_range(0..=max_n)?;
+        let mut seen = HashSet::new();
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let repo = *u.choose(MIXED_CASE_REPOS)?;
+            let number = u.int_in_range(1..=40u64)?;
+            if seen.insert(node_key(repo, number)) {
+                out.push(gen_issue(u, repo, number)?);
+            }
+        }
+        Ok(out)
+    }
+
+    fn issue_ids(list: &[FlowIssue]) -> Vec<(String, u64)> {
+        list.iter().map(|i| (i.repo.clone(), i.number)).collect()
+    }
+
+    fn blocked_ids(list: &[BlockedIssue]) -> Vec<(String, u64, bool, bool)> {
+        list.iter().map(|b| (b.issue.repo.clone(), b.issue.number, b.external, b.more_blockers)).collect()
+    }
+
+    fn assert_sorted_by_queue_order(list: &[FlowIssue]) {
+        for pair in list.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            assert_ne!(queue_order(a, b), Ordering::Greater, "out of order: {a:?} > {b:?}");
+            let (ra, rb) = (rank(a.priority), rank(b.priority));
+            assert!(ra <= rb);
+            if ra == rb {
+                match (due(a), due(b)) {
+                    (None, Some(_)) => panic!("missing due_on preceded dated milestone: {a:?} before {b:?}"),
+                    (Some(da), Some(db)) => assert!(da <= db),
+                    _ => {}
+                }
+                if due(a) == due(b) {
+                    assert!(a.created_at <= b.created_at);
+                    if a.created_at == b.created_at {
+                        let (la, lb) = (a.repo.to_ascii_lowercase(), b.repo.to_ascii_lowercase());
+                        assert!(la <= lb);
+                        if la == lb {
+                            assert!(a.number <= b.number);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn gen_any_issue(u: &mut Unstructured<'_>, max_num: u64) -> arbitrary::Result<FlowIssue> {
+        let repo = *u.choose(MIXED_CASE_REPOS)?;
+        let number = u.int_in_range(1..=max_num)?;
+        gen_issue(u, repo, number)
+    }
+
+    #[test]
+    fn queue_order_is_a_strict_weak_order_invariant_to_permutations() {
+        prop(40, |u| {
+            // Strict weak ordering axioms on arbitrary triples.
+            let a = gen_any_issue(u, 10)?;
+            let b = gen_any_issue(u, 10)?;
+            let c = gen_any_issue(u, 10)?;
+
+            assert_eq!(queue_order(&a, &a), Ordering::Equal);
+            assert_eq!(queue_order(&a, &b), queue_order(&b, &a).reverse());
+            let (ab, bc, ac) = (queue_order(&a, &b), queue_order(&b, &c), queue_order(&a, &c));
+            if ab != Ordering::Greater && bc != Ordering::Greater {
+                assert_ne!(ac, Ordering::Greater, "transitivity of <= failed");
+                if ab == Ordering::Less || bc == Ordering::Less {
+                    assert_eq!(ac, Ordering::Less, "strict transitivity failed");
+                } else {
+                    assert_eq!(ac, Ordering::Equal, "equivalence transitivity failed");
+                }
+            }
+            if node_key(&a.repo, a.number) != node_key(&b.repo, b.number) {
+                assert_ne!(ab, Ordering::Equal, "distinct issues must not tie");
+            }
+
+            // Non-key fields never affect ordering.
+            let mut a_mut = a.clone();
+            a_mut.title = "completely-different-title".into();
+            a_mut.label = "other#999".into();
+            a_mut.url = "https://example.invalid/x".into();
+            a_mut.parent = Some(issue_ref_for("acme/other", 77));
+            a_mut.unblocked_by = vec![issue_ref_for("acme/other", 88)];
+            a_mut.key = "different-key".into();
+            if let Some(ref mut m) = a_mut.milestone {
+                m.title = "renamed-milestone".into();
+            }
+            assert_eq!(queue_order(&a, &a_mut), Ordering::Equal);
+            assert_eq!(queue_order(&a_mut, &b), ab);
+
+            // Permutation invariance on unordered distinct issue inputs.
+            let issues = gen_distinct_issues(u, 16)?;
+            let mut sorted_a = issues.clone();
+            sorted_a.sort_by(queue_order);
+            for _ in 0..2 {
+                let mut permuted = issues.clone();
+                shuffle(u, &mut permuted)?;
+                permuted.sort_by(queue_order);
+                assert_eq!(issue_ids(&permuted), issue_ids(&sorted_a));
+            }
+
+            // Label-permutation invariance of `priority(&labels)`.
+            let label_pool = [
+                "flow",
+                "Priority: HIGH",
+                "priority:  medium ",
+                "priority:low",
+                "priority: unknown",
+                "blocked: external",
+                "bug",
+            ];
+            let label_n = u.int_in_range(0..=7usize)?;
+            let mut labels: Vec<String> = (0..label_n)
+                .map(|_| u.choose(&label_pool).map(|s| (*s).to_string()))
+                .collect::<arbitrary::Result<_>>()?;
+            let p_orig = priority(&labels);
+            shuffle(u, &mut labels)?;
+            assert_eq!(priority(&labels), p_orig);
+
+            // Stability on equal comparison keys preserves original relative order.
+            let dup_n = u.int_in_range(2..=5usize)?;
+            let mut dups: Vec<FlowIssue> = (0..dup_n)
+                .map(|idx| {
+                    let mut x = a.clone();
+                    x.title = format!("tag-{idx}");
+                    x
+                })
+                .collect();
+            dups.push(b);
+            dups.sort_by(queue_order);
+            let tags: Vec<&str> = dups.iter().filter_map(|x| x.title.strip_prefix("tag-")).collect();
+            let expected_tags: Vec<String> = (0..dup_n).map(|idx| idx.to_string()).collect();
+            let expected_refs: Vec<&str> = expected_tags.iter().map(String::as_str).collect();
+            assert_eq!(tags, expected_refs);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn queue_order_enforces_stable_priority_due_age_and_tie_hierarchy() {
+        prop(40, |u| {
+            let mut issues = gen_distinct_issues(u, 18)?;
+            issues.sort_by(queue_order);
+            assert_sorted_by_queue_order(&issues);
+            for pair in issues.windows(2) {
+                assert_eq!(queue_order(&pair[0], &pair[1]), Ordering::Less);
+            }
+
+            // Explicit pairwise dominance across hierarchy levels.
+            let mut hi = gen_any_issue(u, 50)?;
+            let mut lo = gen_any_issue(u, 50)?;
+            let p_pair = *u.choose(&[
+                (Some("high"), Some("medium")),
+                (Some("high"), Some("low")),
+                (Some("high"), None),
+                (Some("medium"), Some("low")),
+                (Some("medium"), None),
+                (Some("low"), None),
+            ])?;
+            hi.priority = p_pair.0;
+            lo.priority = p_pair.1;
+            assert_eq!(queue_order(&hi, &lo), Ordering::Less);
+
+            // Equal priority: dated milestone strictly beats undated/missing milestone regardless of age.
+            lo.priority = hi.priority;
+            hi.milestone = Some(Milestone { title: "m1".into(), due_on: Some("2026-11-10T00:00:00Z".into()) });
+            lo.milestone =
+                if u.arbitrary::<bool>()? { None } else { Some(Milestone { title: "m2".into(), due_on: None }) };
+            assert_eq!(queue_order(&hi, &lo), Ordering::Less);
+
+            // Equal priority and due_on: earlier created_at wins regardless of repo and number.
+            lo.milestone = hi.milestone.clone();
+            hi.created_at = "2026-10-01T00:00:00Z".into();
+            lo.created_at = "2026-10-02T00:00:00Z".into();
+            assert_eq!(queue_order(&hi, &lo), Ordering::Less);
+            Ok(())
+        });
+    }
+
+    #[derive(Clone)]
+    struct FlowScenario {
+        cfg: FlowConfig,
+        covered: BTreeMap<String, String>,
+        reads: Vec<Read>,
+        tickets: Vec<Ticket>,
+        closed: HashSet<String>,
+        stored_skips: BTreeMap<String, String>,
+        unheld_done: BTreeMap<String, Vec<String>>,
+    }
+
+    fn gen_flow_scenario(u: &mut Unstructured<'_>, allow_zero_cap: bool) -> arbitrary::Result<FlowScenario> {
+        let repo_count = u.int_in_range(1..=REPOS.len())?;
+        let repos: Vec<String> = REPOS[..repo_count].iter().map(|s| (*s).to_string()).collect();
+        let covered: BTreeMap<String, String> = repos
+            .iter()
+            .map(|r| {
+                let short = r.rsplit_once('/').unwrap().1.to_ascii_lowercase();
+                (short, r.clone())
+            })
+            .collect();
+        let max_tickets = if allow_zero_cap { u.int_in_range(0..=6usize)? } else { u.int_in_range(1..=6usize)? };
+        let launch = *u.choose(&[Launch::Ask, Launch::Auto, Launch::Off])?;
+        let cfg = FlowConfig { repos: repos.clone(), opt_in: OptIn { label: "flow".into() }, max_tickets, launch };
+
+        let n = u.int_in_range(0..=16usize)?;
+        let mut seen = HashSet::new();
+        let mut reads = Vec::with_capacity(n);
+        let mut issue_keys = Vec::new();
+        for _ in 0..n {
+            let repo = u.choose(&repos)?.clone();
+            let number = u.int_in_range(1..=30u64)?;
+            let nk = node_key(&repo, number);
+            if !seen.insert(nk.clone()) {
+                continue;
+            }
+            issue_keys.push((repo.clone(), number));
+        }
+
+        let mut stored_skips = BTreeMap::new();
+        let mut unheld_done: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut closed_thread_seq = 0usize;
+
+        for (repo, number) in &issue_keys {
+            let mut labels = Vec::new();
+            if u.int_in_range(0..=4u8)? != 0 {
+                labels.push((*u.choose(&["flow", "Flow", "FLOW"])?).to_string());
+            }
+            match u.int_in_range(0..=4u8)? {
+                0 => labels.push((*u.choose(&["priority: high", "Priority: High"])?).to_string()),
+                1 => labels.push("priority: medium".into()),
+                2 => labels.push("priority: low".into()),
+                _ => {}
+            }
+            if u.int_in_range(0..=5u8)? == 0 {
+                labels.push((*u.choose(&[EXTERNAL, "Blocked: External"])?).to_string());
+            }
+
+            let open_blocker_n = if u.int_in_range(0..=3u8)? == 0 { u.int_in_range(1..=2usize)? } else { 0 };
+            let mut open_blockers = Vec::new();
+            let mut blockers = Vec::new();
+            for _ in 0..open_blocker_n {
+                let brepo = *u.choose(&["acme/widgets", "acme/tools", "acme/outside"])?;
+                let bnum = u.int_in_range(100..=120u64)?;
+                let br = issue_ref_for(brepo, bnum);
+                open_blockers.push(br.clone());
+                blockers.push(Target { to: br, state: Some("open") });
+            }
+            let mut unblocked_by = Vec::new();
+            if u.int_in_range(0..=3u8)? == 0 {
+                let cr = issue_ref_for(repo, u.int_in_range(200..=210u64)?);
+                unblocked_by.push(cr.clone());
+                blockers.push(Target { to: cr, state: Some("closed") });
+            }
+            let more_blockers = u.int_in_range(0..=9u8)? == 0;
+
+            let parent_ref = if !issue_keys.is_empty() && u.int_in_range(0..=4u8)? == 0 {
+                let (pr, pn) = u.choose(&issue_keys)?;
+                if pr != repo || pn != number { Some(issue_ref_for(pr, *pn)) } else { None }
+            } else {
+                None
+            };
+
+            let milestone = if u.arbitrary::<bool>()? {
+                Some(Milestone {
+                    title: format!("v0.{}", u.int_in_range(1..=5u8)?),
+                    due_on: (*u.choose(DUE_DATES)?).map(String::from),
+                })
+            } else {
+                None
+            };
+            let key = format!("key-{repo}-{number}");
+            let issue = FlowIssue {
+                repo: repo.clone(),
+                number: *number,
+                label: label_of(repo, *number),
+                url: format!("https://github.com/{repo}/issues/{number}"),
+                title: format!("Issue {number}"),
+                priority: priority(&labels),
+                milestone,
+                created_at: (*u.choose(CREATED_AT)?).to_string(),
+                parent: parent_ref.clone(),
+                unblocked_by,
+                key: key.clone(),
+            };
+
+            match u.int_in_range(0..=7u8)? {
+                0 => {
+                    stored_skips.insert(skip_key(repo, *number), key.clone());
+                }
+                1 => {
+                    stored_skips.insert(skip_key(repo, *number), "stale-key".into());
+                }
+                _ => {}
+            }
+            if u.int_in_range(0..=7u8)? == 0 {
+                closed_thread_seq += 1;
+                let child = format!("mcp:closed-{closed_thread_seq}");
+                let map_key =
+                    if u.arbitrary::<bool>()? { node_key(repo, *number) } else { issue.label.to_ascii_lowercase() };
+                unheld_done.entry(map_key).or_default().push(child);
+            }
+
+            reads.push(Read {
+                issue,
+                state: Some("open"),
+                labels,
+                open_blockers,
+                more_blockers,
+                blockers,
+                parent: parent_ref.map(|to| Target { to, state: Some("open") }),
+                subs: Vec::new(),
+                more_subs: false,
+            });
+        }
+
+        let ticket_n = u.int_in_range(0..=7usize)?;
+        let mut tickets = Vec::with_capacity(ticket_n);
+        let mut closed = HashSet::new();
+        for t_idx in 0..ticket_n {
+            let (trepo, tnum) = if !issue_keys.is_empty() && u.int_in_range(0..=2u8)? != 0 {
+                let (r, num) = u.choose(&issue_keys)?;
+                (r.clone(), *num)
+            } else {
+                let r = *u.choose(&["acme/widgets", "acme/tools", "acme/uncovered"])?;
+                (r.to_string(), u.int_in_range(1..=40u64)?)
+            };
+            let label = label_of(&trepo, tnum);
+            let (repo_field, issue_field) = match u.int_in_range(0..=2u8)? {
+                0 => (None, Some(format!("{trepo}#{tnum}"))),
+                1 => (Some(trepo.clone()), None),
+                _ => (None, None),
+            };
+            let t = Ticket {
+                label,
+                thread: if u.arbitrary::<bool>()? { Some(format!("mcp:t{t_idx}")) } else { None },
+                link: None,
+                repo: repo_field,
+                issue: issue_field,
+                status: "running".into(),
+            };
+            if u.int_in_range(0..=4u8)? == 0
+                && let Some((resolved_repo, resolved_num)) = ticket_repo(&covered, &t)
+            {
+                closed.insert(node_key(&resolved_repo, resolved_num));
+            }
+            tickets.push(t);
+        }
+
+        Ok(FlowScenario { cfg, covered, reads, tickets, closed, stored_skips, unheld_done })
+    }
+
+    #[test]
+    fn plan_flow_is_permutation_invariant_and_enforces_exclusion_invariants() {
+        prop(50, |u| {
+            let sc = gen_flow_scenario(u, false)?;
+            let write = u.arbitrary::<bool>()?;
+
+            let plan = plan_flow(
+                &sc.cfg,
+                Reads { reads: sc.reads.clone(), covered: sc.covered.clone() },
+                sc.tickets.clone(),
+                &sc.closed,
+                &sc.unheld_done,
+                |k| Ok(sc.stored_skips.get(k).cloned()),
+                write,
+            )
+            .unwrap();
+            if !write {
+                assert!(plan.meta_ops.is_empty());
+            }
+
+            // Permutation invariance over unordered reads AND unordered tickets.
+            let mut perm_reads = sc.reads.clone();
+            shuffle(u, &mut perm_reads)?;
+            let mut perm_tickets = sc.tickets.clone();
+            shuffle(u, &mut perm_tickets)?;
+            let perm_plan = plan_flow(
+                &sc.cfg,
+                Reads { reads: perm_reads, covered: sc.covered.clone() },
+                perm_tickets,
+                &sc.closed,
+                &sc.unheld_done,
+                |k| Ok(sc.stored_skips.get(k).cloned()),
+                write,
+            )
+            .unwrap();
+            assert_eq!(issue_ids(&plan.view.queue), issue_ids(&perm_plan.view.queue));
+            assert_eq!(issue_ids(&plan.view.skipped), issue_ids(&perm_plan.view.skipped));
+            assert_eq!(blocked_ids(&plan.view.blocked), blocked_ids(&perm_plan.view.blocked));
+            assert_eq!(plan.view.free, perm_plan.view.free);
+            let mut run_a: Vec<(String, u64)> = plan.view.running.iter().map(|t| (t.repo.clone(), t.number)).collect();
+            let mut run_b: Vec<(String, u64)> =
+                perm_plan.view.running.iter().map(|t| (t.repo.clone(), t.number)).collect();
+            run_a.sort();
+            run_b.sort();
+            assert_eq!(run_a, run_b);
+
+            // Sortedness of all three output lists.
+            assert_sorted_by_queue_order(&plan.view.queue);
+            assert_sorted_by_queue_order(&plan.view.skipped);
+            let blocked_issues: Vec<FlowIssue> = plan.view.blocked.iter().map(|b| b.issue.clone()).collect();
+            assert_sorted_by_queue_order(&blocked_issues);
+
+            // Exclusion & exact disjoint partition invariants.
+            let open_set: HashSet<String> =
+                sc.tickets.iter().filter_map(|t| ticket_repo(&sc.covered, t)).map(|(r, n)| node_key(&r, n)).collect();
+            let q_set: HashSet<String> = plan.view.queue.iter().map(|i| node_key(&i.repo, i.number)).collect();
+            let b_set: HashSet<String> =
+                plan.view.blocked.iter().map(|b| node_key(&b.issue.repo, b.issue.number)).collect();
+            let s_set: HashSet<String> = plan.view.skipped.iter().map(|i| node_key(&i.repo, i.number)).collect();
+
+            assert_eq!(q_set.len(), plan.view.queue.len());
+            assert_eq!(b_set.len(), plan.view.blocked.len());
+            assert_eq!(s_set.len(), plan.view.skipped.len());
+            assert!(q_set.is_disjoint(&b_set));
+            assert!(q_set.is_disjoint(&s_set));
+            assert!(b_set.is_disjoint(&s_set));
+
+            let del_ops: HashSet<String> = plan
+                .meta_ops
+                .iter()
+                .filter_map(|op| match op {
+                    FlowMetaOp::DelSkip(k) => Some(k.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            for r in &sc.reads {
+                let nk = node_key(&r.issue.repo, r.issue.number);
+                let has_opt_in = r.labels.iter().any(|l| l.eq_ignore_ascii_case(&sc.cfg.opt_in.label));
+                let in_progress = open_set.contains(&nk);
+                let parent_in_progress =
+                    r.issue.parent.as_ref().is_some_and(|p| open_set.contains(&node_key(&p.repo, p.number)));
+
+                if !has_opt_in || in_progress || parent_in_progress {
+                    assert!(!q_set.contains(&nk), "{nk} must be excluded from queue");
+                    assert!(!b_set.contains(&nk), "{nk} must be excluded from blocked");
+                    assert!(!s_set.contains(&nk), "{nk} must be excluded from skipped");
+                    continue;
+                }
+
+                let external = r.labels.iter().any(|l| l.eq_ignore_ascii_case(EXTERNAL));
+                let is_blocked = external || !r.open_blockers.is_empty() || r.more_blockers;
+                if is_blocked {
+                    assert!(b_set.contains(&nk), "blocked issue {nk} missing from blocked");
+                    assert!(!q_set.contains(&nk) && !s_set.contains(&nk));
+                    continue;
+                }
+
+                let sk = skip_key(&r.issue.repo, r.issue.number);
+                let has_unheld = sc.unheld_done.contains_key(&nk)
+                    || sc.unheld_done.contains_key(&r.issue.label.to_ascii_lowercase());
+                let exact_skip = sc.stored_skips.get(&sk).is_some_and(|k| *k == r.issue.key);
+                let stale_skip = sc.stored_skips.get(&sk).is_some_and(|k| *k != r.issue.key);
+
+                if has_unheld || exact_skip {
+                    assert!(s_set.contains(&nk), "skipped issue {nk} missing from skipped");
+                    assert!(!q_set.contains(&nk) && !b_set.contains(&nk));
+                } else {
+                    assert!(q_set.contains(&nk), "ready issue {nk} missing from queue");
+                    assert!(!b_set.contains(&nk) && !s_set.contains(&nk));
+                    if write && stale_skip {
+                        assert!(del_ops.contains(&sk), "stale skip {sk} should be cleaned up on write");
+                    }
+                }
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn plan_flow_and_plan_picks_enforce_capacity_caps() {
+        prop(50, |u| {
+            let mut sc = gen_flow_scenario(u, true)?;
+            sc.cfg.launch = *u.choose(&[Launch::Ask, Launch::Auto])?;
+
+            let plan = plan_flow(
+                &sc.cfg,
+                Reads { reads: sc.reads.clone(), covered: sc.covered.clone() },
+                sc.tickets.clone(),
+                &sc.closed,
+                &sc.unheld_done,
+                |k| Ok(sc.stored_skips.get(k).cloned()),
+                false,
+            )
+            .unwrap();
+            let view = &plan.view;
+
+            // Independently derive expected running tickets from inputs (covered and not closed).
+            let expected_running: Vec<(String, u64)> = sc
+                .tickets
+                .iter()
+                .filter_map(|t| {
+                    let (repo, number) = ticket_repo(&sc.covered, t)?;
+                    if !covers(&sc.covered, &repo) || sc.closed.contains(&node_key(&repo, number)) {
+                        return None;
+                    }
+                    Some((repo, number))
+                })
+                .collect();
+            let actual_running: Vec<(String, u64)> =
+                view.running.iter().map(|rt| (rt.repo.clone(), rt.number)).collect();
+            assert_eq!(actual_running, expected_running);
+
+            // Running count and free-slot capacity bounds derived from input tickets.
+            let expected_free = sc.cfg.max_tickets.saturating_sub(expected_running.len());
+            assert_eq!(view.max_tickets, sc.cfg.max_tickets);
+            assert_eq!(view.free, expected_free);
+            assert!(view.free <= sc.cfg.max_tickets);
+            if expected_running.len() >= sc.cfg.max_tickets {
+                assert_eq!(view.free, 0);
+            } else {
+                assert_eq!(expected_running.len() + view.free, sc.cfg.max_tickets);
+            }
+
+            // Generate existing flow cards (ready, stale, duplicates, or non-existent).
+            let card_n = u.int_in_range(0..=8usize)?;
+            let mut cards = Vec::with_capacity(card_n);
+            for idx in 0..card_n {
+                let pick = if !view.queue.is_empty() && u.int_in_range(0..=2u8)? != 0 {
+                    let q = u.choose(&view.queue)?;
+                    FlowPick {
+                        repo: q.repo.clone(),
+                        number: q.number,
+                        label: q.label.clone(),
+                        url: q.url.clone(),
+                        title: q.title.clone(),
+                        key: q.key.clone(),
+                    }
+                } else {
+                    let repo = (*u.choose(REPOS)?).to_string();
+                    let number = u.int_in_range(50..=70u64)?;
+                    FlowPick {
+                        label: label_of(&repo, number),
+                        url: format!("https://github.com/{repo}/issues/{number}"),
+                        title: format!("Stale {number}"),
+                        key: "stale".into(),
+                        repo,
+                        number,
+                    }
+                };
+                cards.push((format!("a{idx}"), pick));
+            }
+            let most = *u.choose(&[None, Some(0), Some(1), Some(2), Some(5)])?;
+            let pp = plan_picks(sc.cfg.launch, &view.queue, &cards, view.free, most);
+
+            // Every card is either kept or retired exactly once.
+            assert_eq!(pp.offered.len() + pp.retire.len(), cards.len());
+            let retired_idxs: HashSet<usize> = pp.retire.iter().map(|(i, _)| *i).collect();
+            assert_eq!(retired_idxs.len(), pp.retire.len());
+
+            // Strict capacity caps anchored to the input-derived free budget.
+            assert!(pp.offered.len() <= expected_free);
+            assert!(pp.offered.len() + pp.picks.len() <= expected_free);
+            assert!(pp.offered.len() + pp.picks.len() <= sc.cfg.max_tickets);
+            assert!(pp.picks.len() <= most.unwrap_or(usize::MAX));
+            assert!(pp.picks.len() <= view.queue.len());
+            if expected_running.len() <= sc.cfg.max_tickets {
+                assert!(expected_running.len() + pp.offered.len() + pp.picks.len() <= sc.cfg.max_tickets);
+            }
+            if expected_free == 0 {
+                assert!(pp.offered.is_empty() && pp.picks.is_empty());
+            }
+
+            if sc.cfg.launch == Launch::Auto {
+                assert!(pp.offered.is_empty());
+                assert_eq!(pp.retire.len(), cards.len());
+                assert!(pp.retire.iter().all(|(_, note)| *note == "flow.launch is auto"));
+                let want = view.free.min(most.unwrap_or(usize::MAX)).min(view.queue.len());
+                assert_eq!(issue_ids(&pp.picks), issue_ids(&view.queue[..want]));
+            } else {
+                for (p, _) in &pp.offered {
+                    assert!(view.queue.iter().any(|i| same(p, i)), "kept non-ready card {p:?}");
+                }
+                for (idx, note) in &pp.retire {
+                    let (_, p) = &cards[*idx];
+                    if *note == "no longer ready" {
+                        assert!(!view.queue.iter().any(|i| same(p, i)));
+                    }
+                }
+                // Picks are disjoint from kept offered cards and are the exact highest-priority prefix.
+                for pick in &pp.picks {
+                    assert!(!pp.offered.iter().any(|(p, _)| same(p, pick)));
+                }
+                let room = view.free.saturating_sub(pp.offered.len()).min(most.unwrap_or(usize::MAX));
+                let expected: Vec<FlowIssue> = view
+                    .queue
+                    .iter()
+                    .filter(|i| !pp.offered.iter().any(|(p, _)| same(p, i)))
+                    .take(room)
+                    .cloned()
+                    .collect();
+                assert_eq!(issue_ids(&pp.picks), issue_ids(&expected));
+            }
+            Ok(())
+        });
     }
 }
