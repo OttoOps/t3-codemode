@@ -174,7 +174,7 @@ select:disabled { opacity: 0.55; cursor: default; }
 .s-fail { color: var(--fail); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2 2l8 8M10 2l-8 8' stroke='%23000' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E"); }
 .s-run { color: var(--fg); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4.6' fill='none' stroke='%23000' stroke-width='1.6'/%3E%3Cpath d='M6 1.4a4.6 4.6 0 0 1 0 9.2z'/%3E%3C/svg%3E"); }
 .s-wait { color: var(--fg-2); font-weight: 500; --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4.6' fill='none' stroke='%23000' stroke-width='1.8' stroke-dasharray='1.8 2.2'/%3E%3C/svg%3E"); }
-.s-idle { color: var(--fg-2); font-weight: 500; --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4.4' fill='none' stroke='%23000' stroke-width='1.4'/%3E%3C/svg%3E"); }
+.s-idle, .s-pause { color: var(--fg-2); font-weight: 500; --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Ccircle cx='6' cy='6' r='4.4' fill='none' stroke='%23000' stroke-width='1.4'/%3E%3C/svg%3E"); }
 .s-done { color: var(--done); --shape: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M1.5 6.5l3 3 6-7' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
 .pill {
   display: inline-flex; align-items: center; justify-content: center; min-width: 24px; height: 20px; padding: 0 8px;
@@ -1611,14 +1611,15 @@ function announce(text, urgent) {
 const KIND_RANK = { blocker: 0, error: 0, escalate: 0, gate: 1, report: 2 };
 const FAIL_KINDS = new Set(["blocker", "error", "escalate"]);
 const KIND_WORD = { blocker: "Blocked", error: "Error", escalate: "Escalated", report: "Report" };
-const WORDS = { need: "needs you", fail: "failed", run: "running", wait: "waiting", idle: "idle", done: "done" };
-const GROUPS = { need: "Needs you", fail: "Failed", run: "Running", wait: "Waiting", idle: "Idle", done: "Done" };
-const ORDER = ["need", "fail", "run", "wait", "idle", "done"];
+const WORDS = { need: "needs you", fail: "failed", run: "running", wait: "waiting", idle: "idle", pause: "paused", done: "done" };
+const GROUPS = { need: "Needs you", fail: "Failed", run: "Running", wait: "Waiting", idle: "Idle", pause: "Paused", done: "Done" };
+const ORDER = ["need", "fail", "run", "wait", "idle", "pause", "done"];
 
 function ownState(s) {
   if (s === "failed" || s === "gone") return "fail";
   if (s === "running" || s === "launching") return "run";
   if (s === "waiting") return "wait";
+  if (s === "paused") return "pause";
   return s === "done" ? "done" : "idle";
 }
 
@@ -1634,7 +1635,7 @@ function ticketState(t, cards) {
   if (t.done) return "done";
   const all = [ownState(t.status), ...(t.workers || []).filter((w) => !w.done).map((w) => workerState(w, cards))];
   for (const k of ["fail", "run", "wait"]) if (all.includes(k)) return k;
-  return "idle";
+  return all[0] === "pause" ? "pause" : "idle";
 }
 
 function markOf(state, cards) {
@@ -2959,6 +2960,26 @@ function patchWorker(el, w, t, cards) {
   else plainText(th, name);
   const same = !!(w.pr && t.pr && w.pr.url && w.pr.url === t.pr.url);
   setPrChip(part(el, "wpr"), same ? null : w.pr, w.label, false);
+  setPause(el, w, w.label, "wpaused", "wpause");
+}
+
+function setPause(host, x, label, pillPart, btnPart) {
+  let b = part(host, btnPart);
+  const on = !!(x && x.thread && x.joined !== false && !x.done);
+  if (!b) {
+    if (!on) return;
+    b = h("button", { class: "linkish", type: "button", "data-part": btnPart });
+    b.addEventListener("click", () => act(b, "/api/links/" + encodeURIComponent(b.dataset.thread) + (b.dataset.paused === "1" ? "/resume" : "/pause")));
+    host.append(statusPill("pause", "paused", { "data-part": pillPart, hidden: true }), b);
+  }
+  const paused = on && !!x.paused;
+  part(host, pillPart).hidden = !paused;
+  b.hidden = !on;
+  if (!on) return;
+  setAttr(b, "data-thread", x.thread);
+  setAttr(b, "data-paused", paused ? "1" : "0");
+  setText(b, paused ? "Resume" : "Pause");
+  setAttr(b, "aria-label", (paused ? "Resume " : "Pause ") + label);
 }
 
 function needsLink(cards) {
@@ -3046,6 +3067,7 @@ function patchTicket(el, t, ctx) {
     setAttr(wd, "title", fin.map((w) => w.label).join(", ") + " done");
     setAttr(wd, "aria-label", "Show the " + fin.length + " finished workers for " + t.label);
   }
+  setPause(row.querySelector(".side"), ctx.done ? null : t, t.label, "paused", "pause");
   if (ctx.done) {
     const side = row.querySelector(".side");
     let b = side.querySelector('[data-part="settle"]');

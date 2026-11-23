@@ -156,6 +156,13 @@ pub fn builtins() -> Vec<Entry> {
             obj(json!({"open": {"type": "string"}, "clear": {"type": "boolean"}}), &[]),
         ),
         builtin(
+            "wf.pause",
+            "wf",
+            "Pause a link the work is meant to sit on: your own parent link, or a child's ({child: label or thread id}). The watcher sends a paused link no nudges, escalations or reports, and the board shows it as paused, not idle. {paused: false} resumes it with a fresh nudge count.",
+            "wf.pause(input?: { child?: string; paused?: boolean }): Promise<{ label: string; paused: boolean }>;",
+            obj(json!({"child": {"type": "string"}, "paused": {"type": "boolean"}}), &[]),
+        ),
+        builtin(
             "wf.close",
             "wf",
             "Close a child link without a handoff (by label or thread id); the watcher stops watching it.",
@@ -180,7 +187,7 @@ pub fn builtins() -> Vec<Entry> {
             "wf.board",
             "wf",
             "Your parent link and one object per child link, with live T3 status. all: include closed links. parent: show that node's tree instead, each child with its workers (parent: \"board\" is the whole t3-codemode board, no caller needed).",
-            "wf.board(input?: { all?: boolean; parent?: string }): Promise<{ parent: { thread: string; label: string; closed: boolean; gate: string | null } | null; children: { label: string; role: string; thread: string; link: string | null; status: string; asks: number; background: number; gate: string | null; lastUp: string; nudges: number; unread: number; last: { handle: string; kind: string; head: string } | null }[] }>;",
+            "wf.board(input?: { all?: boolean; parent?: string }): Promise<{ parent: { thread: string; label: string; closed: boolean; gate: string | null } | null; children: { label: string; role: string; thread: string; link: string | null; status: string; asks: number; background: number; gate: string | null; paused: boolean; lastUp: string; nudges: number; unread: number; last: { handle: string; kind: string; head: string } | null }[] }>;",
             obj(json!({"all": {"type": "boolean"}, "parent": {"type": "string"}}), &[]),
         ),
         builtin(

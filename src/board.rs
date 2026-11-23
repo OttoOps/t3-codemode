@@ -1787,6 +1787,27 @@ impl Wf {
         self.store.link_get(thread)?.filter(|l| l.parent == BOARD).ok_or_else(|| anyhow!("no board ticket {thread:?}"))
     }
 
+    pub async fn pause_link(&self, thread: &str, paused: bool) -> Result<Value> {
+        {
+            let _g = self.lock.lock().await;
+            let mut ln = self
+                .store
+                .link_get(thread)?
+                .filter(|l| {
+                    l.parent == BOARD
+                        || self.store.link_get(&l.parent).ok().flatten().is_some_and(|p| p.parent == BOARD)
+                })
+                .ok_or_else(|| anyhow!("no board ticket or worker {thread:?}"))?;
+            if ln.closed {
+                bail!("{} is done; only open links can be paused", ln.label);
+            }
+            self.set_paused(&mut ln, paused);
+            self.store.link_save(&ln)?;
+        }
+        self.changed();
+        Ok(json!({"thread": thread, "paused": paused}))
+    }
+
     async fn organize(&self, thread: &str, action: &str) -> Value {
         match self.t3.call("t3_thread_organize", json!({"threadId": thread, "action": action})).await {
             Ok(_) => json!({"ok": true}),
@@ -1895,13 +1916,19 @@ impl Wf {
 
     fn node_view(&self, ln: &Link) -> Value {
         let live = self.live_of(&ln.child);
-        let status = if ln.closed { "done" } else { chip(live.as_ref()) };
+        let paused = !ln.closed && ln.paused_at.is_some();
+        let status = match (ln.closed, chip(live.as_ref())) {
+            (true, _) => "done",
+            (false, "idle") if paused => "paused",
+            (false, s) => s,
+        };
         let live = live.unwrap_or(Value::Null);
         let (repo, project) = self.place(ln.project.as_deref(), &live);
         json!({
             "title": live["title"], "repo": repo, "project": project,
             "thread": ln.child, "label": ln.label, "status": status, "t3Status": live["status"],
             "gate": if ln.closed { None } else { ln.gate.clone() },
+            "paused": paused, "pausedAt": if paused { ln.paused_at.clone() } else { None },
             "link": web_link(ln.link.clone().or_else(|| live["link"].as_str().map(String::from))),
             "pr": self.pr_view(&live["pr"]), "done": ln.closed, "closedHow": ln.closed_how, "lastUp": local_clock(&ln.last_up),
             "upAt": ln.last_up,

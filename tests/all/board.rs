@@ -1149,6 +1149,52 @@ async fn links_stored_before_settling_still_load() {
     assert_eq!((old.settled_at, old.restored_at), (None, None));
 }
 
+#[tokio::test]
+async fn links_stored_before_pausing_load_unpaused() {
+    let h = H::new();
+    join_board(&h, TICKET, "widgets#1").await;
+    let ln = h.app.store.link_get(TICKET).unwrap().unwrap();
+    let raw = serde_json::to_value(&ln).unwrap();
+    assert!(raw.get("pausedAt").is_none(), "{raw}");
+    let old: t3_codemode::store::Link = serde_json::from_value(raw).unwrap();
+    assert_eq!(old.paused_at, None);
+}
+
+#[tokio::test]
+async fn pause_and_resume_through_the_routes_show_in_state() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    s.h.wf(WORKER, "join", json!({"parent": TICKET, "label": "#41 PR 1/1", "role": "worker"})).await;
+    let pause = format!("/api/links/{TICKET}/pause");
+    assert_eq!(s.post(&pause, json!({}), None, None).await.status(), 403);
+    assert_eq!(snapshot(&s.h)["tree"][0]["status"], "idle");
+
+    assert_eq!(s.post(&pause, json!({}), Some(&s.csrf()), None).await.status(), 200);
+    let worker_pause = format!("/api/links/{WORKER}/pause");
+    assert_eq!(s.post(&worker_pause, json!({}), Some(&s.csrf()), None).await.status(), 200);
+    let st = snapshot(&s.h);
+    let t = &st["tree"][0];
+    assert_eq!((t["status"].clone(), t["paused"].clone()), (json!("paused"), json!(true)));
+    assert!(t["pausedAt"].is_string());
+    assert_eq!(t["workers"][0]["status"], "paused");
+    assert!(s.h.tick(600).await.is_empty());
+    s.h.fake.update(TICKET, json!({"status": "running"}));
+    assert!(s.h.tick(601).await.is_empty());
+    assert_eq!(snapshot(&s.h)["tree"][0]["status"], "running");
+    assert_eq!(snapshot(&s.h)["tree"][0]["paused"], true);
+
+    s.h.fake.update(TICKET, json!({"status": "idle"}));
+    assert!(s.h.tick(602).await.is_empty());
+    let resume = format!("/api/links/{TICKET}/resume");
+    assert_eq!(s.post(&resume, json!({}), Some(&s.csrf()), None).await.status(), 200);
+    let t = snapshot(&s.h)["tree"][0].clone();
+    assert_eq!(
+        (t["status"].clone(), t["paused"].clone(), t["pausedAt"].clone()),
+        (json!("idle"), json!(false), Value::Null)
+    );
+    assert_eq!(s.post("/api/links/mcp:nobody/pause", json!({}), Some(&s.csrf()), None).await.status(), 404);
+}
+
 fn run_page(html: &str, scenario: &str) -> Value {
     let open = html.find("<script>").unwrap() + "<script>".len();
     let close = html.rfind("</script>").unwrap();
@@ -1904,6 +1950,73 @@ return {{
     assert_eq!(r["inDone"], true, "{r}");
     assert_eq!(r["settle"], "Settle widgets#41", "{r}");
     assert_eq!(r["doneCount"], "1", "{r}");
+}
+
+#[tokio::test]
+async fn ticket_and_worker_rows_pause_and_resume_from_the_board() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    s.h.wf(WORKER, "join", json!({"parent": TICKET, "label": "#41 PR 1/1", "role": "worker"})).await;
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    let r = run_page_async(
+        &html,
+        &format!(
+            r##"async () => {{
+{PAGE_HELPERS}
+const base = {st};
+fetchReply = async () => ({{ ok: true, json: async () => ({{}}) }});
+const T = "{TICKET}";
+const tk = () => q('#open [data-thread="' + T + '"]');
+const side = () => tk().querySelector(".side");
+const wi = () => tk().querySelector(".wi");
+const look = () => ({{
+  btn: side().querySelector('[data-part="pause"]').textContent,
+  label: side().querySelector('[data-part="pause"]').getAttribute("aria-label"),
+  pill: side().querySelector('[data-part="paused"]').hidden ? null : side().querySelector('[data-part="paused"]').textContent,
+  wbtn: wi().querySelector('[data-part="wpause"]').textContent,
+  wpill: !wi().querySelector('[data-part="wpaused"]').hidden,
+  aria: tk().getAttribute("aria-label"),
+  wtitle: wi().getAttribute("title"),
+  group: q("#open .tgroup") && q("#open .tgroup").textContent,
+}});
+emitState(base);
+const before = look();
+side().querySelector('[data-part="pause"]').dispatch("click");
+const flush = async () => {{ for (let i = 0; i < 20; i++) await Promise.resolve(); }};
+await flush();
+wi().querySelector('[data-part="wpause"]').dispatch("click");
+await flush();
+const paused = base.tree.map((t) => ({{ ...t, status: "paused", paused: true, workers: t.workers.map((w) => ({{ ...w, status: "paused", paused: true }})) }}));
+emitState({{ ...base, tree: paused }});
+const after = look();
+side().querySelector('[data-part="pause"]').dispatch("click");
+await flush();
+return {{ before, after, posts: fetches.filter((f) => f.method === "POST").map((f) => f.url) }};
+}}"##
+        ),
+    );
+    assert_eq!(
+        r["before"],
+        json!({"btn": "Pause", "label": "Pause widgets#41", "pill": null, "wbtn": "Pause", "wpill": false,
+            "aria": "widgets#41, idle", "wtitle": "#41 PR 1/1, idle", "group": "Idle1"}),
+        "{r}"
+    );
+    assert_eq!(
+        r["after"],
+        json!({"btn": "Resume", "label": "Resume widgets#41", "pill": "paused", "wbtn": "Resume", "wpill": true,
+            "aria": "widgets#41, paused", "wtitle": "#41 PR 1/1, paused", "group": "Paused1"}),
+        "{r}"
+    );
+    assert_eq!(
+        r["posts"],
+        json!([
+            format!("/api/links/{}/pause", TICKET.replace(':', "%3A")),
+            format!("/api/links/{}/pause", WORKER.replace(':', "%3A")),
+            format!("/api/links/{}/resume", TICKET.replace(':', "%3A")),
+        ]),
+        "{r}"
+    );
 }
 
 #[tokio::test]
@@ -3833,7 +3946,7 @@ async fn done_workers_fold_into_a_count_that_expands() {
             r##"{ROWS}
 const tree = [T("acme/b#2", {{ workers: [W("#2 PR 1/4", "done"), W("#2 PR 2/4", "done"), W("#2 PR 3/4", "idle"), W("#2 PR 4/4", "running")] }})];
 emitState({{ ...base, cards: [], tree }});
-const shown = () => [...row("acme/b#2").querySelectorAll(".wl .wi")].map((w) => w.textContent);
+const shown = () => [...row("acme/b#2").querySelectorAll(".wl .wi")].map((w) => w.querySelector('[data-part="wth"]').textContent);
 const more = row("acme/b#2").querySelector('[data-part="wmore"]');
 const done = row("acme/b#2").querySelector('[data-part="wdone"]');
 const before = {{ shown: shown(), more: more.textContent, done: done.textContent }};

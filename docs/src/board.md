@@ -621,6 +621,20 @@ The **Settled** tab keeps them, with a filter and a
 restarts its settle clock. **Settle** on a row and **Settle all done** do it by
 hand.
 
+## Pausing
+
+**Pause** on a ticket row or a worker marks its link as parked on purpose, and
+**Resume** undoes it. A thread can do the same with `wf.pause()`, and a parent
+with `wf.pause({ child })`. While a link is paused, the watcher sends it no
+nudges, does not escalate it, and reports neither a long silence nor an
+unanswered question. It still closes the link when the thread is archived or
+gone. The row shows a `paused` pill and sorts under **Paused**, and `/api/state` gives the ticket or
+worker `paused: true` and `pausedAt`. Its `status` reads `paused` where it
+would read `idle`; a paused thread that runs, waits or fails shows that
+status instead. Resuming starts the nudge count again from zero, so a link
+that has sat idle past its `down` minutes gets its first nudge on the next
+watcher pass. A link stored before pausing existed loads unpaused.
+
 ## Remote access
 
 The board is loopback-only by default. To open it from another device over
@@ -1063,7 +1077,7 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `GET /icon.svg`, `/icon-192.png`, `/icon-512.png` | Embedded board icons for browser tabs, notifications, and Add to Home Screen (same board auth guards) |
 | `GET /pair` | Remote browser pairing page (enabled when `board.remote.mode` is `"pairing"`, or `"tailscale"` with `requirePairing: true`); reads the token from `#<token>`, clears the fragment, and posts to `POST /api/pair` |
 | `POST /api/pair` `{token, label?}` | Redeem a single-use 5-minute pairing token (`Content-Type: application/json`) over the remote HTTPS origin and set a 30-day `HttpOnly; Secure; SameSite=Strict; Path=/` session cookie |
-| `GET /api/state` | `{rev, cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, counts, service}`, with `counts.newIssues`. `rev` is the board revision: it goes up with every change, keeps going up across a restart, and a state whose `rev` is at least a write's `rev` already holds that write; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. A ticket's or worker's open `pr` carries `readiness` once a [GitHub reconcile](#github-reconcile) has read it open: `isDraft`, `mergeStateStatus` and `reviewDecision` as GitHub gives them, and `checks`. `reviewDecision` is `null` when the repository requires no review. `checks` is `failing` when a check at the head failed, `pending` while one runs, `passing` when every check succeeded or was cancelled, skipped or neutral, and `null` when the head has no checks or has more than 100 and none of the first 100 failed. A pull request that no reconcile has read yet has no `readiness`. Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` while `updateCheck` is `false` or until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
+| `GET /api/state` | `{rev, cards, tree, feed, asks, settled, contexts, newIssues, dismissedIssues, counts, service}`, with `counts.newIssues`. `rev` is the board revision: it goes up with every change, keeps going up across a restart, and a state whose `rev` is at least a write's `rev` already holds that write; tickets, cards and feed items carry `repo` (`owner/repo`) and `project` (`{id, title}`), and tickets their thread `title`, with `last.dismissed` when the last message is a gate whose card you dismissed. A ticket's or worker's open `pr` carries `readiness` once a [GitHub reconcile](#github-reconcile) has read it open: `isDraft`, `mergeStateStatus` and `reviewDecision` as GitHub gives them, and `checks`. `reviewDecision` is `null` when the repository requires no review. `checks` is `failing` when a check at the head failed, `pending` while one runs, `passing` when every check succeeded or was cancelled, skipped or neutral, and `null` when the head has no checks or has more than 100 and none of the first 100 failed. A pull request that no reconcile has read yet has no `readiness`. Tickets and workers carry `paused`, `pausedAt` while paused, and `status: "paused"` in place of `idle` ([pausing](#pausing)). Times come as local clock strings with an ISO twin for ages: a ticket's `lastUp` and `upAt`, a settled ticket's `settledAt` and `settledIso`, and `service.watcher.lastPass` and `lastPassAt`. `service.update` is `null` while `updateCheck` is `false` or until a release check has answered, then `{current, latest, available, notes, command}`. `service.skills` is the skills check that `/healthz` also reports ([getting started](getting-started.md#install-the-skills-with-t3cm)) |
 | `GET /api/events` | SSE: a `state` event on every change, carrying the same `rev` (closes when a remote pairing session is revoked or expires, or when a Tailscale login is no longer allowed) |
 | `GET /api/msg/{handle}` | One stored message in full |
 | `POST /api/cards/{id}/answer` `{text}` | Reply to the card's ticket and resolve it; a flow launch card takes `launch` or `skip` instead ([The flow](#the-flow)) |
@@ -1077,6 +1091,7 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `PUT /api/settings` `{revision, file}` | Loopback or the Tailscale owner: check and save the whole config, then reload it; returns `{revision, restart, warnings}` (409 for a stale revision, 422 with per-field `errors` for an invalid result) |
 | `GET /api/settings/pools` | Loopback or the Tailscale owner: `{pools}`, each pool's live member state as `wf.pools()` reports it |
 | `POST /api/tickets/{thread}/settle`, `/restore` | Settle a done ticket, or bring a settled one back (400 if open, or not settled) |
+| `POST /api/links/{thread}/pause`, `/resume` | [Pause](#pausing) an open ticket or worker link, or resume it; returns `{thread, paused}` (404 for a thread that is neither, 400 for a done one) |
 | `POST /api/asks/{id}/settle`, `/restore` | The same for a closed ask; `id` is `q<n>` |
 | `GET /api/new-issues` | `{issues, dismissed}`, newest first; an issue that has a board ticket is in neither |
 | `POST /api/new-issues/{id}/launch` | Launch a ticket for the entry, as `POST /api/launch` does for one issue; the result adds `id` (404 for no such entry) |

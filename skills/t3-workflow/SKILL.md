@@ -75,6 +75,7 @@ Run every call below inside `mcp__t3cm__execute`, or pipe the same
 | A message to a child | `await wf.reply({ to: "<child id or label>", body })` |
 | You start waiting on a person | `await wf.send({ kind: "gate", gate: "<name>", body: actionLine })`; later `await wf.gate({ clear: true })` |
 | You wait on something else for a long spell, with nothing to send | `await wf.gate({ open: "<what>" })`; `await wf.gate({ clear: true })` when it ends |
+| The work is parked on purpose, with nothing to wait on | `await wf.pause()` (a parent passes `child: "<label>"`); `await wf.pause({ paused: false })` resumes it |
 | Merging a PR on the user's word | `await wf.merge({ repo: "<owner>/<name>", pr: <n>, head: "<sha>", method: "<method>" })` |
 | The work is done | `await wf.send({ kind: "handoff", body })` (closes the link) |
 | The work stopped without finishing | `await wf.send({ kind: "closed", body })` (closes the link) |

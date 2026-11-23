@@ -84,6 +84,13 @@ struct GateArgs {
     clear: bool,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct PauseArgs {
+    child: Option<String>,
+    paused: Option<bool>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChildArgs {
@@ -530,6 +537,7 @@ impl Wf {
             "send" => self.send(me, parse(method, args)?).await,
             "reply" => self.reply(me, parse(method, args)?).await,
             "gate" => self.gate(me, parse(method, args)?).await,
+            "pause" => self.pause(me, parse(method, args)?).await,
             "close" => self.close(me, &parse::<ChildArgs>(method, args)?.child).await,
             "inbox" => {
                 parse::<Empty>(method, args)?;
@@ -697,6 +705,7 @@ impl Wf {
                 settled_at: None,
                 restored_at: None,
                 project: project.or_else(|| old.as_ref().and_then(|o| o.project.clone())),
+                paused_at: old.as_ref().filter(|_| !auto).and_then(|o| o.paused_at.clone()),
             })
         })?;
         let ln = match bound {
@@ -822,6 +831,33 @@ impl Wf {
         Ok(json!({"gate": ln.gate}))
     }
 
+    async fn pause(&self, me: &str, a: PauseArgs) -> Result<Value> {
+        let _g = self.lock.lock().await;
+        let mut ln = match a.child.as_deref() {
+            Some(child) => self.find_child(me, child)?,
+            None => self
+                .store
+                .link_get(me)?
+                .ok_or_else(|| anyhow!("this thread has no parent link to pause; pass {{child}} to pause a child"))?,
+        };
+        if ln.closed {
+            bail!("{}'s link is closed; there is nothing to pause", ln.label);
+        }
+        self.set_paused(&mut ln, a.paused.unwrap_or(true));
+        self.store.link_save(&ln)?;
+        Ok(json!({"label": ln.label, "paused": ln.paused_at.is_some()}))
+    }
+
+    pub(crate) fn set_paused(&self, ln: &mut Link, paused: bool) {
+        if paused == ln.paused_at.is_some() {
+            return;
+        }
+        ln.paused_at = paused.then(|| self.now());
+        ln.nudges = 0;
+        ln.escalated = false;
+        ln.last_nudge = None;
+    }
+
     fn find_child(&self, me: &str, reference: &str) -> Result<Link> {
         self.store
             .children(me, false)?
@@ -888,7 +924,7 @@ impl Wf {
             children.push(json!({
                 "label": k.label, "role": k.role, "thread": k.child, "link": k.link.clone().or_else(|| live["link"].as_str().map(String::from)),
                 "status": status, "asks": count(&live["pendingRequestCount"]), "background": count(&live["pendingBackgroundTasks"]),
-                "gate": k.gate, "lastUp": local_clock(&k.last_up), "nudges": k.nudges, "unread": k.unread.len(),
+                "gate": k.gate, "paused": k.paused_at.is_some(), "lastUp": local_clock(&k.last_up), "nudges": k.nudges, "unread": k.unread.len(),
                 "settled": k.settled_at.is_some(),
                 "last": last.map(|m| json!({"handle": m.handle, "kind": m.kind, "head": m.head(90)})),
             }));
@@ -1101,6 +1137,9 @@ impl Wf {
         }
         let updated = th["updatedAt"].as_str();
         ln.last_seen = updated.map(String::from);
+        if ln.paused_at.is_some() {
+            return Ok(());
+        }
         let status = th["status"].as_str().unwrap_or("");
         let busy =
             ACTIVE.contains(&status) || truthy(&th["blockedOnThreadWait"]) || truthy(&th["pendingBackgroundTasks"]);
