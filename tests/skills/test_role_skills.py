@@ -434,6 +434,9 @@ class NonGithubTrackerTests(unittest.TestCase):
             self.assertIn(token, close)
 
     def test_worker_uses_refs_for_non_github_and_keeps_github_trailer(self):
+        link_proto = " ".join(section(self.worker, "## The link protocol").split())
+        self.assertIn("On a non-GitHub git host, check the MR/PR state", link_proto)
+
         orient = " ".join(section(self.worker, "## 1. Orient").split())
         self.assertIn("Skip `gh issue` commands", orient)
         self.assertIn("Tracker:", orient)

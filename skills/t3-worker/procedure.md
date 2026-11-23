@@ -40,11 +40,14 @@ orchestrator: built, review started, checks green, a skipped slot), `event`
 
 `t3-workflow` asks each role for one thing. Yours is:
 
-- **Resume step:** re-read the step you were on. Once the PR is open,
-  `list_thread_pull_requests`: when this PR (or a follow-up PR) is no
-  longer watched, call `watch_pull_request` on it again. Then check the
-  PR's state (`gh pr view <number> --json state,headRefOid,statusCheckRollup`)
-  and act on any wake you missed (step 4). Then carry on from that step.
+- **Resume step:** re-read the step you were on. Once the PR is open on a
+  GitHub `origin`, run `list_thread_pull_requests`: when this PR (or a
+  follow-up PR) is no longer watched, call `watch_pull_request` on it again.
+  Then check the PR's state (`gh pr view <number> --json
+  state,headRefOid,statusCheckRollup`) and act on any wake you missed (step
+  4). On a non-GitHub git host, check the MR/PR state with the repo's
+  documented workflow instead of `watch_pull_request` and `gh pr view`. Then
+  carry on from that step.
 
 When you wait on a person, send the gate:
 `await wf.send({ kind: "gate", gate: "review", body: "<action line>" })` when
