@@ -1,7 +1,7 @@
 ---
 name: t3-ticket
-description: Use when the t3_thread_launch tool is available (T3 Code) and the user hands over GitHub issue work, even without naming T3 or threads - "work on issue 533", "pick up 42 and ship it", "start on the issues we filed", "have a new thread work on that issue", an issue URL, or "work" plus a request. Splits it into PRs, one worker thread each, merges and deploys on the user's word. Not without t3_thread_launch, nor for status or summary asks or one comment, label, or close.
-argument-hint: "<#issue | issue URL | work: request>"
+description: Use when the t3_thread_launch tool is available (T3 Code) and the user hands over issue or ticket work (GitHub issue, Jira key or browse URL, GitLab issue URL), even without naming T3 or threads - "work on issue 533", "work PROJ-123", "pick up 42 and ship it", "start on the issues we filed", "have a new thread work on that issue", an issue URL, or "work" plus a request. Splits it into PRs, one worker thread each, merges and deploys on the user's word. Not without t3_thread_launch, nor for status or summary asks or one comment, label, or close.
+argument-hint: "<#issue | PROJ-123 | issue URL | work: request>"
 ---
 
 This thread is the work's orchestrator. It reads the issue, splits it into
@@ -38,7 +38,7 @@ the root and talks to the user itself.
   `pr`-scoped stage returns to that worker as a follow-up PR. Stages scoped
   to `ticket` run once on `main` after the last PR hands off, and a failure
   there launches a targeted fix worker on `main`.
-- A worker thread works one issue. Follow-up work that has its own GitHub
+- A worker thread works one issue. Follow-up work that has its own tracked
   issue gets a fresh worker: when a worker reports one, show it to the user
   as an addition to the split, and once approved, launch it through step 3
   after the current worker hands off, with its own label, branch and
@@ -128,39 +128,64 @@ three more rules hold:
 
 1. Join the link protocol. Run the brief's `wf.join(...)` call when the
    message that started this thread has a link block, or
-   `wf.init({ role: "ticket" })` when it has none. With the default roles
+   `wf.init({ role: "ticket" })` when it has none (passing `issue` with the
+   canonical slug from step 3, and `label` when starting on a non-GitHub ref
+   such as `PROJ-123`, so the board and workers share that identity). With
+   the default roles
    config that puts this thread on the board as a ticket, and the result's
    `parent` is `"board"`; when it is missing, this thread is a root and
    talks to the user itself. Add `root: true` only to keep it off the board.
 2. `t3_thread_organize` with action `pin`.
 3. `t3_worktree_status`: note the main workspace root and the repo
-   (`gh repo view --json nameWithOwner,url`). Worktree removal and branch
-   cleanup run there.
+   (`gh repo view --json nameWithOwner,url` on a GitHub repo, else
+   `git -C <main workspace root> remote get-url origin`). Worktree removal
+   and branch cleanup run there. `gh pr`, `wf.pr`, `wf.merge`, and
+   `watch_pull_request` apply only to a GitHub `origin`: on another git host
+   (such as self-hosted GitLab), follow the repo's documented MR/PR, merge,
+   and merge-verification workflow in place of the GitHub PR steps in steps 3
+   and 4 (including "The handoff" item 1), or, when the repo documents none,
+   tell the user under the split (step 2) and stop before launching a worker.
 4. Read the repo's `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `README.md`
    (contributing and versioning), and `docs/agents/`. Settle the
    conventions below, from the repo's `## Agent workflow` section when it
-   has one, else by inference. Show every inferred value under the split
-   (step 2), with the delivery, so the user's approval confirms it.
+   has one, else by inference. For **Tracker**, an explicit ticket ref always
+   wins over the repo default (`jira` for a Jira key or browse URL,
+   `gitlab-issues` for a GitLab issue URL, `github-issues` for a GitHub issue
+   URL or `<owner>/<repo>#<n>`); use the repo setting (else `github-issues`
+   for a bare issue number such as `533` or `#533`, or `none`) only when the
+   input does not identify a tracker. Show every inferred value under the
+   split (step 2), with the delivery, so the user's approval confirms it.
 
    | Setting | Values | Inferred when the repo does not say |
    |---|---|---|
-   | Tracker | `github-issues`, `none` | `github-issues` when the user named an issue, else `none` |
+   | Tracker | `github-issues`, `jira`, `gitlab-issues`, `none` (or another non-GitHub tracker the repo names) | explicit ref first (`jira`, `gitlab-issues`, or `github-issues`); else repo default, `github-issues` for bare `533` or `#533`, or `none` |
    | Merge method | `merge`, `squash`, `rebase` | what the repo documents ("Rebase and merge", squash, or merge), else the method its recent merged PRs show |
    | PR format | a skill or template | the `pr` skill when it is available, else `.github/pull_request_template.md`, else none |
    | Checks | commands | the test commands the repo documents |
    | In-progress label | a label | the label the repo documents for work under way, else none |
 
-   Note the identity too: the bot the repo names, or the user's own. And
-   whether the repo runs CI on PRs (`ls .github/workflows`, triggers on
-   `pull_request`).
+   For a non-GitHub tracker (`jira`, `gitlab-issues`, or another tracker the
+   repo names), also note any CLI, MCP tool, or skill the repo documents for
+   reading its tickets. Note the identity too: the bot the repo names, or the
+   user's own. And whether the repo runs CI on PRs (`ls .github/workflows`,
+   triggers on `pull_request`).
 
 ## 2. Read the work and split it
 
-With tracker `github-issues`, read the issue:
-`gh issue view <n> -R <repo> --json number,title,body,labels,assignees,milestone,comments,url`,
-and its sub-issues:
-`gh api repos/<repo>/issues/<n>/sub_issues --jq '.[] | {number, title, state, html_url}'`.
-With `none`, the user's request is the work.
+- With tracker `github-issues`, read the issue:
+  `gh issue view <n> -R <repo> --json number,title,body,labels,assignees,milestone,comments,url`,
+  and its sub-issues:
+  `gh api repos/<repo>/issues/<n>/sub_issues --jq '.[] | {number, title, state, html_url}'`.
+- With a non-GitHub tracker (`jira`, `gitlab-issues`, or another tracker the
+  repo names), read the ticket with the CLI, MCP tool, or skill the repo
+  documents; skip `gh issue` commands for it. When the ticket text is not
+  already in the prompt and the repo documents no tool to read it (or the
+  documented tool cannot reach it), open a gate (`wf.send({ kind: "gate",
+  gate: "ticket", body, options: [] })`, ignoring any no-buttons warning since
+  the answer is free text) with the action line
+  `paste the title and description for <ref>` (ending `, here: <URL>` when
+  the ref has a URL), wait for the user's reply, and split from that text.
+- With `none`, the user's request is the work.
 
 Look up the delivery slot with `await wf.slot("delivery")` as
 [Looking up slots in a role](../t3-workflow/slots.md#looking-up-slots-in-a-role)
@@ -180,11 +205,12 @@ Write the split: a numbered list of N PRs, in merge order. Each entry
 carries a title (Conventional Commits), the scope, one acceptance line (a
 checkable condition the PR makes true), its sub-issue when the PR closes one
 of the issue's open sub-issues, and a branch name: `<type>/<s>-<slug>` for a
-PR with sub-issue `#<s>`, `<type>/<n>-<slug>` for a PR with only the issue,
-`<type>/<slug>` without an issue, where `<type>` is the Conventional Commits
-type. The PR title stays plain Conventional Commits: the worker's linked
-issue and the board's chips carry the issue mapping. Keep N small: a PR is a
-unit someone can review and revert alone.
+PR with sub-issue `#<s>`, `<type>/<n>-<slug>` for a GitHub or GitLab issue,
+`<type>/<key>-<slug>` (lowercase, such as `feat/proj-123-retry`) for a Jira
+key, or `<type>/<slug>` without an issue, where `<type>` is the Conventional
+Commits type. The PR title stays plain Conventional Commits: the worker's
+linked issue and the board's chips carry the issue mapping. Keep N small: a
+PR is a unit someone can review and revert alone.
 
 A PR's entry carries a `Passes:` line only when the repo's rules
 (`AGENTS.md`, `docs/agents/`) name passes for its kind of change, such as a
@@ -201,9 +227,9 @@ these finds it:
 
 - `git -C <main workspace root> branch --list <name>`
 - `git -C <main workspace root> ls-remote --heads origin <name>`
-- `gh pr list -R <repo> --state all --head <name>`
+- `gh pr list -R <repo> --state all --head <name>` (on a GitHub repo; omit on other git hosts)
 
-Give a taken name a numeric suffix (`-2`, `-3`) until all three come back
+Give a taken name a numeric suffix (`-2`, `-3`) until every check comes back
 empty.
 
 Show the split under the action line "approve this PR split, or reply with
@@ -213,10 +239,11 @@ each stage's `scope`, `gate`, `paths` filter and `watch`, plus `closeAfter`,
 and for a deploy skill with tag families, the family its rules pick for the
 expected paths), each `Passes:` line (approval runs the passes,
 but anything they lead to that the repo's rules reserve for a person, and
-any GPU use, still comes back as a gate), and, with an issue, what approval also does to it: the
-split posted as a comment, the issue assigned to the user when it has no
-assignee, and the in-progress label added when the repo has one. The
-approval is the user's confirmation of those writes. Then, with an issue:
+any GPU use, still comes back as a gate), and, with tracker `github-issues`,
+what approval also does to the issue: the split posted as a comment, the
+issue assigned to the user when it has no assignee, and the in-progress label
+added when the repo has one. The approval is the user's confirmation of those
+writes. Then, with tracker `github-issues`:
 
 1. Post the split as an issue comment through the Publishing section
    (`gh issue comment <n> -R <repo> --body-file <file>`).
@@ -226,8 +253,12 @@ approval is the user's confirmation of those writes. Then, with an issue:
    --add-label <label>`, and remove any not-started label the repo's
    conventions replace it with.
 
+With a non-GitHub tracker (`jira`, `gitlab-issues`, or another tracker the
+repo names), skip `gh issue comment` and `gh issue edit`.
+
 Workers never write to the issue except through their commit trailers and
-`Refs #<n>` lines.
+`Refs` lines (`Refs #<n>` for `github-issues`, or `Refs <ticket ref>` such as
+`Refs PROJ-123` for a non-GitHub tracker).
 
 ## 3. Launch a worker
 
@@ -249,12 +280,22 @@ For PR n:
    with the worker's **label**, identity and **PR format** (`pr`, below the
    table):
 
-   | Field | PR with sub-issue `#<s>` | PR with only the issue, or no issue |
-   |---|---|---|
-   | `label` | `#<s> (#<n> n/N)` | `<#n or slug> PR n/N` |
-   | `issue` | `<owner>/<repo>#<s>` | `<owner>/<repo>#<n>`; left out with no issue |
-   | `parentIssue` | `<owner>/<repo>#<n>` | left out |
-   | `part` | `n/N` | `n/N` |
+   | Field | GitHub sub-issue `#<s>` | GitHub issue, or no issue | Non-GitHub ticket (Jira, GitLab) |
+   |---|---|---|---|
+   | `label` | `#<s> (#<n> n/N)` | `<#n or slug> PR n/N` | `<KEY-N or #n> PR n/N` (such as `PROJ-123 PR 1/2`) |
+   | `issue` | `<owner>/<repo>#<s>` | `<owner>/<repo>#<n>`; left out with no issue | `KEY-N`, `<host>/KEY-N`, `<host>/<scope>#<n>`, or the canonical URL |
+   | `parentIssue` | `<owner>/<repo>#<n>` | left out | parent slug in the same format, else left out |
+   | `part` | `n/N` | `n/N` | `n/N` |
+
+   For a non-GitHub ticket, reuse the `issue` slug from this thread's own
+   `wf.join` or `wf.init` call (or derive it from the ticket ref): `KEY-N`
+   for a bare Jira key, `<host>/KEY-N` for a standard
+   `https://<host>/browse/KEY-N` URL, `<host>/<scope>#<n>` for a standard
+   `https://<host>/<scope>/-/issues/<n>` GitLab URL, or the full canonical
+   URL when it carries a non-standard port, `http://`, or a Jira context path
+   (passing the ticket URL itself also works; `t3cm` normalizes it to the
+   canonical slug). Use `<host>/KEY-N PR n/N` when disambiguating two Jira
+   hosts on the same key.
 
    `pr` is the PR description format from step 1, which t3cm checks the
    worker's opened PR against: `{ format, sections, passes, mergeOnly }`.
@@ -291,11 +332,14 @@ For PR n:
 ### Launch brief
 
 ```markdown
-# <#n: issue title, or the request in one line>
+# <#n or ticket ref: issue title, or the request in one line>
 
-Issue: <issue URL, or "none">
-Sub-issue: <the PR's sub-issue URL, or "none">
+Tracker: <tracker from step 1: github-issues, jira, gitlab-issues, or none>
+Issue: <issue URL or ticket ref, or "none">
+Sub-issue: <the PR's sub-issue URL or ref, or "none">
 PR <n> of <N>: <PR title>
+Scope: <the PR's scope from the split; for a non-GitHub ticket the worker
+cannot read itself, include the relevant ticket details>
 Acceptance: <the PR's acceptance line>
 Branch: <branch>
 Delivery: <resolved steps summary, e.g. merge, tag-deploy (merge -> deploy),
@@ -389,8 +433,12 @@ description (`gh pr view <number> -R <repo> --json body`) has every
 section and required element the format sets (for the `pr` skill: the
 Summary, Evidence and Merge Danger headings, a fenced block under Summary,
 `Before:` and `After:` under Evidence, and `Door:` and `Blast Radius:` under
-Merge Danger), plus `Refs #<n>` when there is an issue and `Refs #<s>`
-when the PR has a sub-issue. When either fails,
+Merge Danger), plus the issue reference line: `Refs #<n>` (and `Refs #<s>`
+when the PR has a sub-issue) with tracker `github-issues`, or `Refs <ticket
+ref>` matching the worker link's `issue` identity with a non-GitHub tracker
+(`Refs PROJ-123` for a bare Jira key, `Refs PROJ-123 (<browse URL>)` or
+`Refs <host>/PROJ-123` for a hosted Jira URL, or `Refs <issue URL>` /
+`Refs <host>/<scope>#<n>` for GitLab). When either fails,
 send the worker "Rewrite #<number>'s description through the Publishing
 section of the t3-worker procedure: <what is missing>."
 
@@ -564,7 +612,7 @@ continue from item 3.
 **Answering `gate: "delivery:<id>"`** (for a later `pr`, `ticket`, or
 `closeAfter: "all"` `post-handoff` stage): clear the gate
 (`wf.gate({ clear: true })`). On `"skip <id>"`, record `<id>` as skipped
-(and note it in the issue comment) and advance to the next stage (when that
+(and note it in the issue comment with tracker `github-issues`) and advance to the next stage (when that
 was the last `pr`-scoped stage and no other `pr`-scoped stage ran after
 `merge`, send the worker `"Merged #<number> at <merge commit sha>. Hand
 off."`). On `"done"` (or a manual prefix such as `"done and verify"` for a
@@ -793,7 +841,7 @@ ticket's combined changed paths across all PRs for `ticket`-scoped and
   (inline or in "Each deploy-watch run"), tell the user what failed with
   its log/URL and any rollback path (do not roll back unasked), then launch
   a targeted fix worker on `main` using step 3 (a fresh worktree branched
-  from `main` on an unused branch such as `fix/<n>-<id>`, acceptance line
+  from `main` on an unused branch such as `fix/<n or key>-<id>`, acceptance line
   `"the failed <id> stage on main succeeds"`, merge-only delivery). Once
   that fix PR merges and its worker hands off, repeat any earlier completed
   stages invalidated by the new `main` revision before resuming the failed
@@ -803,11 +851,12 @@ ticket's combined changed paths across all PRs for `ticket`-scoped and
   `await wf.slot("delivery", { files: combinedFiles })`. When `closeAfter`
   is `"ticket"` (default) or `"pr"`, emit a final report/checklist card
   with `wf.send({ kind: "report", body })` (and show it at the root), post
-  a note on the issue through Publishing naming each remaining
-  `post-handoff` stage (`id`, skill or `prompt`, PRs and `main` SHA), and
-  carry the same checklist in the `handoff` body (on the board, `handoff`
-  resolves open cards for the ticket, so keeping it in both the issue note
-  and the `handoff` preserves the checklist after close). Do not keep the
+  a note on the issue through Publishing when tracker is `github-issues`
+  naming each remaining `post-handoff` stage (`id`, skill or `prompt`, PRs
+  and `main` SHA), and carry the same checklist in the `handoff` body (on
+  the board, `handoff` resolves open cards for the ticket, so keeping it in
+  the `handoff` body, and in the issue note for `github-issues`, preserves
+  the checklist after close). Do not keep the
   ticket open waiting on `post-handoff` stages. Only when `closeAfter` is
   `"all"`, gate each active `post-handoff` stage (`gate: "delivery:<id>"`,
   or run automatically when `gate: "never"`) before closing the issue and
@@ -894,7 +943,9 @@ The worker hands off only after "Merged" or "Delivered" (when its last
 the first time. The handoff has already closed the worker's link.
 
 1. Confirm the PR is merged on GitHub: `gh pr view <number> -R <repo>
-   --json state,mergeCommit`, and the same for any follow-up PR.
+   --json state,mergeCommit`, and the same for any follow-up PR (on a
+   non-GitHub git host, confirm the merge using the repo's documented MR/PR
+   workflow before removing the worktree or branches).
 2. For any `pr`-scoped stage that ran after merge (such as a tag deploy):
    confirm its artifact matches the merge commit (for a tag deploy:
    `git -C <main workspace root> fetch origin --tags`, then
@@ -902,12 +953,13 @@ the first time. The handoff has already closed the worker's link.
    handoff names succeeded as the deploy watch saw it). When the check
    disagrees with the handoff, tell the user and the worker before anything
    else moves.
-3. With an issue: comment on it with the PR, any follow-up PR, what it
-   changed, and the `pr`-scoped delivery result (noting any `ticket` or
-   `post-handoff` stages still to come). Publish through the Publishing
-   section. With a sub-issue, close it with the same comment:
+3. With tracker `github-issues`: comment on the issue with the PR, any
+   follow-up PR, what it changed, and the `pr`-scoped delivery result (noting
+   any `ticket` or `post-handoff` stages still to come). Publish through the
+   Publishing section. With a sub-issue, close it with the same comment:
    `gh issue close <s> -R <repo> --comment "<text>"`. Its work is this PR
-   alone, so it closes now, not in step 5.
+   alone, so it closes now, not in step 5. With a non-GitHub tracker, skip
+   `gh issue` comments and closes.
 4. Remove the worker's worktree from the main workspace root once GitHub
    shows the PR merged: `git -C <main workspace root> worktree remove
    <worktree path>`. The path is in `t3_worktree_list`. When git refuses
@@ -944,8 +996,8 @@ the first time. The handoff has already closed the worker's link.
    that `deploy` must ship), each through its required gates and approvals.
    Preserve an earlier completed stage only when its result still holds for
    the new `main` SHA. Otherwise (this was the last PR of the split):
-   - When `closeAfter` is `"pr"`, close the issue now (remove the
-     in-progress label and run
+   - When `closeAfter` is `"pr"` and tracker is `github-issues`, close the
+     issue now (remove the in-progress label and run
      `gh issue close <n> -R <repo> --comment "<text>"` through Publishing)
      before running any remaining `ticket`-scoped stages.
    - Run any active `ticket`-scoped stages on `main` ("Delivery stages"
@@ -960,8 +1012,8 @@ stages have finished (or been skipped):
    changed files ("Delivery stages", `post-handoff` scope): when
    `closeAfter` is `"all"`, run or gate each one before closing; otherwise
    emit the final report/checklist card (`wf.send({ kind: "report", body })`)
-   and include the checklist in the issue note (below) and the `handoff`
-   body.
+   and include the checklist in the `handoff` body (and in the issue note
+   below when tracker is `github-issues`).
 2. Check `(await wf.board({ all: true })).children` for every worker thread id
    (handoff closes a worker's link, so without `all: true` closed workers are
    omitted), then check each worker's live settlement state in T3
@@ -978,7 +1030,7 @@ stages have finished (or been skipped):
    a worker after its handoff makes T3 recreate its worktree, so a worktree
    removed at the handoff can come back. Remove each one as "The handoff"
    item 4 says.
-5. With an issue:
+5. With tracker `github-issues`:
    - If `closeAfter` is `"pr"` and the issue was already closed after the
      last PR's `pr`-scoped stages, post a comment through Publishing with
      the `ticket`-scoped results and any `post-handoff` checklist.
@@ -987,6 +1039,9 @@ stages have finished (or been skipped):
      then close the issue with the outcome (and any remaining
      `post-handoff` checklist) as the comment, through Publishing:
      `gh issue close <n> -R <repo> --comment "<text>"`.
+   With a non-GitHub tracker (`jira`, `gitlab-issues`, or another tracker the
+   repo names), skip `gh issue` comments, label edits, and closes; carry the
+   outcome, PR URLs, and any `post-handoff` checklist in item 6.
 6. With a parent link: `await wf.send({ kind: "handoff", body })` with the
    outcome, the PR URLs, and any remaining `post-handoff` checklist.
 7. Unpin this thread and settle it.

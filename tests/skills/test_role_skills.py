@@ -394,5 +394,65 @@ class RemoteBoardSetupTests(unittest.TestCase):
         self.assertTrue({"remote-access", "reverse-proxy-examples"} <= heads)
 
 
+class NonGithubTrackerTests(unittest.TestCase):
+    ticket = (SKILLS / "t3-ticket" / "SKILL.md").read_text()
+    worker = (SKILLS / "t3-worker" / "procedure.md").read_text()
+    workflow = (SKILLS / "t3-workflow" / "SKILL.md").read_text()
+    codemode = (SKILLS / "t3-workflow" / "codemode.md").read_text()
+
+    def test_ticket_step_1_resolves_explicit_ref_before_repo_default(self):
+        start = " ".join(section(self.ticket, "## 1. Start").split())
+        for token in ("`github-issues`", "`jira`", "`gitlab-issues`", "`none`",
+                      "explicit ticket ref always wins over the repo default",
+                      "`533` or `#533`", 'wf.init({ role: "ticket" })', "GitHub `origin`"):
+            self.assertIn(token, start)
+
+    def test_ticket_step_2_reads_non_github_without_gh_and_keeps_github_writes(self):
+        read_split = " ".join(section(self.ticket, "## 2. Read the work and split it").split())
+        for token in ("gh issue view <n>", "skip `gh issue` commands", 'gate: "ticket"',
+                      "with tracker `github-issues`:", "skip `gh issue comment` and `gh issue edit`", "Refs PROJ-123"):
+            self.assertIn(token, read_split)
+
+    def test_ticket_step_3_passes_non_github_slugs_scope_and_tracker_to_worker(self):
+        launch = " ".join(self.ticket.split("## 3. Launch a worker", 1)[1].split("## 4. Between workers", 1)[0].split())
+        for token in ("<owner>/<repo>#<n>", "KEY-N", "<host>/KEY-N", "<host>/<scope>#<n>",
+                      "Tracker:", "Scope:", "`wf.join` or `wf.init`"):
+            self.assertIn(token, launch)
+
+    def test_ticket_pr_handoff_and_close_scope_gh_issue_writes_to_github(self):
+        opened = " ".join(section(self.ticket, "### PR opened").split())
+        for token in ("`Refs #<n>`", "`Refs PROJ-123`", "`Refs <host>/PROJ-123`", "`Refs <host>/<scope>#<n>`"):
+            self.assertIn(token, opened)
+
+        handoff = " ".join(section(self.ticket, "### The handoff").split())
+        for token in ("With tracker `github-issues`:", "skip `gh issue` comments and closes",
+                      'When `closeAfter` is `"pr"` and tracker is `github-issues`'):
+            self.assertIn(token, handoff)
+
+        close = " ".join(section(self.ticket, "## 5. Close").split())
+        for token in ("With tracker `github-issues`:", "skip `gh issue` comments, label edits, and closes"):
+            self.assertIn(token, close)
+
+    def test_worker_uses_refs_for_non_github_and_keeps_github_trailer(self):
+        orient = " ".join(section(self.worker, "## 1. Orient").split())
+        self.assertIn("Skip `gh issue` commands", orient)
+        self.assertIn("Tracker:", orient)
+
+        build = " ".join(section(self.worker, "## 2. Build").split())
+        for token in ('--trailer "Github-Issue:#<number>"', "omit the `Github-Issue` trailer", "`Refs PROJ-123`"):
+            self.assertIn(token, build)
+
+        open_pr = " ".join(section(self.worker, "## 3. Open the PR and watch it").split())
+        for token in ("`Refs #<number>`", "`Refs PROJ-123`", "`Refs <host>/PROJ-123`",
+                      "`Refs <host>/<scope>#<n>`", "non-GitHub git host"):
+            self.assertIn(token, open_pr)
+
+    def test_workflow_docs_describe_non_github_issue_slugs_with_valid_js(self):
+        self.assertNotRegex(self.workflow, r"wf\.openChild\(\{[^}]*\?")
+        for text in (" ".join(self.workflow.split()), " ".join(self.codemode.split())):
+            for slug in ("<owner>/<repo>#<n>", "KEY-N", "<host>/KEY-N", "<host>/<scope>#<n>"):
+                self.assertIn(slug, text)
+
+
 if __name__ == "__main__":
     unittest.main()

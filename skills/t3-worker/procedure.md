@@ -4,7 +4,8 @@ description: Procedure for a T3 Code worker thread that builds one pull request 
 ---
 
 You are the worker thread for one pull request (PR) of a piece of work: a
-GitHub issue, or a request with no issue. An orchestrator thread running
+GitHub issue, a ticket from a non-GitHub tracker (such as Jira or GitLab), or
+a request with no issue. An orchestrator thread running
 `t3-ticket` launched you into a worktree T3 created for this PR, with a
 brief. You own this PR from first commit until its `pr`-scoped delivery
 stages finish: a merged PR whose `pr`-scoped delivery stage (such as a
@@ -63,15 +64,20 @@ straight back to you.
 
 ## 1. Orient
 
-Read the brief: the issue (or "no issue"), its sub-issue, which PR this is
-("PR n of N"), its acceptance line, its passes, the delivery (legacy `merge`
-or `tag-deploy`, or ordered delivery steps noting which are `pr`-scoped),
-the previous worker's handoff, and the link block. Pick up the handoff's
-state and decisions as settled.
+Read the brief: the tracker, the issue (or "no issue"), its sub-issue, which
+PR this is ("PR n of N"), its acceptance line, its passes, the delivery
+(legacy `merge` or `tag-deploy`, or ordered delivery steps noting which are
+`pr`-scoped), the previous worker's handoff, and the link block. Pick up the
+handoff's state and decisions as settled.
 
 The **issue this thread implements** is the brief's `Sub-issue:`, else its
-`Issue:`. Call `link_issue` with its URL, so T3's sidebar shows it beside
-the PR. With no issue, link none.
+`Issue:`. Note the brief's `Tracker:` (when omitted, infer `github-issues`
+for a GitHub issue URL or `<owner>/<repo>#<n>`, a non-GitHub tracker for a
+Jira key/browse URL or GitLab issue URL, or `none`). Call `link_issue` with
+the issue's URL when it has one (or its `key` for a bare key when T3's
+tracker supports it; if `link_issue` refuses a non-GitHub ref, carry on).
+With no issue, link none. Skip `gh issue` commands for a non-GitHub ticket;
+read it with the tool the repo documents if you need detail beyond the brief.
 
 Call `t3_worktree_status`. The thread must be attached to a worktree on the
 brief's branch. When it reports the project root, the main workspace, or
@@ -91,8 +97,15 @@ version bump, and the done-checks. Repo rules outrank this template.
 Build exactly the PR's scope. Its acceptance line is the completion
 criterion: the PR is done when that line holds and the repo's done-checks
 pass. Work the brief assigns to a later PR stays out of this one. When the
-brief names an issue, every commit carries the trailer
-`--trailer "Github-Issue:#<number>"` for the issue this thread implements. Stage explicit paths only.
+brief names an issue:
+- With tracker `github-issues`: every commit carries the trailer
+  `--trailer "Github-Issue:#<number>"` for the issue this thread implements.
+- With a non-GitHub tracker (`jira`, `gitlab-issues`, or another tracker the
+  repo names): omit the `Github-Issue` trailer; include `Refs <ticket ref>`
+  (such as `Refs PROJ-123` for Jira, or `Refs <issue URL>` for GitLab) in the
+  commit message instead, unless the repo's rules set another format.
+
+Stage explicit paths only.
 
 When the brief lists `Passes:`, they are part of the scope: after the build,
 run each pass's skill as its `how` from `wf.slot("passes")` says (the Skill
@@ -113,10 +126,11 @@ git remote -v
 gh api user -q .login
 ```
 
-Each must match what the repo documents. When the repo names no bot, the
+Each must match what the repo documents (skip `gh api user` when the git
+host is not GitHub). When the repo names no bot, the
 idents must be the user's own (`git config user.name`, `user.email`), the
 remote must be the repo the brief names, and the `gh` login must be the
-user's account. When anything differs, stop: send the orchestrator the
+user's account on a GitHub repo. When anything differs, stop: send the orchestrator the
 outputs and what was expected, then end the turn. Nothing is committed or
 pushed under the wrong identity.
 
@@ -155,11 +169,24 @@ does not.
 ## 3. Open the PR and watch it
 
 1. Write the PR description through the Publishing section below, all three
-   steps, before you push. When the brief names an issue, the description
-   carries `Refs #<number>` for each issue the brief names (sub-issue and
-   issue), never `Closes` or `Fixes`: the orchestrator
-   closes the issue after delivery, not at merge.
-2. Push the branch and open the PR against `main` with that description:
+   steps, before you push. When the brief names an issue, never use `Closes`
+   or `Fixes`: the orchestrator closes the issue after delivery, not at
+   merge.
+   - With tracker `github-issues`: the description carries `Refs #<number>`
+     for each issue the brief names (sub-issue and issue).
+   - With a non-GitHub tracker (`jira`, `gitlab-issues`, or another tracker
+     the repo names): the description carries `Refs <ticket ref>` instead of
+     `Refs #<number>` (`Refs PROJ-123` for a bare Jira key,
+     `Refs PROJ-123 (<browse URL>)` or `Refs <host>/PROJ-123` for a hosted
+     Jira URL, or `Refs <issue URL>` / `Refs <host>/<scope>#<n>` for GitLab,
+     matching the worker link's `issue` identity so `wf.pr` accepts it).
+2. Items 2 to 5 below and the GitHub `gh` / `wf.pr` / `watch_pull_request`
+   steps in step 4 apply to a GitHub `origin`. On a non-GitHub git host (such
+   as self-hosted GitLab), follow the repo's documented MR/PR, check, and
+   review workflow in place of those GitHub steps, report MR updates and
+   readiness to the orchestrator with `wf.send` (carrying the MR URL, `head
+   <sha>`, and the `Publishing:` line on open), and end the turn. Otherwise
+   push the branch and open the PR against `main` with that description:
    `gh pr create --base main --head <branch> --title <title> --body-file
    <file>`. The title follows Conventional Commits.
 3. `link_pull_request` with the PR URL.
@@ -291,7 +318,7 @@ by a separate fix worker the orchestrator launches.)
 ### One thread, one issue
 
 The follow-up PR fixes this PR's own failed stage, so it stays in this
-thread under this thread's title. Work that has its own GitHub issue, such
+thread under this thread's title. Work that has its own tracked issue, such
 as a follow-up issue filed from a review, gets a fresh worker: send the
 orchestrator an `event` naming the issue, and the orchestrator launches
 one for it.
@@ -304,7 +331,7 @@ thread name it:
    `<label>: <PR title>`.
 2. Rerun the brief's `wf.join` call with the new `label`, `issue`,
    `parentIssue` and `part`. A field left out keeps its old value.
-3. `link_issue` with the new issue's URL.
+3. `link_issue` with the new issue's URL (when it has one).
 
 ## 6. Delivered: hand off
 

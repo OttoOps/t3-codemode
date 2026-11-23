@@ -40,6 +40,16 @@
     "form": "brief"
   },
   {
+    "query": "work PROJ-123 and ship it",
+    "should_trigger": true,
+    "form": "plain"
+  },
+  {
+    "query": "Work https://gitlab.acme.example/team/svc/-/issues/42.\n\n## t3-codemode link\nThis thread is a child on a t3-codemode link. Before anything else, call the t3cm `execute` tool with:\nasync () => wf.join({ parent: \"board\", label: \"svc#42\", role: \"ticket\", issue: \"gitlab.acme.example/team/svc#42\" })\n",
+    "should_trigger": true,
+    "form": "brief"
+  },
+  {
     "query": "what's the status of issue 42?",
     "should_trigger": false
   },
