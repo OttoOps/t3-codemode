@@ -518,6 +518,7 @@ impl T3Client for FakeT3 {
 
 #[derive(Default)]
 struct GhState {
+    delay: Duration,
     repos: BTreeMap<String, Value>,
     prs: BTreeMap<(String, u64), Value>,
     issues: BTreeMap<(String, u64), Value>,
@@ -612,6 +613,10 @@ impl FakeGitHub {
 
     pub fn set_default_method(&self, repo: &str, method: &str) {
         self.st().repos.insert(repo.into(), json!({"viewerDefaultMergeMethod": method}));
+    }
+
+    pub fn set_delay(&self, delay: Duration) {
+        self.st().delay = delay;
     }
 
     pub fn set_queue_length(&self, n: u64) {
@@ -807,6 +812,10 @@ fn flow_tickets(st: &GhState, variables: &Value) -> Value {
 impl crate::github::GitHub for FakeGitHub {
     fn graphql<'a>(&'a self, query: &'a str, variables: Value) -> BoxFut<'a, anyhow::Result<Value>> {
         Box::pin(async move {
+            let delay = self.st().delay;
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
             let mut st = self.st();
             let op = operation(query);
             st.calls.push(json!({"operation": op, "query": query, "variables": variables}));

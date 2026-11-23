@@ -76,7 +76,7 @@ const EXEC_PRELUDE: &str = r#"
     init: m("init"), openChild: m("openChild"), join: m("join"), send: m("send"), reply: m("reply"),
     gate: m("gate"), close: m("close"), inbox: m("inbox"), board: m("board"), adopt: m("adopt"), sweep: m("sweep"),
     show: (handle) => call("wf.show", { handle }),
-    launchTicket: m("launchTicket"), dispatch: m("dispatch"), cards: m("cards"), feed: m("feed"), merge: m("merge"),
+    launchTicket: m("launchTicket"), dispatch: m("dispatch"), cards: m("cards"), feed: m("feed"), merge: m("merge"), pr: m("pr"),
     pick: m("pick"), picked: m("picked"), pools: m("pools"), usageStats: m("usageStats"), issue: m("issue"), status: m("status"),
     flow: Object.freeze(Object.assign(m("flow"), { next: m("flow.next") })),
     slot: (name, x) => call("wf.slot", Object.assign({}, input(x) || {}, { name })),

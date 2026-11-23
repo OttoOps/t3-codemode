@@ -553,6 +553,7 @@ fn bare_link(child: &str, parent: &str, label: &str) -> Link {
         reported: Vec::new(),
         gate: None,
         gate_since: None,
+        gate_pr: None,
         closed: false,
         closed_at: None,
         closed_how: None,
@@ -563,6 +564,8 @@ fn bare_link(child: &str, parent: &str, label: &str) -> Link {
         project: None,
         paused_at: None,
         identity: Default::default(),
+        brief: None,
+        pr: None,
     }
 }
 
@@ -615,6 +618,7 @@ async fn init_leaves_another_launchs_pending_row_alone() {
                 link: thread.map(|t| format!("https://t3/{t}")),
                 project: None,
                 identity: t3_codemode::store::Identity { issue: Some("acme/widgets#41".into()), ..Default::default() },
+                brief: None,
             })
             .unwrap();
         h.fake.update(TICKET, json!({"title": "widgets#41"}));

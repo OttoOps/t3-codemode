@@ -36,6 +36,7 @@ pub enum Ready {
 struct Tally {
     failing: Vec<String>,
     pending: Vec<String>,
+    settled: Vec<String>,
     complete: bool,
 }
 
@@ -47,6 +48,7 @@ fn tally(pr: &Value) -> Option<Tally> {
     let nodes = contexts["nodes"].as_array().filter(|_| at_head)?;
     let mut failing = Vec::new();
     let mut pending = Vec::new();
+    let mut settled = Vec::new();
     for c in nodes {
         let text = |k: &str| c[k].as_str().unwrap_or("unknown");
         if c["__typename"] == "StatusContext" {
@@ -57,12 +59,17 @@ fn tally(pr: &Value) -> Option<Tally> {
             }
         } else if c["status"] != "COMPLETED" {
             pending.push(text("name").to_string());
-        } else if !SETTLED.contains(&text("conclusion")) {
-            failing.push(format!("{} ({})", text("name"), text("conclusion")));
+        } else {
+            let conclusion = text("conclusion");
+            if !SETTLED.contains(&conclusion) {
+                failing.push(format!("{} ({conclusion})", text("name")));
+            } else if conclusion != "SUCCESS" {
+                settled.push(format!("{} ({conclusion})", text("name")));
+            }
         }
     }
     let complete = !nodes.is_empty() && contexts["pageInfo"]["hasNextPage"] != true;
-    Some(Tally { failing, pending, complete })
+    Some(Tally { failing, pending, settled, complete })
 }
 
 pub fn ready(pr: &Value) -> Ready {
@@ -82,6 +89,27 @@ pub fn ready(pr: &Value) -> Ready {
         Ready::Not(format!("merge state UNSTABLE, checks still running: {}", t.pending.join(", ")))
     } else {
         Ready::Yes
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum CheckState {
+    Passed(Vec<String>),
+    Pending(String),
+    Failing(String),
+    Unread,
+}
+
+pub fn check_state(pr: &Value) -> CheckState {
+    let Some(t) = tally(pr) else { return CheckState::Unread };
+    if !t.failing.is_empty() {
+        CheckState::Failing(t.failing.join(", "))
+    } else if !t.complete {
+        CheckState::Unread
+    } else if !t.pending.is_empty() {
+        CheckState::Pending(t.pending.join(", "))
+    } else {
+        CheckState::Passed(t.settled)
     }
 }
 
