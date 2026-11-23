@@ -310,7 +310,10 @@ impl Wf {
         };
         let error = t["error"].as_str().map(String::from);
         let (state, reason) = match (&error, &limit) {
-            (Some(e), _) => (if caps_err.is_some() { "unknown" } else { "disabled" }, Some(e.clone())),
+            (Some(e), _) => {
+                let unknown = caps_err.is_some() || e.starts_with("T3 capabilities unreachable");
+                (if unknown { "unknown" } else { "disabled" }, Some(e.clone()))
+            }
             (None, Some(l)) => ("limited", Some(format!("limited until {}", local_clock(&l.until)))),
             (None, None) => ("ready", None),
         };
