@@ -1559,6 +1559,7 @@ const upd = { hidden: "", announced: "", reload: false };
 const drift = { key: "", announced: "" };
 try { upd.hidden = localStorage.getItem(UPD_KEY) || ""; } catch (_) {}
 const SEND_DELAY = 5000;
+const GONE_MS = 4000;
 const $ = (id) => document.getElementById(id);
 let state = null;
 let firstState = true;
@@ -2123,7 +2124,10 @@ function track(name, scrollEl, newBtn) {
   const flush = () => { if (state && isLive(p)) schedule(); };
   scrollEl.addEventListener("pointerenter", () => { p.pointer = true; });
   scrollEl.addEventListener("pointerleave", () => { p.pointer = false; flush(); });
-  scrollEl.addEventListener("focusout", () => setTimeout(flush, 0));
+  scrollEl.addEventListener("focusout", (e) => {
+    const stale = e.target.closest && e.target.closest(".stale-item");
+    setTimeout(() => { if (stale && state) schedule(); else flush(); }, 0);
+  });
   scrollEl.addEventListener("scroll", () => { if ((scrollEl.scrollTop || 0) <= 2) flush(); });
   if (newBtn) newBtn.addEventListener("click", () => applyHeld(p));
   return p;
@@ -2213,7 +2217,11 @@ function sync(list, items, o) {
     if (keep.has(el)) continue;
     if (focusInside(el)) holdStale(el);
     else if (o.live || !o.gone) el.remove();
-    else if (!el.classList.contains("gone")) o.gone(el);
+    else if (!el.classList.contains("gone")) {
+      o.gone(el);
+      el._rove = o.rove !== false;
+      if (el.classList.contains("gone")) bury(el);
+    }
   }
   if (o.live) {
     want.forEach((el, i) => {
@@ -2223,6 +2231,27 @@ function sync(list, items, o) {
   }
   if (o.rove !== false) rove(list);
   return held;
+}
+
+function bury(el) {
+  clearTimeout(el._reap);
+  el._reap = setTimeout(() => { if (reap(el)) schedule(); }, GONE_MS);
+}
+
+function reap(el) {
+  clearTimeout(el._reap);
+  if (!el.isConnected || !el.classList.contains("gone")) return false;
+  if (focusInside(el)) { bury(el); return false; }
+  const list = el.parentNode;
+  el.remove();
+  if (el._rove) rove(list);
+  return true;
+}
+
+function sweepGone() {
+  let n = 0;
+  for (const el of document.querySelectorAll(".gone[data-key]")) if (reap(el)) n++;
+  if (n) schedule();
 }
 
 function flashMs() {
@@ -2258,11 +2287,11 @@ function items(list) {
 }
 
 function rove(list) {
-  const all = items(list);
+  const all = items(list).filter((el) => !el.classList.contains("gone"));
   let act = list._active;
-  if (!act || act.parentNode !== list) act = all[0] || null;
+  if (!act || act.parentNode !== list || act.classList.contains("gone")) act = all[0] || null;
   list._active = act;
-  for (const it of all) {
+  for (const it of items(list)) {
     const on = it === act;
     setAttr(it, "tabindex", on ? "0" : "-1");
     for (const c of it.querySelectorAll("a, button, input, textarea")) {
@@ -2617,11 +2646,15 @@ function syncCards(cards, all) {
   const live = firstState || isLive(p);
   const sorted = sortCards(cards);
   const refocus = [];
+  let handoff = null;
   for (const [id, p] of pending) {
     const now = all.find((c) => c.id === id);
     if (now && inst(now) === p.inst) continue;
-    if (p.sent) pending.delete(id);
-    else if (now) {
+    if (p.sent) {
+      pending.delete(id);
+      const el = cardEl(id);
+      if (el && focusInside(el)) handoff = el;
+    } else if (now) {
       const el = cardEl(id);
       if (el && document.activeElement === part(el, "undo")) refocus.push(el);
       clearTimeout(p.timer);
@@ -2629,13 +2662,24 @@ function syncCards(cards, all) {
       announce(id + " was already resolved. Nothing was sent.");
     }
   }
-  const held = sync(list, sorted, { key: (c) => c.id, make: makeCard, patch: patchCard, gone: goneCard, live, quiet: firstState || refiltering });
+  const next = handoff && nextCard(list, handoff, new Set(sorted.map((c) => c.id)));
+  if (handoff) document.activeElement.blur();
+  const held = sync(list, sorted, { key: (c) => c.id, make: makeCard, patch: patchCard, gone: goneCard, live: live || (!!handoff && isLive(p)), quiet: firstState || refiltering });
   for (const el of refocus) if (el.isConnected) el.focus();
+  if (next && next.isConnected) focusItem(list, next);
+  else if (handoff) { setAttr(list, "tabindex", "-1"); list.focus(); }
   const urgent = held.filter((c) => FAIL_KINDS.has(c.kind)).length;
   showHeld(p, held, urgent ? urgent + (urgent > 1 ? " blockers" : " blocker") : "");
   emptyState("cards-empty", !cards.length && !items(list).length, all.length ? "Nothing here matches the filter." : null);
   setAttr(list, "aria-busy", null);
   for (const k of goneNote.keys()) if (!all.some((c) => c.id === k) && !cardEl(k)) goneNote.delete(k);
+}
+
+function nextCard(list, from, wanted) {
+  const ok = (el) => el !== from && !el.classList.contains("gone") && wanted.has(el.dataset.key);
+  const all = items(list);
+  const i = all.indexOf(from);
+  return all.slice(i + 1).find(ok) || all.slice(0, i).reverse().find(ok) || null;
 }
 
 function needsOf(cards) {
@@ -5446,7 +5490,8 @@ function setConnected(on) {
     for (const card of $("cards").children) if (card._card) paintSending(card);
     paintService(state);
   }
-  if (!on) announce("Disconnected from the board. Reconnecting.", true);
+  if (on) sweepGone();
+  else announce("Disconnected from the board. Reconnecting.", true);
 }
 
 let notifyUnsupported = false;
@@ -7010,6 +7055,7 @@ function wire() {
   initDrawer();
   initGraph();
   document.addEventListener("click", inspectClick);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) sweepGone(); });
   track("cards", $("cards"), $("new-cards"));
   track("open", $("open"), null);
   $("new-tix").addEventListener("click", () => { const p = $("new-tix")._panel; if (p) applyHeld(p); });
