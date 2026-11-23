@@ -369,6 +369,17 @@ async fn dispatch_to_an_unknown_project_launches_nothing() {
 }
 
 #[tokio::test]
+async fn dispatch_prefers_an_exact_project_id_over_a_title() {
+    let h = H::new();
+    let mut decoy = project("p-decoy", "/src/decoy");
+    decoy["title"] = json!("p-widgets");
+    h.fake.set_projects(vec![decoy, project("p-widgets", "/src/widgets")]);
+    let out = h.exec("async () => wf.dispatch({ project: 'p-widgets', request: 'Cut a release.' })").await;
+    assert_eq!(result(&out)["projectId"], "p-widgets");
+    assert_eq!(h.fake.launched()[0]["projectId"], "p-widgets");
+}
+
+#[tokio::test]
 async fn a_failed_dispatch_launch_frees_its_label_and_leaves_an_error_card() {
     let h = H::new();
     dispatch_projects(&h);
