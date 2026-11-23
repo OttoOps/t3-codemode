@@ -148,6 +148,13 @@ struct UsageStatsArgs {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+struct FlowArgs {
+    #[serde(default)]
+    graph: bool,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct FeedArgs {
     limit: Option<usize>,
     context: Option<String>,
@@ -528,8 +535,8 @@ impl Wf {
                 return self.usage_stats(a.window.as_deref()).await;
             }
             "flow" => {
-                parse::<Empty>(method, args)?;
-                return self.flow().await;
+                let a: FlowArgs = parse(method, args)?;
+                return self.flow(a.graph).await;
             }
             "flow.next" => {
                 parse::<Empty>(method, args)?;

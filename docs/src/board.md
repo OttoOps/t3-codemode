@@ -576,7 +576,10 @@ async () => (await wf.cards({ context: "Widget work" })).map(c => `${c.id} ${c.r
 `wf.launchTicket` finds the T3 project whose workspace `origin` remote is the
 issue's GitHub repo, unless `project` names one, resolves `models.ticket` for
 that project through the service's slot resolver, and launches a thread that
-works the issue and reports to the board. Precedence for the launch model is:
+works the issue and reports to the board. The ticket is labeled `repo#n`, or
+`owner/repo#n` when a ticket for another owner's issue of the same name and
+number already holds `repo#n`. Launching an issue that already has a ticket,
+or a launch that has not joined yet, fails. Precedence for the launch model is:
 
 1. `model` or `effort` passed to `wf.launchTicket`, reported as `modelSource: "argument"`.
 2. The repository's `.t3-workflow.json` or `AGENTS.md`, reported as `".t3-workflow.json"` or `"AGENTS.md"`.

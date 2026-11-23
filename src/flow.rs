@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::board::{BOARD, Card, LaunchArgs, card_text};
+use crate::board::{BOARD, Card, LaunchArgs, card_text, chip};
 use crate::config::{FlowConfig, Launch};
 use crate::github::errors;
 use crate::wf::Wf;
@@ -20,21 +20,36 @@ const HELD: &str = "flow_done:";
 
 pub const FLOW_TICKETS: &str = "query FlowTickets(";
 
-pub const FLOW_ISSUES: &str = "query FlowIssues($owner: String!, $name: String!, $label: String!, $after: String) {
+macro_rules! issue_fields {
+    () => {
+        "number title url createdAt state
+        labels(first: 100) { nodes { name } }
+        milestone { title dueOn }
+        parent { number title url state repository { nameWithOwner } }
+        blockedBy(first: 100) { totalCount nodes { number title url state repository { nameWithOwner } } }
+        subIssues(first: 100) { totalCount nodes { number title url state repository { nameWithOwner } } }"
+    };
+}
+
+pub const FLOW_ISSUES: &str = concat!(
+    "query FlowIssues($owner: String!, $name: String!, $label: String!, $after: String) {
   repository(owner: $owner, name: $name) {
     nameWithOwner
     issues(states: OPEN, labels: [$label], first: 100, after: $after, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        number title url createdAt
-        labels(first: 100) { nodes { name } }
-        milestone { title dueOn }
-        parent { number title url repository { nameWithOwner } }
-        blockedBy(first: 100) { totalCount nodes { number title url state repository { nameWithOwner } } }
+        ",
+    issue_fields!(),
+    "
       }
     }
   }
-}";
+}"
+);
+
+const TRACK: &str = "track:";
+pub const BLOCKED_BY: &str = "blockedBy";
+pub const PARENT: &str = "parent";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,6 +128,57 @@ pub struct FlowView {
     pub queue: Vec<FlowIssue>,
     pub blocked: Vec<BlockedIssue>,
     pub skipped: Vec<FlowIssue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph: Option<Graph>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Graph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct GraphEdge {
+    pub from: String,
+    pub to: String,
+    pub kind: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphTicket {
+    pub thread: Option<String>,
+    pub link: Option<String>,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphNode {
+    pub id: String,
+    pub repo: String,
+    pub number: u64,
+    pub label: String,
+    pub url: String,
+    pub title: Option<String>,
+    pub state: Option<&'static str>,
+    pub tracked: bool,
+    pub labels: Vec<String>,
+    pub priority: Option<&'static str>,
+    pub milestone: Option<Milestone>,
+    pub track: String,
+    pub track_by: &'static str,
+    pub parent: Option<String>,
+    pub sub_issues: Vec<String>,
+    pub more_sub_issues: bool,
+    pub blocked_by: Vec<String>,
+    pub more_blockers: bool,
+    pub unlocks: Vec<String>,
+    pub flow_list: Option<&'static str>,
+    pub ready: bool,
+    pub external: bool,
+    pub ticket: Option<GraphTicket>,
 }
 
 struct Reads {
@@ -120,17 +186,33 @@ struct Reads {
     covered: BTreeMap<String, String>,
 }
 
+#[derive(Clone)]
 struct Ticket {
     label: String,
     thread: Option<String>,
     link: Option<String>,
+    repo: Option<String>,
+    issue: Option<String>,
+    status: String,
 }
 
+#[derive(Clone)]
+struct Target {
+    to: IssueRef,
+    state: Option<&'static str>,
+}
+
+#[derive(Clone)]
 struct Read {
     issue: FlowIssue,
+    state: Option<&'static str>,
     labels: Vec<String>,
     open_blockers: Vec<IssueRef>,
     more_blockers: bool,
+    blockers: Vec<Target>,
+    parent: Option<Target>,
+    subs: Vec<Target>,
+    more_subs: bool,
 }
 
 fn label_of(repo: &str, number: u64) -> String {
@@ -184,6 +266,26 @@ pub fn queue_order(a: &FlowIssue, b: &FlowIssue) -> Ordering {
         .then(a.number.cmp(&b.number))
 }
 
+fn state_of(v: &Value) -> Option<&'static str> {
+    match v["state"].as_str() {
+        Some("OPEN") => Some("open"),
+        Some("CLOSED") => Some("closed"),
+        _ => None,
+    }
+}
+
+fn target(v: &Value) -> Option<Target> {
+    Some(Target { to: issue_ref(v)?, state: state_of(v) })
+}
+
+fn targets(v: &Value) -> Vec<Target> {
+    v["nodes"].as_array().into_iter().flatten().filter_map(target).collect()
+}
+
+fn more(v: &Value, listed: usize) -> bool {
+    v["totalCount"].as_u64().is_some_and(|t| t > listed as u64)
+}
+
 fn parse_node(repo: &str, n: &Value) -> Result<Read> {
     let number = n["number"].as_u64().ok_or_else(|| anyhow!("GitHub returned an issue in {repo} with no number"))?;
     let labels: Vec<String> = n["labels"]["nodes"]
@@ -193,6 +295,9 @@ fn parse_node(repo: &str, n: &Value) -> Result<Read> {
         .filter_map(|l| l["name"].as_str())
         .map(String::from)
         .collect();
+    let all_blockers = targets(&n["blockedBy"]);
+    let subs = targets(&n["subIssues"]);
+    let more_subs = more(&n["subIssues"], n["subIssues"]["nodes"].as_array().map_or(0, Vec::len));
     let blockers: Vec<&Value> = n["blockedBy"]["nodes"].as_array().into_iter().flatten().collect();
     let more_blockers = n["blockedBy"]["totalCount"].as_u64().is_some_and(|t| t > blockers.len() as u64);
     let mut names: Vec<String> = labels.iter().map(|l| l.trim().to_ascii_lowercase()).collect();
@@ -223,7 +328,17 @@ fn parse_node(repo: &str, n: &Value) -> Result<Read> {
         unblocked_by: closed.into_iter().filter_map(issue_ref).collect(),
         key,
     };
-    Ok(Read { more_blockers, open_blockers: open.into_iter().filter_map(issue_ref).collect(), labels, issue })
+    Ok(Read {
+        more_blockers,
+        open_blockers: open.into_iter().filter_map(issue_ref).collect(),
+        state: state_of(n),
+        blockers: all_blockers,
+        parent: target(&n["parent"]),
+        subs,
+        more_subs,
+        labels,
+        issue,
+    })
 }
 
 fn skip_key(repo: &str, number: u64) -> String {
@@ -234,6 +349,236 @@ fn ticket_issue(covered: &BTreeMap<String, String>, label: &str) -> Option<(Stri
     let (name, n) = label.rsplit_once('#')?;
     let number: u64 = n.parse().ok()?;
     Some((covered.get(&name.to_ascii_lowercase())?.clone(), number))
+}
+
+fn ticket_repo(covered: &BTreeMap<String, String>, t: &Ticket) -> Option<(String, u64)> {
+    if let Some((repo, n)) = t.issue.as_deref().and_then(|i| i.rsplit_once('#')) {
+        return Some((repo.to_string(), n.parse().ok()?));
+    }
+    let (name, n) = t.label.rsplit_once('#')?;
+    let known = t.repo.as_deref().filter(|r| r.rsplit_once('/').is_some_and(|(_, s)| s.eq_ignore_ascii_case(name)));
+    match known {
+        Some(repo) => Some((repo.to_string(), n.parse().ok()?)),
+        None => ticket_issue(covered, &t.label),
+    }
+}
+
+fn covers(covered: &BTreeMap<String, String>, repo: &str) -> bool {
+    covered.values().any(|c| c.eq_ignore_ascii_case(repo))
+}
+
+fn node_key(repo: &str, number: u64) -> String {
+    format!("{}#{number}", repo.to_ascii_lowercase())
+}
+
+fn track_label(labels: &[String]) -> Option<String> {
+    labels
+        .iter()
+        .filter_map(|l| {
+            let (head, rest) = l.split_at_checked(TRACK.len())?;
+            let rest = rest.trim();
+            (head.eq_ignore_ascii_case(TRACK) && !rest.is_empty()).then(|| rest.to_string())
+        })
+        .min_by_key(|t| t.to_ascii_lowercase())
+}
+
+#[derive(Default)]
+struct GraphBuild {
+    nodes: BTreeMap<String, GraphNode>,
+    edges: std::collections::BTreeSet<(String, &'static str, String)>,
+    more_blockers: HashSet<String>,
+    more_subs: HashSet<String>,
+}
+
+impl GraphBuild {
+    fn node(&mut self, r: &IssueRef, state: Option<&'static str>) -> String {
+        let key = node_key(&r.repo, r.number);
+        let n = self.nodes.entry(key.clone()).or_insert_with(|| GraphNode {
+            id: format!("{}#{}", r.repo, r.number),
+            repo: r.repo.clone(),
+            number: r.number,
+            label: r.label.clone(),
+            url: r.url.clone(),
+            title: None,
+            state: None,
+            tracked: false,
+            labels: Vec::new(),
+            priority: None,
+            milestone: None,
+            track: String::new(),
+            track_by: "",
+            parent: None,
+            sub_issues: Vec::new(),
+            more_sub_issues: false,
+            blocked_by: Vec::new(),
+            more_blockers: false,
+            unlocks: Vec::new(),
+            flow_list: None,
+            ready: false,
+            external: false,
+            ticket: None,
+        });
+        n.title = n.title.take().or_else(|| r.title.clone());
+        n.state = n.state.or(state);
+        key
+    }
+
+    fn read(&mut self, r: Read, list: Option<&'static str>, tracked: &HashSet<String>) {
+        let i = &r.issue;
+        let me = IssueRef {
+            repo: i.repo.clone(),
+            number: i.number,
+            label: i.label.clone(),
+            url: i.url.clone(),
+            title: None,
+        };
+        let key = self.node(&me, r.state);
+        for b in &r.blockers {
+            let to = self.node(&b.to, b.state);
+            self.edges.insert((key.clone(), BLOCKED_BY, to));
+        }
+        if let Some(p) = &r.parent {
+            let to = self.node(&p.to, p.state);
+            self.edges.insert((key.clone(), PARENT, to));
+        }
+        for s in &r.subs {
+            let from = self.node(&s.to, s.state);
+            self.edges.insert((from, PARENT, key.clone()));
+        }
+        if r.more_blockers {
+            self.more_blockers.insert(key.clone());
+        }
+        if r.more_subs {
+            self.more_subs.insert(key.clone());
+        }
+        let outside = |b: &IssueRef| !tracked.contains(&b.repo.to_ascii_lowercase());
+        let external = r.labels.iter().any(|l| l.eq_ignore_ascii_case(EXTERNAL))
+            || (!r.open_blockers.is_empty() && !r.more_blockers && r.open_blockers.iter().all(outside));
+        let n = self.nodes.get_mut(&key).expect("node just added");
+        n.title = Some(i.title.clone());
+        n.state = r.state.or(n.state);
+        n.tracked = true;
+        n.priority = i.priority;
+        n.milestone = i.milestone.clone();
+        n.flow_list = list.or(n.flow_list);
+        n.ready = n.flow_list == Some("queue");
+        n.external = external;
+        n.labels = r.labels;
+    }
+
+    fn ticket(&mut self, repo: &str, number: u64, t: &Ticket) {
+        let r = IssueRef {
+            label: label_of(repo, number),
+            url: format!("https://github.com/{repo}/issues/{number}"),
+            repo: repo.to_string(),
+            number,
+            title: None,
+        };
+        let key = self.node(&r, None);
+        let n = self.nodes.get_mut(&key).expect("node just added");
+        n.tracked = true;
+        n.ticket = Some(GraphTicket { thread: t.thread.clone(), link: t.link.clone(), status: t.status.clone() });
+    }
+
+    fn finish(mut self) -> Graph {
+        let id = |nodes: &BTreeMap<String, GraphNode>, k: &str| nodes[k].id.clone();
+        let mut up: BTreeMap<String, String> = self.nodes.keys().map(|k| (k.clone(), k.clone())).collect();
+        fn root(up: &mut BTreeMap<String, String>, k: &str) -> String {
+            let mut k = k.to_string();
+            while up[&k] != k {
+                let next = up[&up[&k]].clone();
+                up.insert(k.clone(), next.clone());
+                k = next;
+            }
+            k
+        }
+        let order = |nodes: &BTreeMap<String, GraphNode>, k: &str| {
+            let n = &nodes[k];
+            (n.repo.to_ascii_lowercase(), n.number)
+        };
+        for (from, _, to) in &self.edges {
+            let (a, b) = (root(&mut up, from), root(&mut up, to));
+            if a != b {
+                let (lo, hi) = if order(&self.nodes, &a) <= order(&self.nodes, &b) { (a, b) } else { (b, a) };
+                up.insert(hi, lo);
+            }
+        }
+        let mut sorted: Vec<&(String, &'static str, String)> = self.edges.iter().collect();
+        sorted.sort_by(|a, b| {
+            order(&self.nodes, &a.0)
+                .cmp(&order(&self.nodes, &b.0))
+                .then(a.1.cmp(b.1))
+                .then_with(|| order(&self.nodes, &a.2).cmp(&order(&self.nodes, &b.2)))
+        });
+        let sorted: Vec<(String, &'static str, String)> = sorted.into_iter().cloned().collect();
+        let mut edges = Vec::new();
+        for (from, kind, to) in &sorted {
+            let (f, t) = (id(&self.nodes, from), id(&self.nodes, to));
+            match *kind {
+                BLOCKED_BY => {
+                    self.nodes.get_mut(from).expect("edge end").blocked_by.push(t.clone());
+                    self.nodes.get_mut(to).expect("edge end").unlocks.push(f.clone());
+                }
+                _ => {
+                    let child = self.nodes.get_mut(from).expect("edge end");
+                    child.parent = child.parent.take().or_else(|| Some(t.clone()));
+                    self.nodes.get_mut(to).expect("edge end").sub_issues.push(f.clone());
+                }
+            }
+            edges.push(GraphEdge { from: f, to: t, kind });
+        }
+        let mut keys: Vec<String> = self.nodes.keys().cloned().collect();
+        keys.sort_by_key(|k| order(&self.nodes, k));
+        let mut lanes: BTreeMap<String, String> = BTreeMap::new();
+        for k in &keys {
+            let comp = root(&mut up, k);
+            let n = self.nodes.get_mut(k).expect("listed key");
+            n.more_blockers = self.more_blockers.contains(k);
+            n.more_sub_issues = self.more_subs.contains(k);
+            let own = match (track_label(&n.labels), &n.milestone) {
+                (Some(t), _) => Some((t, "label")),
+                (None, Some(m)) => Some((m.title.clone(), "milestone")),
+                (None, None) => None,
+            };
+            if let Some((t, by)) = own {
+                lanes.entry(comp).or_insert_with(|| t.clone());
+                (n.track, n.track_by) = (t, by);
+            }
+        }
+        for k in &keys {
+            let comp = root(&mut up, k);
+            let lane = lanes.get(&comp).cloned().unwrap_or_else(|| self.nodes[&comp].label.clone());
+            let n = self.nodes.get_mut(k).expect("listed key");
+            if n.track_by.is_empty() {
+                (n.track, n.track_by) = (lane, "component");
+            }
+        }
+        let mut nodes: Vec<GraphNode> = self.nodes.into_values().collect();
+        nodes.sort_by(|a, b| {
+            a.repo.to_ascii_lowercase().cmp(&b.repo.to_ascii_lowercase()).then(a.number.cmp(&b.number))
+        });
+        Graph { nodes, edges }
+    }
+}
+
+fn graph(
+    covered: &BTreeMap<String, String>,
+    reads: Vec<Read>,
+    tickets: &[Ticket],
+    lists: &BTreeMap<String, &'static str>,
+) -> Graph {
+    let tracked: HashSet<String> = covered.values().map(|r| r.to_ascii_lowercase()).collect();
+    let mut g = GraphBuild::default();
+    for r in reads {
+        let list = lists.get(&node_key(&r.issue.repo, r.issue.number)).copied();
+        g.read(r, list, &tracked);
+    }
+    for t in tickets {
+        if let Some((repo, number)) = ticket_repo(covered, t) {
+            g.ticket(&repo, number, t);
+        }
+    }
+    g.finish()
 }
 
 pub fn why(i: &FlowIssue) -> String {
@@ -249,14 +594,21 @@ pub fn why(i: &FlowIssue) -> String {
     s
 }
 
-fn tickets_query(asks: &[(String, u64)]) -> (String, Value) {
+fn tickets_query(asks: &[(String, u64)], full: bool) -> (String, Value) {
     let mut params = Vec::new();
     let mut fields = Vec::new();
     let mut vars = serde_json::Map::new();
     for (i, (repo, number)) in asks.iter().enumerate() {
         let (owner, name) = repo.split_once('/').unwrap_or_default();
         params.push(format!("$o{i}: String!, $r{i}: String!, $n{i}: Int!"));
-        fields.push(format!("t{i}: repository(owner: $o{i}, name: $r{i}) {{ issue(number: $n{i}) {{ state }} }}"));
+        fields.push(if full {
+            format!(
+                "t{i}: repository(owner: $o{i}, name: $r{i}) {{ nameWithOwner issue(number: $n{i}) {{ {} }} }}",
+                issue_fields!()
+            )
+        } else {
+            format!("t{i}: repository(owner: $o{i}, name: $r{i}) {{ issue(number: $n{i}) {{ state }} }}")
+        });
         vars.insert(format!("o{i}"), json!(owner));
         vars.insert(format!("r{i}"), json!(name));
         vars.insert(format!("n{i}"), json!(number));
@@ -280,7 +632,10 @@ impl Wf {
             .into_iter()
             .map(|l| {
                 let link = l.link.clone().or_else(|| self.live_of(&l.child)?["link"].as_str().map(String::from));
-                Ticket { label: l.label, thread: Some(l.child), link }
+                let v = self.node_view(&l);
+                let repo = v["repo"].as_str().map(String::from);
+                let status = v["status"].as_str().unwrap_or("unknown").to_string();
+                Ticket { label: l.label, thread: Some(l.child), link, repo, issue: l.identity.issue, status }
             })
             .collect();
         let seen: HashSet<String> = out.iter().map(|t| t.label.to_ascii_lowercase()).collect();
@@ -289,7 +644,19 @@ impl Wf {
                 .pending_all()?
                 .into_iter()
                 .filter(|p| p.parent == BOARD && !seen.contains(&p.label.to_ascii_lowercase()))
-                .map(|p| Ticket { label: p.label, thread: p.thread, link: p.link }),
+                .map(|p| {
+                    let live = p.thread.as_deref().and_then(|t| self.live_of(t));
+                    let status = if p.thread.is_none() { "launching" } else { chip(live.as_ref()) };
+                    let repo = self.place(None, &live.unwrap_or(Value::Null)).0.as_str().map(String::from);
+                    Ticket {
+                        label: p.label,
+                        thread: p.thread,
+                        link: p.link,
+                        repo,
+                        issue: p.identity.issue,
+                        status: status.to_string(),
+                    }
+                }),
         );
         Ok(out)
     }
@@ -336,17 +703,20 @@ impl Wf {
         Ok(Reads { reads, covered })
     }
 
-    async fn closed_tickets(&self, r: &Reads, tickets: &[Ticket]) -> Result<HashSet<String>> {
-        let open: HashSet<String> = r.reads.iter().map(|x| x.issue.label.to_ascii_lowercase()).collect();
+    async fn ticket_reads(&self, r: &Reads, tickets: &[Ticket], full: bool) -> Result<(HashSet<String>, Vec<Read>)> {
+        let open: HashSet<String> = r.reads.iter().map(|x| node_key(&x.issue.repo, x.issue.number)).collect();
         let asks: Vec<(String, (String, u64))> = tickets
             .iter()
-            .filter(|t| !open.contains(&t.label.to_ascii_lowercase()))
-            .filter_map(|t| Some((t.label.to_ascii_lowercase(), ticket_issue(&r.covered, &t.label)?)))
+            .filter_map(|t| ticket_repo(&r.covered, t))
+            .filter(|(repo, _)| full || covers(&r.covered, repo))
+            .map(|(repo, number)| (node_key(&repo, number), (repo, number)))
+            .filter(|(key, _)| !open.contains(key))
             .collect();
         let mut closed = HashSet::new();
+        let mut reads = Vec::new();
         for chunk in asks.chunks(50) {
             let issues: Vec<(String, u64)> = chunk.iter().map(|(_, i)| i.clone()).collect();
-            let (query, vars) = tickets_query(&issues);
+            let (query, vars) = tickets_query(&issues, full);
             let resp = self.github.graphql(&query, vars).await?;
             if !resp["data"].is_object() {
                 bail!(
@@ -354,17 +724,23 @@ impl Wf {
                     errors(&resp).unwrap_or_else(|| "no data".into())
                 );
             }
-            for (i, (label, _)) in chunk.iter().enumerate() {
-                if resp["data"][format!("t{i}")]["issue"]["state"] == "CLOSED" {
-                    closed.insert(label.clone());
+            for (i, (key, (repo, _))) in chunk.iter().enumerate() {
+                let t = &resp["data"][format!("t{i}")];
+                let issue = &t["issue"];
+                if issue["state"] == "CLOSED" {
+                    closed.insert(key.clone());
+                }
+                if full && issue.is_object() {
+                    reads.push(parse_node(t["nameWithOwner"].as_str().unwrap_or(repo), issue)?);
                 }
             }
         }
-        Ok(closed)
+        Ok((closed, reads))
     }
 
-    pub async fn flow(&self) -> Result<Value> {
+    pub async fn flow(&self, with_graph: bool) -> Result<Value> {
         let Some(cfg) = self.config().flow.clone() else {
+            let tickets = if with_graph { self.open_tickets()? } else { Vec::new() };
             let off = FlowView {
                 enabled: false,
                 launch: None,
@@ -374,13 +750,27 @@ impl Wf {
                 queue: Vec::new(),
                 blocked: Vec::new(),
                 skipped: Vec::new(),
+                graph: with_graph.then(|| graph(&BTreeMap::new(), Vec::new(), &tickets, &BTreeMap::new())),
             };
             return Ok(serde_json::to_value(off)?);
         };
         let reads = self.flow_reads(&cfg).await?;
         let tickets = self.open_tickets()?;
-        let closed = self.closed_tickets(&reads, &tickets).await?;
-        Ok(serde_json::to_value(self.flow_build(&cfg, reads, tickets, &closed, false)?)?)
+        let (closed, extra) = self.ticket_reads(&reads, &tickets, with_graph).await?;
+        let covered = reads.covered.clone();
+        let mut all = reads.reads.clone();
+        all.extend(extra);
+        let mut view = self.flow_build(&cfg, reads, tickets.clone(), &closed, false)?;
+        if !with_graph {
+            return Ok(serde_json::to_value(view)?);
+        }
+        let mut lists: BTreeMap<String, &'static str> = BTreeMap::new();
+        for (name, list) in [("queue", &view.queue), ("skipped", &view.skipped)] {
+            lists.extend(list.iter().map(|i| (node_key(&i.repo, i.number), name)));
+        }
+        lists.extend(view.blocked.iter().map(|b| (node_key(&b.issue.repo, b.issue.number), "blocked")));
+        view.graph = Some(graph(&covered, all, &tickets, &lists));
+        Ok(serde_json::to_value(view)?)
     }
 
     fn flow_build(
@@ -391,12 +781,15 @@ impl Wf {
         closed: &HashSet<String>,
         write: bool,
     ) -> Result<FlowView> {
-        let open: HashSet<String> = tickets.iter().map(|t| t.label.to_ascii_lowercase()).collect();
+        let open: HashSet<String> =
+            tickets.iter().filter_map(|t| ticket_repo(&r.covered, t)).map(|(repo, n)| node_key(&repo, n)).collect();
         let running: Vec<FlowTicket> = tickets
             .into_iter()
-            .filter(|t| !closed.contains(&t.label.to_ascii_lowercase()))
             .filter_map(|t| {
-                let (repo, number) = ticket_issue(&r.covered, &t.label)?;
+                let (repo, number) = ticket_repo(&r.covered, &t)?;
+                if !covers(&r.covered, &repo) || closed.contains(&node_key(&repo, number)) {
+                    return None;
+                }
                 Some(FlowTicket {
                     url: format!("https://github.com/{repo}/issues/{number}"),
                     label: t.label,
@@ -415,10 +808,10 @@ impl Wf {
         let (mut queue, mut blocked, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
         for r in r.reads {
             let has = |want: &str| r.labels.iter().any(|l| l.eq_ignore_ascii_case(want));
-            if !has(&opt_in) || open.contains(&r.issue.label.to_ascii_lowercase()) {
+            if !has(&opt_in) || open.contains(&node_key(&r.issue.repo, r.issue.number)) {
                 continue;
             }
-            if r.issue.parent.as_ref().is_some_and(|p| open.contains(&p.label.to_ascii_lowercase())) {
+            if r.issue.parent.as_ref().is_some_and(|p| open.contains(&node_key(&p.repo, p.number))) {
                 continue;
             }
             let key = skip_key(&r.issue.repo, r.issue.number);
@@ -475,6 +868,7 @@ impl Wf {
             queue,
             blocked,
             skipped,
+            graph: None,
         })
     }
 
@@ -547,8 +941,9 @@ impl Wf {
                              "reason": "flow.launch is off, so nothing launches"}));
         }
         let reads = self.flow_reads(&cfg).await?;
-        let closed = self.closed_tickets(&reads, &self.open_tickets()?).await?;
+        let (closed, _) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
         let g = self.lock.lock().await;
+        let covered = reads.covered.clone();
         let view = self.flow_build(&cfg, reads, self.open_tickets()?, &closed, true)?;
         let ready = |p: &FlowPick| view.queue.iter().any(|i| same(p, i));
         let mut offered: Vec<(FlowPick, String)> = Vec::new();
@@ -596,8 +991,9 @@ impl Wf {
         for i in &picks {
             let mut v = picked(i);
             if let Some(p) = &i.parent {
+                let parent = node_key(&p.repo, p.number);
                 let open = self.open_tickets()?;
-                if open.iter().any(|t| t.label.eq_ignore_ascii_case(&p.label)) {
+                if open.iter().filter_map(|t| ticket_repo(&covered, t)).any(|(r, n)| node_key(&r, n) == parent) {
                     v["reason"] = json!(format!("its parent {} has a ticket now", p.label));
                     done.push(v);
                     continue;
@@ -652,7 +1048,7 @@ impl Wf {
         let fresh = match &cfg {
             Some(c) => {
                 let reads = self.flow_reads(c).await?;
-                let closed = self.closed_tickets(&reads, &self.open_tickets()?).await?;
+                let (closed, _) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
                 Some((reads, closed))
             }
             None => None,
