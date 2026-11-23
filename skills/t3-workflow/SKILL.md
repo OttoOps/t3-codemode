@@ -94,7 +94,9 @@ Which kinds wake the parent is set per link by t3cm's `roles` config
 
 A protocol message opens with `[t3cm <kind> from=<label> msg=<handle>]`.
 Act on its body as your role says; nothing needs acknowledging. Lines under
-"Notes since your last wake" are the digest.
+"Notes since your last wake" are the digest. A "handled for you" line
+there is a message t3cm routed past this thread, such as a worker's blocker
+it took to the board, or the board's answer it sent back to the worker.
 
 - **nudge** (from the watcher): this thread sat idle with its parent link
   open and no gate. Run your role's resume step, then say what changed

@@ -50,6 +50,14 @@ gate, so the watcher reads your silence as a wait, not a stall. Clear it
 with `await wf.gate({ clear: true })` when the answer, "Merged", or
 "Delivered" arrives.
 
+When the orchestrator's ticket is on the board, t3cm puts a `blocker`, or
+any gate other than `merge` and `delivery:<id>`, in front of the user as
+you wrote it. Open each one with an
+action line (`**ACTION NEEDED:** <plain verb phrase>, here: <URL or
+command>`), and pass `options` with the answers that need no judgment, such
+as `["fix it", "ship as is"]` or `["retry"]`. A click on one of them comes
+straight back to you.
+
 ## 1. Orient
 
 Read the brief: the issue (or "no issue"), its sub-issue, which PR this is
@@ -127,9 +135,13 @@ check above.
 - **Stuck** (a finding disputed after two replies, or the review's budget
   ends with a blocker open), **or the reviewer cannot run** (its model or
   route is down): send the orchestrator the open findings, both sides in
-  2-3 lines each, or the blocker, as the `review` gate. End the turn. The
-  user decides, and the orchestrator relays the answer. Push nothing until
-  it comes.
+  2-3 lines each, or the blocker, as the `review` gate. Its action line is
+  "decide each open review finding: fix it, or ship as is", with
+  `options: ["fix it", "ship as is"]`, or for a reviewer that cannot run,
+  "open the PR without the independent review, or fix the reviewer's
+  route", with `options: ["open without review", "fix the reviewer"]`.
+  End the turn. The user decides, and the answer arrives as a
+  `[t3cm reply]`. Push nothing until it comes.
 - **No reviewer** (`skill: null`, or the reviewer skipped): go to step 3.
   The PR description says no independent review ran, and why: none is
   configured, or the configured reviewer no longer resolves.
@@ -221,6 +233,10 @@ Each arrives as a `reply` on the link; act on its body:
 - **"Deploy failed: ..."** or **"Delivery stage <id> failed: ..."**: step 5.
 - **A user decision** (a review dispute, a gate cleared): act on it from
   the step that was waiting.
+
+A `[t3cm reply from=board]` is the user's answer to your blocker or gate,
+which t3cm took to the board past the orchestrator. Act on
+it as a user decision.
 
 ## 5. PR delivery stage failed: follow-up PR
 
