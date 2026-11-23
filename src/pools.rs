@@ -573,7 +573,7 @@ impl Wf {
         *self.usage.lock().unwrap_or_else(|e| e.into_inner()) = source;
     }
 
-    async fn usage_of(&self, instances: &[String]) -> BTreeMap<String, Usage> {
+    pub(crate) async fn usage_of(&self, instances: &[String]) -> BTreeMap<String, Usage> {
         let source = self.usage.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let Some(source) = source else { return BTreeMap::new() };
         match source.usage(instances).await {
@@ -638,7 +638,7 @@ impl Wf {
         Ok(out)
     }
 
-    async fn running_by_instance(&self) -> Result<BTreeMap<String, u64>> {
+    pub(crate) async fn running_by_instance(&self) -> Result<BTreeMap<String, u64>> {
         let mut out = BTreeMap::new();
         for t in self.threads_with(ACTIVE).await? {
             if let Some(id) = t["providerInstanceId"].as_str() {
@@ -772,7 +772,7 @@ impl Wf {
         Ok(json!({"pick": seq, "pool": p.pool, "instanceId": p.instance_id, "thread": thread}))
     }
 
-    fn members(config: &Config) -> BTreeSet<String> {
+    pub(crate) fn members(config: &Config) -> BTreeSet<String> {
         config.pools.values().flat_map(|p| p.members.iter().map(|m| m.instance_id.clone())).collect()
     }
 
@@ -900,69 +900,80 @@ impl Wf {
         let reported = self.usage_of(&Self::members(&config).into_iter().collect::<Vec<_>>()).await;
         let mut out = Vec::new();
         for (name, pool) in &config.pools {
-            let caps = match &running {
-                Ok(_) => self.pool_capabilities(pool).await,
-                Err(e) => Err(anyhow!("{e:#}")),
-            };
-            let now = self.clock.now();
-            let usage = current(reported.clone(), now);
-            let error = match &caps {
-                Ok(c) => check_members(name, pool, c).err().map(|e| format!("{e:#}")),
-                Err(e) => Some(format!("T3 did not answer: {e:#}")),
-            };
-            let warnings = match (&caps, &error) {
-                (Ok(c), None) => sole_warnings(pool, c),
-                _ => Vec::new(),
-            };
-            let stats = self.store.pick_stats(name)?;
-            let members: Vec<Value> = pool
-                .members
-                .iter()
-                .map(|m| {
-                    let limit = active_limit(&limits, &m.instance_id, now);
-                    let left = usage.get(&m.instance_id);
-                    let p = caps.as_ref().ok().and_then(|c| provider(c, &m.instance_id));
-                    let state = match (p, limit) {
-                        (Some(p), _) if error.is_none() => Some(member_state(pool, m, p, limit, left)),
-                        (_, Some(l)) => Some(State::Limited(l.until.clone())),
-                        _ => None,
-                    };
-                    let (picks, last) = stats.get(&m.instance_id).cloned().unwrap_or((0, None));
-                    let driver = p.and_then(|p| p["driverKind"].as_str()).or(pool.driver.as_deref());
-                    json!({
-                        "instanceId": m.instance_id,
-                        "driver": driver,
-                        "model": pool.model_of(m),
-                        "effort": pool.effort_of(m),
-                        "weight": m.weight,
-                        "reserve": m.reserve,
-                        "cost": m.cost,
-                        "state": state.as_ref().map_or("unknown", State::name),
-                        "reason": state.as_ref().and_then(|s| s.why(pool, m)),
-                        "limitedUntil": limit.map(|l| l.until.clone()),
-                        "limitedUntilLocal": limit.map(|l| local_clock(&l.until)),
-                        "limitReason": limit.and_then(|l| l.reason.clone()),
-                        "usageLeft": left.map(|u| u.left),
-                        "running": running.as_ref().ok().map(|r| r.get(&m.instance_id).copied().unwrap_or(0)),
-                        "picks": picks,
-                        "lastPick": last,
-                        "lastPickLocal": last.as_deref().map(local_clock),
-                    })
-                })
-                .collect();
-            out.push(json!({
-                "pool": name,
-                "mixed": pool.mixed,
-                "driver": pool.driver,
-                "model": pool.model,
-                "effort": pool.effort,
-                "strategy": pool.strategy,
-                "moveOnLimit": pool.move_on_limit,
-                "error": error,
-                "warnings": warnings,
-                "members": members,
-            }));
+            out.push(self.pool_entry(name, pool, &running, &limits, &reported).await?);
         }
         Ok(Value::Array(out))
+    }
+
+    pub(crate) async fn pool_entry(
+        &self,
+        name: &str,
+        pool: &PoolConfig,
+        running: &Result<BTreeMap<String, u64>>,
+        limits: &BTreeMap<String, Limit>,
+        reported: &BTreeMap<String, Usage>,
+    ) -> Result<Value> {
+        let caps = match running {
+            Ok(_) => self.pool_capabilities(pool).await,
+            Err(e) => Err(anyhow!("{e:#}")),
+        };
+        let now = self.clock.now();
+        let usage = current(reported.clone(), now);
+        let error = match &caps {
+            Ok(c) => check_members(name, pool, c).err().map(|e| format!("{e:#}")),
+            Err(e) => Some(format!("T3 did not answer: {e:#}")),
+        };
+        let warnings = match (&caps, &error) {
+            (Ok(c), None) => sole_warnings(pool, c),
+            _ => Vec::new(),
+        };
+        let stats = self.store.pick_stats(name)?;
+        let members: Vec<Value> = pool
+            .members
+            .iter()
+            .map(|m| {
+                let limit = active_limit(limits, &m.instance_id, now);
+                let left = usage.get(&m.instance_id);
+                let p = caps.as_ref().ok().and_then(|c| provider(c, &m.instance_id));
+                let state = match (p, limit) {
+                    (Some(p), _) if error.is_none() => Some(member_state(pool, m, p, limit, left)),
+                    (_, Some(l)) => Some(State::Limited(l.until.clone())),
+                    _ => None,
+                };
+                let (picks, last) = stats.get(&m.instance_id).cloned().unwrap_or((0, None));
+                let driver = p.and_then(|p| p["driverKind"].as_str()).or(pool.driver.as_deref());
+                json!({
+                    "instanceId": m.instance_id,
+                    "driver": driver,
+                    "model": pool.model_of(m),
+                    "effort": pool.effort_of(m),
+                    "weight": m.weight,
+                    "reserve": m.reserve,
+                    "cost": m.cost,
+                    "state": state.as_ref().map_or("unknown", State::name),
+                    "reason": state.as_ref().and_then(|s| s.why(pool, m)),
+                    "limitedUntil": limit.map(|l| l.until.clone()),
+                    "limitedUntilLocal": limit.map(|l| local_clock(&l.until)),
+                    "limitReason": limit.and_then(|l| l.reason.clone()),
+                    "usageLeft": left.map(|u| u.left),
+                    "running": running.as_ref().ok().map(|r| r.get(&m.instance_id).copied().unwrap_or(0)),
+                    "picks": picks,
+                    "lastPick": last,
+                    "lastPickLocal": last.as_deref().map(local_clock),
+                })
+            })
+            .collect();
+        Ok(json!({
+            "pool": name,
+            "mixed": pool.mixed,
+            "driver": pool.driver,
+            "model": pool.model,
+            "effort": pool.effort,
+            "strategy": pool.strategy,
+            "moveOnLimit": pool.move_on_limit,
+            "error": error,
+            "warnings": warnings,
+            "members": members,
+        }))
     }
 }
