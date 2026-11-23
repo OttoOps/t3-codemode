@@ -21,6 +21,17 @@ use crate::store::{Link, Pending};
 use crate::t3::{BoxFut, truncate_chars};
 use crate::wf::{ACTIVE, ENDED_BADLY, WATCHER, Wf, capped, count, header};
 
+#[derive(Debug)]
+pub struct T3Unreachable(pub String);
+
+impl std::fmt::Display for T3Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for T3Unreachable {}
+
 pub const BOARD: &str = "board";
 pub const CARD_KINDS: &[&str] = &["gate", "blocker", "report", "escalate"];
 const FEED_KINDS: &[&str] = &["note", "event"];
@@ -1856,6 +1867,90 @@ impl Wf {
                 json!({"ok": false, "error": why})
             }
         }
+    }
+
+    pub async fn close_ticket(&self, thread: &str, notify: bool) -> Result<Value> {
+        let label = {
+            let _g = self.lock.lock().await;
+            let ln = self.board_ticket(thread)?;
+            if ln.closed {
+                bail!("{} is already done; only open tickets can be closed", ln.label);
+            }
+            ln.label
+        };
+        let refreshed = match self.read_thread(thread).await {
+            Ok(th) => chip(Some(&th)),
+            Err(e) if e.is_not_found() => "gone",
+            Err(e) => {
+                return Err(T3Unreachable(format!(
+                    "cannot verify {label} in T3 before closing: {}; try again once T3 answers",
+                    self.t3.redact(e.to_string())
+                ))
+                .into());
+            }
+        };
+        let label = {
+            let _g = self.lock.lock().await;
+            let mut ln = self.board_ticket(thread)?;
+            if ln.closed {
+                bail!("{} is already done; only open tickets can be closed", ln.label);
+            }
+            let live = self.live_of(thread);
+            let live_status = live.as_ref().map(|v| chip(Some(v))).unwrap_or(refreshed);
+            let active = if matches!(live_status, "running" | "waiting") {
+                Some(live_status)
+            } else if matches!(refreshed, "running" | "waiting") {
+                Some(refreshed)
+            } else {
+                None
+            };
+            if let Some(status) = active {
+                bail!("{} is {status}; only idle, paused or failed tickets can be closed", ln.label);
+            }
+            let now = self.now();
+            ln.closed = true;
+            ln.closed_at = Some(now);
+            ln.closed_how = Some("closed-by-board".into());
+            ln.gate = None;
+            ln.gate_since = None;
+            ln.paused_at = None;
+            self.store.link_save(&ln)?;
+            self.resolve_ticket_cards(&ln.child, "ticket closed from the board")?;
+            self.flow_soon();
+            ln.label
+        };
+        let mut out = json!({"thread": thread, "closed": true, "notified": false});
+        if notify {
+            let body = format!(
+                "{label} was closed from the board. Its link to the board is closed; no further action is needed."
+            );
+            let handle = self.store.msg_new(BOARD, thread, "reply", &body, &self.now())?;
+            let msg = format!(
+                "{}\n{}",
+                header("reply", BOARD, &handle, None),
+                capped(&body, &handle, self.config().reply_cap)
+            );
+            let t3 = match self
+                .t3
+                .call("t3_thread_send", json!({"threadId": thread, "message": msg, "mode": "queue"}))
+                .await
+            {
+                Ok(_) => {
+                    out["notified"] = json!(true);
+                    json!({"ok": true})
+                }
+                Err(e) => {
+                    let why = self.t3.redact(e.to_string());
+                    tracing::warn!("t3_thread_send close {thread} failed: {why}");
+                    json!({"ok": false, "error": why})
+                }
+            };
+            out["handle"] = json!(handle);
+            out["t3"] = t3;
+        }
+        self.changed();
+        self.flow_if_due().await;
+        Ok(out)
     }
 
     pub async fn settle_ticket(&self, thread: &str) -> Result<Value> {

@@ -1241,6 +1241,134 @@ async fn pause_and_resume_through_the_routes_show_in_state() {
     assert_eq!(s.post("/api/links/mcp:nobody/pause", json!({}), Some(&s.csrf()), None).await.status(), 404);
 }
 
+#[tokio::test]
+async fn close_idle_open_ticket_through_route_then_settle() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    s.h.wf(WORKER, "join", json!({"parent": TICKET, "label": "#41 PR 1/1", "role": "worker"})).await;
+    // Reproduce #213: ticket raised a gate, the gate card was dismissed, ticket sits idle.
+    let gate =
+        s.h.wf(TICKET, "send", json!({"kind": "gate", "gate": "e2e", "body": "**ACTION NEEDED:** reply \"close\""}))
+            .await;
+    s.h.app.wf.dismiss(gate["card"].as_str().unwrap()).unwrap();
+
+    let close = format!("/api/tickets/{TICKET}/close");
+    assert_eq!(s.post(&close, json!({}), None, None).await.status(), 403);
+    assert_eq!(s.post(&close, json!({}), Some("nope"), None).await.status(), 403);
+    assert_eq!(s.post("/api/tickets/mcp:nobody/close", json!({}), Some(&s.csrf()), None).await.status(), 404);
+    assert_eq!(s.post(&format!("/api/tickets/{WORKER}/close"), json!({}), Some(&s.csrf()), None).await.status(), 404);
+    assert_eq!(s.post(&close, json!({"bogus": true}), Some(&s.csrf()), None).await.status(), 400);
+    assert_eq!(s.post(&format!("/api/tickets/{TICKET}/settle"), json!({}), Some(&s.csrf()), None).await.status(), 400);
+
+    let r = s.post(&close, json!({}), Some(&s.csrf()), Some(&s.base)).await;
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body, json!({"thread": TICKET, "closed": true, "notified": false}));
+    assert!(s.h.fake.sent().is_empty());
+
+    let st = snapshot(&s.h);
+    let t = &st["tree"][0];
+    assert_eq!(
+        (t["thread"].clone(), t["done"].clone(), t["status"].clone(), t["closedHow"].clone(), t["gate"].clone()),
+        (json!(TICKET), json!(true), json!("done"), json!("closed-by-board"), Value::Null)
+    );
+    assert_eq!(st["counts"]["tickets"], 0);
+    assert_eq!(s.post(&close, json!({}), Some(&s.csrf()), None).await.status(), 400);
+
+    // Settle now accepts the closed ticket.
+    let settled = s.post(&format!("/api/tickets/{TICKET}/settle"), json!({}), Some(&s.csrf()), None).await;
+    assert_eq!(settled.status(), 200);
+    let body: Value = settled.json().await.unwrap();
+    assert_eq!((body["settled"].clone(), body["t3"]["ok"].clone()), (json!(true), json!(true)));
+    let st = snapshot(&s.h);
+    assert_eq!(st["tree"], json!([]));
+    assert_eq!(st["settled"]["tickets"][0]["thread"], TICKET);
+
+    // Closing a paused ticket with an open card resolves its card and clears paused.
+    s.h.fake.put(thread("mcp:t2", "idle", T0));
+    join_board(&s.h, "mcp:t2", "widgets#42").await;
+    s.h.wf("mcp:t2", "send", json!({"kind": "report", "body": "stuck"})).await;
+    assert_eq!(s.post("/api/links/mcp:t2/pause", json!({}), Some(&s.csrf()), None).await.status(), 200);
+    assert_eq!(snapshot(&s.h)["cards"].as_array().unwrap().len(), 1);
+    assert_eq!(s.post("/api/tickets/mcp:t2/close", json!({}), Some(&s.csrf()), None).await.status(), 200);
+    let st = snapshot(&s.h);
+    assert!(st["cards"].as_array().unwrap().is_empty());
+    assert_eq!((st["tree"][0]["done"].clone(), st["tree"][0]["paused"].clone()), (json!(true), json!(false)));
+
+    // A ticket that resumed running or waiting cannot be closed, leaving its link and cards intact.
+    s.h.fake.put(thread("mcp:t3", "idle", T0));
+    join_board(&s.h, "mcp:t3", "widgets#43").await;
+    s.h.wf("mcp:t3", "send", json!({"kind": "report", "body": "check"})).await;
+    s.h.fake.update("mcp:t3", json!({"status": "running"}));
+    let running = s.post("/api/tickets/mcp:t3/close", json!({}), Some(&s.csrf()), None).await;
+    assert_eq!(running.status(), 400);
+    let err: Value = running.json().await.unwrap();
+    assert!(err["error"].as_str().unwrap().contains("running"), "{err}");
+    s.h.fake.update("mcp:t3", json!({"status": "waiting"}));
+    let waiting = s.post("/api/tickets/mcp:t3/close", json!({}), Some(&s.csrf()), None).await;
+    assert_eq!(waiting.status(), 400);
+    let err: Value = waiting.json().await.unwrap();
+    assert!(err["error"].as_str().unwrap().contains("waiting"), "{err}");
+    let st = snapshot(&s.h);
+    assert_eq!(st["cards"].as_array().unwrap().len(), 1);
+    assert_eq!(st["tree"].as_array().unwrap().iter().find(|t| t["thread"] == "mcp:t3").unwrap()["done"], false);
+
+    // Transient T3 read error returns 503 and leaves link and cards untouched.
+    s.h.fake.update("mcp:t3", json!({"status": "idle"}));
+    s.h.fake.set_read_fails(true);
+    let unavailable = s.post("/api/tickets/mcp:t3/close", json!({}), Some(&s.csrf()), None).await;
+    assert_eq!(unavailable.status(), 503);
+    s.h.fake.set_read_fails(false);
+    let st = snapshot(&s.h);
+    assert_eq!(st["cards"].as_array().unwrap().len(), 1);
+    assert_eq!(st["tree"].as_array().unwrap().iter().find(|t| t["thread"] == "mcp:t3").unwrap()["done"], false);
+
+    // A confirmed missing (gone) thread can still be closed from the board.
+    s.h.fake.remove("mcp:t3");
+    let gone = s.post("/api/tickets/mcp:t3/close", json!({}), Some(&s.csrf()), None).await;
+    assert_eq!(gone.status(), 200);
+    let st = snapshot(&s.h);
+    assert!(st["cards"].as_array().unwrap().is_empty());
+    assert_eq!(st["tree"].as_array().unwrap().iter().find(|t| t["thread"] == "mcp:t3").unwrap()["done"], true);
+}
+
+#[tokio::test]
+async fn close_ticket_optionally_notifies_the_thread() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    let r = s.post(&format!("/api/tickets/{TICKET}/close"), json!({"notify": true}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(
+        (body["closed"].clone(), body["notified"].clone(), body["t3"]["ok"].clone()),
+        (json!(true), json!(true), json!(true))
+    );
+    let handle = body["handle"].as_str().unwrap();
+    let sent = s.h.fake.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["threadId"], TICKET);
+    let msg = sent[0]["message"].as_str().unwrap();
+    assert!(msg.starts_with(&format!("[t3cm reply from=board msg={handle}]")), "{msg}");
+    assert!(msg.contains("widgets#41 was closed from the board"), "{msg}");
+
+    // A T3 send failure still closes the ticket and reports the error in t3.
+    s.h.fake.put(thread("mcp:t2", "failed", T0));
+    join_board(&s.h, "mcp:t2", "widgets#42").await;
+    s.h.fake.set_send_fails(true);
+    let r = s.post("/api/tickets/mcp:t2/close", json!({"notify": true}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(
+        (body["closed"].clone(), body["notified"].clone(), body["t3"]["ok"].clone()),
+        (json!(true), json!(false), json!(false))
+    );
+    assert!(body["t3"]["error"].as_str().is_some_and(|e| !e.is_empty()), "{body}");
+    assert_eq!(
+        snapshot(&s.h)["tree"].as_array().unwrap().iter().find(|t| t["thread"] == "mcp:t2").unwrap()["done"],
+        true
+    );
+}
+
 fn run_page(html: &str, scenario: &str) -> Value {
     let open = html.find("<script>").unwrap() + "<script>".len();
     let close = html.rfind("</script>").unwrap();
@@ -2063,6 +2191,86 @@ return {{ before, after, posts: fetches.filter((f) => f.method === "POST").map((
         ]),
         "{r}"
     );
+}
+
+#[tokio::test]
+async fn ticket_rows_show_close_on_idle_paused_and_failed_open_tickets() {
+    let s = start(H::new()).await;
+    join_board(&s.h, TICKET, "widgets#41").await;
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st: Value = s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json().await.unwrap();
+    let r = run_page_async(
+        &html,
+        &format!(
+            r##"async () => {{
+{PAGE_HELPERS}
+const base = {st};
+fetchReply = async () => ({{ ok: true, json: async () => ({{}}) }});
+const T = "{TICKET}";
+const mk = (id, label, extra) => ({{ ...base.tree[0], ticket: id, thread: id, label, workers: [], ...extra }});
+const tree = [
+  mk("mcp:idle", "widgets#1", {{ status: "idle", paused: false, done: false, joined: true }}),
+  mk("mcp:pause", "widgets#2", {{ status: "paused", paused: true, done: false, joined: true }}),
+  mk("mcp:fail", "widgets#3", {{ status: "failed", paused: false, done: false, joined: true }}),
+  mk("mcp:run", "widgets#4", {{ status: "running", paused: false, done: false, joined: true }}),
+  mk("mcp:wait", "widgets#5", {{ status: "waiting", paused: false, done: false, joined: true }}),
+  mk("mcp:paused-report", "widgets#6", {{ status: "paused", paused: true, done: false, joined: true }}),
+  mk("mcp:run-fail-worker", "widgets#9", {{
+    status: "running", paused: false, done: false, joined: true,
+    workers: [{{ thread: "mcp:w1", label: "#9 PR 1/1", status: "failed", paused: false, done: false, joined: true }}],
+  }}),
+  mk(null, "widgets#7", {{ status: "launching", paused: false, done: false, joined: false }}),
+  mk("mcp:done", "widgets#8", {{ status: "done", paused: false, done: true, joined: true }}),
+];
+const cards = [{{ id: "a1", kind: "report", label: "widgets#6", ticket: "mcp:paused-report", text: "Stuck report", options: [], at: "2026-04-16T10:00:00Z", atLocal: "10:00 MST", token: "1" }}];
+emitState({{ ...base, tree, cards }});
+const closeVisible = (list, key) => {{
+  const el = q("#" + list + ' [data-key="' + key + '"]');
+  const b = el && el.querySelector('[data-part="close"]');
+  return !!(b && !b.hidden);
+}};
+const shown = {{
+  idle: closeVisible("open", "mcp:idle"),
+  pause: closeVisible("open", "mcp:pause"),
+  fail: closeVisible("open", "mcp:fail"),
+  run: closeVisible("open", "mcp:run"),
+  wait: closeVisible("open", "mcp:wait"),
+  pausedReport: closeVisible("open", "mcp:paused-report"),
+  runFailWorker: closeVisible("open", "mcp:run-fail-worker"),
+  pending: closeVisible("open", "pending:widgets#7"),
+  done: closeVisible("done", "mcp:done"),
+}};
+const idleBtn = q('#open [data-key="mcp:idle"] [data-part="close"]');
+const idleLabel = idleBtn.getAttribute("aria-label");
+idleBtn.dispatch("click");
+const flush = async () => {{ for (let i = 0; i < 20; i++) await Promise.resolve(); }};
+await flush();
+// Transitioning idle -> running hides Close; back to idle shows it again; closing moves it to Done with Settle.
+emitState({{ ...base, cards, tree: tree.map((t) => t.thread === "mcp:idle" ? {{ ...t, status: "running" }} : t) }});
+const whileRunning = closeVisible("open", "mcp:idle");
+emitState({{ ...base, cards, tree: tree.map((t) => t.thread === "mcp:idle" ? {{ ...t, status: "idle" }} : t) }});
+const backToIdle = closeVisible("open", "mcp:idle");
+emitState({{ ...base, cards, tree: tree.map((t) => t.thread === "mcp:idle" ? {{ ...t, status: "done", done: true }} : t) }});
+const inDoneSettle = !!q('#done [data-key="mcp:idle"] [data-part="settle"]');
+const inDoneClose = closeVisible("done", "mcp:idle");
+return {{
+  shown, idleLabel, whileRunning, backToIdle, inDoneSettle, inDoneClose,
+  posts: fetches.filter((f) => f.method === "POST").map((f) => f.url),
+}};
+}}"##
+        ),
+    );
+    assert_eq!(
+        r["shown"],
+        json!({"idle": true, "pause": true, "fail": true, "run": false, "wait": false, "pausedReport": true, "runFailWorker": false, "pending": false, "done": false}),
+        "{r}"
+    );
+    assert_eq!(r["idleLabel"], "Close widgets#1", "{r}");
+    assert_eq!(r["whileRunning"], false, "{r}");
+    assert_eq!(r["backToIdle"], true, "{r}");
+    assert_eq!(r["inDoneSettle"], true, "{r}");
+    assert_eq!(r["inDoneClose"], false, "{r}");
+    assert_eq!(r["posts"], json!(["/api/tickets/mcp%3Aidle/close"]), "{r}");
 }
 
 #[tokio::test]
