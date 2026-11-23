@@ -185,6 +185,31 @@ impl ServeStatus {
         }
         None
     }
+
+    pub fn root_only_handlers(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (host_port, routes) in &self.web {
+            for r in routes {
+                let target =
+                    r.path.as_deref().map(|p| format!("path {p}")).or_else(|| {
+                        r.proxy.as_deref().filter(|p| is_unix_socket_target(p)).map(|p| format!("socket {p}"))
+                    });
+                if let Some(target) = target {
+                    out.push(format!("{host_port}{} -> {target}", r.mount));
+                }
+            }
+        }
+        out
+    }
+}
+
+fn is_unix_socket_target(target: &str) -> bool {
+    target.trim().to_ascii_lowercase().starts_with("unix:")
+}
+
+pub fn is_root_required_serve_error(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("must be root") && (lower.contains("path or unix socket") || lower.contains("serve a path"))
 }
 
 pub trait TailscaleRunner: Send + Sync {
@@ -308,6 +333,7 @@ impl TailscaleCli {
                 format!("`tailscale {}` failed: {detail}", args.join(" "))
             };
             if cfg!(target_os = "linux")
+                && !is_root_required_serve_error(&detail)
                 && (detail.to_ascii_lowercase().contains("access denied")
                     || detail.to_ascii_lowercase().contains("permission denied")
                     || detail.to_ascii_lowercase().contains("operator"))
@@ -711,7 +737,10 @@ pub fn expose_tailscale(ts: &dyn TailscaleRunner, cfg_path: &Path, opts: &Expose
     }
     let already_serving_board = serve_status.has_board_root_route(&dns_name, opts.https_port, opts.local_port);
 
-    ts.serve_enable(opts.https_port, opts.local_port)?;
+    if !already_serving_board {
+        ts.serve_enable(opts.https_port, opts.local_port)
+            .map_err(|e| explain_root_required(e, &serve_status, opts.https_port, opts.local_port))?;
+    }
 
     let mut remote_obj = Map::new();
     remote_obj.insert("mode".into(), json!("tailscale"));
@@ -739,6 +768,24 @@ pub fn expose_tailscale(ts: &dyn TailscaleRunner, cfg_path: &Path, opts: &Expose
         require_pairing: opts.require_pairing,
         config_path: cfg_path.display().to_string(),
     })
+}
+
+fn explain_root_required(err: anyhow::Error, serve: &ServeStatus, https_port: u16, local_port: u16) -> anyhow::Error {
+    if !is_root_required_serve_error(&format!("{err:#}")) {
+        return err;
+    }
+    let handlers = serve.root_only_handlers();
+    let blocker = if handlers.is_empty() {
+        "a Path or Unix socket handler on another port".to_string()
+    } else {
+        format!("the Path or Unix socket handler {}", handlers.join(", "))
+    };
+    anyhow!(
+        "{err:#}\n\ntailscaled requires root for any Serve change while {blocker} is configured \
+         (`tailscale serve status`); operator access is not enough. Add the board route as root with \
+         `sudo tailscale serve --bg --https={https_port} http://127.0.0.1:{local_port}`, \
+         then rerun the same `t3cm board expose --tailscale` command, flags included"
+    )
 }
 
 fn shell_quote(raw: &str) -> String {
@@ -1011,6 +1058,26 @@ mod tests {
         assert_eq!(targeting.len(), 2);
         assert!(targeting.iter().any(|r| r.is_raw_tcp && r.port == 9000));
         assert!(targeting.iter().any(|r| !r.is_raw_tcp && r.port == 47732));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cli_skips_the_operator_hint_when_serve_needs_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_only = dir.path().join("root-only-tailscale");
+        crate::fake::write_executable(
+            &root_only,
+            "#!/bin/sh\necho \"401 Unauthorized: must be root, or be an operator and able to run 'sudo tailscale' to serve a path or Unix socket\" >&2\nexit 1\n",
+        );
+        let err = TailscaleCli::with_binary(Some(root_only)).serve_enable(47732, 47731).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("must be root"), "{msg}");
+        assert!(!msg.contains("set --operator"), "{msg}");
+
+        let denied = dir.path().join("denied-tailscale");
+        crate::fake::write_executable(&denied, "#!/bin/sh\necho 'Access denied: serve config denied' >&2\nexit 1\n");
+        let err = TailscaleCli::with_binary(Some(denied)).serve_enable(47732, 47731).unwrap_err();
+        assert!(format!("{err:#}").contains("sudo tailscale set --operator=$USER"), "{err:#}");
     }
 
     #[cfg(unix)]
