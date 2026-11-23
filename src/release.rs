@@ -178,11 +178,22 @@ pub struct Checked {
     pub checked_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tried_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked_by: Option<String>,
 }
 
 impl Checked {
     pub fn now(latest: &Version) -> Checked {
-        Checked { latest: latest.to_string(), checked_at: Timestamp::now().to_string(), tried_at: None }
+        Checked {
+            latest: latest.to_string(),
+            checked_at: Timestamp::now().to_string(),
+            tried_at: None,
+            checked_by: Some(env!("CARGO_PKG_VERSION").to_string()),
+        }
+    }
+
+    pub fn by_this_install(&self) -> bool {
+        self.checked_by.as_deref() == Some(env!("CARGO_PKG_VERSION"))
     }
 
     pub fn version(&self) -> Option<Version> {
@@ -219,6 +230,10 @@ pub fn read_cache(state_dir: &Path) -> Option<Checked> {
     serde_json::from_str(&std::fs::read_to_string(cache_path(state_dir)).ok()?).ok()
 }
 
+pub fn read_own_cache(state_dir: &Path) -> Option<Checked> {
+    read_cache(state_dir).filter(Checked::by_this_install)
+}
+
 pub fn write_cache(state_dir: &Path, c: &Checked) -> Result<()> {
     std::fs::create_dir_all(state_dir).with_context(|| format!("creating {}", state_dir.display()))?;
     let path = cache_path(state_dir);
@@ -242,13 +257,17 @@ pub fn notice(current: &Version, latest: &Version, releases: &str) -> Option<Str
 }
 
 pub async fn known_latest(state_dir: &Path, releases: &str, within: SignedDuration) -> Option<Version> {
-    let prior = read_cache(state_dir);
+    let prior = read_own_cache(state_dir);
     if let Some(c) = &prior
         && (c.fresh(within) || c.tried_recently(within))
     {
         return c.version();
     }
-    let mut attempt = prior.unwrap_or(Checked { latest: String::new(), checked_at: String::new(), tried_at: None });
+    let mut attempt = prior.unwrap_or_else(|| Checked {
+        latest: String::new(),
+        checked_at: String::new(),
+        ..Checked::now(&Version::current())
+    });
     attempt.tried_at = Some(Timestamp::now().to_string());
     let _ = write_cache(state_dir, &attempt);
     let v = latest(releases).await.ok()?;
@@ -263,7 +282,7 @@ pub fn view(current: &Version, latest: Option<&Version>, releases: &str) -> Valu
     match latest {
         Some(l) => json!({
             "current": current.to_string(),
-            "latest": l.to_string(),
+            "latest": l.max(current).to_string(),
             "available": l > current,
             "notes": notes_url(releases, l),
             "command": UPDATE_COMMAND,
@@ -311,6 +330,37 @@ mod tests {
         assert_eq!(view(&v("0.4.0"), Some(&v("0.5.0")), r)["available"], true);
         assert_eq!(view(&v("0.5.0"), Some(&v("0.5.0")), r)["available"], false);
         assert!(view(&v("0.5.0"), None, r).is_null());
+    }
+
+    #[test]
+    fn an_older_published_release_is_never_reported_as_latest() {
+        let r = "https://example.test/releases";
+        let shown = view(&v("0.7.0"), Some(&v("0.6.0")), r);
+        assert_eq!(shown["latest"], "0.7.0", "{shown}");
+        assert_eq!(shown["available"], false, "{shown}");
+        assert_eq!(shown["notes"], "https://example.test/releases/tag/v0.6.0", "{shown}");
+        assert!(notice(&v("0.7.0"), &v("0.6.0"), r).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_cache_left_by_another_install_is_checked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let older = Checked { checked_by: Some("0.0.1".into()), ..Checked::now(&v("0.0.1")) };
+        write_cache(dir.path(), &older).unwrap();
+        assert!(read_own_cache(dir.path()).is_none());
+        let unsigned = Checked { checked_by: None, ..older };
+        write_cache(dir.path(), &unsigned).unwrap();
+        assert!(read_own_cache(dir.path()).is_none());
+        let app = axum::Router::new().route(
+            "/releases/latest",
+            axum::routing::get(|| async { (axum::http::StatusCode::FOUND, [("location", "/releases/tag/v99.0.0")]) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://127.0.0.1:{}/releases", listener.local_addr().unwrap().port());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        assert_eq!(known_latest(dir.path(), &url, CLI_FRESH).await, Some(v("99.0.0")));
+        let back = read_own_cache(dir.path()).expect("the new check is recorded as this install's");
+        assert_eq!(back.version(), Some(v("99.0.0")));
     }
 
     #[test]

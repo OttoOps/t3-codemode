@@ -779,7 +779,7 @@ fn spawn_release_checks(app: Arc<App>, state_dir: PathBuf) {
         }
         let every = release::SERVICE_EVERY;
         let mut wait = std::time::Duration::from_secs(5);
-        if let Some(c) = release::read_cache(&state_dir)
+        if let Some(c) = release::read_own_cache(&state_dir)
             && let Some(v) = c.version()
         {
             app.wf.set_release(v);
