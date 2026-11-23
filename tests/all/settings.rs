@@ -90,72 +90,202 @@ fn remote_config(remote: Value) -> Config {
     Config::from_value(json!({"board": {"remote": remote}})).unwrap()
 }
 
-async fn refuses_signed_in_remote_requests(remote: Value, sign_in: &[&str]) {
-    let host = "board.acme.example:47732";
-    let origin = format!("https://{host}");
-    let h = H::build(Vec::new(), remote_config(remote.clone()));
-    h.tailscale.set_host_login("alice@acme.example");
-    let mut signed_in: Vec<(&str, String)> = Vec::new();
-    if sign_in.contains(&"tailscale") {
-        signed_in.push(("tailscale-user-login", "alice@acme.example".into()));
-    }
-    if sign_in.contains(&"pairing") {
-        let (store, now) = (&h.app.store, h.clock.now());
-        let minted = pairing::mint_pairing_token(store, &RemoteOrigin::parse(&origin).unwrap(), None, now).unwrap();
-        let (session, _) = pairing::redeem_pairing_token(store, &minted.token, None, now).unwrap().unwrap();
-        signed_in.push(("cookie", format!("{}={session}", pairing::SESSION_COOKIE)));
-    }
-    let b = Board::start(h).await;
-    let revision = b.settings().await["revision"].clone();
+const REMOTE_HOST: &str = "board.acme.example:47732";
+const OWNER: &str = "alice@acme.example";
+const OTHER: &str = "bob@acme.example";
 
-    let by_host = vec![("host", host.to_string()), ("x-forwarded-proto", "https".to_string())];
-    let by_proxy = vec![("x-forwarded-host", host.to_string()), ("x-forwarded-proto", "https".to_string())];
-    for route in [by_host, by_proxy] {
-        let send = |method: &str, path: &str| {
-            let mut req = b.request(method, path).header("origin", &origin).header("X-T3CM-CSRF", &b.h.app.csrf);
-            for (name, value) in route.iter().chain(&signed_in) {
-                req = req.header(*name, value);
-            }
-            req
-        };
-        let allowed = send("GET", "/api/models").send().await.unwrap();
-        assert_eq!(allowed.status(), 200, "the request must be authenticated: {remote}");
-        let page = send("GET", "/").send().await.unwrap().text().await.unwrap();
-        let opened = run_page_async_with(&page, "", "async () => ({ local: LOCAL, sections: conf.panels.size })");
-        assert_eq!(opened, json!({"local": false, "sections": 0}), "a remote board builds no settings: {remote}");
-        assert!(page.contains(r#"id="models-btn""#), "the Models control stays: {remote}");
+struct Remote {
+    b: Board,
+    origin: String,
+    signed_in: Vec<(&'static str, String)>,
+}
+
+impl Remote {
+    async fn start(remote: Value, login: Option<&str>, paired: bool) -> Remote {
+        let origin = format!("https://{REMOTE_HOST}");
+        let h = H::build(Vec::new(), remote_config(remote));
+        h.tailscale.set_host_login(OWNER);
+        let mut signed_in = Vec::new();
+        if let Some(login) = login {
+            signed_in.push(("tailscale-user-login", login.to_string()));
+        }
+        if paired {
+            let (store, now) = (&h.app.store, h.clock.now());
+            let minted = pairing::mint_pairing_token(store, &RemoteOrigin::parse(&origin).unwrap(), None, now).unwrap();
+            let (session, _) = pairing::redeem_pairing_token(store, &minted.token, None, now).unwrap().unwrap();
+            signed_in.push(("cookie", format!("{}={session}", pairing::SESSION_COOKIE)));
+        }
+        Remote { b: Board::start(h).await, origin, signed_in }
+    }
+
+    fn routes() -> [Vec<(&'static str, String)>; 2] {
+        let by_host = vec![("host", REMOTE_HOST.to_string()), ("x-forwarded-proto", "https".to_string())];
+        let by_proxy = vec![("x-forwarded-host", REMOTE_HOST.to_string()), ("x-forwarded-proto", "https".to_string())];
+        [by_host, by_proxy]
+    }
+
+    fn send(&self, route: &[(&'static str, String)], method: &str, path: &str) -> reqwest::RequestBuilder {
+        let mut req = self.b.request(method, path).header("origin", &self.origin);
+        for (name, value) in route.iter().chain(&self.signed_in) {
+            req = req.header(*name, value);
+        }
+        req
+    }
+
+    async fn page(&self, route: &[(&'static str, String)], settings: u16) -> Value {
+        let allowed = self.send(route, "GET", "/api/models").send().await.unwrap();
+        assert_eq!(allowed.status(), 200, "the request must be authenticated");
+        let page = self.send(route, "GET", "/").send().await.unwrap().text().await.unwrap();
+        assert!(page.contains(r#"id="models-btn""#), "the Models control stays");
         let gear = &page[page.find(r#"<button class="btn" type="button" id="settings-btn""#).unwrap()..];
-        assert!(gear[..gear.find('>').unwrap()].ends_with(" hidden"), "only a local page shows the gear: {remote}");
-        for (method, path) in ROUTES {
-            let body = json!({"revision": revision, "file": {"deny": []}});
-            let r = send(method, path).json(&body).send().await.unwrap();
-            assert_eq!(r.status(), 403, "{method} {path} {remote}");
-            if *method != "HEAD" {
-                let said: Value = r.json().await.unwrap();
-                assert!(said["error"].as_str().unwrap().contains("only allowed from loopback"), "{said}");
+        assert!(gear[..gear.find('>').unwrap()].ends_with(" hidden"), "the gear starts hidden on a remote page");
+        let prelude = format!(
+            r#"globalThis.__fetchReply = (url) => {{
+  if (url !== "/api/settings") return new Promise(() => {{}});
+  $("settings-btn").hidden = true;
+  return Promise.resolve({{ ok: {settings} < 300, status: {settings}, json: () => Promise.resolve({{}}) }});
+}};"#
+        );
+        run_page_async_with(
+            &page,
+            &prelude,
+            "async () => { for (let i = 0; i < 5; i++) await null; \
+             return { local: LOCAL, settings: SETTINGS, sections: conf.panels.size, gear: $(\"settings-btn\").hidden === false }; }",
+        )
+    }
+
+    async fn refused(&self, remote: &Value, why: &str) {
+        let revision = self.b.settings().await["revision"].clone();
+        for route in Remote::routes() {
+            let opened = self.page(&route, 403).await;
+            assert_eq!(
+                opened,
+                json!({"local": false, "settings": false, "sections": 0, "gear": false}),
+                "a refused board builds no settings: {remote}"
+            );
+            for (method, path) in ROUTES {
+                let body = json!({"revision": revision, "file": {"deny": []}});
+                let req = self.send(&route, method, path).header("X-T3CM-CSRF", &self.b.h.app.csrf);
+                let r = req.json(&body).send().await.unwrap();
+                assert_eq!(r.status(), 403, "{method} {path} {remote}");
+                if *method != "HEAD" {
+                    let said: Value = r.json().await.unwrap();
+                    assert!(said["error"].as_str().unwrap().contains(why), "{said}");
+                }
             }
         }
+        assert_eq!(self.b.text(), None, "a refused save writes nothing");
+        assert_eq!(self.b.h.app.config().deny, Config::default().deny);
     }
-    assert_eq!(b.text(), None, "a refused save writes nothing");
-    assert_eq!(b.h.app.config().deny, Config::default().deny);
+
+    async fn allowed(&self) {
+        for route in Remote::routes() {
+            let opened = self.page(&route, 200).await;
+            assert_eq!(opened["settings"], true, "{opened}");
+            assert_eq!(opened["gear"], true, "the owner's board shows the gear: {opened}");
+            assert!(opened["sections"].as_u64().unwrap() > 0, "{opened}");
+            for (method, path) in ROUTES.iter().filter(|(m, _)| *m != "PUT") {
+                let r = self.send(&route, method, path).send().await.unwrap();
+                assert_eq!(r.status(), 200, "{method} {path}");
+            }
+            let revision = self.b.settings().await["revision"].clone();
+            let body = json!({"revision": revision, "file": {"board": {"feed": 33}}});
+            let put = || self.send(&route, "PUT", "/api/settings").json(&body);
+            assert_eq!(put().send().await.unwrap().status(), 403, "no CSRF token");
+            assert_eq!(put().header("X-T3CM-CSRF", "guess").send().await.unwrap().status(), 403, "wrong CSRF token");
+            assert_eq!(self.b.text(), None, "a save without the token writes nothing");
+            let saved = put().header("X-T3CM-CSRF", &self.b.h.app.csrf).send().await.unwrap();
+            assert_eq!(saved.status(), 200);
+            assert_eq!(self.b.h.app.config().board.feed, 33);
+            std::fs::remove_file(self.b.file()).unwrap();
+        }
+    }
+}
+
+const TAILSCALE: &str = r#"{"mode": "tailscale", "origin": "https://board.acme.example:47732"}"#;
+
+fn tailscale(extra: Value) -> Value {
+    let mut remote: Value = serde_json::from_str(TAILSCALE).unwrap();
+    remote.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    remote
 }
 
 #[tokio::test]
 async fn every_settings_route_refuses_a_paired_remote_browser() {
     let remote = json!({"mode": "pairing", "origin": "https://board.acme.example:47732"});
-    refuses_signed_in_remote_requests(remote, &["pairing"]).await;
+    Remote::start(remote.clone(), None, true).await.refused(&remote, "in Tailscale mode, the board's owner").await;
 }
 
 #[tokio::test]
-async fn every_settings_route_refuses_a_tailscale_user() {
-    let remote = json!({"mode": "tailscale", "origin": "https://board.acme.example:47732"});
-    refuses_signed_in_remote_requests(remote, &["tailscale"]).await;
+async fn a_pairing_session_with_the_owner_login_header_is_still_refused() {
+    let remote = json!({"mode": "pairing", "origin": "https://board.acme.example:47732"});
+    Remote::start(remote.clone(), Some(OWNER), true).await.refused(&remote, "in Tailscale mode").await;
 }
 
 #[tokio::test]
-async fn every_settings_route_refuses_a_paired_tailscale_user() {
-    let remote = json!({"mode": "tailscale", "origin": "https://board.acme.example:47732", "requirePairing": true});
-    refuses_signed_in_remote_requests(remote, &["tailscale", "pairing"]).await;
+async fn the_tailscale_owner_reaches_every_settings_route() {
+    Remote::start(tailscale(json!({})), Some(OWNER), false).await.allowed().await;
+}
+
+#[tokio::test]
+async fn a_paired_tailscale_owner_reaches_every_settings_route() {
+    Remote::start(tailscale(json!({"requirePairing": true})), Some(OWNER), true).await.allowed().await;
+}
+
+#[tokio::test]
+async fn every_settings_route_refuses_another_allowed_tailscale_user() {
+    let remote = tailscale(json!({"allowUsers": [OWNER, OTHER]}));
+    Remote::start(remote.clone(), Some(OTHER), false).await.refused(&remote, "board.remote.settingsUsers").await;
+    let paired = tailscale(json!({"allowUsers": [OWNER, OTHER], "requirePairing": true}));
+    Remote::start(paired.clone(), Some(OTHER), true).await.refused(&paired, "board.remote.settingsUsers").await;
+}
+
+#[tokio::test]
+async fn settings_users_replace_the_host_login() {
+    let remote = tailscale(json!({"allowUsers": [OWNER, OTHER], "settingsUsers": [OTHER]}));
+    Remote::start(remote.clone(), Some(OTHER), false).await.allowed().await;
+    Remote::start(remote.clone(), Some(OWNER), false).await.refused(&remote, "board.remote.settingsUsers").await;
+}
+
+#[tokio::test]
+async fn remote_settings_need_https() {
+    let r = Remote::start(tailscale(json!({})), Some(OWNER), false).await;
+    let plain = [vec![("host", REMOTE_HOST.to_string())], vec![("x-forwarded-host", REMOTE_HOST.to_string())]];
+    for route in plain {
+        assert_eq!(r.send(&route, "GET", "/api/models").send().await.unwrap().status(), 200, "the board still answers");
+        for (method, path) in ROUTES {
+            let req = r.send(&route, method, path).header("X-T3CM-CSRF", &r.b.h.app.csrf);
+            let res = req.json(&json!({"revision": "absent", "file": {"deny": []}})).send().await.unwrap();
+            assert_eq!(res.status(), 403, "{method} {path}");
+            if *method != "HEAD" {
+                let said: Value = res.json().await.unwrap();
+                assert!(said["error"].as_str().unwrap().contains("X-Forwarded-Proto: https"), "{said}");
+            }
+        }
+    }
+    assert_eq!(r.b.text(), None);
+}
+
+#[tokio::test]
+async fn a_loopback_board_builds_settings_without_asking() {
+    let b = Board::start(H::new()).await;
+    let opened = run_page_async_with(
+        &b.page().await,
+        "",
+        "async () => ({ local: LOCAL, settings: SETTINGS, built: conf.panels.size > 0, gear: $(\"settings-btn\").hidden === false })",
+    );
+    assert_eq!(opened, json!({"local": true, "settings": true, "built": true, "gear": true}));
+}
+
+#[test]
+fn changed_keys_name_each_leaf_that_differs() {
+    let old = json!({"board": {"feed": 10, "remote": {"mode": "off"}}, "deny": ["a"], "pools": {"a.b": {"x": 1}}});
+    let new = json!({"board": {"feed": 10, "remote": {"mode": "tailscale", "origin": "o"}}, "deny": ["a", "b"], "maxConcurrentRuns": 2});
+    assert_eq!(
+        t3_codemode::config_edit::changed_keys(&old, &new),
+        ["board.remote.mode", "board.remote.origin", "deny", "maxConcurrentRuns", "pools"]
+    );
+    assert!(t3_codemode::config_edit::changed_keys(&old, &old).is_empty());
 }
 
 #[tokio::test]
@@ -300,6 +430,10 @@ async fn an_invalid_save_names_its_field_and_leaves_the_file() {
         (json!({"wake": ["event", "note"]}), "wake.1"),
         (json!({"deny": "t3_thread_launch"}), "deny"),
         (json!({"board": {"remote": {"mode": "pairing"}}}), "board.remote.origin"),
+        (
+            json!({"board": {"remote": {"mode": "tailscale", "origin": "https://board.acme.example", "allowUsers": ["alice@acme.example"], "settingsUsers": ["bob@acme.example"]}}}),
+            "board.remote.settingsUsers.0",
+        ),
         (json!({"pools": {"gpt-6.1": {"driver": "codex", "model": "m", "members": []}}}), "pools.\"gpt-6.1\".members"),
         (json!({"upstreams": [{"name": "wf", "transport": "stdio", "stdio": {"command": "x"}}]}), "upstreams.0.name"),
     ];
@@ -618,7 +752,7 @@ async fn the_dialog_has_a_control_or_an_editor_for_every_key() {
             "one": {"driver": "claudeAgent", "model": "m", "effort": "high", "moveOnLimit": "auto", "members": [{"instanceId": "claudeAgent"}]},
             "tier": {"mixed": true, "members": [{"instanceId": "claudeAgent", "model": "m", "effort": "low"}]},
         },
-        "board": {"remote": {"mode": "tailscale", "origin": "https://board.acme.example", "allowUsers": ["alice@acme.example"], "requirePairing": true}},
+        "board": {"remote": {"mode": "tailscale", "origin": "https://board.acme.example", "allowUsers": ["alice@acme.example"], "requirePairing": true, "settingsUsers": ["alice@acme.example"]}},
         "maxConcurrentRuns": 4,
         "upstreams": [{"name": "docs", "transport": "stdio", "stdio": {"command": "docs-mcp"}}],
     });
