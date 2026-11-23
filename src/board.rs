@@ -458,6 +458,12 @@ pub fn ticket_brief(url: &str, label: &str) -> String {
     format!("Work {url} with the t3-ticket skill.\n\n{}", board_link(label))
 }
 
+fn pick_project(projects: Vec<Value>, wanted: &str) -> Option<Value> {
+    let by_title = projects.iter().position(|p| p["title"].as_str().is_some_and(|t| t.eq_ignore_ascii_case(wanted)));
+    let at = projects.iter().position(|p| p["id"] == wanted).or(by_title)?;
+    projects.into_iter().nth(at)
+}
+
 pub fn dispatch_brief(request: &str, label: &str) -> String {
     format!("{request}\n\n{}", board_link(label))
 }
@@ -1028,11 +1034,7 @@ impl Wf {
     async fn find_project(&self, issue: &Issue, wanted: Option<&str>) -> Result<Option<Value>> {
         let projects = self.projects().await?;
         if let Some(w) = wanted {
-            return projects
-                .into_iter()
-                .find(|p| p["id"] == w || p["title"].as_str().is_some_and(|t| t.eq_ignore_ascii_case(w)))
-                .map(Some)
-                .ok_or_else(|| anyhow!("no T3 project with id or title {w:?}"));
+            return pick_project(projects, w).map(Some).ok_or_else(|| anyhow!("no T3 project with id or title {w:?}"));
         }
         for p in projects {
             let Some(root) = p["workspaceRoot"].as_str() else { continue };
@@ -1429,11 +1431,7 @@ impl Wf {
         if wanted.is_empty() {
             bail!("wf.dispatch: project must not be empty");
         }
-        let project = self
-            .projects()
-            .await?
-            .into_iter()
-            .find(|p| p["id"] == wanted || p["title"].as_str().is_some_and(|t| t.eq_ignore_ascii_case(wanted)))
+        let project = pick_project(self.projects().await?, wanted)
             .ok_or_else(|| anyhow!("wf.dispatch: no T3 project with id or title {wanted:?}; nothing was launched"))?;
         let project_id = project["id"].as_str().unwrap_or_default().to_string();
         let name = project["title"].as_str().filter(|t| !t.trim().is_empty()).unwrap_or(&project_id).trim().to_string();
