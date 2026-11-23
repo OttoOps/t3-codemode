@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use crate::common::*;
 use serde_json::{Value, json};
-use t3_codemode::board::BOARD;
+use t3_codemode::board::{BOARD, CardRef};
+use t3_codemode::clock::{Clock, iso, plus_minutes};
 use t3_codemode::fake::{check_run, github_pr, project, pull_request, thread};
 use t3_codemode::store::{MergeWait, WaitStatus};
 
@@ -69,7 +70,9 @@ struct GhPrModel {
     read_err: bool,
     queue_enabled: bool,
     queued: bool,
-    removed_reason: Option<&'static str>,
+    removed: Option<(&'static str, String)>,
+    ended_at: Option<String>,
+    merge_commit: Option<String>,
 }
 
 impl Default for GhPrModel {
@@ -84,7 +87,47 @@ impl Default for GhPrModel {
             read_err: false,
             queue_enabled: false,
             queued: false,
-            removed_reason: None,
+            removed: None,
+            ended_at: None,
+            merge_commit: None,
+        }
+    }
+}
+
+fn clock_now(h: &H) -> String {
+    iso(h.clock.now())
+}
+
+fn before_tracking(t0: jiff::Timestamp) -> String {
+    iso(plus_minutes(t0, -10.0))
+}
+
+fn advance_mutations(h: &H) -> (usize, usize) {
+    let mut merges = 0;
+    let mut enqueues = 0;
+    for op in h.github.operations() {
+        match op.as_str() {
+            "mergePullRequest" => merges += 1,
+            "enqueuePullRequest" => enqueues += 1,
+            _ => {}
+        }
+    }
+    (merges, enqueues)
+}
+
+fn pull_gh_mutations(h: &H, prs: &mut BTreeMap<u64, GhPrModel>) {
+    for (&number, m) in prs.iter_mut() {
+        if !m.exists {
+            continue;
+        }
+        let cur = h.github.pr(REPO, number);
+        if cur["state"] == "MERGED" && m.state != "MERGED" {
+            m.state = "MERGED";
+            m.queued = false;
+            m.merge_commit = cur["mergeCommit"]["oid"].as_str().map(String::from);
+            m.ended_at = cur["mergedAt"].as_str().map(String::from);
+        } else if cur["isInMergeQueue"] == true && !m.queued {
+            m.queued = true;
         }
     }
 }
@@ -144,16 +187,24 @@ fn sync_gh(h: &H, prs: &BTreeMap<u64, GhPrModel>) {
         pr["state"] = json!(m.state);
         pr["isDraft"] = json!(m.draft);
         pr["isInMergeQueue"] = json!(m.queued);
+        if m.queued {
+            pr["mergeQueueEntry"] = json!({"position": 1});
+        }
         pr["body"] = json!(GOOD_BODY);
         pr["files"] = json!({"pageInfo": {"hasNextPage": false}, "nodes": [{"path": "src/lib.rs"}]});
-        if let Some(reason) = m.removed_reason {
-            pr["timelineItems"] = json!({"nodes": [{"reason": reason, "createdAt": "2026-11-23T12:04:00Z"}]});
+        if let Some((reason, at)) = &m.removed {
+            pr["timelineItems"] = json!({"nodes": [{"reason": reason, "createdAt": at}]});
         }
         if m.state == "MERGED" {
-            pr["mergeCommit"] = json!({"oid": HEADS[(m.head_idx + 1) % HEADS.len()]});
-            pr["mergedAt"] = json!("2026-11-23T12:05:00Z");
-        } else if m.state == "CLOSED" {
-            pr["closedAt"] = json!("2026-11-23T12:05:00Z");
+            let oid = m.merge_commit.as_deref().unwrap_or(HEADS[(m.head_idx + 1) % HEADS.len()]);
+            pr["mergeCommit"] = json!({"oid": oid});
+            if let Some(at) = &m.ended_at {
+                pr["mergedAt"] = json!(at);
+            }
+        } else if m.state == "CLOSED"
+            && let Some(at) = &m.ended_at
+        {
+            pr["closedAt"] = json!(at);
         }
         h.github.set_pr(REPO, number, pr);
         let checks = match m.checks {
@@ -315,9 +366,22 @@ fn chaos_seeds(default: usize) -> usize {
 #[tokio::test]
 async fn seeded_sequential_chaos_holds_all_invariants() {
     let seeds = chaos_seeds(60);
+    let mut advance_merges = 0usize;
+    let mut advance_enqueues = 0usize;
+    let mut reassigned_id_rejects = 0usize;
+    let mut predates_finished_reconciled = 0usize;
+    let mut after_finished_reconciled = 0usize;
+    let mut predates_removed_reconciled = 0usize;
+    let mut after_removed_reconciled = 0usize;
+    let mut dismiss_at_calls = 0usize;
     for seed in 0..seeds as u64 {
         let mut rng = Rng::new(seed);
         let (h, mut gh) = setup_chaos();
+        for m in gh.values_mut() {
+            m.queue_enabled = rng.coin();
+        }
+        sync_gh(&h, &gh);
+        let t0 = h.clock.now();
         let mut trace: Vec<String> = Vec::new();
         let mut closed_workers: BTreeMap<String, usize> = BTreeMap::new();
 
@@ -341,6 +405,7 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
         }
 
         for step in 0..45 {
+            h.clock.advance_minutes(1);
             let op = rng.pick(20);
             let mut healthy_reconcile = false;
             let res = tokio::time::timeout(Duration::from_secs(5), async {
@@ -446,14 +511,26 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
                             let m = gh.get_mut(&pr).unwrap();
                             if m.exists && m.state == "OPEN" {
                                 match rng.pick(4) {
-                                    0 => m.state = "MERGED",
-                                    1 => m.state = "CLOSED",
+                                    0 => {
+                                        m.state = "MERGED";
+                                        m.queued = false;
+                                        let predates = rng.pick(3) == 0;
+                                        m.ended_at =
+                                            Some(if predates { before_tracking(t0) } else { clock_now(&h) });
+                                    }
+                                    1 => {
+                                        m.state = "CLOSED";
+                                        m.queued = false;
+                                        let predates = rng.pick(3) == 0;
+                                        m.ended_at =
+                                            Some(if predates { before_tracking(t0) } else { clock_now(&h) });
+                                    }
                                     2 => m.read_err = !m.read_err,
                                     _ => m.exists = false,
                                 }
                                 trace.push(format!(
-                                    "#{step} gh lifecycle #{pr} state={} exists={} err={}",
-                                    m.state, m.exists, m.read_err
+                                    "#{step} gh lifecycle #{pr} state={} exists={} err={} ended_at={:?}",
+                                    m.state, m.exists, m.read_err, m.ended_at
                                 ));
                                 true
                             } else {
@@ -466,21 +543,114 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
                     }
                     7 | 8 => {
                         let had_err = gh.values().any(|m| m.read_err);
+                        let mutations_before = advance_mutations(&h);
                         let rec = h.app.wf.reconcile().await;
+                        pull_gh_mutations(&h, &mut gh);
                         trace.push(format!("#{step} reconcile -> ok={}", rec.is_ok()));
-                        if !had_err && rec.is_ok() {
+                        if !had_err && let Ok(actions) = &rec {
                             healthy_reconcile = true;
+                            for (&number, m) in &gh {
+                                let Some(seen) = h.app.store.pr_seen_get(REPO, number).unwrap() else {
+                                    continue;
+                                };
+                                let label = format!("{REPO}#{number}");
+                                if seen.state != "OPEN"
+                                    && seen.state == m.state
+                                    && let Some(at) = m.ended_at.as_deref()
+                                {
+                                    let reported = actions.iter().any(|a| {
+                                        a.starts_with(&format!("{label} merged on GitHub"))
+                                            || a.starts_with(&format!("{label} closed on GitHub"))
+                                    });
+                                    if at < seen.since.as_str() {
+                                        assert!(
+                                            !reported,
+                                            "stale finished event {label} at {at} (< since {}) was reported: \
+                                             actions={actions:?}\nseed={seed}\n{}",
+                                            seen.since,
+                                            trace.join("\n")
+                                        );
+                                        predates_finished_reconciled += 1;
+                                    } else if reported {
+                                        after_finished_reconciled += 1;
+                                    }
+                                }
+                                if seen.state == "OPEN"
+                                    && !seen.queued
+                                    && let Some((_, at)) = &m.removed
+                                {
+                                    let after = seen
+                                        .queued_at
+                                        .as_deref()
+                                        .filter(|q| *q >= seen.since.as_str())
+                                        .unwrap_or(&seen.since);
+                                    let reported = actions
+                                        .iter()
+                                        .any(|a| a.starts_with(&format!("{label} dropped from the merge queue")));
+                                    if at.as_str() < after {
+                                        let event = format!("removed:{at}");
+                                        let marked = h.app.store.pr_event_seen(REPO, number, &event, BOARD).unwrap()
+                                            || seen
+                                                .tickets
+                                                .iter()
+                                                .any(|(t, _)| h.app.store.pr_event_seen(REPO, number, &event, t).unwrap());
+                                        assert!(
+                                            !reported && !marked,
+                                            "stale queue drop {label} at {at} (< after {after}) was reported or marked: \
+                                             actions={actions:?}\nseed={seed}\n{}",
+                                            trace.join("\n")
+                                        );
+                                        predates_removed_reconciled += 1;
+                                    } else if reported {
+                                        after_removed_reconciled += 1;
+                                    }
+                                }
+                            }
+                            if advance_mutations(&h) != mutations_before {
+                                let settle = h.app.wf.reconcile().await;
+                                pull_gh_mutations(&h, &mut gh);
+                                assert!(
+                                    settle.is_ok(),
+                                    "settling reconcile after advance failed: {settle:?}\nseed={seed}\n{}",
+                                    trace.join("\n")
+                                );
+                            }
+                            let retrying_prs: BTreeSet<(String, u64)> = h
+                                .app
+                                .store
+                                .merge_waits()
+                                .unwrap()
+                                .into_iter()
+                                .filter(|w| w.failures > 0)
+                                .map(|w| (w.repo, w.pr))
+                                .collect();
                             let before_msgs = h.sent().len();
                             let before_cards: Vec<String> =
                                 h.app.wf.cards().unwrap().into_iter().map(|c| c.id).collect();
+                            let before_set: BTreeSet<String> = before_cards.iter().cloned().collect();
                             let rec2 = h.app.wf.reconcile().await;
+                            pull_gh_mutations(&h, &mut gh);
                             assert!(
                                 rec2.is_ok(),
                                 "second reconcile failed: {rec2:?}\nseed={seed}\n{}",
                                 trace.join("\n")
                             );
-                            let after_cards: Vec<String> =
-                                h.app.wf.cards().unwrap().into_iter().map(|c| c.id).collect();
+                            let after_cards: Vec<String> = h
+                                .app
+                                .wf
+                                .cards()
+                                .unwrap()
+                                .into_iter()
+                                .filter(|c| {
+                                    before_set.contains(&c.id)
+                                        || !(c.kind == "report"
+                                            && c.text.contains("GitHub would not ")
+                                            && c.pr
+                                                .as_ref()
+                                                .is_some_and(|p| retrying_prs.contains(&(p.repo.clone(), p.number))))
+                                })
+                                .map(|c| c.id)
+                                .collect();
                             assert_eq!(
                                 h.sent().len(),
                                 before_msgs,
@@ -490,7 +660,7 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
                             assert_eq!(
                                 after_cards,
                                 before_cards,
-                                "reconcile was not idempotent (changed cards)\nseed={seed}\n{}",
+                                "reconcile was not idempotent (changed cards outside retrying waits {retrying_prs:?})\nseed={seed}\n{}",
                                 trace.join("\n")
                             );
                         }
@@ -535,8 +705,19 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
                                 let _ = h.app.wf.answer(&c.id, ans).await;
                                 trace.push(format!("#{step} answer {} with {ans:?}", c.id));
                             } else {
-                                let _ = h.app.wf.dismiss(&c.id);
-                                trace.push(format!("#{step} dismiss {}", c.id));
+                                let res = h
+                                    .app
+                                    .wf
+                                    .dismiss_at(&c.id, &CardRef { at: Some(&c.at), token: Some(&c.token) })
+                                    .await;
+                                assert!(
+                                    res.is_ok(),
+                                    "dismiss_at rejected freshly read card {}: {res:?}\nseed={seed}\n{}",
+                                    c.id,
+                                    trace.join("\n")
+                                );
+                                dismiss_at_calls += 1;
+                                trace.push(format!("#{step} dismiss_at {}", c.id));
                             }
                         }
                     }
@@ -587,8 +768,8 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
                                 })
                             })
                             .collect();
-                        h.tick(200).await;
-                        trace.push(format!("#{step} tick(200)"));
+                        h.advance_tick(200).await;
+                        trace.push(format!("#{step} advance_tick(200)"));
                         for (w, before) in waiting_before {
                             let after = h
                                 .sent()
@@ -601,7 +782,7 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
                             assert_eq!(
                                 after,
                                 before,
-                                "waiting worker {w} was nudged during tick(200)\nseed={seed}\n{}",
+                                "waiting worker {w} was nudged during advance_tick(200)\nseed={seed}\n{}",
                                 trace.join("\n")
                             );
                         }
@@ -625,19 +806,19 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
                         let ticket = TICKETS[rng.pick(TICKETS.len())];
                         let m = gh.get_mut(&pr).unwrap();
                         if m.exists && m.state == "OPEN" {
-                            match rng.pick(4) {
-                                0 => {
+                            match rng.pick(7) {
+                                0 | 1 => {
                                     let head = HEADS[m.head_idx].to_string();
                                     let w = MergeWait {
                                         repo: REPO.into(),
                                         pr,
                                         head: head.clone(),
-                                        pull_request_id: "PR_id".into(),
+                                        pull_request_id: format!("PR_{REPO}_{pr}"),
                                         method: None,
                                         thread: Some(ticket.into()),
                                         label: Some(format!("widgets#{pr}")),
                                         merge_state: m.merge_state.into(),
-                                        at: "2026-11-23T12:01:00Z".into(),
+                                        at: clock_now(&h),
                                         status: if m.queued { WaitStatus::Sent } else { WaitStatus::Waiting },
                                         approval: format!("appr-{seed}-{step}"),
                                         failures: 0,
@@ -646,20 +827,46 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
                                     h.app.store.merge_wait_put(&w).unwrap();
                                     trace.push(format!("#{step} merge_wait_put #{pr}@{head} for {ticket}"));
                                 }
-                                1 => {
+                                2 => {
+                                    // Deliberate reassigned-ID mismatch to exercise reconcile's node-ID rejection path
+                                    let head = HEADS[m.head_idx].to_string();
+                                    let w = MergeWait {
+                                        repo: REPO.into(),
+                                        pr,
+                                        head: head.clone(),
+                                        pull_request_id: format!("PR_{REPO}_{pr}_reassigned"),
+                                        method: None,
+                                        thread: Some(ticket.into()),
+                                        label: Some(format!("widgets#{pr}")),
+                                        merge_state: m.merge_state.into(),
+                                        at: clock_now(&h),
+                                        status: if m.queued { WaitStatus::Sent } else { WaitStatus::Waiting },
+                                        approval: format!("appr-{seed}-{step}-reassigned"),
+                                        failures: 0,
+                                        last_error: None,
+                                    };
+                                    h.app.store.merge_wait_put(&w).unwrap();
+                                    trace.push(format!(
+                                        "#{step} merge_wait_put(reassigned_id) #{pr}@{head} for {ticket}"
+                                    ));
+                                }
+                                3 => {
                                     m.queue_enabled = !m.queue_enabled;
                                     m.queued = m.queue_enabled && rng.coin();
-                                    m.removed_reason = None;
+                                    m.removed = None;
                                     trace.push(format!(
                                         "#{step} gh queue #{pr} enabled={} queued={}",
                                         m.queue_enabled, m.queued
                                     ));
                                     sync_gh(&h, &gh);
                                 }
-                                2 => {
+                                4 | 5 => {
                                     m.queued = false;
-                                    m.removed_reason = Some(if rng.coin() { "failed_checks" } else { "merge_conflict" });
-                                    trace.push(format!("#{step} gh queue drop #{pr} reason={:?}", m.removed_reason));
+                                    let reason = if rng.coin() { "failed_checks" } else { "merge_conflict" };
+                                    let predates = rng.coin();
+                                    let at = if predates { before_tracking(t0) } else { clock_now(&h) };
+                                    m.removed = Some((reason, at));
+                                    trace.push(format!("#{step} gh queue drop #{pr} removed={:?}", m.removed));
                                     sync_gh(&h, &gh);
                                 }
                                 _ => {
@@ -739,6 +946,38 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
             assert!(res.is_ok(), "step timed out (possible deadlock) at seed={seed}\n{}", trace.join("\n"));
             assert_invariants(&h, seed, &trace, &closed_workers, healthy_reconcile, &gh);
         }
+        let (merges, enqueues) = advance_mutations(&h);
+        advance_merges += merges;
+        advance_enqueues += enqueues;
+        reassigned_id_rejects += h
+            .app
+            .store
+            .waiting_data(BOARD, true)
+            .unwrap()
+            .into_iter()
+            .filter(|(item, _, _, _)| item.text.contains("is no longer the pull request that was approved"))
+            .count();
+    }
+    if seeds >= 60 {
+        assert!(
+            advance_merges > 0 && advance_enqueues > 0,
+            "expected reconcile::advance to exercise both merge and enqueue across {seeds} seeds \
+             (merges={advance_merges}, enqueues={advance_enqueues})"
+        );
+        assert!(
+            reassigned_id_rejects > 0,
+            "expected deliberate reassigned-ID mismatch branch to fire across {seeds} seeds"
+        );
+        assert!(
+            predates_finished_reconciled > 0
+                && after_finished_reconciled > 0
+                && predates_removed_reconciled > 0
+                && after_removed_reconciled > 0,
+            "expected both pre-tracking and after-tracking GitHub events to be reconciled across {seeds} seeds \
+             (predates_finished={predates_finished_reconciled}, after_finished={after_finished_reconciled}, \
+              predates_removed={predates_removed_reconciled}, after_removed={after_removed_reconciled})"
+        );
+        assert!(dismiss_at_calls > 0, "expected op 11 dismiss_at path to run across {seeds} seeds");
     }
 }
 
@@ -748,6 +987,11 @@ async fn concurrent_chaos_races_never_deadlock_or_violate_invariants() {
     for seed in 0..seeds as u64 {
         let mut rng = Rng::new(seed ^ 0x55aa_1234_9876_fedc);
         let (h, mut gh) = setup_chaos();
+        for m in gh.values_mut() {
+            m.queue_enabled = rng.coin();
+        }
+        sync_gh(&h, &gh);
+        let t0 = h.clock.now();
         let mut trace = Vec::new();
 
         for (i, &t) in TICKETS.iter().enumerate() {
@@ -769,6 +1013,7 @@ async fn concurrent_chaos_races_never_deadlock_or_violate_invariants() {
 
         h.github.set_delay(Duration::from_millis(15));
         for round in 0..6 {
+            h.clock.advance_minutes(1);
             let race = rng.pick(5);
             let res = tokio::time::timeout(Duration::from_secs(5), async {
                 match race {
@@ -800,6 +1045,9 @@ async fn concurrent_chaos_races_never_deadlock_or_violate_invariants() {
                                     m.head_idx = (m.head_idx + 1) % HEADS.len();
                                 } else {
                                     m.state = "MERGED";
+                                    m.queued = false;
+                                    let predates = rng.pick(4) == 0;
+                                    m.ended_at = Some(if predates { before_tracking(t0) } else { clock_now(&h) });
                                 }
                             }
                         }

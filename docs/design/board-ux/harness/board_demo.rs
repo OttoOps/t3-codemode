@@ -318,7 +318,7 @@ impl Demo {
             }
             if churn && n.is_multiple_of(5) {
                 if let Some(c) = self.app.wf.cards().ok().and_then(|c| c.into_iter().next()) {
-                    let _ = self.app.wf.dismiss(&c.id);
+                    let _ = self.app.wf.dismiss(&c.id).await;
                 }
                 if let Some(t) = late.pop_front() {
                     gated.remove(&t);

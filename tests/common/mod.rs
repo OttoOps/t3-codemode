@@ -152,6 +152,12 @@ impl H {
         self.app.wf.tick().await.unwrap()
     }
 
+    pub async fn advance_tick(&self, minutes: i64) -> Vec<String> {
+        assert!(minutes >= 0, "advance_tick requires non-negative minutes, got {minutes}");
+        self.clock.advance_minutes(minutes);
+        self.app.wf.tick().await.unwrap()
+    }
+
     pub fn sent(&self) -> Vec<Value> {
         self.fake.sent()
     }

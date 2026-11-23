@@ -1327,7 +1327,7 @@ async fn close_idle_open_ticket_through_route_then_settle() {
     let gate =
         s.h.wf(TICKET, "send", json!({"kind": "gate", "gate": "e2e", "body": "**ACTION NEEDED:** reply \"close\""}))
             .await;
-    s.h.app.wf.dismiss(gate["card"].as_str().unwrap()).unwrap();
+    s.h.app.wf.dismiss(gate["card"].as_str().unwrap()).await.unwrap();
 
     let close = format!("/api/tickets/{TICKET}/close");
     assert_eq!(s.post(&close, json!({}), None, None).await.status(), 403);
@@ -4906,7 +4906,7 @@ async fn a_dismissed_gate_is_marked_on_the_ticket_last_message() {
     let last = |h: &H| by_label(&snapshot(h)["tree"], "widgets#41")["last"].clone();
     assert!(last(&h).get("dismissed").is_none(), "{}", last(&h));
     let id = cards(&h)[0]["id"].as_str().unwrap().to_string();
-    h.app.wf.dismiss(&id).unwrap();
+    h.app.wf.dismiss(&id).await.unwrap();
     assert_eq!(last(&h)["dismissed"], true, "{}", last(&h));
 }
 
