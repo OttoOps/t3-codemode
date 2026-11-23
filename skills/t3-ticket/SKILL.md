@@ -245,8 +245,9 @@ For PR n:
    the instance now with `await wf.pick({ pool: "<name>" })`, as
    [A pool on a model slot](../t3-workflow/slots.md#a-pool-on-a-model-slot)
    says.
-3. `const { brief } = await wf.openChild({ role: "worker", label, issue, parentIssue, part })`,
-   with the worker's **label** and identity:
+3. `const { brief } = await wf.openChild({ role: "worker", label, issue, parentIssue, part, pr })`,
+   with the worker's **label**, identity and **PR format** (`pr`, below the
+   table):
 
    | Field | PR with sub-issue `#<s>` | PR with only the issue, or no issue |
    |---|---|---|
@@ -254,6 +255,17 @@ For PR n:
    | `issue` | `<owner>/<repo>#<s>` | `<owner>/<repo>#<n>`; left out with no issue |
    | `parentIssue` | `<owner>/<repo>#<n>` | left out |
    | `part` | `n/N` | `n/N` |
+
+   `pr` is the PR description format from step 1, which t3cm checks the
+   worker's opened PR against: `{ format, sections, passes, mergeOnly }`.
+   `format` names the format skill (`"pr"` for the `pr` skill, which also
+   requires its Summary, Evidence and Merge Danger sections and their
+   elements). `sections` maps each further heading the repo requires, such
+   as a PR template's, to the text it must hold (`{ "Compatibility": [] }`).
+   `passes` lists the PR's `Passes:` line. `mergeOnly: true` marks a
+   targeted fix PR (see "Ready to merge"). With no format set by the repo,
+   leave `format` out, and leave `pr` out too unless the PR is a targeted
+   fix (`pr: { mergeOnly: true }`).
 
    The sub-issue leads the label because T3's sidebar shows only about 28
    characters of a title. Put `brief` verbatim in the launch brief. The
@@ -320,9 +332,19 @@ such as Antigravity, read `~/.agents/skills/t3-worker/SKILL.md` and the
 Every worker message opens with a `[t3cm` header and needs no command
 before you act. A message about a closed link no longer arrives. The body
 says which part below handles it: a blocker or a worker's own gate is the
-next three paragraphs, "PR opened", "ready to merge" and "updated" are their
-sections, and the `handoff` is "The handoff". A `note` never wakes this
-thread; it shows in the digest.
+next three paragraphs, "PR opened", "ready to merge" and "updated" are the
+sections "PR opened", "Ready to merge" and "PR updated", and the `handoff`
+is "The handoff". A `note` never wakes this thread; it shows in the digest.
+
+On the board, a worker reports its PR with `wf.pr`, and t3cm runs those
+three sections in code. It checks an opened PR's Publishing line and
+description and sends the worker any rewrite request. It records an updated
+head and drops the merge card for the old one. On ready to merge, it
+verifies the PR on GitHub and opens the merge card with the answers the
+delivery slot calls for. Each shows up as a "handled for you" line in the
+digest, and none wakes this thread. A worker's PR message reaches this
+thread only when t3cm could not decide: it ends with "t3cm left this to the
+ticket: <why>". Then run its section below.
 
 On the board, t3cm handles a worker's blocker, and every gate it opens
 other than `merge` and `delivery:<id>`, without this thread. It puts each
@@ -330,15 +352,9 @@ on the board as a card tagged with the worker, and sends the user's answer
 straight to the worker when it is one of the card's buttons or "hold".
 Each step shows up as a "handled for you" line in the digest of this
 thread's next wake. Any other answer arrives here as a `[t3cm reply]`
-saying the worker still waits on it: decide what it asks of the worker,
-send that with `wf.reply`, then end the turn. An answer that starts with
-"merge" arrives here too. When it answers a worker's "ready to merge" sent
-under a gate of its own, treat that card as the worker's "ready to merge":
-run "Ready to merge" for its PR, taking the head the card names, or the
-PR's current `headRefOid` when it names none. That opens the proper merge
-gate with the answers the delivery slot calls for, and the earlier answer
-does not count as approval. Treat any other "merge" answer like the
-free-text answers above.
+saying the worker still waits on it, and so does an answer that starts with
+"merge": decide what it asks of the worker, send that with `wf.reply`, then
+end the turn.
 
 Under an overseer thread, or with `relay` set to `false` for workers in
 t3cm's roles config, the worker's blocker or gate wakes this thread
@@ -357,7 +373,8 @@ to the worker, then end the turn.
 
 ### PR opened
 
-First check two things. (a) The worker's message carries a `Publishing:`
+This runs when an opened PR reaches this thread (above). First check two
+things. (a) The worker's message carries a `Publishing:`
 line that names the brief's format and each pass. (b) The published
 description (`gh pr view <number> -R <repo> --json body`) has every
 section and required element the format sets (for the `pr` skill: the
@@ -372,10 +389,21 @@ Then tell the user the PR is open, with its URL, so they can review it
 while its checks run. When the worker reported "Checks: none in this repo",
 go straight to "Ready to merge" below. Otherwise end the turn.
 
+### PR updated
+
+The worker pushed a new head. Note it: the merge gate and `wf.merge` take
+only the head the worker last named. When a merge gate for an older head is
+still open, clear it (`wf.gate({ clear: true })`). In a repo with no CI, run
+"Ready to merge" at the new head, since no "ready to merge" follows.
+Otherwise wait for the worker's "ready to merge" at the new head. End the
+turn.
+
 ### Ready to merge
 
-A worker's "ready to merge" message, or "opened" in a repo with no CI,
-starts the merge gate. Verify on GitHub first:
+A worker's "ready to merge" message that reaches this thread (above), or
+"opened" in a repo with no CI, starts the merge gate. On the user's
+answer to a merge card t3cm opened, go straight to "On the user's word".
+Verify on GitHub first:
 
 `gh pr view <number> -R <repo> --json state,isDraft,headRefOid,mergeStateStatus,statusCheckRollup,files`
 

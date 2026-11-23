@@ -29,9 +29,12 @@ the brief's link block (through `mcp__t3cm__execute`, or piped to
 [Reaching t3cm](../t3-workflow/SKILL.md#reaching-t3cm)); it binds the link.
 From then on, every message to the orchestrator goes through `wf.send(...)`,
 and a message that opens with `[t3cm` needs no command before you act on its
-body. The kinds this procedure sends: `event` (PR opened, ready to merge,
-updated), `note` (routine progress that needs nothing from the orchestrator:
-built, review started, checks green, a skipped slot), `gate` (step 7),
+body. Your PR's own steps (opened, updated, ready to merge) go through
+`wf.pr(...)` (steps 3 and 4), which acts on them in code and sends the
+orchestrator what it still has to see. The kinds this procedure sends with
+`wf.send`: `note` (routine progress that needs nothing from the
+orchestrator: built, review started, checks green, a skipped slot), `event`
+(work with its own issue, step 5), `gate` (review findings and step 7),
 `blocker` (a stop: wrong checkout, wrong identity), and `handoff` (step 6).
 
 `t3-workflow` asks each role for one thing. Yours is:
@@ -43,12 +46,12 @@ built, review started, checks green, a skipped slot), `gate` (step 7),
   and act on any wake you missed (step 4). Then carry on from that step.
 
 When you wait on a person, send the gate:
-`await wf.send({ kind: "gate", gate: "merge", body: "<action line>" })` when
-you send "ready to merge", `gate: "review"` when you send review findings
-for the user to decide, and the gate's own name for step 7. It opens the
-gate, so the watcher reads your silence as a wait, not a stall. Clear it
-with `await wf.gate({ clear: true })` when the answer, "Merged", or
-"Delivered" arrives.
+`await wf.send({ kind: "gate", gate: "review", body: "<action line>" })` when
+you send review findings for the user to decide, and the gate's own name
+for step 7. It opens the gate, so the watcher reads your silence as a wait,
+not a stall. A `wf.pr` ready call opens the `merge` gate on your link for
+you. Clear a gate with `await wf.gate({ clear: true })` when the answer,
+"Merged", or "Delivered" arrives.
 
 When the orchestrator's ticket is on the board, t3cm puts a `blocker`, or
 any gate other than `merge` and `delivery:<id>`, in front of the user as
@@ -126,8 +129,8 @@ says (sending any skip note it calls for). Run the returned skill on this
 branch as its `how` says, before anything is pushed. Its base is
 `git merge-base HEAD origin/main`, its intent is the PR's acceptance line,
 and its out-of-scope is the work the brief gives to later PRs. Follow it to
-its verdict. Name any review worktree it could not remove in the "opened"
-message (step 3). Commit each fix the review leads to, with the identity
+its verdict. Name any review worktree it could not remove in the `wf.pr`
+opened call's `body` (step 3). Commit each fix the review leads to, with the identity
 check above.
 
 - **Agreed:** go to step 3. The PR description carries any line the
@@ -161,10 +164,16 @@ does not.
    <file>`. The title follows Conventional Commits.
 3. `link_pull_request` with the PR URL.
 4. `watch_pull_request` on it.
-5. Send the orchestrator "PR n/N opened: #<number> <PR URL>, head <sha>",
-   followed by the `Publishing:` line (Publishing, step 3), and one of:
-   - "Checks: none in this repo" when the repo runs no CI on PRs;
-   - "Checks: pending" otherwise.
+5. Report it:
+   `await wf.pr({ event: "opened", repo: "<owner>/<name>", pr: <number>, head: "<sha>", publishing: "<Publishing line>", checks: "pending" })`,
+   with the `Publishing:` line from Publishing, step 3, and
+   `checks: "none"` when the repo runs no CI on PRs. Name any review
+   worktree you could not remove in `body`. Act on its `status`:
+   - `open`: t3cm checked the description and the Publishing line.
+   - `rewrite`: do what `message` says (`gh pr edit <number> --body-file
+     <file>`, through Publishing again), then call the same `wf.pr` opened
+     again with the new Publishing line.
+   - `ticket`: t3cm sent it to the orchestrator, for the reason in `why`.
 6. End the turn.
 
 The watcher wakes you on failed checks, passed checks, comments, reviews,
@@ -198,16 +207,29 @@ does those and messages you. Never merge the PR yourself, through `gh`,
 - **A conflict:** `git fetch origin`, rebase on `origin/main`, re-run the
   done-checks, push with `--force-with-lease=<branch>:<old head sha>`. The
   PR targets `main`; it is never stacked on another PR.
-- **The required checks passed:** send the orchestrator "PR n/N ready to
-  merge: #<number>, head <sha>, checks passed" as the `merge` gate
-  (`await wf.send({ kind: "gate", gate: "merge", body: "<action line>" })`).
-  Keep `head <sha>` in it: a merge approval holds only for the head its
-  gate names. Send it once per head sha, and never while a `review` gate is
-  open: send it after the user's answer clears that gate.
-- **After any push:** when you already sent "opened" or "ready" for an older
-  head, send "PR n/N updated: #<number>, head <sha>" with what changed. The
-  orchestrator merges only at the head you named (`wf.merge` takes it as
-  `head`), so it must know the head.
+- **The required checks passed:** call
+  `await wf.pr({ event: "ready", repo: "<owner>/<name>", pr: <number>, head: "<sha>" })`.
+  A merge approval holds only for the head it names. Call it once per head
+  sha, and never while a `review` gate is open: call it after the user's
+  answer clears that gate. Act on its `status`:
+  - `gated`: the merge card is on the user's board, and your link holds
+    the `merge` gate. Wait for the orchestrator's "Merged" message.
+  - `waiting`: a check is still running. t3cm opens the merge card once it
+    finishes, or `detail` says to call ready again.
+  - `failing`, or `refused`: for a draft with green checks, mark the PR
+    ready for review and call `wf.pr` ready again at the same SHA without
+    pushing; for a failing check, moved head, or conflict, handle it as the
+    wakes above say, push, then send updated.
+  - `ticket`: t3cm sent the orchestrator your "ready to merge" as its
+    `merge` gate, for the reason in `why`.
+- **After any push:** when you already called `wf.pr` opened or ready for
+  an older head, call
+  `await wf.pr({ event: "updated", repo: "<owner>/<name>", pr: <number>, head: "<new sha>", body: "<what changed>" })`.
+  It records the head and drops any merge card for the old one, because the
+  orchestrator merges only at the head you named. Then call ready again
+  when the new head's checks pass.
+- **A `[t3cm reply from=t3cm` about your PR:** a check failed, or the PR
+  changed, after a `waiting` ready. Treat it as the wake it names.
 
 - **A message that opens with `[t3cm nudge`:** "The link protocol"
   above. It sends you through your resume step, then a note, a gate, or the
@@ -248,8 +270,8 @@ this thread and this worktree:
    When that name is taken (local branch, `git ls-remote --heads origin`,
    or `gh pr list --state all --head <name>`), add `-2`, `-3`.
 2. Steps 2 to 4 for the new PR, its review included. Its acceptance line is
-   "the failed delivery stage succeeds". Its "opened" message names it as a
-   follow-up of #<number>.
+   "the failed delivery stage succeeds". Its `wf.pr` opened call's `body`
+   names it as a follow-up of #<number>.
 
 You own the change until the fix passes its `pr`-scoped delivery stages.
 (`ticket`-scoped failures on `main` run after you hand off and are handled
@@ -352,8 +374,8 @@ not included.
    exception. An empty `skills` list runs no pass. A pass scoped to part of
    the text, such as a skill call whose arguments name only one section,
    does not cover the rest.
-3. **Report.** Where you report the publish (for a PR, the "opened"
-   message), add a `Publishing:` line: the format skill you invoked, the
+3. **Report.** Where you report the publish (for a PR, the `publishing`
+   field of the `wf.pr` opened call), add a `Publishing:` line: the format skill you invoked, the
    template you filled, or "no format set by the repo"; each pass you ran,
    with its result, or "passes: none configured"; each skipped pass; and
    each rule a pass set that you did not apply, with the reason. Never say

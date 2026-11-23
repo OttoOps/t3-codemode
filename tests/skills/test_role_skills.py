@@ -144,10 +144,23 @@ class MergeRouteTests(unittest.TestCase):
         for path, line in lines:
             self.assertRegex(line, r"at head (<sha>|[0-9a-f]{7,40})", f"{path.relative_to(ROOT)}: {line}")
 
-    def test_the_worker_merge_gate_names_its_head(self):
-        worker = (SKILLS / "t3-worker" / "procedure.md").read_text()
-        self.assertIn('ready to\n  merge: #<number>, head <sha>, checks passed"', worker)
-        self.assertIn("Keep `head <sha>`", worker)
+    def test_the_worker_reports_each_pr_step_with_its_head(self):
+        worker = " ".join((SKILLS / "t3-worker" / "procedure.md").read_text().split())
+        for event in ("opened", "updated", "ready"):
+            self.assertIn(f'wf.pr({{ event: "{event}", repo: "<owner>/<name>", pr: <number>, head: "<', worker)
+        self.assertIn('publishing: "<Publishing line>"', worker)
+        self.assertIn("A merge approval holds only for the head it names", worker)
+        self.assertNotIn('gate: "merge", body', worker)
+
+    def test_the_ticket_hands_its_pr_format_to_the_worker_link(self):
+        ticket = " ".join(self.ticket.split())
+        self.assertIn("wf.openChild({ role: \"worker\", label, issue, parentIssue, part, pr })", ticket)
+        self.assertIn("{ format, sections, passes, mergeOnly }", ticket)
+        between = " ".join(section(self.ticket, "## 4. Between workers").split())
+        self.assertIn("t3cm left this to the ticket: <why>", between)
+        self.assertIn("### PR updated", section(self.ticket, "## 4. Between workers"))
+        self.assertNotIn("misnamed", between)
+        self.assertNotIn("sent under a gate of its own", between)
 
     def test_the_merge_wait_reads_what_the_reconcile_sends(self):
         wait = " ".join(section(self.ticket, "#### The merge wait").split())
