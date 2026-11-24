@@ -81,7 +81,7 @@ pub fn change_refs(text: &str, forges: &Forges) -> Vec<ChangeRef> {
     out
 }
 
-fn gl_name(s: &str) -> bool {
+pub(crate) fn gl_name(s: &str) -> bool {
     !s.is_empty() && s != "-" && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
