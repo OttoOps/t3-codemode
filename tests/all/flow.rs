@@ -1936,3 +1936,126 @@ async fn local_mirror_origin_falls_back_to_github_identity_for_discovery_and_lau
     assert_eq!(pick["picked"][0]["launched"]["ok"], true, "{pick}");
     assert_eq!(h_launch.fake.launched()[0]["projectId"], "p-mirror");
 }
+
+#[tokio::test]
+async fn single_segment_non_github_and_unavailable_origins_block_identity_fallback() {
+    let mut ssh_proj = project("p-ssh", "/src/ssh");
+    ssh_proj["repositoryIdentity"] = json!({"owner": "acme", "name": "widgets"});
+    let mut timeout_proj = project("p-timeout", "/src/timeout");
+    timeout_proj["repositoryIdentity"] = json!({"owner": "acme", "name": "widgets"});
+
+    // Zero-config graph must not discover acme/widgets from either project.
+    let h_graph = H::build(Vec::new(), Config::default());
+    h_graph.fake.set_projects(vec![ssh_proj.clone(), timeout_proj.clone()]);
+    h_graph.remotes.set("/src/ssh", "ssh://git@git.example.com/widgets.git");
+    h_graph.remotes.set_unavailable("/src/timeout");
+    issue(&h_graph, REPO, 1, &[], 1);
+
+    let g = graph(&h_graph).await;
+    assert_eq!(g["graph"]["nodes"], json!([]), "{g}");
+    assert!(h_graph.github.calls().is_empty(), "{:?}", h_graph.github.calls());
+
+    // Auto-launch must not route acme/widgets issues to either project.
+    let cfg = Config::from_value(json!({"flow": {"repos": [REPO], "maxTickets": 1, "launch": "auto"}})).unwrap();
+    let h_launch = H::build(Vec::new(), cfg);
+    h_launch.fake.set_projects(vec![ssh_proj, timeout_proj]);
+    h_launch.remotes.set("/src/ssh", "ssh://git@git.example.com/widgets.git");
+    h_launch.remotes.set_unavailable("/src/timeout");
+    issue(&h_launch, REPO, 2, &[], 1);
+
+    let pick = next(&h_launch).await;
+    assert_eq!(pick["picked"][0]["launched"]["ok"], false, "{pick}");
+    assert!(h_launch.fake.launched().is_empty());
+}
+
+#[tokio::test]
+async fn discovery_does_not_overwrite_cached_project_repo_for_legacy_tickets() {
+    let fork = "fork/widgets";
+    let cfg = Config::from_value(json!({"flow": {"includeRepos": [REPO], "maxTickets": 2, "launch": "ask"}})).unwrap();
+    let h = H::build(Vec::new(), cfg);
+    let mut proj = project("p-widgets", "/src/widgets");
+    proj["repositoryIdentity"] = json!({"owner": "acme", "name": "widgets"});
+    h.fake.set_projects(vec![proj]);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+
+    // Open a legacy ticket without a stored issue URL, placed in p-widgets, and learn its repo.
+    let mut th = t3_codemode::fake::thread("mcp:legacy41", "running", T0);
+    th["projectId"] = json!("p-widgets");
+    h.fake.put(th);
+    h.wf("mcp:legacy41", "join", json!({"parent": BOARD, "label": "widgets#41", "role": "ticket"})).await;
+    h.app.wf.board_tick().await.unwrap();
+
+    // Now the workspace origin points at fork/widgets while both repos have an open #41.
+    h.remotes.set("/src/widgets", "git@github.com:fork/widgets.git");
+    issue(&h, REPO, 41, &[], 1);
+    issue(&h, fork, 41, &[], 2);
+
+    let g = graph(&h).await;
+
+    assert_eq!(g["running"].as_array().unwrap().len(), 1, "{g}");
+    assert_eq!(g["running"][0]["repo"], REPO, "legacy ticket must stay on original repo: {g}");
+    assert_eq!(g["queue"].as_array().unwrap().len(), 1, "{g}");
+    assert_eq!(g["queue"][0]["repo"], fork, "fork#41 must remain queued instead of suppressed: {g}");
+}
+
+#[tokio::test]
+async fn renamed_repo_routes_launch_applies_canonical_exclude_and_deduplicates_issues() {
+    let old = "acme/old";
+    let cfg = Config::from_value(json!({"flow": {"includeRepos": [REPO], "maxTickets": 2, "launch": "auto"}})).unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.fake.set_projects(vec![project("p-old", "/src/old")]);
+    h.remotes.set("/src/old", "https://github.com/acme/old.git");
+    h.github.alias_repo(old, REPO);
+    issue(&h, REPO, 1, &[], 1);
+
+    // Discovered acme/old and included acme/widgets both return acme/widgets#1: queue lists it once.
+    let f = flow(&h).await;
+    assert_eq!(labels(&f["queue"]), ["widgets#1"], "{f}");
+
+    // Launch routing uses the verified canonical alias so p-old receives the launch.
+    let pick = next(&h).await;
+    assert_eq!(pick["picked"][0]["launched"]["ok"], true, "{pick}");
+    assert_eq!(h.fake.launched()[0]["projectId"], "p-old");
+
+    // Excluding the canonical name acme/widgets suppresses issues discovered via stale acme/old.
+    let ex_cfg =
+        Config::from_value(json!({"flow": {"excludeRepos": [REPO], "maxTickets": 1, "launch": "auto"}})).unwrap();
+    let h2 = H::build(Vec::new(), ex_cfg);
+    h2.fake.set_projects(vec![project("p-old", "/src/old")]);
+    h2.remotes.set("/src/old", "https://github.com/acme/old.git");
+    h2.github.alias_repo(old, REPO);
+    issue(&h2, REPO, 2, &[], 1);
+
+    let f2 = flow(&h2).await;
+    assert_eq!(f2["queue"], json!([]), "{f2}");
+    let pick2 = next(&h2).await;
+    assert_eq!(pick2["picked"], json!([]), "{pick2}");
+    assert!(h2.fake.launched().is_empty());
+}
+
+#[tokio::test]
+async fn unreadable_discovered_repo_preserves_running_ticket_capacity() {
+    let cfg = Config::from_value(json!({"flow": {"maxTickets": 1, "launch": "auto"}})).unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets"), project("p-tools", "/src/tools")]);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    h.remotes.set("/src/tools", "git@github.com:acme/tools.git");
+    // Only acme/tools is readable in FakeGitHub; acme/widgets returns a GraphQL error.
+    issue(&h, TOOLS, 2, &[], 1);
+
+    // Open running ticket in acme/widgets fills the single maxTickets slot.
+    let mut th = t3_codemode::fake::thread("mcp:w1", "running", T0);
+    th["projectId"] = json!("p-widgets");
+    h.fake.put(th);
+    h.wf(
+        "mcp:w1",
+        "join",
+        json!({"parent": BOARD, "label": "widgets#1", "role": "ticket", "issue": "https://github.com/acme/widgets/issues/1"}),
+    )
+    .await;
+
+    let pick = next(&h).await;
+    assert_eq!(pick["free"], 0, "unreadable repo's running ticket must keep its slot: {pick}");
+    assert_eq!(pick["picked"], json!([]), "{pick}");
+    assert!(h.fake.launched().is_empty());
+}

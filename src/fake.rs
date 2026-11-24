@@ -44,17 +44,30 @@ pub struct FakeT3 {
 }
 
 #[derive(Default)]
-pub struct FakeRemotes(Mutex<BTreeMap<String, String>>);
+pub struct FakeRemotes(Mutex<BTreeMap<String, crate::board::Origin>>);
 
 impl FakeRemotes {
     pub fn set(&self, root: &str, url: &str) {
-        self.0.lock().unwrap().insert(root.into(), url.into());
+        self.0.lock().unwrap().insert(root.into(), crate::board::Origin::Url(url.into()));
+    }
+
+    pub fn set_unavailable(&self, root: &str) {
+        self.0.lock().unwrap().insert(root.into(), crate::board::Origin::Unavailable);
     }
 }
 
 impl crate::board::Remotes for FakeRemotes {
     fn origin<'a>(&'a self, root: &'a str) -> BoxFut<'a, Option<String>> {
-        Box::pin(async move { self.0.lock().unwrap().get(root).cloned() })
+        Box::pin(async move {
+            match self.0.lock().unwrap().get(root).cloned() {
+                Some(crate::board::Origin::Url(url)) => Some(url),
+                _ => None,
+            }
+        })
+    }
+
+    fn origin_lookup<'a>(&'a self, root: &'a str) -> BoxFut<'a, crate::board::Origin> {
+        Box::pin(async move { self.0.lock().unwrap().get(root).cloned().unwrap_or(crate::board::Origin::Absent) })
     }
 }
 
@@ -520,6 +533,7 @@ impl T3Client for FakeT3 {
 struct GhState {
     delay: Duration,
     repos: BTreeMap<String, Value>,
+    repo_aliases: BTreeMap<String, String>,
     prs: BTreeMap<(String, u64), Value>,
     issues: BTreeMap<(String, u64), Value>,
     issue_page: usize,
@@ -618,6 +632,10 @@ impl FakeGitHub {
 
     pub fn set_default_method(&self, repo: &str, method: &str) {
         self.st().repos.insert(repo.into(), json!({"viewerDefaultMergeMethod": method}));
+    }
+
+    pub fn alias_repo(&self, from: &str, to: &str) {
+        self.st().repo_aliases.insert(from.to_ascii_lowercase(), to.to_string());
     }
 
     pub fn set_delay(&self, delay: Duration) {
@@ -759,8 +777,10 @@ fn full_issue_node(st: &GhState, i: &Value) -> Value {
 }
 
 fn flow_issues(st: &GhState, variables: &Value) -> Value {
-    let repo = format!("{}/{}", variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap())
+    let raw_repo = format!("{}/{}", variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap())
         .to_ascii_lowercase();
+    let canonical = st.repo_aliases.get(&raw_repo).cloned();
+    let repo = canonical.as_deref().map(str::to_ascii_lowercase).unwrap_or(raw_repo);
     if !st.repos.contains_key(&repo) {
         return gh_error(&format!("Could not resolve to a Repository with the name '{repo}'."));
     }
@@ -786,7 +806,12 @@ fn flow_issues(st: &GhState, variables: &Value) -> Value {
     let size = if st.issue_page == 0 { 100 } else { st.issue_page };
     let end = (start + size).min(matching.len());
     let nodes: Vec<Value> = matching[start.min(end)..end].iter().map(|i| full_issue_node(st, i)).collect();
-    let name = matching.first().and_then(|i| i["nameWithOwner"].as_str()).unwrap_or(&repo).to_string();
+    let name = matching
+        .first()
+        .and_then(|i| i["nameWithOwner"].as_str())
+        .or(canonical.as_deref())
+        .unwrap_or(&repo)
+        .to_string();
     json!({"data": {"repository": {"nameWithOwner": name, "issues": {
         "pageInfo": {"hasNextPage": end < matching.len(), "endCursor": (end < matching.len()).then(|| end.to_string())},
         "nodes": nodes
