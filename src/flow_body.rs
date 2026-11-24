@@ -293,6 +293,29 @@ fn fence_close(cursor: &LineCursor<'_>, open_ch: u8, open_len: usize) -> bool {
     bytes[len..].iter().all(|b| *b == b' ' || *b == b'\t' || *b == b'\r')
 }
 
+fn find_inline_code_end(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    let mut i = start;
+    while i < bytes.len() && bytes[i] == b'`' {
+        i += 1;
+    }
+    let tick_len = i - start;
+    let mut j = i;
+    while j < bytes.len() {
+        if bytes[j] == b'`' {
+            let cs = j;
+            while j < bytes.len() && bytes[j] == b'`' {
+                j += 1;
+            }
+            if j - cs == tick_len {
+                return Some((i, j));
+            }
+        } else {
+            j += 1;
+        }
+    }
+    None
+}
+
 fn strip_html_comments(line: &str, in_comment: &mut bool) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
@@ -304,13 +327,37 @@ fn strip_html_comments(line: &str, in_comment: &mut bool) -> String {
             } else {
                 break;
             }
-        } else if let Some(start) = rest.find("<!--") {
-            out.push_str(&rest[..start]);
-            *in_comment = true;
-            rest = &rest[start + 4..];
         } else {
-            out.push_str(rest);
-            break;
+            let bytes = rest.as_bytes();
+            let mut i = 0;
+            let mut started_comment = false;
+            while i < bytes.len() {
+                if bytes[i] == b'`' {
+                    if let Some((_, end)) = find_inline_code_end(bytes, i) {
+                        // Preserve inline code spans verbatim so `<!--` in backticks never starts a comment.
+                        out.push_str(&rest[i..end]);
+                        i = end;
+                    } else {
+                        let start = i;
+                        while i < bytes.len() && bytes[i] == b'`' {
+                            i += 1;
+                        }
+                        out.push_str(&rest[start..i]);
+                    }
+                } else if rest[i..].starts_with("<!--") {
+                    *in_comment = true;
+                    rest = &rest[i + 4..];
+                    started_comment = true;
+                    break;
+                } else {
+                    let ch = rest[i..].chars().next().expect("valid utf-8 boundary");
+                    out.push(ch);
+                    i += ch.len_utf8();
+                }
+            }
+            if !started_comment {
+                break;
+            }
         }
     }
     out
@@ -322,32 +369,14 @@ fn strip_inline_code(line: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'`' {
-            let start = i;
-            while i < bytes.len() && bytes[i] == b'`' {
-                i += 1;
-            }
-            let tick_len = i - start;
-            // Find matching run of exact length `tick_len`.
-            let mut j = i;
-            let mut closed = None;
-            while j < bytes.len() {
-                if bytes[j] == b'`' {
-                    let cs = j;
-                    while j < bytes.len() && bytes[j] == b'`' {
-                        j += 1;
-                    }
-                    if j - cs == tick_len {
-                        closed = Some(j);
-                        break;
-                    }
-                } else {
-                    j += 1;
-                }
-            }
-            if let Some(end) = closed {
+            if let Some((_, end)) = find_inline_code_end(bytes, i) {
                 out.push(' ');
                 i = end;
             } else {
+                let start = i;
+                while i < bytes.len() && bytes[i] == b'`' {
+                    i += 1;
+                }
                 out.push_str(&line[start..i]);
             }
         } else {
@@ -496,6 +525,20 @@ fn next_char(s: &str, i: usize) -> usize {
     i + s[i..].chars().next().map_or(1, char::len_utf8)
 }
 
+const MAX_GRAPHQL_ISSUE_NUMBER: u64 = i32::MAX as u64;
+
+fn is_valid_issue_number(number: u64) -> bool {
+    number > 0 && number <= MAX_GRAPHQL_ISSUE_NUMBER
+}
+
+fn is_opening_quote_byte(bytes: &[u8], i: usize) -> bool {
+    match bytes[i] {
+        b'"' => true,
+        b'\'' => i == 0 || !bytes[i - 1].is_ascii_alphanumeric(),
+        _ => false,
+    }
+}
+
 fn extract_explicit_refs(default_repo: &str, segment: &str) -> (Vec<BodyRef>, Vec<String>) {
     let mut found = Vec::new();
     let mut malformed = Vec::new();
@@ -515,7 +558,11 @@ fn extract_explicit_refs(default_repo: &str, segment: &str) -> (Vec<BodyRef>, Ve
                 if let Some(issue) = parse_github_issue_only(url)
                     && let Some((owner, repo, number)) = issue.github_parts()
                 {
-                    found.push(BodyRef::Issue { repo: format!("{owner}/{repo}"), number });
+                    if is_valid_issue_number(number) {
+                        found.push(BodyRef::Issue { repo: format!("{owner}/{repo}"), number });
+                    } else {
+                        malformed.push(url.to_string());
+                    }
                     i = after_br + 1 + close_p + 1;
                     continue;
                 }
@@ -535,7 +582,11 @@ fn extract_explicit_refs(default_repo: &str, segment: &str) -> (Vec<BodyRef>, Ve
             if let Some(issue) = parse_github_issue_only(raw_url)
                 && let Some((owner, repo, number)) = issue.github_parts()
             {
-                found.push(BodyRef::Issue { repo: format!("{owner}/{repo}"), number });
+                if is_valid_issue_number(number) {
+                    found.push(BodyRef::Issue { repo: format!("{owner}/{repo}"), number });
+                } else {
+                    malformed.push(raw_url.to_string());
+                }
                 i = end;
                 continue;
             }
@@ -566,7 +617,7 @@ fn extract_explicit_refs(default_repo: &str, segment: &str) -> (Vec<BodyRef>, Ve
                 if parts.len() == 2 && gh_name(parts[0]) && gh_name(parts[1]) && is_boundary_before(bytes, prefix_start)
                 {
                     if let Ok(number) = num_part.parse::<u64>()
-                        && number > 0
+                        && is_valid_issue_number(number)
                         && is_boundary_after(bytes, num_end)
                     {
                         found.push(BodyRef::Issue { repo: format!("{}/{}", parts[0], parts[1]), number });
@@ -580,11 +631,11 @@ fn extract_explicit_refs(default_repo: &str, segment: &str) -> (Vec<BodyRef>, Ve
                 continue;
             }
 
-            // 4. Same-repo ref: #N (or malformed #0 / #abc / bare #)
+            // 4. Same-repo ref: #N (or malformed #0 / #abc / out-of-range / bare #)
             if is_boundary_before(bytes, i) {
                 if !num_part.is_empty() && num_part.bytes().all(|b| b.is_ascii_digit()) {
                     if let Ok(number) = num_part.parse::<u64>()
-                        && number > 0
+                        && is_valid_issue_number(number)
                     {
                         found.push(BodyRef::Issue { repo: default_repo.to_string(), number });
                     } else {
@@ -633,7 +684,11 @@ fn split_top_level(raw: &str) -> Vec<String> {
             continue;
         }
         match ch {
-            '"' | '\'' => {
+            '"' => {
+                in_quote = Some(ch);
+                cur.push(ch);
+            }
+            '\'' if i == 0 || !chars[i - 1].is_alphanumeric() => {
                 in_quote = Some(ch);
                 cur.push(ch);
             }
@@ -697,7 +752,7 @@ fn split_and_clauses(segment: &str) -> Vec<String> {
             continue;
         }
         match b {
-            b'"' | b'\'' => in_quote = Some(b),
+            b'"' | b'\'' if is_opening_quote_byte(bytes, i) => in_quote = Some(b),
             b'(' => paren += 1,
             b')' => paren = paren.saturating_sub(1),
             b'[' => bracket += 1,
@@ -946,7 +1001,7 @@ fn slice_directive_tail(rest: &str, inside_parens: bool) -> (&str, &str) {
             continue;
         }
         match b {
-            b'"' | b'\'' => in_quote = Some(b),
+            b'"' | b'\'' if is_opening_quote_byte(bytes, i) => in_quote = Some(b),
             b'(' => paren += 1,
             b')' => {
                 if paren == 0 && inside_parens {
@@ -1098,7 +1153,7 @@ fn scan_unquoted_item_end(tail: &str, start: usize) -> usize {
             continue;
         }
         match b {
-            b'"' | b'\'' => in_quote = Some(b),
+            b'"' | b'\'' if is_opening_quote_byte(bytes, i) => in_quote = Some(b),
             b'(' => paren += 1,
             b')' => paren = paren.saturating_sub(1),
             b'[' => bracket += 1,
@@ -1428,7 +1483,11 @@ fn extract_leading_issue_ref(default_repo: &str, text: &str) -> Option<BodyRef> 
         if let Some(issue) = parse_github_issue_only(url)
             && let Some((owner, repo, number)) = issue.github_parts()
         {
-            return Some(BodyRef::Issue { repo: format!("{owner}/{repo}"), number });
+            return Some(if is_valid_issue_number(number) {
+                BodyRef::Issue { repo: format!("{owner}/{repo}"), number }
+            } else {
+                BodyRef::Malformed(url.to_string())
+            });
         }
     }
     let token = t.split_whitespace().next()?;
@@ -1774,9 +1833,7 @@ fn resolve_in_scope(query: &str, scope: &[&Candidate], optional: bool) -> Resolv
                     .copied()
                     .filter(|c| contains_word_bounded(&normalize_title(&c.title), &subtitle))
                     .collect();
-                if narrowed.len() == 1 {
-                    return decide(narrowed);
-                }
+                return decide(narrowed);
             }
             return decide(phase_hits);
         }
@@ -2319,6 +2376,61 @@ After: #48, Phase 1: Auth setup
         assert_eq!(
             parse_body(REPO, "Depends on Setup auth, Do database migration\n").blockers,
             vec![BodyRef::Symbolic("Setup auth".into()), BodyRef::Symbolic("Do database migration".into())]
+        );
+
+        // Apostrophes inside words must not start a single-quoted string and swallow later blockers.
+        assert_eq!(
+            parse_body(REPO, "Depends on #1, Rotate team's keys, #2\n").blockers,
+            vec![
+                BodyRef::Issue { repo: REPO.into(), number: 1 },
+                BodyRef::OptionalSymbolic("Rotate team's keys".into()),
+                BodyRef::Issue { repo: REPO.into(), number: 2 },
+            ]
+        );
+        assert_eq!(
+            parse_body(REPO, "Depends on Rotate team's keys, Fix user's login\n").blockers,
+            vec![BodyRef::Symbolic("Rotate team's keys".into()), BodyRef::Symbolic("Fix user's login".into())]
+        );
+
+        // `<!--` inside inline backticks must not start an HTML comment that hides real directives.
+        assert_eq!(
+            parse_body(REPO, "Example `<!--` token.\nDepends on #2\n").blockers,
+            vec![BodyRef::Issue { repo: REPO.into(), number: 2 }]
+        );
+
+        // Out-of-range GraphQL Int issue numbers are flagged malformed without dropping valid siblings.
+        assert_eq!(
+            parse_body(REPO, "Depends on #9999999999999, acme/tools#3000000000, #2\n").blockers,
+            vec![
+                BodyRef::Malformed("#9999999999999".into()),
+                BodyRef::Malformed("acme/tools#3000000000".into()),
+                BodyRef::Issue { repo: REPO.into(), number: 2 },
+            ]
+        );
+
+        // Qualified phase subtitle with no match must stay NotFound rather than binding another Phase 1.
+        let reporting_only = vec![Candidate {
+            repo: REPO.into(),
+            number: 11,
+            label: "widgets#11".into(),
+            title: "Phase 1: Reporting".into(),
+            parent_key: Some("acme/widgets#10".into()),
+            declared_phase: Some(1),
+        }];
+        assert_eq!(
+            resolve_symbolic(
+                "Phase 1: Authentication",
+                RefRole::Blocker,
+                REPO,
+                12,
+                Some("acme/widgets#10"),
+                &reporting_only
+            ),
+            ResolveOutcome::NotFound
+        );
+        assert_eq!(
+            resolve_symbolic("Phase 1", RefRole::Blocker, REPO, 12, Some("acme/widgets#10"), &reporting_only),
+            ResolveOutcome::Resolved(REPO.into(), 11)
         );
     }
 }

@@ -661,6 +661,7 @@ fn warn_kind_rank(kind: &str) -> u8 {
 struct GraphBuild {
     nodes: BTreeMap<String, GraphNode>,
     edges: BTreeMap<(String, &'static str, String), &'static str>,
+    primary_parents: BTreeMap<String, String>,
     body_tracks: BTreeMap<String, String>,
     more_blockers: HashSet<String>,
     more_subs: HashSet<String>,
@@ -725,6 +726,9 @@ impl GraphBuild {
         for b in &r.blockers {
             let to = self.node(&b.to, b.state);
             self.add_edge(key.clone(), BLOCKED_BY, to, b.source);
+        }
+        if let Some(p) = &i.parent {
+            self.primary_parents.insert(key.clone(), node_key(&p.repo, p.number));
         }
         if let Some(p) = &r.parent {
             let to = self.node(&p.to, p.state);
@@ -841,7 +845,7 @@ impl GraphBuild {
                 .then_with(|| order(&self.nodes, &a.2).cmp(&order(&self.nodes, &b.2)))
         });
         let mut edges = Vec::new();
-        let mut parent_of: BTreeMap<String, (u8, String)> = BTreeMap::new();
+        let mut parent_of: BTreeMap<String, ((u8, u8, u8), String)> = BTreeMap::new();
         let mut blocked_pairs: Vec<(String, String)> = Vec::new();
         let mut parent_pairs: Vec<(String, String)> = Vec::new();
         let mut all_pairs: Vec<(String, String)> = Vec::new();
@@ -856,16 +860,20 @@ impl GraphBuild {
                 }
                 _ => {
                     parent_pairs.push((from.clone(), to.clone()));
-                    let sr = source_rank(source);
+                    let rank = (
+                        u8::from(self.primary_parents.get(from).map(String::as_str) != Some(to.as_str())),
+                        source_rank(source),
+                        u8::from(self.nodes[to].state == Some("closed")),
+                    );
                     if from != to {
                         parent_of
                             .entry(from.clone())
                             .and_modify(|cur| {
-                                if sr < cur.0 {
-                                    *cur = (sr, to.clone());
+                                if rank < cur.0 {
+                                    *cur = (rank, to.clone());
                                 }
                             })
-                            .or_insert_with(|| (sr, to.clone()));
+                            .or_insert_with(|| (rank, to.clone()));
                     }
                     self.nodes.get_mut(to).expect("edge end").sub_issues.push(f.clone());
                 }
@@ -1544,6 +1552,7 @@ impl Wf {
                 }
             }
         }
+        let mut failed_open_repos: HashSet<String> = HashSet::new();
         for repo in need_open_repos {
             match self.read_repo(&repo, None).await {
                 Ok((full, rs)) => {
@@ -1553,6 +1562,7 @@ impl Wf {
                 Err(RepoReadError::Transport(e)) => return Err(e),
                 Err(RepoReadError::Graphql(e)) => {
                     tracing::warn!("flow: could not read open siblings in {repo} for body resolution: {e:#}");
+                    failed_open_repos.insert(repo.to_ascii_lowercase());
                 }
             }
         }
@@ -1569,8 +1579,9 @@ impl Wf {
             }
         }
         reads.aliases = self.repo_aliases_snapshot();
-
         let aliases = reads.aliases.clone();
+        let failed_open_repos: HashSet<String> =
+            failed_open_repos.into_iter().map(|r| canonicalize_repo(&aliases, &r).to_ascii_lowercase()).collect();
         let mut known: BTreeMap<String, (IssueRef, Option<&'static str>)> = BTreeMap::new();
         for r in reads.reads.iter().chain(extra.iter()).chain(symbolic_pool.iter()) {
             seed_known_issue(&mut known, r);
@@ -1763,6 +1774,8 @@ impl Wf {
                         }
                     }
                     BodyRef::OptionalSymbolic(raw) => {
+                        let canon_me = canonicalize_repo(&aliases, &me_repo).to_ascii_lowercase();
+                        let open_failed = failed_open_repos.contains(&canon_me);
                         match flow_body::resolve_symbolic_optional(
                             &raw,
                             &me_repo,
@@ -1772,7 +1785,21 @@ impl Wf {
                         ) {
                             ResolveOutcome::Resolved(repo, number) => {
                                 let canon = canonicalize_repo(&aliases, &repo);
-                                resolved[idx].blockers.push((canon, number));
+                                let k = node_key(&canon, number);
+                                if open_failed && known.get(&k).is_some_and(|(_, st)| *st == Some("closed")) {
+                                    let msg = format!(
+                                        "Could not verify blocker reference \"{raw}\" (reading open siblings in {me_repo} failed)"
+                                    );
+                                    record_unresolved_ref(
+                                        &mut r.warnings,
+                                        &mut r.unresolved_blockers,
+                                        RefRole::Blocker,
+                                        raw,
+                                        Some(msg),
+                                    );
+                                } else {
+                                    resolved[idx].blockers.push((canon, number));
+                                }
                             }
                             ResolveOutcome::Ambiguous(matches) => {
                                 let msg =
@@ -1785,7 +1812,20 @@ impl Wf {
                                     Some(msg),
                                 );
                             }
-                            ResolveOutcome::NotFound => {}
+                            ResolveOutcome::NotFound => {
+                                if open_failed {
+                                    let msg = format!(
+                                        "Could not verify blocker reference \"{raw}\" (reading open siblings in {me_repo} failed)"
+                                    );
+                                    record_unresolved_ref(
+                                        &mut r.warnings,
+                                        &mut r.unresolved_blockers,
+                                        RefRole::Blocker,
+                                        raw,
+                                        Some(msg),
+                                    );
+                                }
+                            }
                         }
                     }
                     BodyRef::Malformed(raw) => {
@@ -1797,6 +1837,7 @@ impl Wf {
 
         // Pass 3: batch-fetch any referenced numeric issues whose state/title isn't already known.
         let mut asks_map: BTreeMap<String, (String, u64)> = BTreeMap::new();
+        let mut missing_refs: HashSet<String> = HashSet::new();
         for (idx, res) in resolved.iter().enumerate() {
             // On queue-only reads (`!all_open`), `extra` holds active parent tickets only for
             // tasklist parent propagation onto `reads.reads`; skip unrelated missing sub-issues.
@@ -1805,13 +1846,16 @@ impl Wf {
             }
             for (repo, number) in res.blockers.iter().chain(&res.parents).chain(&res.subs) {
                 let k = node_key(repo, *number);
+                if *number == 0 || *number > i32::MAX as u64 {
+                    missing_refs.insert(k);
+                    continue;
+                }
                 if known.get(&k).is_none_or(|(_, st)| st.is_none()) {
                     asks_map.entry(k).or_insert_with(|| (repo.clone(), *number));
                 }
             }
         }
         let asks: Vec<(String, u64)> = asks_map.into_values().collect();
-        let mut missing_refs: HashSet<String> = HashSet::new();
         for chunk in asks.chunks(50) {
             let (query, vars) = refs_query(chunk);
             let resp = self.github.graphql(&query, vars).await?;

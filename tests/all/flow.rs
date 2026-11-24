@@ -2803,6 +2803,8 @@ async fn sole_closed_epic_context_open_epic_precedence_and_after_prose_work_cons
     assert_eq!(labels(&q["queue"][0]["unblockedBy"]), ["widgets#2"]);
     assert_eq!(node(&g, "acme/widgets#3")["warnings"], json!([]));
     assert_eq!(node(&g, "acme/widgets#30")["ready"], true);
+    assert_eq!(node(&g, "acme/widgets#30")["parent"], "acme/widgets#20");
+    assert_eq!(node(&g, "acme/widgets#30")["track"], "widgets#20");
     assert_eq!(node(&g, "acme/widgets#51")["warnings"], json!([]));
     assert_eq!(node(&g, "acme/widgets#52")["warnings"], json!([]));
 
@@ -2812,4 +2814,45 @@ async fn sole_closed_epic_context_open_epic_precedence_and_after_prose_work_cons
     assert_eq!(labels(&q["blocked"][1]["blockers"]), ["widgets#43", "widgets#44"]);
     assert_eq!(ids(&node(&g, "acme/widgets#50")["blockedBy"]), ["acme/widgets#42", "acme/widgets#43"]);
     assert_eq!(ids(&node(&g, "acme/widgets#53")["blockedBy"]), ["acme/widgets#43", "acme/widgets#44"]);
+}
+
+#[tokio::test]
+async fn failed_sibling_read_and_out_of_range_issue_numbers_keep_dependents_safe() {
+    let h = flowing_with(4, "auto");
+    // #1 is closed; #2 is open unlabelled ("Setup auth"); #3 is open unlabelled blocker in another repo.
+    h.github.set_issue(REPO, github_issue(1, "Base", &[], "2026-03-01T00:00:00Z"));
+    h.github.close_issue(REPO, 1);
+    h.github.set_issue(REPO, github_issue(2, "Setup auth", &[], "2026-03-02T00:00:00Z"));
+    h.github.set_issue(TOOLS, github_issue(7, "External tool", &[], "2026-03-02T00:00:00Z"));
+
+    // #10 has an out-of-range issue number alongside a real open cross-repo blocker: only the
+    // invalid number becomes unresolved, while the batch lookup for tools#7 still succeeds.
+    h.github.set_issue(REPO, github_issue(10, "Huge ref", &[FLOW], "2026-03-03T00:00:00Z"));
+    h.github.set_body(REPO, 10, "Depends on #9999999999999, acme/tools#7\n");
+
+    // #11 uses `After #1, Setup auth`. When the supplemental unlabelled OPEN read fails, Flow
+    // must NOT treat `OptionalSymbolic::NotFound` as trailing prose or launch #11.
+    h.github.set_issue(REPO, github_issue(11, "After failed open read", &[FLOW], "2026-03-04T00:00:00Z"));
+    h.github.set_body(REPO, 11, "After #1, Setup auth\n");
+
+    h.github.fail_unlabelled_open_issues(Some("transient GraphQL error on open siblings"));
+
+    let q = flow(&h).await;
+    assert_eq!(labels(&q["queue"]), Vec::<String>::new(), "neither #10 nor #11 may enter queue: {q}");
+    assert_eq!(labels(&q["blocked"]), ["widgets#10", "widgets#11"], "{q}");
+    assert_eq!(labels(&q["blocked"][0]["blockers"]), ["tools#7"]);
+    assert_eq!(q["blocked"][0]["unresolved"], json!(["#9999999999999"]));
+    assert_eq!(q["blocked"][1]["unresolved"], json!(["Setup auth"]));
+
+    // wf.flow.next() must refuse to launch #11 while its supplemental open-sibling read failed.
+    let pick = next(&h).await;
+    assert_eq!(pick["picked"], json!([]), "{pick}");
+    assert!(h.fake.launched().is_empty());
+
+    // Once the supplemental open read recovers, #10 still resolves tools#7 and #11 resolves #2 cleanly.
+    h.github.fail_unlabelled_open_issues(None);
+    let q2 = flow(&h).await;
+    assert_eq!(labels(&q2["blocked"]), ["widgets#10", "widgets#11"], "{q2}");
+    assert_eq!(labels(&q2["blocked"][1]["blockers"]), ["widgets#2"]);
+    assert!(q2["blocked"][1].get("unresolved").is_none());
 }
