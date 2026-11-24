@@ -1060,6 +1060,55 @@ fn starts_with_directive_keyword(s: &str) -> bool {
         || match_phase_of(s).is_some()
 }
 
+fn contains_prose_directive_cue(s: &str) -> bool {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let unbold = trimmed.strip_prefix("**").or_else(|| trimmed.strip_prefix("__")).unwrap_or(trimmed);
+    if match_phase_of(unbold).is_some()
+        || strip_leading_kw(unbold, "depends on").is_some()
+        || strip_leading_kw(unbold, "blocked by").is_some()
+        || strip_leading_kw(unbold, "blocked-by").is_some()
+        || strip_leading_kw(unbold, "part of").is_some()
+    {
+        return true;
+    }
+    if let Some(after_kw) = strip_leading_kw(unbold, "after") {
+        let (has_colon, rest) = strip_colon_and_bold(after_kw);
+        if has_colon || starts_with_explicit_or_phase_or_quote(rest) {
+            return true;
+        }
+    }
+    let bytes = trimmed.as_bytes();
+    let mut i = 0;
+    while i < trimmed.len() {
+        if i > 0 && bytes[i - 1].is_ascii_alphanumeric() {
+            i = next_char(trimmed, i);
+            continue;
+        }
+        let rest_here = &trimmed[i..];
+        if match_phase_of(rest_here).is_some() {
+            return true;
+        }
+        for kw in ["depends on", "blocked by", "blocked-by", "part of", "after"] {
+            if let Some(after_kw) = strip_leading_kw(rest_here, kw) {
+                let t = after_kw.trim_start();
+                let has_colon = t.starts_with(':');
+                let target_src = t.strip_prefix(':').unwrap_or(t).trim_start();
+                if starts_with_explicit_or_phase_or_quote(target_src)
+                    || (has_colon && kw != "after")
+                    || (kw != "after" && is_negated_prefix(&trimmed[..i]))
+                {
+                    return true;
+                }
+            }
+        }
+        i = next_char(trimmed, i);
+    }
+    false
+}
+
 fn capture_inline_target(rest: &str, inside_parens: bool) -> (&str, &str) {
     // Used for mid-sentence inline directives: capture consecutive refs separated by ',', ';', 'and', '&',
     // optional parenthetical annotation "(Phase 1)", stopping before unrelated prose words.
@@ -1712,29 +1761,37 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
                     continue;
                 }
                 FlowFormSection::Parent | FlowFormSection::BlockedBy => {
+                    let dest = match form_sec {
+                        FlowFormSection::Parent => &mut parsed.parents,
+                        FlowFormSection::BlockedBy => &mut parsed.blockers,
+                        FlowFormSection::Track | FlowFormSection::Touches => unreachable!(),
+                    };
                     let clean = strip_inline_code(&line);
                     let trimmed = clean.trim();
-                    let (_, clean_stripped) = strip_bullet_and_quote(&clean);
-                    let bare_unquoted =
-                        raw_stripped.trim_start().starts_with('`').then(|| raw_stripped.replace('`', ""));
-                    let is_bare_value = pending_prose_role.is_none()
-                        && !trimmed.starts_with('|')
-                        && parse_tasklist_item(&clean).is_none()
-                        && !starts_with_directive_keyword(clean_stripped)
-                        && (starts_with_explicit_or_phase_or_quote(clean_stripped)
-                            || bare_unquoted.as_deref().is_some_and(|u| {
-                                !starts_with_directive_keyword(u) && starts_with_explicit_or_phase_or_quote(u)
-                            }));
-                    if is_bare_value {
-                        let dest = match form_sec {
-                            FlowFormSection::Parent => &mut parsed.parents,
-                            FlowFormSection::BlockedBy => &mut parsed.blockers,
-                            FlowFormSection::Track | FlowFormSection::Touches => unreachable!(),
-                        };
-                        for r in parse_ref_list(default_repo, raw_stripped, true) {
-                            push_unique_ref(dest, r);
+                    if pending_prose_role.is_none() && !trimmed.starts_with('|') {
+                        if let Some(task_rest) = parse_tasklist_item(&line) {
+                            let task_clean = strip_inline_code(task_rest);
+                            let has_cue = contains_prose_directive_cue(&task_clean)
+                                || (task_clean.trim().is_empty()
+                                    && contains_prose_directive_cue(&task_rest.replace('`', "")));
+                            if !has_cue {
+                                for r in parse_ref_list(default_repo, task_rest, true) {
+                                    push_unique_ref(dest, r);
+                                }
+                                continue;
+                            }
+                        } else {
+                            let (_, clean_stripped) = strip_bullet_and_quote(&clean);
+                            let has_cue = contains_prose_directive_cue(clean_stripped)
+                                || (clean_stripped.trim().is_empty()
+                                    && contains_prose_directive_cue(&raw_stripped.replace('`', "")));
+                            if !has_cue {
+                                for r in parse_ref_list(default_repo, raw_stripped, true) {
+                                    push_unique_ref(dest, r);
+                                }
+                                continue;
+                            }
                         }
-                        continue;
                     }
                 }
             }
@@ -2655,30 +2712,44 @@ _No response_
         assert!(empty.track.is_none(), "{empty:?}");
         assert!(empty.touches.is_empty(), "{empty:?}");
 
-        // Explicit directives inside ### Blocked by keep their prose semantics (e.g. Part of -> parent).
+        // Explicit directives inside ### Blocked by keep their prose semantics (e.g. Part of -> parent),
+        // while structured tasklist lists, backticked refs, and bare sibling titles stay blockers.
         let mixed = "\
 ### Blocked by
 
 - [ ] Part of #10
-- [ ] #11
-Part of #12
-Phase 1 of #13
-Not blocked by #14
+- [ ] #11, #12
+- [ ] `#16`
+Setup auth
+Clean up after migration
+Part of #13
+Phase 1 of #14
+Not blocked by #15
 Part of:
-- #15
+- #17
 ";
         let mixed_parsed = parse_body(REPO, mixed);
         assert_eq!(
             mixed_parsed.parents,
             vec![
                 BodyRef::Issue { repo: REPO.into(), number: 10 },
-                BodyRef::Issue { repo: REPO.into(), number: 12 },
                 BodyRef::Issue { repo: REPO.into(), number: 13 },
-                BodyRef::Issue { repo: REPO.into(), number: 15 },
+                BodyRef::Issue { repo: REPO.into(), number: 14 },
+                BodyRef::Issue { repo: REPO.into(), number: 17 },
             ],
             "{mixed_parsed:?}"
         );
-        assert_eq!(mixed_parsed.blockers, vec![BodyRef::Issue { repo: REPO.into(), number: 11 }], "{mixed_parsed:?}");
+        assert_eq!(
+            mixed_parsed.blockers,
+            vec![
+                BodyRef::Issue { repo: REPO.into(), number: 11 },
+                BodyRef::Issue { repo: REPO.into(), number: 12 },
+                BodyRef::Issue { repo: REPO.into(), number: 16 },
+                BodyRef::Symbolic("Setup auth".into()),
+                BodyRef::Symbolic("Clean up after migration".into()),
+            ],
+            "{mixed_parsed:?}"
+        );
         assert_eq!(mixed_parsed.declared_phase, Some(1));
     }
 }

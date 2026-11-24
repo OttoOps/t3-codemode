@@ -4189,7 +4189,7 @@ function flowDue(s) {
 
 async function loadFlow() {
   if (!state || !flowNeeded(state)) return;
-  if (flow.busy) { flow.again = true; return; }
+  if (flow.busy || graph.syncing) { flow.again = true; return; }
   flow.busy = true;
   const seq = ++flow.seq;
   const btn = $("flow-refresh");
@@ -4220,7 +4220,7 @@ async function loadFlow() {
   } finally {
     flow.busy = false;
     setAttr(btn, "aria-disabled", null);
-    if (flow.again) { flow.again = false; loadFlow(); }
+    if (flow.again && !graph.syncing) { flow.again = false; loadFlow(); }
   }
 }
 
@@ -4704,7 +4704,6 @@ async function syncGraphLinks() {
     graph.syncCount = 0;
     if (res && res.flow) {
       ++flow.seq;
-      flow.again = false;
       flow.failed = false;
       flow.shown = null;
       graph.held = false;
@@ -4720,6 +4719,10 @@ async function syncGraphLinks() {
     graph.syncCount = 0;
     paintGraphSync(graph.edges);
     paintGraphSyncResult(null, e.message);
+  } finally {
+    graph.syncing = false;
+    graph.syncCount = 0;
+    if (!flow.busy && flow.again) { flow.again = false; loadFlow(); }
   }
 }
 

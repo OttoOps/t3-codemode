@@ -3198,6 +3198,68 @@ async fn board_sync_links_writes_graph_primary_parent_and_conflicts_lower_preced
     let e10 = d_errs.iter().find(|e| e["from"] == "acme/widgets#4" && e["to"] == "acme/widgets#10").unwrap();
     assert_eq!(e10["conflict"], true, "{e10}");
     assert!(e10.get("existingParent").is_none(), "{e10}");
+
+    // S6: if GitHub acquires a secondary parent candidate between the graph snapshot and readIssue,
+    // sync must report that secondary candidate as alreadyLinked rather than conflicting with itself.
+    struct ParentRaceGitHub {
+        inner: std::sync::Arc<t3_codemode::fake::FakeGitHub>,
+        triggered: std::sync::atomic::AtomicBool,
+    }
+    impl t3_codemode::github::GitHub for ParentRaceGitHub {
+        fn graphql<'a>(
+            &'a self,
+            query: &'a str,
+            variables: Value,
+        ) -> t3_codemode::t3::BoxFut<'a, anyhow::Result<Value>> {
+            self.graphql_with_headers(query, variables, &[])
+        }
+        fn graphql_with_headers<'a>(
+            &'a self,
+            query: &'a str,
+            variables: Value,
+            headers: &'a [(&'a str, &'a str)],
+        ) -> t3_codemode::t3::BoxFut<'a, anyhow::Result<Value>> {
+            if query.starts_with("query IssueNode(") && !self.triggered.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.inner.set_parent(REPO, 3, (REPO, 10));
+            }
+            self.inner.graphql_with_headers(query, variables, headers)
+        }
+    }
+
+    let rh = flowing(4);
+    issue(&rh, REPO, 10, &[], 1);
+    issue(&rh, REPO, 20, &[], 2);
+    issue(&rh, REPO, 3, &[FLOW], 3);
+    rh.github.set_body(REPO, 10, "- [ ] #3\n");
+    rh.github.set_body(REPO, 3, "## Flow\n- Parent: #20\n");
+    let racy_gh = std::sync::Arc::new(ParentRaceGitHub {
+        inner: rh.github.clone(),
+        triggered: std::sync::atomic::AtomicBool::new(false),
+    });
+    let racy_app = t3_codemode::app::App::with_host_and_tailscale(
+        rh.config.clone(),
+        std::sync::Arc::new(t3_codemode::store::Store::open(rh.dir.path()).unwrap()),
+        rh.fake.clone(),
+        rh.clock.clone(),
+        rh.remotes.clone(),
+        racy_gh,
+        rh.desktop.clone(),
+        rh.tailscale.clone(),
+    );
+    let raced = racy_app.wf.sync_flow_links().await.unwrap();
+    assert!(!raced.ok);
+    assert_eq!(raced.total, 2);
+    assert_eq!(raced.synced, 0);
+    assert_eq!(raced.already_linked, 1);
+    assert_eq!(raced.failed, 1);
+    assert_eq!(raced.errors.len(), 1);
+    assert_eq!(raced.errors[0].to, "acme/widgets#20");
+    assert!(raced.errors[0].conflict);
+    assert_eq!(raced.errors[0].existing_parent.as_deref(), Some("acme/widgets#10"));
+    let r10 = raced.results.iter().find(|r| r.to == "acme/widgets#10").unwrap();
+    assert_eq!(r10.status, "alreadyLinked");
+    assert!(!r10.conflict);
 }
 
 #[tokio::test]
@@ -3471,7 +3533,13 @@ return {{ before, drawerBefore, afterOk, dismissedHidden, afterPartial, afterFai
     assert_eq!(r["afterFail"]["resErr"], true, "{r}");
     assert_eq!(r["afterFail"]["resMsg"], "Could not sync parsed links: gh down", "{r}");
 
-    // Stale GET /api/flow started before sync must not overwrite synced edges or bring back the sync button.
+    // Stale GET /api/flow started before sync must not overwrite synced edges or bring back the sync button,
+    // and a refresh queued during sync must still run after sync and the stale GET settle.
+    let post_sync_view = {
+        let mut v = synced_res["flow"].clone();
+        v["graph"]["nodes"][0]["title"] = json!("Post-sync refreshed title");
+        v
+    };
     let race = panel(
         &html,
         &st,
@@ -3479,44 +3547,60 @@ return {{ before, drawerBefore, afterOk, dismissedHidden, afterPartial, afterFai
         &format!(
             r##"{GRAPH}
 const syncedRes = {synced_res};
+const postSyncView = {post_sync_view};
 let resolveStaleGet = null;
+let resolvePost = null;
 let getCount = 0;
 fetchReply = (url) => {{
   if (url === "/api/flow") {{
     getCount += 1;
     if (getCount === 1) return reply(200, view);
-    return new Promise((resolve) => {{ resolveStaleGet = () => resolve(reply(200, view)); }});
+    if (getCount === 2) return new Promise((resolve) => {{ resolveStaleGet = () => resolve(reply(200, view)); }});
+    return reply(200, postSyncView);
   }}
-  if (url === "/api/flow/sync-links") return reply(200, syncedRes);
+  if (url === "/api/flow/sync-links") {{
+    return new Promise((resolve) => {{ resolvePost = () => resolve(reply(200, syncedRes)); }});
+  }}
   return new Promise(() => {{}});
 }};
 emitState(base);
 await tick();
 selectTab("graph");
-// Start a poll GET /api/flow that stays in flight while sync completes.
+// 1. Start a poll GET /api/flow that stays in flight while sync completes.
 loadFlow();
 q("#graph-sync").dispatch("click");
+await tick();
+// 2. Simulate a board state change queuing a refresh during sync.
+loadFlow();
+// 3. POST resolves before the stale pre-sync GET.
+resolvePost();
 await tick();
 const afterSync = {{
   btnHidden: q("#graph-sync").hidden,
   edges: document.querySelectorAll(".ge").map((p) => p.getAttribute("data-source")),
+  getCount,
 }};
-// Now resolve the pre-sync GET /api/flow with stale body edges.
+// 4. Resolve the pre-sync GET with stale body edges: it must be discarded, and the queued refresh must run.
 resolveStaleGet();
 await tick();
 const afterStaleGet = {{
   btnHidden: q("#graph-sync").hidden,
   edges: document.querySelectorAll(".ge").map((p) => p.getAttribute("data-source")),
+  getCount,
+  nodeTitle: flow.view && flow.view.graph && flow.view.graph.nodes[0] && flow.view.graph.nodes[0].title,
 }};
 return {{ afterSync, afterStaleGet }};
 "##
         ),
     );
     assert_eq!(race["afterSync"]["btnHidden"], true, "{race}");
+    assert_eq!(race["afterSync"]["getCount"], 2, "no third GET while stale GET is still busy: {race}");
     assert!(race["afterSync"]["edges"].as_array().unwrap().iter().all(|s| s == "github"), "{race}");
     assert_eq!(race["afterStaleGet"]["btnHidden"], true, "stale poll must not bring back sync button: {race}");
     assert!(
         race["afterStaleGet"]["edges"].as_array().unwrap().iter().all(|s| s == "github"),
         "stale poll must not overwrite synced edges: {race}"
     );
+    assert_eq!(race["afterStaleGet"]["getCount"], 3, "queued refresh must run after sync settles: {race}");
+    assert_eq!(race["afterStaleGet"]["nodeTitle"], "Post-sync refreshed title", "{race}");
 }
