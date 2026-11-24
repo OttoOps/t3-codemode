@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,11 @@ use serde_json::{Value, json};
 use crate::board::{BOARD, Card, LaunchArgs, card_text, chip};
 use crate::config::{FlowConfig, Launch, OptIn};
 use crate::flow_body::{self, BodyRef, Candidate, ParsedBody, RefRole, ResolveOutcome};
-use crate::github::errors;
+use crate::flow_git::{
+    self, ActiveBranchLink, ActivePartLink, FileConflictEdge, IssueFileInput, LocalRepoInfo, OpenPr, PrStackEdge,
+    RepoPrs, SourceControlInput,
+};
+use crate::github::{FLOW_OPEN_PRS, errors};
 use crate::wf::Wf;
 
 pub const EXTERNAL: &str = "blocked: external";
@@ -32,10 +37,19 @@ macro_rules! issue_fields {
     };
 }
 
+macro_rules! pr_fields {
+    () => {
+        "number title url body baseRefName headRefName headRefOid isCrossRepository
+        closingIssuesReferences(first: 20) { nodes { number repository { nameWithOwner } } }
+        files(first: 100) { nodes { path } }"
+    };
+}
+
 pub const FLOW_ISSUES: &str = concat!(
-    "query FlowIssues($owner: String!, $name: String!, $label: String!, $after: String) {
+    "query FlowIssues($owner: String!, $name: String!, $label: String!, $after: String, $withPrs: Boolean!) {
   repository(owner: $owner, name: $name) {
     nameWithOwner
+    defaultBranchRef { name }
     issues(states: OPEN, labels: [$label], first: 100, after: $after, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
@@ -44,19 +58,36 @@ pub const FLOW_ISSUES: &str = concat!(
     "
       }
     }
+    pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) @include(if: $withPrs) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        ",
+    pr_fields!(),
+    "
+      }
+    }
   }
 }"
 );
 
 pub const FLOW_OPEN_ISSUES: &str = concat!(
-    "query FlowIssues($owner: String!, $name: String!, $after: String) {
+    "query FlowIssues($owner: String!, $name: String!, $after: String, $withPrs: Boolean!) {
   repository(owner: $owner, name: $name) {
     nameWithOwner
+    defaultBranchRef { name }
     issues(states: OPEN, first: 100, after: $after, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
         ",
     issue_fields!(),
+    "
+      }
+    }
+    pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) @include(if: $withPrs) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        ",
+    pr_fields!(),
     "
       }
     }
@@ -82,11 +113,11 @@ const TRACK_SUFFIX: &str = "-track";
 const AREA: &str = "area:";
 pub const BLOCKED_BY: &str = "blockedBy";
 pub const PARENT: &str = "parent";
+pub const PR_STACK: &str = "prStack";
+pub const FILE_CONFLICT: &str = "fileConflict";
 pub const SOURCE_GITHUB: &str = "github";
 pub const SOURCE_BODY: &str = "body";
-#[allow(dead_code)]
 pub const SOURCE_GIT: &str = "git";
-#[allow(dead_code)]
 pub const SOURCE_CODE: &str = "code";
 pub const WARN_CYCLE: &str = "cycle";
 pub const WARN_UNRESOLVED: &str = "unresolved";
@@ -137,6 +168,35 @@ pub struct FlowPick {
     pub key: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrStackBlock {
+    pub repo: String,
+    pub number: u64,
+    pub label: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_pr: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileConflictBlock {
+    pub repo: String,
+    pub number: u64,
+    pub label: String,
+    pub url: String,
+    pub files: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockedIssue {
@@ -149,6 +209,10 @@ pub struct BlockedIssue {
     pub blocked_label: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pr_stack: Vec<PrStackBlock>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_conflicts: Vec<FileConflictBlock>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -204,11 +268,24 @@ pub struct Graph {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GraphEdge {
     pub from: String,
     pub to: String,
     pub kind: &'static str,
     pub source: &'static str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_pr: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -295,6 +372,8 @@ struct Reads {
     unreadable_projects: HashSet<String>,
     has_unavailable_discovery: bool,
     aliases: std::collections::HashMap<String, String>,
+    open_prs: BTreeMap<String, RepoPrs>,
+    workspaces: BTreeMap<String, Vec<PathBuf>>,
 }
 
 struct ResolvedRepo {
@@ -306,6 +385,56 @@ struct ResolvedRepo {
 struct ResolvedRepos {
     repos: Vec<ResolvedRepo>,
     unavailable_projects: Vec<String>,
+    workspaces: BTreeMap<String, Vec<PathBuf>>,
+}
+
+#[derive(Clone, Default)]
+struct SourceControlEdges {
+    pr_stacks: Vec<PrStackEdge>,
+    file_conflicts: Vec<FileConflictEdge>,
+    known_refs: BTreeMap<String, (IssueRef, Option<&'static str>)>,
+}
+
+impl SourceControlEdges {
+    fn conflict_adj(&self) -> BTreeMap<String, HashSet<String>> {
+        let mut adj: BTreeMap<String, HashSet<String>> = BTreeMap::new();
+        for c in &self.file_conflicts {
+            let ka = node_key(&c.from.0, c.from.1);
+            let kb = node_key(&c.to.0, c.to.1);
+            adj.entry(ka.clone()).or_default().insert(kb.clone());
+            adj.entry(kb).or_default().insert(ka);
+        }
+        adj
+    }
+
+    fn conflicts_with_running(&self, key: &str, running_open: &HashSet<String>) -> Vec<FileConflictBlock> {
+        let mut out = Vec::new();
+        for c in &self.file_conflicts {
+            let ka = node_key(&c.from.0, c.from.1);
+            let kb = node_key(&c.to.0, c.to.1);
+            let other = if ka == key {
+                (&c.to, &kb)
+            } else if kb == key {
+                (&c.from, &ka)
+            } else {
+                continue;
+            };
+            if !running_open.contains(other.1) {
+                continue;
+            }
+            let (repo, number) = other.0;
+            let iref = self.known_refs.get(other.1).map(|(r, _)| r);
+            out.push(FileConflictBlock {
+                repo: iref.map_or_else(|| repo.clone(), |r| r.repo.clone()),
+                number: *number,
+                label: iref.map_or_else(|| label_of(repo, *number), |r| r.label.clone()),
+                url: iref.map_or_else(|| format!("https://github.com/{repo}/issues/{number}"), |r| r.url.clone()),
+                files: c.files.clone(),
+            });
+        }
+        out.sort_by(|a, b| a.repo.to_ascii_lowercase().cmp(&b.repo.to_ascii_lowercase()).then(a.number.cmp(&b.number)));
+        out
+    }
 }
 
 impl Reads {
@@ -341,8 +470,8 @@ struct Read {
     issue: FlowIssue,
     state: Option<&'static str>,
     labels: Vec<String>,
+    body_text: String,
     body_track: Option<String>,
-    #[allow(dead_code)] // PR 5 (#257) uses Touches: for fileConflict edges
     body_touches: Vec<String>,
     body_parsed: ParsedBody,
     open_blockers: Vec<IssueRef>,
@@ -353,6 +482,7 @@ struct Read {
     subs: Vec<Target>,
     more_subs: bool,
     unresolved_blockers: Vec<String>,
+    pr_stack: Vec<PrStackBlock>,
     warnings: Vec<NodeWarning>,
 }
 
@@ -446,6 +576,7 @@ fn compute_skip_key(
     blockers: &[Target],
     more_blockers: bool,
     unresolved_blockers: &[String],
+    pr_stack: &[PrStackBlock],
 ) -> String {
     let mut names: Vec<String> = labels.iter().map(|l| l.trim().to_ascii_lowercase()).collect();
     names.sort();
@@ -462,13 +593,22 @@ fn compute_skip_key(
         .collect();
     held.sort();
     held.dedup();
-    if unresolved_blockers.is_empty() {
+    let mut stacks: Vec<String> =
+        pr_stack.iter().map(|s| format!("{}#{}", s.repo.to_ascii_lowercase(), s.number)).collect();
+    stacks.sort();
+    stacks.dedup();
+    if unresolved_blockers.is_empty() && stacks.is_empty() {
         json!([names, held, more_blockers]).to_string()
-    } else {
+    } else if stacks.is_empty() {
         let mut unres: Vec<String> = unresolved_blockers.iter().map(|u| u.trim().to_ascii_lowercase()).collect();
         unres.sort();
         unres.dedup();
         json!([names, held, more_blockers, unres]).to_string()
+    } else {
+        let mut unres: Vec<String> = unresolved_blockers.iter().map(|u| u.trim().to_ascii_lowercase()).collect();
+        unres.sort();
+        unres.dedup();
+        json!([names, held, more_blockers, unres, stacks]).to_string()
     }
 }
 
@@ -486,13 +626,13 @@ fn parse_node(repo: &str, n: &Value) -> Result<Read> {
     let more_subs = more(&n["subIssues"], n["subIssues"]["nodes"].as_array().map_or(0, Vec::len));
     let blockers: Vec<&Value> = n["blockedBy"]["nodes"].as_array().into_iter().flatten().collect();
     let more_blockers = n["blockedBy"]["totalCount"].as_u64().is_some_and(|t| t > blockers.len() as u64);
-    let key = compute_skip_key(&labels, &all_blockers, more_blockers, &[]);
+    let key = compute_skip_key(&labels, &all_blockers, more_blockers, &[], &[]);
     let (open, closed): (Vec<&Value>, Vec<&Value>) = blockers.into_iter().partition(|b| b["state"] != "CLOSED");
     let milestone = n["milestone"]["title"]
         .as_str()
         .map(|t| Milestone { title: t.to_string(), due_on: n["milestone"]["dueOn"].as_str().map(String::from) });
-    let body_text = n["body"].as_str().unwrap_or_default();
-    let body_parsed = flow_body::parse_body(repo, body_text);
+    let body_text = n["body"].as_str().unwrap_or_default().to_string();
+    let body_parsed = flow_body::parse_body(repo, &body_text);
     let body_track = body_parsed.track.clone();
     let body_touches = body_parsed.touches.clone();
     let issue = FlowIssue {
@@ -518,10 +658,12 @@ fn parse_node(repo: &str, n: &Value) -> Result<Read> {
         subs,
         more_subs,
         labels,
+        body_text,
         body_track,
         body_touches,
         body_parsed,
         unresolved_blockers: Vec::new(),
+        pr_stack: Vec::new(),
         warnings: Vec::new(),
         issue,
     })
@@ -657,10 +799,21 @@ fn warn_kind_rank(kind: &str) -> u8 {
     }
 }
 
+#[derive(Clone, Default)]
+struct EdgeData {
+    source: &'static str,
+    branch: Option<String>,
+    base_branch: Option<String>,
+    pr: Option<u64>,
+    base_pr: Option<u64>,
+    part: Option<String>,
+    files: Vec<String>,
+}
+
 #[derive(Default)]
 struct GraphBuild {
     nodes: BTreeMap<String, GraphNode>,
-    edges: BTreeMap<(String, &'static str, String), &'static str>,
+    edges: BTreeMap<(String, &'static str, String), EdgeData>,
     primary_parents: BTreeMap<String, String>,
     body_tracks: BTreeMap<String, String>,
     more_blockers: HashSet<String>,
@@ -670,14 +823,39 @@ struct GraphBuild {
 
 impl GraphBuild {
     fn add_edge(&mut self, from: String, kind: &'static str, to: String, source: &'static str) {
+        self.add_edge_data(from, kind, to, EdgeData { source, ..EdgeData::default() });
+    }
+
+    fn add_edge_data(&mut self, from: String, kind: &'static str, to: String, data: EdgeData) {
         self.edges
             .entry((from, kind, to))
             .and_modify(|cur| {
-                if source_rank(source) < source_rank(cur) {
-                    *cur = source;
+                if source_rank(data.source) < source_rank(cur.source) {
+                    cur.source = data.source;
                 }
+                if cur.branch.is_none() {
+                    cur.branch.clone_from(&data.branch);
+                }
+                if cur.base_branch.is_none() {
+                    cur.base_branch.clone_from(&data.base_branch);
+                }
+                if cur.pr.is_none() {
+                    cur.pr = data.pr;
+                }
+                if cur.base_pr.is_none() {
+                    cur.base_pr = data.base_pr;
+                }
+                if cur.part.is_none() {
+                    cur.part.clone_from(&data.part);
+                }
+                for f in &data.files {
+                    if !cur.files.iter().any(|x| x == f) {
+                        cur.files.push(f.clone());
+                    }
+                }
+                cur.files.sort();
             })
-            .or_insert(source);
+            .or_insert(data);
     }
 
     fn node(&mut self, r: &IssueRef, state: Option<&'static str>) -> String {
@@ -711,6 +889,60 @@ impl GraphBuild {
         n.title = n.title.take().or_else(|| r.title.clone());
         n.state = n.state.or(state);
         key
+    }
+
+    fn ref_node(
+        &mut self,
+        repo: &str,
+        number: u64,
+        known: &BTreeMap<String, (IssueRef, Option<&'static str>)>,
+    ) -> String {
+        let key = node_key(repo, number);
+        if self.nodes.contains_key(&key) {
+            return key;
+        }
+        if let Some((iref, st)) = known.get(&key) {
+            self.node(iref, *st)
+        } else {
+            let iref = IssueRef {
+                repo: repo.to_string(),
+                number,
+                label: label_of(repo, number),
+                url: format!("https://github.com/{repo}/issues/{number}"),
+                title: None,
+            };
+            self.node(&iref, None)
+        }
+    }
+
+    fn add_pr_stack(&mut self, e: &PrStackEdge, known: &BTreeMap<String, (IssueRef, Option<&'static str>)>) {
+        let from = self.ref_node(&e.from.0, e.from.1, known);
+        let to = self.ref_node(&e.to.0, e.to.1, known);
+        self.add_edge_data(
+            from,
+            PR_STACK,
+            to,
+            EdgeData {
+                source: SOURCE_GIT,
+                branch: e.branch.clone(),
+                base_branch: e.base_branch.clone(),
+                pr: e.pr,
+                base_pr: e.base_pr,
+                part: e.part.clone(),
+                files: Vec::new(),
+            },
+        );
+    }
+
+    fn add_file_conflict(&mut self, e: &FileConflictEdge, known: &BTreeMap<String, (IssueRef, Option<&'static str>)>) {
+        let from = self.ref_node(&e.from.0, e.from.1, known);
+        let to = self.ref_node(&e.to.0, e.to.1, known);
+        self.add_edge_data(
+            from,
+            FILE_CONFLICT,
+            to,
+            EdgeData { source: SOURCE_CODE, files: e.files.clone(), ..EdgeData::default() },
+        );
     }
 
     fn read(&mut self, r: Read, list: Option<&'static str>, tracked: &HashSet<String>) {
@@ -753,16 +985,16 @@ impl GraphBuild {
         }
         let outside = |b: &IssueRef| !tracked.contains(&b.repo.to_ascii_lowercase());
         let has_external = r.labels.iter().any(|l| l.eq_ignore_ascii_case(EXTERNAL));
-        let external = has_external
-            || (!r.open_blockers.is_empty()
-                && !r.more_blockers
-                && r.unresolved_blockers.is_empty()
-                && r.open_blockers.iter().all(outside));
+        let all_hard_outside = (!r.open_blockers.is_empty() || !r.pr_stack.is_empty())
+            && r.open_blockers.iter().all(outside)
+            && r.pr_stack.iter().all(|s| !tracked.contains(&s.repo.to_ascii_lowercase()));
+        let external = has_external || (!r.more_blockers && r.unresolved_blockers.is_empty() && all_hard_outside);
         let mut node_warnings = r.warnings;
         if r.state != Some("closed")
             && has_blocked_label(&r.labels)
             && !has_external
             && r.open_blockers.is_empty()
+            && r.pr_stack.is_empty()
             && !r.more_blockers
         {
             node_warnings.push(NodeWarning {
@@ -829,15 +1061,18 @@ impl GraphBuild {
             let n = &nodes[k];
             (n.repo.to_ascii_lowercase(), n.number)
         };
-        for (from, _, to) in self.edges.keys() {
+        for (from, kind, to) in self.edges.keys() {
+            if *kind == FILE_CONFLICT {
+                continue;
+            }
             let (a, b) = (root(&mut up, from), root(&mut up, to));
             if a != b {
                 let (lo, hi) = if order(&self.nodes, &a) <= order(&self.nodes, &b) { (a, b) } else { (b, a) };
                 up.insert(hi, lo);
             }
         }
-        let mut sorted: Vec<(String, &'static str, String, &'static str)> =
-            self.edges.into_iter().map(|((f, k, t), s)| (f, k, t, s)).collect();
+        let mut sorted: Vec<(String, &'static str, String, EdgeData)> =
+            self.edges.into_iter().map(|((f, k, t), d)| (f, k, t, d)).collect();
         sorted.sort_by(|a, b| {
             order(&self.nodes, &a.0)
                 .cmp(&order(&self.nodes, &b.0))
@@ -849,20 +1084,26 @@ impl GraphBuild {
         let mut blocked_pairs: Vec<(String, String)> = Vec::new();
         let mut parent_pairs: Vec<(String, String)> = Vec::new();
         let mut all_pairs: Vec<(String, String)> = Vec::new();
-        for (from, kind, to, source) in &sorted {
+        for (from, kind, to, data) in &sorted {
             let (f, t) = (id(&self.nodes, from), id(&self.nodes, to));
-            all_pairs.push((from.clone(), to.clone()));
             match *kind {
                 BLOCKED_BY => {
+                    all_pairs.push((from.clone(), to.clone()));
                     blocked_pairs.push((from.clone(), to.clone()));
                     self.nodes.get_mut(from).expect("edge end").blocked_by.push(t.clone());
                     self.nodes.get_mut(to).expect("edge end").unlocks.push(f.clone());
                 }
+                PR_STACK => {
+                    all_pairs.push((from.clone(), to.clone()));
+                    blocked_pairs.push((from.clone(), to.clone()));
+                }
+                FILE_CONFLICT => {}
                 _ => {
+                    all_pairs.push((from.clone(), to.clone()));
                     parent_pairs.push((from.clone(), to.clone()));
                     let rank = (
                         u8::from(self.primary_parents.get(from).map(String::as_str) != Some(to.as_str())),
-                        source_rank(source),
+                        source_rank(data.source),
                         u8::from(self.nodes[to].state == Some("closed")),
                     );
                     if from != to {
@@ -878,7 +1119,18 @@ impl GraphBuild {
                     self.nodes.get_mut(to).expect("edge end").sub_issues.push(f.clone());
                 }
             }
-            edges.push(GraphEdge { from: f, to: t, kind, source });
+            edges.push(GraphEdge {
+                from: f,
+                to: t,
+                kind,
+                source: data.source,
+                branch: data.branch.clone(),
+                base_branch: data.base_branch.clone(),
+                pr: data.pr,
+                base_pr: data.base_pr,
+                part: data.part.clone(),
+                files: data.files.clone(),
+            });
         }
         let parent_of: BTreeMap<String, String> = parent_of.into_iter().map(|(k, (_, v))| (k, v)).collect();
         for (child, parent) in &parent_of {
@@ -1090,6 +1342,7 @@ fn graph(
     reads: Vec<Read>,
     tickets: &[Ticket],
     lists: &BTreeMap<String, &'static str>,
+    sc: &SourceControlEdges,
 ) -> Graph {
     let tracked = covered.tracked_set();
     let mut g = GraphBuild::default();
@@ -1101,6 +1354,12 @@ fn graph(
         if let Some((repo, number)) = ticket_repo_canonical(covered, aliases, t) {
             g.ticket(&repo, number, t);
         }
+    }
+    for e in &sc.pr_stacks {
+        g.add_pr_stack(e, &sc.known_refs);
+    }
+    for e in &sc.file_conflicts {
+        g.add_file_conflict(e, &sc.known_refs);
     }
     g.finish()
 }
@@ -1202,15 +1461,21 @@ fn matches_opt_in(opt_in: Option<&OptIn>, r: &Read) -> bool {
     true
 }
 
+struct PlanInputs<'a> {
+    reads: Reads,
+    tickets: Vec<Ticket>,
+    closed: &'a HashSet<String>,
+    done: &'a BTreeMap<String, Vec<String>>,
+    sc: &'a SourceControlEdges,
+    write: bool,
+}
+
 fn plan_flow(
     cfg: &FlowConfig,
-    r: Reads,
-    tickets: Vec<Ticket>,
-    closed: &HashSet<String>,
-    done: &BTreeMap<String, Vec<String>>,
+    inputs: PlanInputs<'_>,
     mut meta_get: impl FnMut(&str) -> Result<Option<String>>,
-    write: bool,
 ) -> Result<FlowPlan> {
+    let PlanInputs { reads: r, tickets, closed, done, sc, write } = inputs;
     let max_tickets = cfg.max_tickets.unwrap_or(0);
     let capacity_repos = r.capacity_repos();
     let aliases = &r.aliases;
@@ -1221,6 +1486,7 @@ fn plan_flow(
         .map(|(repo, n)| node_key(&repo, n))
         .collect();
     let mut running: Vec<FlowTicket> = Vec::new();
+    let mut active_running_keys: HashSet<String> = HashSet::new();
     let mut extra_running = 0usize;
     for t in tickets {
         let in_unreadable_project = t.project.as_deref().is_some_and(|p| r.unreadable_projects.contains(p));
@@ -1237,11 +1503,13 @@ fn plan_flow(
             continue;
         };
         let unmatched_under_unavailable = r.has_unavailable_discovery && t.project.is_none() && !excluded(&repo);
+        let rk = node_key(&repo, number);
         if (!capacity_repos.contains(&repo) && !in_unreadable_project && !unmatched_under_unavailable)
-            || closed.contains(&node_key(&repo, number))
+            || closed.contains(&rk)
         {
             continue;
         }
+        active_running_keys.insert(rk);
         running.push(FlowTicket {
             url: format!("https://github.com/{repo}/issues/{number}"),
             label: t.label,
@@ -1257,7 +1525,8 @@ fn plan_flow(
     let mut marked_held = HashSet::new();
     for r in r.reads {
         let has = |want: &str| r.labels.iter().any(|l| l.eq_ignore_ascii_case(want));
-        if !matches_opt_in(cfg.opt_in.as_ref(), &r) || open.contains(&node_key(&r.issue.repo, r.issue.number)) {
+        let slug_key = node_key(&r.issue.repo, r.issue.number);
+        if !matches_opt_in(cfg.opt_in.as_ref(), &r) || open.contains(&slug_key) {
             continue;
         }
         if r.issue.parent.as_ref().is_some_and(|p| open.contains(&node_key(&p.repo, p.number))) {
@@ -1269,7 +1538,6 @@ fn plan_flow(
             None => meta_get(&key)?,
         };
         let mut unheld = Vec::new();
-        let slug_key = node_key(&r.issue.repo, r.issue.number);
         let label_key = r.issue.label.to_ascii_lowercase();
         for t in done.get(&slug_key).into_iter().chain(done.get(&label_key)).flatten() {
             let held = format!("{HELD}{t}");
@@ -1290,23 +1558,46 @@ fn plan_flow(
         }
         let external = has(EXTERNAL);
         let blocked_label = has_blocked_label(&r.labels);
+        let file_conflicts = if cfg.serialize_file_conflicts {
+            sc.conflicts_with_running(&slug_key, &active_running_keys)
+        } else {
+            Vec::new()
+        };
         if external
             || blocked_label
             || !r.open_blockers.is_empty()
             || r.more_blockers
             || !r.unresolved_blockers.is_empty()
+            || !r.pr_stack.is_empty()
+            || !file_conflicts.is_empty()
         {
             if write && stored.as_ref().is_some_and(|k| *k != r.issue.key) {
                 skip_overlay.insert(key.clone(), None);
                 meta_ops.push(FlowMetaOp::DelSkip(key));
             }
+            let mut blockers = r.open_blockers;
+            for st in &r.pr_stack {
+                let stk = node_key(&st.repo, st.number);
+                if !blockers.iter().any(|b| node_key(&b.repo, b.number) == stk) {
+                    let title = sc.known_refs.get(&stk).and_then(|(ir, _)| ir.title.clone());
+                    blockers.push(IssueRef {
+                        repo: st.repo.clone(),
+                        number: st.number,
+                        label: st.label.clone(),
+                        url: st.url.clone(),
+                        title,
+                    });
+                }
+            }
             blocked.push(BlockedIssue {
                 issue: r.issue,
-                blockers: r.open_blockers,
+                blockers,
                 more_blockers: r.more_blockers,
                 external,
                 blocked_label,
                 unresolved: r.unresolved_blockers,
+                pr_stack: r.pr_stack,
+                file_conflicts,
             });
             continue;
         }
@@ -1345,32 +1636,91 @@ struct PickPlan {
     picks: Vec<FlowIssue>,
 }
 
+fn conflicts_with_any(
+    key: &str,
+    chosen: &HashSet<String>,
+    conflicts: Option<&BTreeMap<String, HashSet<String>>>,
+) -> bool {
+    let Some(adj) = conflicts else { return false };
+    adj.get(key).is_some_and(|peers| peers.iter().any(|p| chosen.contains(p)))
+}
+
 fn plan_picks(
     launch: Launch,
     queue: &[FlowIssue],
     cards: &[(String, FlowPick)],
     free: usize,
     most: Option<usize>,
+    conflicts: Option<&BTreeMap<String, HashSet<String>>>,
 ) -> PickPlan {
     let ready = |p: &FlowPick| queue.iter().any(|i| same(p, i));
     let mut offered: Vec<(FlowPick, String)> = Vec::new();
     let mut retire = Vec::new();
-    for (idx, (id, p)) in cards.iter().enumerate() {
-        let note = if launch == Launch::Auto {
-            "flow.launch is auto"
-        } else if !ready(p) {
-            "no longer ready"
-        } else if offered.len() >= free {
-            "no free slot"
-        } else {
-            offered.push((p.clone(), id.clone()));
-            continue;
-        };
-        retire.push((idx, note));
+    let mut chosen: HashSet<String> = HashSet::new();
+    if let Some(adj) = conflicts
+        && launch != Launch::Auto
+    {
+        // Evaluate ready cards in queue priority order so a higher-priority offered card wins over a colliding one.
+        let mut ready_cards: Vec<(usize, usize)> = Vec::new();
+        for (idx, (_, p)) in cards.iter().enumerate() {
+            if let Some(qpos) = queue.iter().position(|i| same(p, i)) {
+                ready_cards.push((qpos, idx));
+            } else {
+                retire.push((idx, "no longer ready"));
+            }
+        }
+        ready_cards.sort_by_key(|&(qpos, idx)| (qpos, idx));
+        let mut kept_indices: HashSet<usize> = HashSet::new();
+        for (_, idx) in ready_cards {
+            let (_, p) = &cards[idx];
+            let k = node_key(&p.repo, p.number);
+            if kept_indices.len() >= free {
+                retire.push((idx, "no free slot"));
+            } else if conflicts_with_any(&k, &chosen, Some(adj)) {
+                retire.push((idx, "conflicts with an offered launch"));
+            } else {
+                kept_indices.insert(idx);
+                chosen.insert(k);
+            }
+        }
+        retire.sort_by_key(|(idx, _)| *idx);
+        for (idx, (id, p)) in cards.iter().enumerate() {
+            if kept_indices.contains(&idx) {
+                offered.push((p.clone(), id.clone()));
+            }
+        }
+    } else {
+        for (idx, (id, p)) in cards.iter().enumerate() {
+            let note = if launch == Launch::Auto {
+                "flow.launch is auto"
+            } else if !ready(p) {
+                "no longer ready"
+            } else if offered.len() >= free {
+                "no free slot"
+            } else {
+                chosen.insert(node_key(&p.repo, p.number));
+                offered.push((p.clone(), id.clone()));
+                continue;
+            };
+            retire.push((idx, note));
+        }
     }
     let room = free.saturating_sub(offered.len()).min(most.unwrap_or(usize::MAX));
-    let picks: Vec<FlowIssue> =
-        queue.iter().filter(|i| !offered.iter().any(|(p, _)| same(p, i))).take(room).cloned().collect();
+    let mut picks = Vec::new();
+    for i in queue {
+        if picks.len() >= room {
+            break;
+        }
+        if offered.iter().any(|(p, _)| same(p, i)) {
+            continue;
+        }
+        let k = node_key(&i.repo, i.number);
+        if conflicts_with_any(&k, &chosen, conflicts) {
+            continue;
+        }
+        chosen.insert(k);
+        picks.push(i.clone());
+    }
     PickPlan { offered, retire, picks }
 }
 
@@ -1554,8 +1904,8 @@ impl Wf {
         }
         let mut failed_open_repos: HashSet<String> = HashSet::new();
         for repo in need_open_repos {
-            match self.read_repo(&repo, None).await {
-                Ok((full, rs)) => {
+            match self.read_repo(&repo, None, false).await {
+                Ok((full, rs, _)) => {
                     self.record_github_repo_alias(&repo, &full);
                     symbolic_pool.extend(rs);
                 }
@@ -2048,7 +2398,8 @@ impl Wf {
             r.warnings.sort_by(|a, b| {
                 warn_kind_rank(a.kind).cmp(&warn_kind_rank(b.kind)).then_with(|| a.message.cmp(&b.message))
             });
-            r.issue.key = compute_skip_key(&r.labels, &r.blockers, r.more_blockers, &r.unresolved_blockers);
+            r.issue.key =
+                compute_skip_key(&r.labels, &r.blockers, r.more_blockers, &r.unresolved_blockers, &r.pr_stack);
         }
 
         // Also seed `sub_parent_fill` from open unlabelled epics in `symbolic_pool` so an open
@@ -2092,6 +2443,327 @@ impl Wf {
         }
 
         Ok(())
+    }
+
+    fn collect_active_source_links(&self, reads: &Reads) -> Result<(Vec<ActivePartLink>, Vec<ActiveBranchLink>)> {
+        let capacity_repos = reads.capacity_repos();
+        let aliases = &reads.aliases;
+        let resolve_link_issue = |issue: Option<&str>,
+                                  parent: &str,
+                                  label: &str,
+                                  project: Option<&str>,
+                                  live: Option<&Value>|
+         -> Option<(String, u64)> {
+            if let Some(raw) = issue
+                && let Some(parsed) = crate::board::parse_github_issue_only(raw)
+                && let Some((owner, repo, number)) = parsed.github_parts()
+            {
+                return Some((canonicalize_repo(aliases, &format!("{owner}/{repo}")), number));
+            }
+            if parent == BOARD {
+                let repo = live.map(|l| self.place(project, l).0).and_then(|v| v.as_str().map(String::from));
+                let t = Ticket {
+                    label: label.to_string(),
+                    thread: None,
+                    link: None,
+                    repo,
+                    project: project.map(String::from),
+                    issue: issue.map(String::from),
+                    status: String::new(),
+                };
+                return ticket_repo_canonical(&capacity_repos, aliases, &t);
+            }
+            None
+        };
+        let part_scope = |parent_issue: Option<&str>, parent: &str| -> Option<String> {
+            if let Some(raw) = parent_issue
+                && let Some(parsed) = crate::board::parse_github_issue_only(raw)
+                && let Some((owner, repo, num)) = parsed.github_parts()
+            {
+                let canon = canonicalize_repo(aliases, &format!("{owner}/{repo}"));
+                return Some(format!("issue:{}", node_key(&canon, num)));
+            }
+            if parent != BOARD {
+                return Some(format!("parent:{parent}"));
+            }
+            None
+        };
+
+        let mut active_parts = Vec::new();
+        let mut active_branches = Vec::new();
+        let mut seen_threads = HashSet::new();
+
+        for ln in self.store.links_open()? {
+            seen_threads.insert(ln.child.clone());
+            let live = self.live_of(&ln.child);
+            let Some(issue) = resolve_link_issue(
+                ln.identity.issue.as_deref(),
+                &ln.parent,
+                &ln.label,
+                ln.project.as_deref(),
+                live.as_ref(),
+            ) else {
+                continue;
+            };
+            if let Some(part_raw) = ln.identity.part.as_deref()
+                && let Some((n, total)) = flow_git::parse_part(part_raw)
+                && let Some(scope) = part_scope(ln.identity.parent_issue.as_deref(), &ln.parent)
+            {
+                active_parts.push(ActivePartLink { scope, part_num: n, part_total: total, issue: issue.clone() });
+            }
+            let branch = live
+                .as_ref()
+                .and_then(|v| v["branch"].as_str().or_else(|| v["pr"]["headBranch"].as_str()))
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            let worktree_path =
+                live.as_ref().and_then(|v| v["worktreePath"].as_str()).filter(|s| !s.is_empty()).map(PathBuf::from);
+            let mut pr_pairs: Vec<(Option<String>, Option<u64>)> = Vec::new();
+            if let Some(p) = &ln.pr {
+                pr_pairs.push((Some(p.repo.clone()), Some(p.number)));
+            }
+            if let Some(live_pr) = live.as_ref().map(|v| &v["pr"])
+                && let Some(num) = live_pr["number"].as_u64()
+            {
+                let prepo = live_pr["repository"].as_str().map(String::from);
+                if !pr_pairs.iter().any(|(_, n)| *n == Some(num)) {
+                    pr_pairs.push((prepo, Some(num)));
+                }
+            }
+            if pr_pairs.is_empty() && (branch.is_some() || worktree_path.is_some()) {
+                let repo_hint = live
+                    .as_ref()
+                    .and_then(|l| self.place(ln.project.as_deref(), l).0.as_str().map(String::from))
+                    .or_else(|| Some(issue.0.clone()));
+                active_branches.push(ActiveBranchLink {
+                    repo: repo_hint,
+                    pr_number: None,
+                    branch,
+                    worktree_path,
+                    issue,
+                });
+            } else {
+                for (repo, pr_number) in pr_pairs {
+                    active_branches.push(ActiveBranchLink {
+                        repo: repo.or_else(|| Some(issue.0.clone())),
+                        pr_number,
+                        branch: branch.clone(),
+                        worktree_path: worktree_path.clone(),
+                        issue: issue.clone(),
+                    });
+                }
+            }
+        }
+
+        for p in self.store.pending_all()? {
+            if p.thread.as_deref().is_some_and(|t| seen_threads.contains(t)) {
+                continue;
+            }
+            let live = p.thread.as_deref().and_then(|t| self.live_of(t));
+            let Some(issue) = resolve_link_issue(
+                p.identity.issue.as_deref(),
+                &p.parent,
+                &p.label,
+                p.project.as_deref(),
+                live.as_ref(),
+            ) else {
+                continue;
+            };
+            if let Some(part_raw) = p.identity.part.as_deref()
+                && let Some((n, total)) = flow_git::parse_part(part_raw)
+                && let Some(scope) = part_scope(p.identity.parent_issue.as_deref(), &p.parent)
+            {
+                active_parts.push(ActivePartLink { scope, part_num: n, part_total: total, issue });
+            }
+        }
+        Ok((active_parts, active_branches))
+    }
+
+    async fn resolve_source_control(
+        &self,
+        reads: &mut Reads,
+        extra: &mut [Read],
+        closed: &HashSet<String>,
+    ) -> Result<SourceControlEdges> {
+        let aliases = reads.aliases.clone();
+        let mut parent_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut add_parent = |child: String, parent: String| {
+            let entry = parent_of.entry(child).or_default();
+            if !entry.contains(&parent) {
+                entry.push(parent);
+            }
+        };
+        let mut closed_issues: HashSet<String> = closed.clone();
+        let mut known_refs: BTreeMap<String, (IssueRef, Option<&'static str>)> = BTreeMap::new();
+        for r in reads.reads.iter().chain(extra.iter()) {
+            seed_known_issue(&mut known_refs, r);
+            let me_key = node_key(&r.issue.repo, r.issue.number);
+            if r.state == Some("closed") {
+                closed_issues.insert(me_key.clone());
+            }
+            if let Some(p) = &r.parent {
+                add_parent(me_key.clone(), node_key(&canonicalize_repo(&aliases, &p.to.repo), p.to.number));
+            }
+            for p in &r.extra_parents {
+                add_parent(me_key.clone(), node_key(&canonicalize_repo(&aliases, &p.to.repo), p.to.number));
+            }
+            for s in &r.subs {
+                add_parent(node_key(&canonicalize_repo(&aliases, &s.to.repo), s.to.number), me_key.clone());
+            }
+        }
+
+        let mut local_repos: BTreeMap<String, LocalRepoInfo> = BTreeMap::new();
+        for (raw_repo, roots) in &reads.workspaces {
+            let canon = canonicalize_repo(&aliases, raw_repo);
+            if !reads.covered.contains(&canon) {
+                continue;
+            }
+            let rkey = canon.to_ascii_lowercase();
+            if local_repos.contains_key(&rkey) {
+                continue;
+            }
+            let gh_default = reads.open_prs.get(&rkey).and_then(|rp| rp.default_branch.as_deref());
+            for root in roots {
+                if let Some(info) = flow_git::inspect_local_repo(root, gh_default).await {
+                    local_repos.insert(rkey.clone(), info);
+                    break;
+                }
+            }
+        }
+
+        let (active_parts, active_branches) = self.collect_active_source_links(reads)?;
+        let open_issues: Vec<IssueFileInput<'_>> = reads
+            .reads
+            .iter()
+            .chain(extra.iter())
+            .filter(|r| r.state != Some("closed") && !closed_issues.contains(&node_key(&r.issue.repo, r.issue.number)))
+            .map(|r| IssueFileInput {
+                repo: &r.issue.repo,
+                number: r.issue.number,
+                touches: &r.body_touches,
+                body: &r.body_text,
+            })
+            .collect();
+
+        let analysis = flow_git::analyze_source_control(SourceControlInput {
+            aliases: &aliases,
+            parent_of: &parent_of,
+            closed_issues: &closed_issues,
+            open_prs: &reads.open_prs,
+            local_repos: &local_repos,
+            active_parts: &active_parts,
+            active_branches: &active_branches,
+            open_issues: &open_issues,
+        })
+        .await;
+
+        // Batch-verify any prStack endpoints not already known (e.g. unlabelled issues or branch-inferred numbers).
+        let mut asks_map: BTreeMap<String, (String, u64)> = BTreeMap::new();
+        for e in &analysis.pr_stacks {
+            for (repo, number) in [&e.from, &e.to] {
+                let k = node_key(repo, *number);
+                if !known_refs.contains_key(&k) && *number > 0 && *number <= i32::MAX as u64 {
+                    asks_map.entry(k).or_insert_with(|| (repo.clone(), *number));
+                }
+            }
+        }
+        let mut missing_refs: HashSet<String> = HashSet::new();
+        let asks: Vec<(String, u64)> = asks_map.into_values().collect();
+        for chunk in asks.chunks(50) {
+            let (query, vars) = refs_query(chunk);
+            let resp = self.github.graphql(&query, vars).await?;
+            if !resp["data"].is_object() {
+                bail!(
+                    "wf.flow: reading PR-referenced issues failed: {}",
+                    errors(&resp).unwrap_or_else(|| "no data".into())
+                );
+            }
+            for (i, (query_repo, number)) in chunk.iter().enumerate() {
+                let t = &resp["data"][format!("t{i}")];
+                let actual = t["nameWithOwner"].as_str().filter(|s| s.contains('/'));
+                if let Some(actual) = actual {
+                    self.record_github_repo_alias(query_repo, actual);
+                }
+                let final_repo = actual.unwrap_or(query_repo);
+                let issue = &t["issue"];
+                if issue.is_object() {
+                    let iref = IssueRef {
+                        repo: final_repo.to_string(),
+                        number: *number,
+                        label: label_of(final_repo, *number),
+                        url: issue["url"]
+                            .as_str()
+                            .map_or_else(|| format!("https://github.com/{final_repo}/issues/{number}"), String::from),
+                        title: issue["title"].as_str().map(String::from),
+                    };
+                    let st = state_of(issue);
+                    known_refs.insert(node_key(final_repo, *number), (iref.clone(), st));
+                    if !final_repo.eq_ignore_ascii_case(query_repo) {
+                        known_refs.insert(node_key(query_repo, *number), (iref, st));
+                    }
+                } else {
+                    missing_refs.insert(node_key(query_repo, *number));
+                    missing_refs.insert(node_key(final_repo, *number));
+                }
+            }
+        }
+        reads.aliases = self.repo_aliases_snapshot();
+        let aliases = &reads.aliases;
+
+        let mut pr_stacks = Vec::new();
+        for mut e in analysis.pr_stacks {
+            e.from.0 = canonicalize_repo(aliases, &e.from.0);
+            e.to.0 = canonicalize_repo(aliases, &e.to.0);
+            let kf = node_key(&e.from.0, e.from.1);
+            let kt = node_key(&e.to.0, e.to.1);
+            if kf == kt || missing_refs.contains(&kf) || missing_refs.contains(&kt) {
+                continue;
+            }
+            // Pure part: n/N chain (no open PR or branch) stops holding once the earlier part closes.
+            let is_part_only = e.pr.is_none() && e.base_pr.is_none() && e.branch.is_none() && e.base_branch.is_none();
+            if is_part_only
+                && (closed_issues.contains(&kt) || known_refs.get(&kt).is_some_and(|(_, st)| *st == Some("closed")))
+            {
+                continue;
+            }
+            pr_stacks.push(e);
+        }
+
+        // Attach active prStack holds onto each dependent Read.
+        let mut by_from: BTreeMap<String, Vec<PrStackBlock>> = BTreeMap::new();
+        for e in &pr_stacks {
+            let kf = node_key(&e.from.0, e.from.1);
+            let kt = node_key(&e.to.0, e.to.1);
+            let iref = known_refs.get(&kt).map(|(r, _)| r);
+            let block = PrStackBlock {
+                repo: iref.map_or_else(|| e.to.0.clone(), |r| r.repo.clone()),
+                number: e.to.1,
+                label: iref.map_or_else(|| label_of(&e.to.0, e.to.1), |r| r.label.clone()),
+                url: iref.map_or_else(|| format!("https://github.com/{}/issues/{}", e.to.0, e.to.1), |r| r.url.clone()),
+                branch: e.branch.clone(),
+                base_branch: e.base_branch.clone(),
+                pr: e.pr,
+                base_pr: e.base_pr,
+                part: e.part.clone(),
+            };
+            let list = by_from.entry(kf).or_default();
+            if !list.iter().any(|b| b.number == block.number && b.repo.eq_ignore_ascii_case(&block.repo)) {
+                list.push(block);
+            }
+        }
+        for r in reads.reads.iter_mut().chain(extra.iter_mut()) {
+            let k = node_key(&r.issue.repo, r.issue.number);
+            if let Some(mut blocks) = by_from.remove(&k) {
+                blocks.sort_by(|a, b| {
+                    a.repo.to_ascii_lowercase().cmp(&b.repo.to_ascii_lowercase()).then(a.number.cmp(&b.number))
+                });
+                r.pr_stack = blocks;
+                r.issue.key =
+                    compute_skip_key(&r.labels, &r.blockers, r.more_blockers, &r.unresolved_blockers, &r.pr_stack);
+            }
+        }
+
+        Ok(SourceControlEdges { pr_stacks, file_conflicts: analysis.file_conflicts, known_refs })
     }
 
     fn open_tickets(&self) -> Result<Vec<Ticket>> {
@@ -2180,22 +2852,74 @@ impl Wf {
         }
     }
 
+    async fn read_open_prs_tail(
+        &self,
+        repo: &str,
+        full: &str,
+        mut after: String,
+        out: &mut Vec<OpenPr>,
+    ) -> std::result::Result<(), RepoReadError> {
+        let (owner, name) =
+            repo.split_once('/').ok_or_else(|| RepoReadError::Graphql(anyhow!("flow: {repo:?} is not owner/name")))?;
+        let mut seen_cursors: HashSet<String> = HashSet::new();
+        seen_cursors.insert(after.clone());
+        loop {
+            let resp = self
+                .github
+                .graphql(FLOW_OPEN_PRS, json!({"owner": owner, "name": name, "after": after}))
+                .await
+                .map_err(RepoReadError::Transport)?;
+            if let Some(e) = errors(&resp) {
+                return Err(RepoReadError::Graphql(anyhow!("wf.flow: reading {repo}'s pull requests failed: {e}")));
+            }
+            let r = &resp["data"]["repository"];
+            if r.is_null() {
+                return Err(RepoReadError::Graphql(anyhow!("wf.flow: GitHub returned no repository {repo}")));
+            }
+            let repo_name = r["nameWithOwner"].as_str().unwrap_or(full);
+            for p in r["pullRequests"]["nodes"].as_array().into_iter().flatten() {
+                if let Some(pr) = flow_git::parse_open_pr(repo_name, p) {
+                    out.push(pr);
+                }
+            }
+            let page = &r["pullRequests"]["pageInfo"];
+            match page["endCursor"].as_str() {
+                Some(c) if page["hasNextPage"] == true => {
+                    if !seen_cursors.insert(c.to_string()) {
+                        return Err(RepoReadError::Graphql(anyhow!(
+                            "wf.flow: GitHub repeated PR page cursor {c:?} while reading {repo}"
+                        )));
+                    }
+                    after = c.to_string();
+                }
+                _ => return Ok(()),
+            }
+        }
+    }
+
     async fn read_repo(
         &self,
         repo: &str,
         label: Option<&str>,
-    ) -> std::result::Result<(String, Vec<Read>), RepoReadError> {
+        with_prs: bool,
+    ) -> std::result::Result<(String, Vec<Read>, RepoPrs), RepoReadError> {
         let (owner, name) =
             repo.split_once('/').ok_or_else(|| RepoReadError::Graphql(anyhow!("flow: {repo:?} is not owner/name")))?;
         let mut after: Option<String> = None;
         let mut seen_cursors: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
         let mut full = repo.to_string();
+        let mut default_branch: Option<String> = None;
+        let mut prs: Vec<OpenPr> = Vec::new();
+        let mut pr_next_cursor: Option<String> = None;
         let query = if label.is_some() { FLOW_ISSUES } else { FLOW_OPEN_ISSUES };
         loop {
+            let fetch_prs = with_prs && after.is_none();
             let vars = match label {
-                Some(label) => json!({"owner": owner, "name": name, "label": label, "after": after}),
-                None => json!({"owner": owner, "name": name, "after": after}),
+                Some(label) => {
+                    json!({"owner": owner, "name": name, "label": label, "after": after, "withPrs": fetch_prs})
+                }
+                None => json!({"owner": owner, "name": name, "after": after, "withPrs": fetch_prs}),
             };
             let resp = self.github.graphql(query, vars).await.map_err(RepoReadError::Transport)?;
             if let Some(e) = errors(&resp) {
@@ -2207,6 +2931,22 @@ impl Wf {
             }
             if let Some(n) = r["nameWithOwner"].as_str() {
                 full = n.to_string();
+            }
+            if default_branch.is_none() {
+                default_branch = r["defaultBranchRef"]["name"].as_str().map(String::from);
+            }
+            if fetch_prs {
+                for p in r["pullRequests"]["nodes"].as_array().into_iter().flatten() {
+                    if let Some(pr) = flow_git::parse_open_pr(&full, p) {
+                        prs.push(pr);
+                    }
+                }
+                let pr_page = &r["pullRequests"]["pageInfo"];
+                if pr_page["hasNextPage"] == true
+                    && let Some(c) = pr_page["endCursor"].as_str()
+                {
+                    pr_next_cursor = Some(c.to_string());
+                }
             }
             for n in r["issues"]["nodes"].as_array().into_iter().flatten() {
                 out.push(parse_node(&full, n).map_err(RepoReadError::Graphql)?);
@@ -2221,20 +2961,29 @@ impl Wf {
                     }
                     after = Some(c.to_string());
                 }
-                _ => return Ok((full, out)),
+                _ => {
+                    if let Some(pr_cursor) = pr_next_cursor {
+                        self.read_open_prs_tail(repo, &full, pr_cursor, &mut prs).await?;
+                    }
+                    return Ok((full, out, RepoPrs { default_branch, prs }));
+                }
             }
         }
     }
 
     async fn resolve_repos(&self, cfg: Option<&FlowConfig>) -> Result<ResolvedRepos> {
         let mut resolved = match cfg.and_then(|c| c.repos.as_ref()) {
-            Some(explicit) => ResolvedRepos {
-                repos: explicit
-                    .iter()
-                    .map(|r| ResolvedRepo { repo: r.clone(), explicit: true, project_ids: Vec::new() })
-                    .collect(),
-                unavailable_projects: Vec::new(),
-            },
+            Some(explicit) => {
+                let workspaces = self.discover_github_repos().await.map(|d| d.workspaces).unwrap_or_default();
+                ResolvedRepos {
+                    repos: explicit
+                        .iter()
+                        .map(|r| ResolvedRepo { repo: r.clone(), explicit: true, project_ids: Vec::new() })
+                        .collect(),
+                    unavailable_projects: Vec::new(),
+                    workspaces,
+                }
+            }
             None => {
                 let discovered = self.discover_github_repos().await?;
                 ResolvedRepos {
@@ -2244,6 +2993,7 @@ impl Wf {
                         .map(|(repo, project_ids)| ResolvedRepo { repo, explicit: false, project_ids })
                         .collect(),
                     unavailable_projects: discovered.unavailable_projects,
+                    workspaces: discovered.workspaces,
                 }
             }
         };
@@ -2273,24 +3023,27 @@ impl Wf {
             .flatten();
         let is_excluded =
             |name: &str| cfg.is_some_and(|c| c.exclude_repos.iter().any(|ex| ex.eq_ignore_ascii_case(name)));
-        let ResolvedRepos { repos, unavailable_projects } = self.resolve_repos(cfg).await?;
+        let ResolvedRepos { repos, unavailable_projects, workspaces } = self.resolve_repos(cfg).await?;
         let has_unavailable_discovery = !unavailable_projects.is_empty();
         let mut reads = Vec::new();
         let mut seen_issues: HashSet<String> = HashSet::new();
         let mut covered = CoveredRepos::default();
         let mut unreadable = CoveredRepos::default();
         let mut unreadable_projects: HashSet<String> = unavailable_projects.into_iter().collect();
+        let mut open_prs: BTreeMap<String, RepoPrs> = BTreeMap::new();
         let mut succeeded = 0usize;
         let mut first_discovered_err: Option<anyhow::Error> = None;
         for ResolvedRepo { repo, explicit, project_ids } in repos {
-            match self.read_repo(&repo, label).await {
-                Ok((full, rs)) => {
+            match self.read_repo(&repo, label, true).await {
+                Ok((full, rs, repo_prs)) => {
                     self.record_github_repo_alias(&repo, &full);
                     if is_excluded(&full) {
                         continue;
                     }
                     succeeded += 1;
+                    let full_key = full.to_ascii_lowercase();
                     covered.insert(full);
+                    open_prs.insert(full_key, repo_prs);
                     for r in rs {
                         if seen_issues.insert(node_key(&r.issue.repo, r.issue.number)) {
                             reads.push(r);
@@ -2319,7 +3072,16 @@ impl Wf {
             return Err(e);
         }
         let aliases = self.repo_aliases_snapshot();
-        Ok(Reads { reads, covered, unreadable, unreadable_projects, has_unavailable_discovery, aliases })
+        Ok(Reads {
+            reads,
+            covered,
+            unreadable,
+            unreadable_projects,
+            has_unavailable_discovery,
+            aliases,
+            open_prs,
+            workspaces,
+        })
     }
 
     async fn ticket_reads(&self, r: &Reads, tickets: &[Ticket], full: bool) -> Result<(HashSet<String>, Vec<Read>)> {
@@ -2378,7 +3140,10 @@ impl Wf {
                         reads.push(parse_node(final_repo, issue)?);
                     } else {
                         let mut parsed = parse_node(final_repo, issue)?;
-                        if !parsed.body_parsed.sub_issues.is_empty() {
+                        if !parsed.body_parsed.sub_issues.is_empty()
+                            || !parsed.body_touches.is_empty()
+                            || !parsed.body_text.trim().is_empty()
+                        {
                             parsed.body_parsed.blockers.clear();
                             parsed.body_parsed.parents.clear();
                             reads.push(parsed);
@@ -2416,12 +3181,13 @@ impl Wf {
         let aliases = self.repo_aliases_snapshot();
         reads.aliases = aliases;
         self.resolve_body_dependencies(&mut reads, &mut extra, with_graph).await?;
+        let sc = self.resolve_source_control(&mut reads, &mut extra, &closed).await?;
         let aliases = reads.aliases.clone();
         let covered = reads.covered.clone();
         let mut all = reads.reads.clone();
         all.extend(extra);
         let mut view = match cfg.as_ref().filter(|c| c.queue_enabled()) {
-            Some(c) => self.flow_build(c, reads, tickets.clone(), &closed, false)?,
+            Some(c) => self.flow_build(c, reads, tickets.clone(), &closed, &sc, false)?,
             None => FlowView {
                 enabled: false,
                 launch: None,
@@ -2442,7 +3208,7 @@ impl Wf {
             lists.extend(list.iter().map(|i| (node_key(&i.repo, i.number), name)));
         }
         lists.extend(view.blocked.iter().map(|b| (node_key(&b.issue.repo, b.issue.number), "blocked")));
-        view.graph = Some(graph(&covered, &aliases, all, &tickets, &lists));
+        view.graph = Some(graph(&covered, &aliases, all, &tickets, &lists, &sc));
         Ok(view)
     }
 
@@ -2452,6 +3218,7 @@ impl Wf {
         r: Reads,
         tickets: Vec<Ticket>,
         closed: &HashSet<String>,
+        sc: &SourceControlEdges,
         write: bool,
     ) -> Result<FlowView> {
         let mut done: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -2466,7 +3233,9 @@ impl Wf {
             };
             done.entry(key).or_default().push(l.child);
         }
-        let plan = plan_flow(cfg, r, tickets, closed, &done, |k| self.store.meta_get(k), write)?;
+        let plan = plan_flow(cfg, PlanInputs { reads: r, tickets, closed, done: &done, sc, write }, |k| {
+            self.store.meta_get(k)
+        })?;
         if write {
             for op in plan.meta_ops {
                 match op {
@@ -2566,13 +3335,16 @@ impl Wf {
         let (closed, mut extra) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
         reads.aliases = self.repo_aliases_snapshot();
         self.resolve_body_dependencies(&mut reads, &mut extra, false).await?;
+        let sc = self.resolve_source_control(&mut reads, &mut extra, &closed).await?;
         let aliases = reads.aliases.clone();
+        let conflict_adj = cfg.serialize_file_conflicts.then(|| sc.conflict_adj());
         let g = self.lock.lock().await;
         let covered = reads.capacity_repos();
-        let view = self.flow_build(&cfg, reads, self.open_tickets()?, &closed, true)?;
+        let view = self.flow_build(&cfg, reads, self.open_tickets()?, &closed, &sc, true)?;
         let flow_cards = self.flow_cards()?;
         let card_refs: Vec<(String, FlowPick)> = flow_cards.iter().map(|(c, p)| (c.id.clone(), p.clone())).collect();
-        let PickPlan { offered, retire, picks } = plan_picks(cfg.launch, &view.queue, &card_refs, view.free, most);
+        let PickPlan { offered, retire, picks } =
+            plan_picks(cfg.launch, &view.queue, &card_refs, view.free, most, conflict_adj.as_ref());
         let mut retired = Vec::new();
         for (idx, note) in retire {
             let (c, _) = &flow_cards[idx];
@@ -2604,17 +3376,32 @@ impl Wf {
         drop(g);
         for i in &picks {
             let mut v = picked(i);
-            if let Some(p) = &i.parent {
-                let parent = node_key(&p.repo, p.number);
+            if i.parent.is_some() || cfg.serialize_file_conflicts {
                 let open = self.open_tickets()?;
-                if open
+                let open_keys: HashSet<String> = open
                     .iter()
                     .filter_map(|t| ticket_repo_canonical(&covered, &aliases, t))
-                    .any(|(r, n)| node_key(&r, n) == parent)
+                    .map(|(r, n)| node_key(&r, n))
+                    .filter(|k| !closed.contains(k))
+                    .collect();
+                if let Some(p) = &i.parent
+                    && open_keys.contains(&node_key(&p.repo, p.number))
                 {
                     v["reason"] = json!(format!("its parent {} has a ticket now", p.label));
                     done.push(v);
                     continue;
+                }
+                if cfg.serialize_file_conflicts {
+                    let holds = sc.conflicts_with_running(&node_key(&i.repo, i.number), &open_keys);
+                    if let Some(first) = holds.first() {
+                        v["reason"] = json!(format!(
+                            "conflicts with running ticket {} on {}",
+                            first.label,
+                            first.files.join(", ")
+                        ));
+                        done.push(v);
+                        continue;
+                    }
                 }
             }
             let title = Some(i.title.clone()).filter(|t| !t.trim().is_empty());
@@ -2674,35 +3461,48 @@ impl Wf {
                 let (closed, mut extra) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
                 reads.aliases = self.repo_aliases_snapshot();
                 self.resolve_body_dependencies(&mut reads, &mut extra, false).await?;
-                Some((reads, closed))
+                let sc = self.resolve_source_control(&mut reads, &mut extra, &closed).await?;
+                Some((reads, closed, sc))
             }
             None => None,
         };
-        let seen = fresh.as_ref().and_then(|(r, _)| {
+        let seen = fresh.as_ref().and_then(|(r, _, _)| {
             r.reads
                 .iter()
                 .find(|x| x.issue.repo.eq_ignore_ascii_case(&pick.repo) && x.issue.number == pick.number)
                 .map(|x| x.issue.key.clone())
         });
         let g = self.lock.lock().await;
+        let conflict_adj = cfg
+            .as_ref()
+            .zip(fresh.as_ref())
+            .and_then(|(c, (_, _, sc))| c.serialize_file_conflicts.then(|| sc.conflict_adj()));
         let view = match (&cfg, fresh) {
-            (Some(c), Some((reads, closed))) => Some(self.flow_build(c, reads, self.open_tickets()?, &closed, true)?),
+            (Some(c), Some((reads, closed, sc))) => {
+                Some(self.flow_build(c, reads, self.open_tickets()?, &closed, &sc, true)?)
+            }
             _ => None,
         };
         let current = view.as_ref().and_then(|v| v.queue.iter().find(|i| same(pick, i))).cloned();
-        let holds = match &view {
-            Some(v) => self
-                .flow_cards()?
-                .into_iter()
-                .filter(|(_, p)| v.queue.iter().any(|i| same(p, i)))
-                .take(v.free)
-                .any(|(c, _)| c.seq == card.seq),
-            None => false,
+        let (holds, conflict_retired) = match (&cfg, &view) {
+            (Some(c), Some(v)) => {
+                let flow_cards = self.flow_cards()?;
+                let card_refs: Vec<(String, FlowPick)> =
+                    flow_cards.iter().map(|(fc, p)| (fc.id.clone(), p.clone())).collect();
+                let planned = plan_picks(c.launch, &v.queue, &card_refs, v.free, Some(0), conflict_adj.as_ref());
+                let holds = planned.offered.iter().any(|(_, id)| id == &card.id);
+                let conflict_retired = planned.retire.iter().any(|(idx, note)| {
+                    flow_cards[*idx].0.seq == card.seq && *note == "conflicts with an offered launch"
+                });
+                (holds, conflict_retired)
+            }
+            _ => (false, false),
         };
         let refused = match (&view, &current) {
             _ if word == SKIP => None,
             (None, _) => Some("the flow is off".to_string()),
             (_, None) => Some(format!("{} is no longer ready", pick.label)),
+            _ if conflict_retired => Some(format!("{} conflicts with a higher-priority offered launch", pick.label)),
             _ if !holds => Some("no ticket slot is free".to_string()),
             _ => None,
         };
@@ -3030,6 +3830,7 @@ mod prop_tests {
             opt_in,
             max_tickets: Some(max_tickets),
             launch,
+            serialize_file_conflicts: false,
         };
 
         let n = u.int_in_range(0..=16usize)?;
@@ -3138,6 +3939,7 @@ mod prop_tests {
                 issue,
                 state: Some("open"),
                 labels,
+                body_text: String::new(),
                 body_track: None,
                 body_touches: Vec::new(),
                 body_parsed: ParsedBody::default(),
@@ -3149,6 +3951,7 @@ mod prop_tests {
                 subs: Vec::new(),
                 more_subs: false,
                 unresolved_blockers,
+                pr_stack: Vec::new(),
                 warnings: Vec::new(),
             });
         }
@@ -3196,21 +3999,27 @@ mod prop_tests {
             let sc = gen_flow_scenario(u, false)?;
             let write = u.arbitrary::<bool>()?;
 
+            let sc_empty = SourceControlEdges::default();
             let plan = plan_flow(
                 &sc.cfg,
-                Reads {
-                    reads: sc.reads.clone(),
-                    covered: sc.covered.clone(),
-                    unreadable: CoveredRepos::default(),
-                    unreadable_projects: HashSet::new(),
-                    has_unavailable_discovery: false,
-                    aliases: std::collections::HashMap::new(),
+                PlanInputs {
+                    reads: Reads {
+                        reads: sc.reads.clone(),
+                        covered: sc.covered.clone(),
+                        unreadable: CoveredRepos::default(),
+                        unreadable_projects: HashSet::new(),
+                        has_unavailable_discovery: false,
+                        aliases: std::collections::HashMap::new(),
+                        open_prs: BTreeMap::new(),
+                        workspaces: BTreeMap::new(),
+                    },
+                    tickets: sc.tickets.clone(),
+                    closed: &sc.closed,
+                    done: &sc.unheld_done,
+                    sc: &sc_empty,
+                    write,
                 },
-                sc.tickets.clone(),
-                &sc.closed,
-                &sc.unheld_done,
                 |k| Ok(sc.stored_skips.get(k).cloned()),
-                write,
             )
             .unwrap();
             if !write {
@@ -3224,19 +4033,24 @@ mod prop_tests {
             shuffle(u, &mut perm_tickets)?;
             let perm_plan = plan_flow(
                 &sc.cfg,
-                Reads {
-                    reads: perm_reads,
-                    covered: sc.covered.clone(),
-                    unreadable: CoveredRepos::default(),
-                    unreadable_projects: HashSet::new(),
-                    has_unavailable_discovery: false,
-                    aliases: std::collections::HashMap::new(),
+                PlanInputs {
+                    reads: Reads {
+                        reads: perm_reads,
+                        covered: sc.covered.clone(),
+                        unreadable: CoveredRepos::default(),
+                        unreadable_projects: HashSet::new(),
+                        has_unavailable_discovery: false,
+                        aliases: std::collections::HashMap::new(),
+                        open_prs: BTreeMap::new(),
+                        workspaces: BTreeMap::new(),
+                    },
+                    tickets: perm_tickets,
+                    closed: &sc.closed,
+                    done: &sc.unheld_done,
+                    sc: &sc_empty,
+                    write,
                 },
-                perm_tickets,
-                &sc.closed,
-                &sc.unheld_done,
                 |k| Ok(sc.stored_skips.get(k).cloned()),
-                write,
             )
             .unwrap();
             assert_eq!(issue_ids(&plan.view.queue), issue_ids(&perm_plan.view.queue));
@@ -3334,21 +4148,27 @@ mod prop_tests {
             let mut sc = gen_flow_scenario(u, true)?;
             sc.cfg.launch = *u.choose(&[Launch::Ask, Launch::Auto])?;
 
+            let sc_empty = SourceControlEdges::default();
             let plan = plan_flow(
                 &sc.cfg,
-                Reads {
-                    reads: sc.reads.clone(),
-                    covered: sc.covered.clone(),
-                    unreadable: CoveredRepos::default(),
-                    unreadable_projects: HashSet::new(),
-                    has_unavailable_discovery: false,
-                    aliases: std::collections::HashMap::new(),
+                PlanInputs {
+                    reads: Reads {
+                        reads: sc.reads.clone(),
+                        covered: sc.covered.clone(),
+                        unreadable: CoveredRepos::default(),
+                        unreadable_projects: HashSet::new(),
+                        has_unavailable_discovery: false,
+                        aliases: std::collections::HashMap::new(),
+                        open_prs: BTreeMap::new(),
+                        workspaces: BTreeMap::new(),
+                    },
+                    tickets: sc.tickets.clone(),
+                    closed: &sc.closed,
+                    done: &sc.unheld_done,
+                    sc: &sc_empty,
+                    write: false,
                 },
-                sc.tickets.clone(),
-                &sc.closed,
-                &sc.unheld_done,
                 |k| Ok(sc.stored_skips.get(k).cloned()),
-                false,
             )
             .unwrap();
             let view = &plan.view;
@@ -3423,7 +4243,7 @@ mod prop_tests {
                 cards.push((format!("a{idx}"), pick));
             }
             let most = *u.choose(&[None, Some(0), Some(1), Some(2), Some(5)])?;
-            let pp = plan_picks(sc.cfg.launch, &view.queue, &cards, view.free, most);
+            let pp = plan_picks(sc.cfg.launch, &view.queue, &cards, view.free, most, None);
 
             // Every card is either kept or retired exactly once.
             assert_eq!(pp.offered.len() + pp.retire.len(), cards.len());
@@ -3497,6 +4317,7 @@ mod prop_tests {
             },
             state: Some("open"),
             labels: labels.iter().map(|s| (*s).to_string()).collect(),
+            body_text: String::new(),
             body_track: body_track.map(String::from),
             body_touches: Vec::new(),
             body_parsed: ParsedBody::default(),
@@ -3512,6 +4333,7 @@ mod prop_tests {
             subs: Vec::new(),
             more_subs: false,
             unresolved_blockers: Vec::new(),
+            pr_stack: Vec::new(),
             warnings: Vec::new(),
         };
         g.read(make(1, &[], Some("flow-dag"), None), None, &tracked);

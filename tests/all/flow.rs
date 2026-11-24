@@ -3665,3 +3665,638 @@ return {{ afterSync, afterStaleGet }};
     assert_eq!(race["afterStaleGet"]["getCount"], 3, "queued refresh must run after sync settles: {race}");
     assert_eq!(race["afterStaleGet"]["nodeTitle"], "Post-sync refreshed title", "{race}");
 }
+
+fn open_pr(number: u64, base: &str, head: &str, body: &str, closing: &[(&str, u64)], files: &[&str]) -> Value {
+    let closing_nodes: Vec<Value> =
+        closing.iter().map(|(r, n)| json!({"number": n, "repository": {"nameWithOwner": r}})).collect();
+    let file_nodes: Vec<Value> = files.iter().map(|p| json!({"path": p})).collect();
+    json!({
+        "id": format!("PR_{number}"),
+        "number": number,
+        "state": "OPEN",
+        "isDraft": false,
+        "baseRefName": base,
+        "headRefName": head,
+        "headRefOid": format!("{number:040x}"),
+        "isCrossRepository": false,
+        "body": body,
+        "closingIssuesReferences": {"nodes": closing_nodes},
+        "files": {"nodes": file_nodes},
+    })
+}
+
+fn run_git(dir: &std::path::Path, args: &[&str]) {
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "Test User")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test User")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_PREFIX",
+        "GIT_SUPER_PREFIX",
+    ] {
+        cmd.env_remove(var);
+    }
+    let out = cmd.output().expect("run git");
+    assert!(out.status.success(), "git {args:?} failed in {}: {}", dir.display(), String::from_utf8_lossy(&out.stderr));
+}
+
+#[tokio::test]
+async fn pr_stack_from_open_prs_holds_dependent_until_base_merges_and_paginates_open_prs() {
+    let h = flowing_with(4, "auto");
+    issue(&h, REPO, 10, &[], 1); // Epic parent of #2
+    issue(&h, REPO, 1, &[FLOW], 2);
+    issue(&h, REPO, 2, &[FLOW], 3);
+    issue(&h, REPO, 3, &[FLOW], 4);
+    h.github.set_parent(REPO, 2, (REPO, 10));
+
+    // PR #101 closes #1 (targets main).
+    h.github.set_pr(REPO, 101, open_pr(101, "main", "feat/1-base", "Closes #1", &[(REPO, 1)], &["src/a.rs"]));
+    // PR #102 targets PR #101's head branch; body references sub-issue #2 AND parent epic #10 (epic pruned).
+    h.github.set_pr(REPO, 102, open_pr(102, "feat/1-base", "feat/2-stack", "Refs #2\nRefs #10", &[], &["src/b.rs"]));
+    // PR #103 targets PR #102's head branch; matched solely via branch `<type>/<n>-...`.
+    h.github.set_pr(REPO, 103, open_pr(103, "feat/2-stack", "feat/3-branch-only", "No refs here", &[], &["src/c.rs"]));
+    // PR #104 has a bogus branch issue number #999 (does not exist on GitHub -> dropped without phantom node).
+    h.github.set_pr(REPO, 104, open_pr(104, "feat/1-base", "feat/999-missing", "", &[], &[]));
+    // PR #105 mentions PR number #101 in `Refs #101` (not an issue -> dropped without phantom node).
+    h.github.set_pr(REPO, 105, open_pr(105, "feat/1-base", "chore/followup", "Refs #101", &[], &[]));
+    // Force pagination of open PRs (`flowOpenPrs`) across 2 PRs per page.
+    h.github.set_pr_page(2);
+
+    let f = flow(&h).await;
+    assert_eq!(labels(&f["queue"]), ["widgets#1"], "{f}");
+    assert_eq!(labels(&f["blocked"]), ["widgets#2", "widgets#3"], "{f}");
+    assert_eq!(
+        f["blocked"][0]["prStack"],
+        json!([{
+            "repo": REPO,
+            "number": 1,
+            "label": "widgets#1",
+            "url": "https://github.com/acme/widgets/issues/1",
+            "branch": "feat/2-stack",
+            "baseBranch": "feat/1-base",
+            "pr": 102,
+            "basePr": 101
+        }]),
+        "{f}"
+    );
+    assert_eq!(labels(&f["blocked"][0]["blockers"]), ["widgets#1"]);
+    assert_eq!(
+        f["blocked"][1]["prStack"],
+        json!([{
+            "repo": REPO,
+            "number": 2,
+            "label": "widgets#2",
+            "url": "https://github.com/acme/widgets/issues/2",
+            "branch": "feat/3-branch-only",
+            "baseBranch": "feat/2-stack",
+            "pr": 103,
+            "basePr": 102
+        }]),
+        "{f}"
+    );
+    assert!(
+        h.github.operations().iter().any(|op| op == "flowOpenPrs"),
+        "expected flowOpenPrs pagination query: {:?}",
+        h.github.operations()
+    );
+
+    let g = graph(&h).await;
+    let edges = g["graph"]["edges"].as_array().unwrap();
+    assert!(
+        edges.contains(&json!({
+            "from": "acme/widgets#2",
+            "to": "acme/widgets#1",
+            "kind": "prStack",
+            "source": "git",
+            "branch": "feat/2-stack",
+            "baseBranch": "feat/1-base",
+            "pr": 102,
+            "basePr": 101
+        })),
+        "{edges:?}"
+    );
+    assert!(
+        edges.contains(&json!({
+            "from": "acme/widgets#3",
+            "to": "acme/widgets#2",
+            "kind": "prStack",
+            "source": "git",
+            "branch": "feat/3-branch-only",
+            "baseBranch": "feat/2-stack",
+            "pr": 103,
+            "basePr": 102
+        })),
+        "{edges:?}"
+    );
+    let node_ids: Vec<&str> =
+        g["graph"]["nodes"].as_array().unwrap().iter().map(|n| n["id"].as_str().unwrap()).collect();
+    assert!(
+        !node_ids.contains(&"acme/widgets#999") && !node_ids.contains(&"acme/widgets#101"),
+        "bogus branch/PR numbers must not produce phantom nodes: {node_ids:?}"
+    );
+    // Epic #10 must not receive a prStack edge from #102 because #2 is its sub-issue.
+    assert!(
+        edges.iter().all(|e| !(e["kind"] == "prStack" && e["from"] == "acme/widgets#10")),
+        "parent epic must be pruned when sub-issue matches: {edges:?}"
+    );
+
+    // Auto-launch picks only #1 while #2 and #3 are held by prStack.
+    reconcile(&h).await;
+    let launched: Vec<String> = h.fake.launched().iter().map(|l| l["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(launched, ["widgets#1: Issue 1"]);
+
+    // Once PR #101 merges (and #1 closes), #2 unblocks and enters queue while #3 stays stacked on PR #102.
+    h.github.update_pr(REPO, 101, json!({"state": "MERGED"}));
+    h.github.close_issue(REPO, 1);
+    let f2 = flow(&h).await;
+    assert_eq!(labels(&f2["queue"]), ["widgets#2"], "{f2}");
+    assert_eq!(labels(&f2["blocked"]), ["widgets#3"], "{f2}");
+
+    // Once PR #102 merges too, #3 enters queue.
+    h.github.update_pr(REPO, 102, json!({"state": "MERGED"}));
+    let f3 = flow(&h).await;
+    assert_eq!(labels(&f3["queue"]), ["widgets#2", "widgets#3"], "{f3}");
+    assert_eq!(labels(&f3["blocked"]), Vec::<String>::new(), "{f3}");
+}
+
+#[tokio::test]
+async fn local_worktree_branch_ancestry_and_dirty_edits_infer_pr_stack_and_file_conflict() {
+    let td = tempfile::tempdir().unwrap();
+    let repo_dir = td.path().join("repo");
+    std::fs::create_dir_all(repo_dir.join("src")).unwrap();
+    run_git(&repo_dir, &["init", "-b", "main"]);
+    std::fs::write(repo_dir.join("src/alpha.rs"), "pub fn a() {}\n").unwrap();
+    std::fs::write(repo_dir.join("src/beta.rs"), "pub fn b() {}\n").unwrap();
+    std::fs::write(repo_dir.join("src/shared.rs"), "pub fn s() {}\n").unwrap();
+    run_git(&repo_dir, &["add", "."]);
+    run_git(&repo_dir, &["commit", "-m", "init"]);
+
+    let wt1 = td.path().join("wt-1");
+    run_git(&repo_dir, &["worktree", "add", "-b", "feat/1-base", wt1.to_str().unwrap(), "main"]);
+    std::fs::write(wt1.join("src/alpha.rs"), "pub fn a() { /* base */ }\n").unwrap();
+    run_git(&wt1, &["commit", "-am", "base"]);
+
+    let wt2 = td.path().join("wt-2");
+    run_git(&repo_dir, &["worktree", "add", "-b", "feat/2-child", wt2.to_str().unwrap(), "feat/1-base"]);
+    std::fs::write(wt2.join("src/beta.rs"), "pub fn b() { /* child */ }\n").unwrap();
+    run_git(&wt2, &["commit", "-am", "child"]);
+
+    let wt3 = td.path().join("wt-3");
+    run_git(&repo_dir, &["worktree", "add", "-b", "feat/3-grandchild", wt3.to_str().unwrap(), "feat/2-child"]);
+    std::fs::write(wt3.join("src/shared.rs"), "pub fn s() { /* grandchild */ }\n").unwrap();
+    run_git(&wt3, &["commit", "-am", "grandchild"]);
+
+    // Independent worktree #4 branched from main with an uncommitted edit to src/beta.rs (conflicts with #2).
+    let wt4 = td.path().join("wt-4");
+    run_git(&repo_dir, &["worktree", "add", "-b", "feat/4-dirty", wt4.to_str().unwrap(), "main"]);
+    std::fs::write(wt4.join("src/beta.rs"), "pub fn b() { /* dirty */ }\n").unwrap();
+
+    let cfg = Config::from_value(json!({
+        "flow": {"repos": [REPO], "optIn": {"label": FLOW}, "maxTickets": 4, "launch": "ask"}
+    }))
+    .unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.github.add_repo(REPO);
+    h.fake.set_projects(vec![project("p-widgets", repo_dir.to_str().unwrap())]);
+    h.remotes.set(repo_dir.to_str().unwrap(), "git@github.com:acme/widgets.git");
+    for n in 1..=4 {
+        issue(&h, REPO, n, &[FLOW], n as u32);
+    }
+
+    let g = graph(&h).await;
+    assert_eq!(labels(&g["queue"]), ["widgets#1", "widgets#4"], "{g}");
+    assert_eq!(labels(&g["blocked"]), ["widgets#2", "widgets#3"], "{g}");
+
+    let edges = g["graph"]["edges"].as_array().unwrap();
+    let pr_stacks: Vec<&Value> = edges.iter().filter(|e| e["kind"] == "prStack").collect();
+    assert_eq!(
+        pr_stacks,
+        vec![
+            &json!({
+                "from": "acme/widgets#2",
+                "to": "acme/widgets#1",
+                "kind": "prStack",
+                "source": "git",
+                "branch": "feat/2-child",
+                "baseBranch": "feat/1-base"
+            }),
+            &json!({
+                "from": "acme/widgets#3",
+                "to": "acme/widgets#2",
+                "kind": "prStack",
+                "source": "git",
+                "branch": "feat/3-grandchild",
+                "baseBranch": "feat/2-child"
+            }),
+        ],
+        "3-deep worktree stack must transitively reduce #3 -> #1: {pr_stacks:?}"
+    );
+    let conflicts: Vec<&Value> = edges.iter().filter(|e| e["kind"] == "fileConflict").collect();
+    assert_eq!(
+        conflicts,
+        vec![&json!({
+            "from": "acme/widgets#2",
+            "to": "acme/widgets#4",
+            "kind": "fileConflict",
+            "source": "code",
+            "files": ["src/beta.rs"]
+        })],
+        "stacked worktrees diff against stack base (no false #3/#1 or #3/#2 conflict), dirty #4 conflicts with #2: {conflicts:?}"
+    );
+
+    // Once feat/1-base merges into main, #2 is no longer stacked on #1 and enters queue.
+    run_git(&repo_dir, &["merge", "--ff-only", "feat/1-base"]);
+    let f2 = flow(&h).await;
+    assert_eq!(labels(&f2["queue"]), ["widgets#1", "widgets#2", "widgets#4"], "{f2}");
+    assert_eq!(labels(&f2["blocked"]), ["widgets#3"], "{f2}");
+}
+
+#[tokio::test]
+async fn sequential_ticket_part_chains_emit_pr_stack_and_unblock_when_earlier_part_closes() {
+    let h = flowing(4);
+    issue(&h, REPO, 100, &[], 1); // Epic
+    issue(&h, REPO, 101, &[FLOW], 2);
+    issue(&h, REPO, 102, &[FLOW], 3);
+    issue(&h, REPO, 103, &[FLOW], 4);
+
+    // Ticket thread for part 1/3 is open; worker/pending links hold parts 2/3 and 3/3 under parentIssue #100.
+    h.fake.put(t3_codemode::fake::thread("mcp:t101", "running", T0));
+    h.wf(
+        "mcp:t101",
+        "join",
+        json!({
+            "parent": BOARD,
+            "label": "widgets#101",
+            "role": "ticket",
+            "issue": "acme/widgets#101",
+            "parentIssue": "acme/widgets#100",
+            "part": "1/3"
+        }),
+    )
+    .await;
+    let params = h.app.wf.config().link_params("ticket", "worker").unwrap();
+    for (num, part) in [(102u64, "2/3"), (103u64, "3/3")] {
+        h.app
+            .store
+            .pending_put(&Pending {
+                parent: "mcp:overseer".into(),
+                label: format!("widgets#{num}"),
+                role: "worker".into(),
+                params,
+                at: T0.into(),
+                reported: false,
+                thread: None,
+                link: None,
+                project: None,
+                identity: t3_codemode::store::Identity {
+                    issue: Some(format!("acme/widgets#{num}")),
+                    parent_issue: Some("acme/widgets#100".into()),
+                    part: Some(part.into()),
+                },
+                brief: None,
+            })
+            .unwrap();
+    }
+
+    let g = graph(&h).await;
+    assert_eq!(labels(&g["queue"]), Vec::<String>::new(), "{g}");
+    assert_eq!(labels(&g["blocked"]), ["widgets#102", "widgets#103"], "{g}");
+    assert_eq!(g["blocked"][0]["prStack"][0]["part"], "1/3 -> 2/3");
+    assert_eq!(g["blocked"][1]["prStack"][0]["part"], "2/3 -> 3/3");
+    let pr_stacks: Vec<&Value> =
+        g["graph"]["edges"].as_array().unwrap().iter().filter(|e| e["kind"] == "prStack").collect();
+    assert_eq!(
+        pr_stacks,
+        vec![
+            &json!({
+                "from": "acme/widgets#102",
+                "to": "acme/widgets#101",
+                "kind": "prStack",
+                "source": "git",
+                "part": "1/3 -> 2/3"
+            }),
+            &json!({
+                "from": "acme/widgets#103",
+                "to": "acme/widgets#102",
+                "kind": "prStack",
+                "source": "git",
+                "part": "2/3 -> 3/3"
+            }),
+        ],
+        "{pr_stacks:?}"
+    );
+
+    // Closing #101 releases the pure part 1/3 -> 2/3 hold so #102 enters queue while #103 still waits on #102.
+    h.github.close_issue(REPO, 101);
+    let f2 = flow(&h).await;
+    assert_eq!(labels(&f2["queue"]), ["widgets#102"], "{f2}");
+    assert_eq!(labels(&f2["blocked"]), ["widgets#103"], "{f2}");
+}
+
+#[tokio::test]
+async fn file_conflicts_verify_paths_against_repo_tree_and_serialize_when_enabled() {
+    let td = tempfile::tempdir().unwrap();
+    let repo_dir = td.path().join("widgets");
+    std::fs::create_dir_all(repo_dir.join("src")).unwrap();
+    run_git(&repo_dir, &["init", "-b", "main"]);
+    std::fs::write(repo_dir.join("src/flow.rs"), "// flow\n").unwrap();
+    std::fs::write(repo_dir.join("src/board.html"), "<!-- board -->\n").unwrap();
+    std::fs::write(repo_dir.join("src/other.rs"), "// other\n").unwrap();
+    run_git(&repo_dir, &["add", "."]);
+    run_git(&repo_dir, &["commit", "-m", "init"]);
+
+    let setup = |serialize: bool, launch: &str, max: usize| -> H {
+        let cfg = Config::from_value(json!({
+            "flow": {
+                "repos": [REPO, TOOLS],
+                "optIn": {"label": FLOW},
+                "maxTickets": max,
+                "launch": launch,
+                "serializeFileConflicts": serialize
+            }
+        }))
+        .unwrap();
+        let h = H::build(Vec::new(), cfg);
+        h.github.add_repo(REPO);
+        h.github.add_repo(TOOLS);
+        h.fake.set_projects(vec![project("p-widgets", repo_dir.to_str().unwrap()), project("p-tools", "/src/tools")]);
+        h.remotes.set(repo_dir.to_str().unwrap(), "git@github.com:acme/widgets.git");
+        h.remotes.set("/src/tools", "git@github.com:acme/tools.git");
+
+        issue(&h, REPO, 1, &[FLOW, "priority: high"], 1);
+        issue(&h, REPO, 2, &[FLOW, "priority: medium"], 2);
+        issue(&h, REPO, 3, &[FLOW, "priority: low"], 3);
+        issue(&h, REPO, 4, &[FLOW, "priority: low"], 4);
+        issue(&h, REPO, 5, &[FLOW, "priority: low"], 5);
+        issue(&h, TOOLS, 1, &[FLOW, "priority: low"], 6);
+
+        // #1 declares real src/flow.rs + nonexistent src/ghost.rs in Touches.
+        h.github.set_body(REPO, 1, "## Flow\n- Touches: `src/flow.rs`, `src/ghost.rs`\n");
+        // #2 mentions src/flow.rs and src/ghost.rs in prose + Touches src/board.html.
+        h.github.set_body(
+            REPO,
+            2,
+            "Update `src/flow.rs` and `src/ghost.rs`.\n\n## Flow\n- Touches: `src/board.html`\n",
+        );
+        // #3 has an open PR modifying src/board.html (overlaps with #2's Touches).
+        h.github.set_pr(REPO, 201, open_pr(201, "main", "feat/3-ui", "Closes #3", &[(REPO, 3)], &["src/board.html"]));
+        // #4 touches independent src/other.rs.
+        h.github.set_body(REPO, 4, "## Flow\n- Touches: `src/other.rs`\n");
+        // #5 is a sub-issue of #1 touching src/flow.rs (epic/sub-issue pair must NOT emit fileConflict).
+        h.github.set_parent(REPO, 5, (REPO, 1));
+        h.github.set_body(REPO, 5, "## Flow\n- Touches: `src/flow.rs`\n");
+        // Cross-repo tools#1 mentions src/flow.rs (different repo -> must NOT conflict with widgets#1).
+        h.github.set_body(TOOLS, 1, "## Flow\n- Touches: `src/flow.rs`\n");
+        h
+    };
+
+    // 1. Default (serializeFileConflicts: false): edges appear in graph, but queue & auto-launch stay unblocked.
+    let h_off = setup(false, "auto", 2);
+    let g_off = graph(&h_off).await;
+    let conflicts: Vec<&Value> =
+        g_off["graph"]["edges"].as_array().unwrap().iter().filter(|e| e["kind"] == "fileConflict").collect();
+    assert_eq!(
+        conflicts,
+        vec![
+            &json!({
+                "from": "acme/widgets#1",
+                "to": "acme/widgets#2",
+                "kind": "fileConflict",
+                "source": "code",
+                "files": ["src/flow.rs"]
+            }),
+            &json!({
+                "from": "acme/widgets#2",
+                "to": "acme/widgets#3",
+                "kind": "fileConflict",
+                "source": "code",
+                "files": ["src/board.html"]
+            }),
+            &json!({
+                "from": "acme/widgets#2",
+                "to": "acme/widgets#5",
+                "kind": "fileConflict",
+                "source": "code",
+                "files": ["src/flow.rs"]
+            }),
+        ],
+        "ghost.rs dropped, parent-child #1/#5 skipped (while unrelated #2/#5 still conflicts), cross-repo tools#1 skipped: {conflicts:?}"
+    );
+    assert_eq!(labels(&g_off["queue"]), ["widgets#1", "widgets#2", "widgets#3", "widgets#4", "widgets#5", "tools#1"]);
+    reconcile(&h_off).await;
+    let launched_off: Vec<String> =
+        h_off.fake.launched().iter().map(|l| l["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(launched_off, ["widgets#1: Issue 1", "widgets#2: Issue 2"]);
+
+    // 2. serializeFileConflicts: true in auto mode: batch pick launches #1, skips colliding #2, launches #3 and #4.
+    let h_auto = setup(true, "auto", 3);
+    reconcile(&h_auto).await;
+    let launched_on: Vec<String> =
+        h_auto.fake.launched().iter().map(|l| l["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(
+        launched_on,
+        ["widgets#1: Issue 1", "widgets#3: Issue 3", "widgets#4: Issue 4"],
+        "colliding #2 must be held while higher-priority #1 launches, non-conflicting #3 & #4 fill slots"
+    );
+
+    // 3. With #1 actively running, wf.flow() moves #2 into blocked with fileConflicts details until #1 hands off.
+    let h_run = setup(true, "ask", 3);
+    ticket(&h_run, "mcp:t1", "widgets#1").await;
+    let f_run = flow(&h_run).await;
+    assert_eq!(labels(&f_run["blocked"]), ["widgets#2"], "{f_run}");
+    assert_eq!(
+        f_run["blocked"][0]["fileConflicts"],
+        json!([{
+            "repo": REPO,
+            "number": 1,
+            "label": "widgets#1",
+            "url": "https://github.com/acme/widgets/issues/1",
+            "files": ["src/flow.rs"]
+        }]),
+        "{f_run}"
+    );
+    assert_eq!(labels(&f_run["queue"]), ["widgets#3", "widgets#4", "tools#1"], "{f_run}");
+
+    // Hand off #1 -> #2 returns to queue cleanly.
+    h_run.wf("mcp:t1", "send", json!({"kind": "handoff", "body": "done"})).await;
+    let f_after = flow(&h_run).await;
+    assert_eq!(labels(&f_after["blocked"]), Vec::<String>::new(), "{f_after}");
+    assert!(labels(&f_after["queue"]).contains(&"widgets#2".to_string()), "{f_after}");
+
+    // 4. serializeFileConflicts: true in ask mode offers #1 and #3 (skipping colliding #2),
+    // and retires/refuses a stale lower-priority colliding card when serialization turns on later.
+    let h_ask = setup(true, "ask", 2);
+    reconcile(&h_ask).await;
+    let offered: Vec<String> = flow_cards(&h_ask).iter().map(|c| c["label"].as_str().unwrap().to_string()).collect();
+    assert_eq!(offered, ["widgets#1", "widgets#3"], "ask mode must not offer colliding #2 alongside #1");
+
+    let mut h_retire = setup(false, "ask", 2);
+    reconcile(&h_retire).await;
+    let pre_cards = flow_cards(&h_retire);
+    assert_eq!(pre_cards.iter().map(|c| c["label"].as_str().unwrap()).collect::<Vec<_>>(), ["widgets#1", "widgets#2"]);
+    let card2_id = pre_cards[1]["id"].as_str().unwrap().to_string();
+    h_retire.config = Config::from_value(json!({
+        "flow": {
+            "repos": [REPO, TOOLS],
+            "optIn": {"label": FLOW},
+            "maxTickets": 2,
+            "launch": "ask",
+            "serializeFileConflicts": true
+        }
+    }))
+    .unwrap();
+    h_retire.reopen();
+    let refused = h_retire.app.wf.answer(&card2_id, "launch").await.unwrap_err().to_string();
+    assert!(refused.contains("conflicts with a higher-priority offered launch"), "{refused}");
+    assert!(h_retire.fake.launched().is_empty());
+}
+
+#[tokio::test]
+async fn graph_tab_renders_pr_stack_and_file_conflict_styles_legend_tooltips_and_inspector() {
+    let cfg = Config::from_value(json!({
+        "flow": {
+            "repos": [REPO],
+            "optIn": {"label": FLOW},
+            "maxTickets": 4,
+            "launch": "ask",
+            "serializeFileConflicts": true
+        }
+    }))
+    .unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.github.add_repo(REPO);
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+
+    issue(&h, REPO, 1, &[FLOW, "priority: high"], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    issue(&h, REPO, 3, &[FLOW], 3);
+    issue(&h, REPO, 4, &[FLOW], 4);
+    h.github.set_pr(REPO, 101, open_pr(101, "main", "feat/1-base", "Closes #1", &[(REPO, 1)], &["src/flow.rs"]));
+    h.github.set_pr(
+        REPO,
+        102,
+        open_pr(102, "feat/1-base", "feat/2-stack", "Closes #2", &[(REPO, 2)], &["src/board.html"]),
+    );
+    h.github.set_body(REPO, 3, "## Flow\n- Touches: `src/board.html`\n");
+    h.github.set_body(REPO, 4, "## Flow\n- Touches: `src/flow.rs`\n");
+    ticket(&h, "mcp:t1", "widgets#1").await;
+
+    let (html, st, view) = panel_page(h).await;
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        &format!(
+            r##"{GRAPH}
+fetchReply = (url) => url === "/api/flow" ? reply(200, view) : new Promise(() => {{}});
+emitState(base);
+await tick();
+const blockedRows = Object.fromEntries(rows("flow-b").map((row) => [row.label, row.why]));
+selectTab("graph");
+const legend = document.querySelectorAll("#graph-key span").map((s) => s.textContent.trim());
+const edgeInfo = document.querySelectorAll(".ge").map((p) => ({{
+  cls: p.getAttribute("class"),
+  kind: p.getAttribute("data-kind"),
+  source: p.getAttribute("data-source"),
+  marker: p.getAttribute("marker-end"),
+  title: p.querySelector("title") ? p.querySelector("title").textContent : null,
+}}));
+btn("acme/widgets#2").dispatch("pointerover");
+const hover2Edges = document.querySelectorAll(".ge").map((p) => [p.getAttribute("data-kind"), p.getAttribute("class")]);
+const hover2Marks = marks();
+btn("acme/widgets#2").dispatch("click");
+const drawer2 = deps();
+const note2 = dp("note-m").textContent;
+btn("acme/widgets#1").dispatch("click");
+const drawer1 = deps();
+return {{ blockedRows, legend, edgeInfo, hover2Edges, hover2Marks, drawer2, note2, drawer1 }};
+"##
+        ),
+    );
+
+    assert!(
+        html.contains(r#"class="k-stack""#)
+            && html.contains("PR stack")
+            && html.contains(r#"class="k-conflict""#)
+            && html.contains("file conflict"),
+        "Graph legend HTML must include PR stack and file conflict entries"
+    );
+
+    assert!(
+        r["blockedRows"]["widgets#2"].as_str().unwrap().contains("stacked on #1"),
+        "Up next blocked row must name PR stack hold: {r}"
+    );
+    assert!(
+        r["blockedRows"]["widgets#4"].as_str().unwrap().contains("file conflict with #1 (src/flow.rs)"),
+        "Up next blocked row must name file conflict hold: {r}"
+    );
+
+    let edges = r["edgeInfo"].as_array().unwrap();
+    let stack_e = edges.iter().find(|e| e["kind"] == "prStack").expect("prStack edge");
+    assert_eq!(stack_e["cls"], "ge stack src-git");
+    assert_eq!(stack_e["source"], "git");
+    assert_eq!(stack_e["marker"], "url(#gm-git)");
+    let stack_title = stack_e["title"].as_str().unwrap();
+    assert!(
+        stack_title.contains("feat/2-stack")
+            && stack_title.contains("feat/1-base")
+            && stack_title.contains("#102")
+            && stack_title.contains("#101"),
+        "prStack tooltip must name branches and PRs: {stack_title}"
+    );
+
+    let conflict_e = edges
+        .iter()
+        .find(|e| e["kind"] == "fileConflict" && e["title"].as_str().unwrap().contains("src/board.html"))
+        .expect("fileConflict edge");
+    assert_eq!(conflict_e["cls"], "ge conflict src-code");
+    assert_eq!(conflict_e["source"], "code");
+    assert_eq!(conflict_e["marker"], Value::Null);
+
+    // Hovering #2 traces upstream prStack (#1 -> up), keeps incident fileConflict peer #3 undimmed,
+    // highlights incident conflict edge (#2/#3 -> hot), and dims unrelated #4 and its conflict edge.
+    assert_eq!(r["hover2Marks"]["acme/widgets#2"], "hot", "{r}");
+    assert_eq!(r["hover2Marks"]["acme/widgets#1"], "up", "{r}");
+    assert_eq!(r["hover2Marks"]["acme/widgets#3"], "", "{r}");
+    assert_eq!(r["hover2Marks"]["acme/widgets#4"], "dim", "{r}");
+    let h2 = r["hover2Edges"].as_array().unwrap();
+    assert!(h2.contains(&json!(["prStack", "ge stack src-git up"])), "{h2:?}");
+    assert!(h2.contains(&json!(["fileConflict", "ge conflict src-code hot"])), "{h2:?}");
+    assert!(h2.contains(&json!(["fileConflict", "ge conflict src-code dim"])), "{h2:?}");
+
+    // Inspector for #2 lists PR stack + branch/PR details and File conflicts + overlapping path.
+    let d2: Vec<&str> = r["drawer2"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(
+        d2.iter().any(|s| s.contains("PR stack") && s.contains("widgets#1") && s.contains("feat/2-stack")),
+        "drawer #2 PR stack detail missing: {d2:?}"
+    );
+    assert!(
+        d2.iter().any(|s| s.contains("File conflicts") && s.contains("widgets#3") && s.contains("src/board.html")),
+        "drawer #2 File conflicts detail missing: {d2:?}"
+    );
+    assert!(r["note2"].as_str().unwrap().contains("stacked PR"), "{r}");
+
+    // Inspector for #1 lists Stacked (incoming prStack from #2) and File conflicts with #4.
+    let d1: Vec<&str> = r["drawer1"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(
+        d1.iter().any(|s| s.contains("Stacked") && s.contains("widgets#2")),
+        "drawer #1 Stacked section missing: {d1:?}"
+    );
+    assert!(
+        d1.iter().any(|s| s.contains("File conflicts") && s.contains("widgets#4") && s.contains("src/flow.rs")),
+        "drawer #1 File conflicts section missing: {d1:?}"
+    );
+}

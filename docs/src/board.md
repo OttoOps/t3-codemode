@@ -552,7 +552,9 @@ gets the hover shade, so you can find it on the board.
   Pause or Resume. Opened from a worker, the inspector shades that worker.
 - **Dependencies.** With a `flow` block, a ticket or issue in
   [the dependency graph](#the-dependency-graph) shows its lane and its
-  Blocked by, Unlocks, Parent and Sub-issues as chips, each with its state.
+  Blocked by, Unlocks, PR stack, Stacked, File conflicts, Parent and Sub-issues
+  as chips, each with its state. PR stack chips include the branch, pull
+  request or part detail, and file conflict chips list the overlapping paths.
   A chip moves the inspector to that issue, or to its ticket when it has one,
   and leaves the board where it was. `Esc` still returns focus to the item
   that first opened the inspector. The pills add the issue's priority and
@@ -758,7 +760,9 @@ a skip, raises a card or launches anything.
   A blocker in another repository shows as `repo#n`.
 - **Blocked** folds the opted-in issues that still wait on something. Each row
   names its open blockers from GitHub links or parsed issue bodies, adds "and
-  more" when GitHub lists more than 100, notes unresolved dependency references
+  more" when GitHub lists more than 100, notes PR stack holds (with the base
+  PR, branch or part), file conflicts with running tickets when
+  `flow.serializeFileConflicts` is enabled, unresolved dependency references
   or an unlinked plain `blocked` label, or reads "blocked: external" for an
   issue with that label. Click Blocked to open or close the list.
 - **Skipped** folds the issues the flow skipped ([skip memory](#the-flow)),
@@ -815,6 +819,28 @@ blocks, inline code spans and HTML comments:
   diagnostic, and unresolved blocker references keep the issue out of the ready
   queue.
 
+t3cm also infers git and file-overlap edges from open pull requests, local T3
+worktrees, active ticket links and repository trees:
+
+- **`prStack` (`source: "git"`).** Reads each covered repo's open pull requests
+  (`baseRefName`, `headRefName`, `closingIssuesReferences`, `Refs #N` and
+  `<type>/<n>-...` branch names) and inspects local worktree branch ancestry
+  with `git merge-base`. When PR B targets PR A's head branch or descends from
+  A's commits ahead of the default branch, t3cm emits a hard `prStack` edge
+  between their issues. Active `t3-ticket` / `t3-worker` links carrying
+  sequential `part: n/N` chains under the same parent emit `prStack` edges as
+  well. A `prStack` edge holds the dependent issue out of `queue` until the
+  base PR merges or the earlier part closes, and carries optional `branch`,
+  `baseBranch`, `pr`, `basePr` and `part` details.
+- **`fileConflict` (`source: "code"`).** Combines modified files from open pull
+  requests and local worktrees with repo-relative paths from `Touches:` and
+  issue bodies (verified against the repository tree when a local checkout
+  exists). Open issues in the same repository whose path sets overlap get an
+  undirected `fileConflict` edge carrying `files`. These edges are advisory by
+  default; set [`flow.serializeFileConflicts`](config.md#flow) to `true` to
+  hold conflicting issues while a colliding ticket is running and avoid
+  launching conflicting issues at the same time.
+
 `edges` lists each link once, from the issue that has it. Each edge carries
 `source` as `github`, `body`, `git` or `code`, and native `github` wins when
 both a native link and a body directive exist:
@@ -823,6 +849,8 @@ both a native link and a body directive exist:
 |---|---|---|
 | `blockedBy` | the blocked issue, its blocker | the blocker unlocks the issue |
 | `parent` | the sub-issue, its parent | the parent's sub-issue |
+| `prStack` | the stacked issue, its base issue | the base PR or part unblocks the stacked issue |
+| `fileConflict` | an open issue, a conflicting open issue (undirected) | both issues touch the paths listed in `files` |
 
 `warnings` lists graph-level diagnostics with `kind`, `message`, `nodes` and
 optional `raw`. `kind` is `cycle` for dependency, parent or mixed cycles,
@@ -839,7 +867,7 @@ Each node's `id` is `owner/name#N`, and its lists use those ids:
 | `labels`, `priority`, `milestone` | As GitHub gives them, with `priority` read from a `priority:` label. |
 | `track`, `trackBy` | The lane it belongs to, by the rules below. |
 | `flowList` | `queue`, `blocked` or `skipped` when it is in that list, else `null`. |
-| `ready` | `true` while it is in the ready queue: opted in when `optIn` is set, no open blocker, no unresolved blocker reference, no `blocked` or `blocked: external` label, and no ticket. |
+| `ready` | `true` while it is in the ready queue: opted in when `optIn` is set, no open blocker or `prStack` hold, no unresolved blocker reference, no `blocked` or `blocked: external` label, no active `fileConflict` hold when `flow.serializeFileConflicts` is enabled, and no ticket. |
 | `external` | `true` when it is labelled `blocked: external`, or when it has open blockers, GitHub listed all of them, no blocker reference is unresolved, and none is in a covered repo. |
 | `ticket` | Its board ticket's `thread`, `link` and `status`, or `null`. |
 | `warnings` | Any `cycle`, `unresolved` or `blockedLabel` diagnostics affecting this node. |
@@ -884,16 +912,20 @@ the address opens it too.
   repository. Its heading names the track, what set it and how many issues it
   holds. Lanes holding a ticket come first, then label, epic, milestone, linked
   and independent lanes, each in name order.
-- **Layout.** A blocker sits to the left of what it blocks, and a parent to
-  the left of its sub-issues, so work flows left to right. The same graph
+- **Layout.** A blocker or `prStack` base sits to the left of what it blocks,
+  and a parent to the left of its sub-issues, so work flows left to right.
+  Undirected `fileConflict` lines do not constrain column order. The same graph
   always lays out the same way. A wide graph scrolls inside the tab, never
   the page. Each issue shows its `repo#N`, title and state: a ticket's live
   state, or for an issue with no ticket ready, blocked, external, skipped,
   closed or open. Amber still marks only a ticket with an open card.
 - **Links.** A solid arrow runs from a native GitHub blocker to the issue it
   blocks, while a dashed purple arrow marks a blocker parsed from an issue
-  body. A dashed line runs from a parent to its sub-issue, or a dotted purple
-  line when parsed from a body.
+  body. A solid teal arrow marks a `prStack` dependency (`source: "git"`), and
+  a dotted amber line marks a `fileConflict` (`source: "code"`). A dashed line
+  runs from a parent to its sub-issue, or a dotted purple line when parsed from
+  a body. Hovering an edge shows a tooltip naming its source, branch/PR or
+  part chain for `prStack`, or overlapping file paths for `fileConflict`.
 - **Sync parsed links.** When the graph holds `blockedBy` or `parent` links
   with `source: "body"` that are not yet on GitHub, the Graph bar shows
   **Sync N parsed links to GitHub**. Clicking it calls
@@ -906,12 +938,13 @@ the address opens it too.
   plain `blocked` labels with no open blocker linked appear in a warning banner
   above the graph, add a badge on each affected node, and show in the
   inspector.
-- **Tracing.** Hover or focus an issue, and the chain of issues that block it,
-  however far back, turns red, and the chain it unlocks turns blue. Its
-  parent and sub-issues keep their look, and everything else turns muted
-  until the pointer leaves and focus moves out of the graph. The latest hover
-  or focus picks the issue, and with the pointer off the graph, the focused
-  issue keeps its trace.
+- **Tracing.** Hover or focus an issue, and the chain of issues that block it
+  (through `blockedBy` or `prStack`), however far back, turns red, and the
+  chain it unlocks turns blue. Any incident `fileConflict` lines and their
+  conflicting issues stay highlighted, its parent and sub-issues keep their
+  look, and everything else turns muted until the pointer leaves and focus
+  moves out of the graph. The latest hover or focus picks the issue, and with
+  the pointer off the graph, the focused issue keeps its trace.
 - **Filters.** The [filter bar](#filtering-the-page), a saved
   [context](#contexts), search and the [pulse strip](#the-pulse-strip) apply
   to the graph too. An issue they leave out stays in place with a dashed

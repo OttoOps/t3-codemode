@@ -93,6 +93,21 @@ pub const CREATE_ISSUE: &str = "mutation CreateIssue($repoId: ID!, $title: Strin
   }
 }";
 
+pub const FLOW_OPEN_PRS: &str = "query FlowOpenPrs($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    nameWithOwner
+    defaultBranchRef { name }
+    pullRequests(states: OPEN, first: 100, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number title url body baseRefName headRefName headRefOid isCrossRepository
+        closingIssuesReferences(first: 20) { nodes { number repository { nameWithOwner } } }
+        files(first: 100) { nodes { path } }
+      }
+    }
+  }
+}";
+
 pub trait GitHub: Send + Sync {
     fn graphql<'a>(&'a self, query: &'a str, variables: Value) -> BoxFut<'a, Result<Value>>;
 

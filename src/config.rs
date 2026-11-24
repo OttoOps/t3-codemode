@@ -408,6 +408,8 @@ pub struct FlowConfig {
     pub max_tickets: Option<usize>,
     #[serde(default)]
     pub launch: Launch,
+    #[serde(default)]
+    pub serialize_file_conflicts: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

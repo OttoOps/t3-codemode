@@ -537,6 +537,7 @@ leaves the Up next queue and launching off.
 | `optIn.milestone` | unset | Optional milestone title filter for the launch queue, matched ignoring case. When both `optIn.label` and `optIn.milestone` are set, an issue must match both. When `optIn` is omitted, any open issue in a covered repo can enter the queue. |
 | `maxTickets` | unset | Enables the launch queue and caps how many flow tickets can be open on the board at once, at least 1. Required when `launch` is `ask` or `auto`. Omit it for graph-only repository overrides. |
 | `launch` | `ask` when `maxTickets` is set, else `off` | How a free slot launches the next ready issue: `ask` raises a launch card, `auto` launches it, and `off` launches nothing. |
+| `serializeFileConflicts` | `false` | When `true`, serializes `fileConflict` pairs: holds an issue out of `queue` while a conflicting ticket is running, and prevents colliding ready issues from launching or being offered at the same time (keeping the higher-priority issue in queue order). |
 
 When `maxTickets` is set, an issue is ready when all of these hold:
 
@@ -545,6 +546,10 @@ When `maxTickets` is set, an issue is ready when all of these hold:
   issue-body dependencies from `## Flow` `Blocked by:`, `Depends on`,
   `Blocked by`, or `After`, and it has no unresolved blocker reference in its
   body.
+- No open stacked pull request (`prStack`) or active sequential `part: n/N`
+  predecessor holds it back.
+- When `serializeFileConflicts` is `true`, it shares no overlapping files
+  (`fileConflict`) with an open running ticket.
 - It is not labelled `blocked` or `blocked: external`.
 - No board ticket is open for it.
 - It isn't skipped. A skipped issue, or one still open after its board ticket
