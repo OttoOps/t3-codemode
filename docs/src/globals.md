@@ -294,17 +294,20 @@ async () => {
 ### wf.pr
 
 A worker calls `wf.pr` for each step of its pull request. `repo` is
-`owner/name`, `pr` the number, and `head` the head commit SHA, 7 to 40
-characters. When the worker's ticket is on the board and the link's
+`owner/name` for GitHub, `<host>/<group>[/<subgroup>...]/<project>` for a
+GitLab merge request on a host listed under [`forges`](config.md#forges), or
+the merge request's URL, in which case `pr` can be left out. `pr` is the
+pull request number or the merge request's `iid`, and `head` the head commit
+SHA, 7 to 40 characters. When the worker's ticket is on the board and the link's
 [`relay`](config.md#workflow-layer) is on, the service handles the event
 itself. Each step lands in the ticket's digest as a "handled for you" line.
 
 | `event` | What the service does | `status` |
 |---|---|---|
-| `opened`, with `publishing` | Checks that the Publishing line names the format and each pass, and that the description on GitHub has every heading, element and `Refs #<n>` line the format sets | `open`, or `rewrite` with the rewrite request in `message` and the gaps in `missing` |
+| `opened`, with `publishing` | Checks that the Publishing line names the format and each pass, and that the description on the forge has every heading, element and `Refs #<n>` line the format sets | `open`, or `rewrite` with the rewrite request in `message` and the gaps in `missing` |
 | `updated` | Records the new head and drops any merge card for an older head | `recorded`, with the `dropped` card ids |
-| `ready` | Reads the PR on GitHub, resolves the [delivery slot](config.md#workflow-layer) for its changed files, and opens the ticket's merge card with the answers the slot calls for | `gated` with the `card` and its `options` |
-| `ready`, any check still running, required or not, such as CodeRabbit's | Marks the PR; GitHub reconcile opens the card once every check finishes | `waiting` |
+| `ready` | Reads the PR on its forge, resolves the [delivery slot](config.md#workflow-layer) for its changed files, and opens the ticket's merge card with the answers the slot calls for | `gated` with the `card` and its `options` |
+| `ready`, any check still running, required or not, such as CodeRabbit's | Marks the PR; PR reconcile opens the card once every check finishes | `waiting` |
 | `ready`, a check failed | Nothing on the board; a failure reconcile finds later comes back as a reply | `failing` with the `checks` |
 | `ready`, draft, moved head or merge conflict | Nothing | `refused` with a `reason` |
 
@@ -315,6 +318,17 @@ hold. A PR whose merge state is `BLOCKED` or `BEHIND` with every check passed
 still gets its card, and the card names the block. For each reviewer whose
 latest review requests changes, it names the reviewer and the commit that
 review is on, as the current head or an earlier head.
+
+For a GitLab merge request, the service reads the merge request, its changed
+files and its pipelines over REST with `glab api`. It judges the checks on
+the newest pipeline at the head whose ref is not a merge train's. A merge
+request with no such pipeline goes to the ticket. A `Refs #<n>` line in its
+description names issue `<n>` of the merge request's own project. Past 100
+changed files, the event goes to the ticket, as it does on GitHub. It also
+goes to the ticket when the diff list holds fewer files than the merge
+request's `changes_count`, or when the head moves while the service reads it. The service
+does not merge a merge request yet, so an answer to its merge card goes to
+the ticket as a reply.
 
 Where the service cannot decide, it sends the ticket the message a worker
 sent before `wf.pr`, with a line saying why, and returns `status: "ticket"`

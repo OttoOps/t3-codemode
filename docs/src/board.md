@@ -1136,8 +1136,9 @@ reads with `glab api` as the user the service runs as, with prompts off and a
 - one GraphQL query for every 10 tracked merge requests on a host, for the
   state, draft flag, head, `detailedMergeStatus`, merge time, merge commit and
   merge train car,
-- the merge request's own pipelines for an open one, so readiness is judged on
-  the newest pipeline at its head whose ref is not a merge train's,
+- the merge request's own pipelines for an open one, up to five pages of 100.
+  The service judges readiness on the pipeline with the highest id at its
+  head whose ref is not a merge train's,
 - the merge request over REST for a merged one GraphQL gives no merge commit,
   such as a squash merge, and for a closed one, to read `squash_commit_sha`
   and `closed_at`.
@@ -1152,8 +1153,10 @@ one `event` from `gitlab` that says "merged on GitLab" and names the commit on
 the target branch. A close wakes it the same way. When `glab` fails, the
 pull requests on GitHub are still checked.
 
-`wf.pr` and `wf.merge` do not take a merge request yet, so the board opens no
-merge card for one and never merges one.
+[`wf.pr`](globals.md#wfpr) takes a merge request, so a worker's `ready`
+opens its merge card, naming the merge request's URL. `wf.merge` does not
+take one yet, so the board never merges one, and an answer to that card goes
+to the ticket as a reply.
 
 ## Settling
 
