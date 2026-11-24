@@ -2144,6 +2144,27 @@ async fn shrink_sequential_failure(
     .await
 }
 
+/// Verify a minimized sequence outside the shrinker memo and write its corpus file on match.
+fn publish_verified_shrink<T: std::fmt::Debug>(
+    shrunk: &ShrinkOutcome,
+    recheck: &ProbeResult<T>,
+    source: &str,
+    corpus_dir: &std::path::Path,
+    sentinel_name: Option<&str>,
+) -> Result<(std::path::PathBuf, String), String> {
+    if !shrunk.class.matches(recheck) {
+        return Err(format!(
+            "CHAOS_SHRINK could not reproduce {source} ({:?} / {}) on recheck; skipped writing a corpus file\n\
+             recheck outcome: {recheck:?}",
+            shrunk.class.kind, shrunk.class.signature
+        ));
+    }
+    let written = write_corpus_file(corpus_dir, shrunk, source)
+        .map_err(|e| format!("CHAOS_SHRINK failed to write corpus file: {e}"))?;
+    let report = format_shrink_report(shrunk, source, &written, sentinel_name);
+    Ok((written, report))
+}
+
 /// Execute `ops`, running `ddmin` + value simplification and writing `<corpus_dir>/<hash>.ops`
 /// when `shrink` is enabled and execution fails.
 async fn run_sequential_ops_maybe_shrink(
@@ -2163,11 +2184,17 @@ async fn run_sequential_ops_maybe_shrink(
     };
     let class = FailureClass::from_probe(&outcome).expect("non-Ok probe must classify");
     let shrunk = shrink_sequential_failure(ops.to_vec(), sentinel, class, &failure_msg).await;
-    let written = write_corpus_file(corpus_dir, &shrunk, source)
-        .unwrap_or_else(|e| panic!("CHAOS_SHRINK failed to write corpus file: {e}"));
-    let report = format_shrink_report(&shrunk, source, &written, sentinel.map(Sentinel::name));
-    eprintln!("{report}");
-    panic!("{report}\n\nOriginal failure:\n{failure_msg}");
+    let recheck = probe_sequential_ops(shrunk.ops.clone(), sentinel, format!("recheck {source}")).await;
+    match publish_verified_shrink(&shrunk, &recheck, source, corpus_dir, sentinel.map(Sentinel::name)) {
+        Ok((_, report)) => {
+            eprintln!("{report}");
+            panic!("{report}\n\nOriginal failure:\n{failure_msg}");
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            panic!("{err}\n\nOriginal failure:\n{failure_msg}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -3538,6 +3565,16 @@ async fn failure_class_normalizes_entities_and_distinguishes_bug_classes() {
     let same_1 = FailureClass::from_probe(&probe_oracle(unwrap_at_one_site()).await).unwrap();
     let same_2 = FailureClass::from_probe(&probe_oracle(unwrap_at_one_site()).await).unwrap();
     assert_eq!(same_1, same_2, "panics at the same call site must match");
+
+    // Long diagnostics sharing a >180-char prefix stay distinct in FailureClass while failure_summary caps display.
+    let shared_prefix = "context ".repeat(26);
+    let long_a = format!("{shared_prefix}reason alpha");
+    let long_b = format!("{shared_prefix}reason beta");
+    assert_eq!(failure_summary(&long_a).chars().count(), 180);
+    assert_eq!(failure_summary(&long_a), failure_summary(&long_b));
+    let long_class_a = FailureClass::from_probe(&ProbeResult::<()>::OracleFailure(long_a)).unwrap();
+    let long_class_b = FailureClass::from_probe(&ProbeResult::<()>::OracleFailure(long_b)).unwrap();
+    assert_ne!(long_class_a, long_class_b, "signature must not truncate before comparison");
 }
 
 #[test]
@@ -3589,6 +3626,16 @@ fn shrink_formatting_hashing_and_env_parsing() {
     let (_, loaded) = load_ops_file(&written).unwrap();
     assert_eq!(loaded, ops);
     assert_eq!(list_corpus_files(dir.path()).unwrap(), vec![written]);
+
+    // Non-reproducing recheck must refuse to publish a corpus file.
+    let transient_dir = tempfile::tempdir().unwrap();
+    let non_repro = publish_verified_shrink(&outcome, &ProbeResult::Ok(()), "seed 7", transient_dir.path(), None);
+    assert!(non_repro.is_err(), "passing recheck must not publish a corpus file");
+    assert!(list_corpus_files(transient_dir.path()).unwrap().is_empty());
+    let matching_recheck = ProbeResult::<()>::OracleFailure("cards diverged\nseed=recheck".into());
+    let (repro_path, _) =
+        publish_verified_shrink(&outcome, &matching_recheck, "seed 7", transient_dir.path(), None).unwrap();
+    assert_eq!(list_corpus_files(transient_dir.path()).unwrap(), vec![repro_path]);
 
     let snippet = format_regression_test(&outcome, "seed 7");
     assert!(snippet.contains(&format!("async fn chaos_regression_{hash}()")));
