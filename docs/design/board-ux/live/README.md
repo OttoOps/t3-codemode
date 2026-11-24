@@ -31,6 +31,17 @@ freeze one moment of the live board and replay it.
   themes.
 - `after/` holds the readable board (`59b51ca`) replayed the same way, with
   `report.json` from `capture.js` and `glance.json` from `glance.js`.
+- `pane-scroll.js` is the browser check for issue #314. It serves six
+  copies of the cards, tickets and Activity rows, with half the copied pull
+  requests merged so Recently merged shows, and checks Dispatch and
+  Activity at 1600x900, 1121x600, 1100x800, 1100x700 and 641x700. It
+  fails when the page or `#main` can scroll, when a list is under 60 px
+  tall, when a full list fits its pane, or when the mouse wheel over a list
+  scrolls the page or leaves a full list where it was. At 1121x599,
+  1100x699, 641x540 and 390x844, where the view scrolls as one page, it
+  fails when the wheel over Needs you or Activity leaves `#main` where it
+  was. It returns JSON with `pass` and a `summary` line, and needs only
+  `__BOARD_URL__`.
 
 The replay matches the live board closely. Run minutes apart with the same
 probe, the replay and the live service, read-only, gave the same
