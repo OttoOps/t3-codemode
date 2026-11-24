@@ -10,8 +10,8 @@ use crate::board::{BOARD, Card, LaunchArgs, card_text, chip};
 use crate::config::{FlowConfig, Launch, OptIn};
 use crate::flow_body::{self, BodyRef, Candidate, ParsedBody, RefRole, ResolveOutcome};
 use crate::flow_git::{
-    self, ActiveBranchLink, ActivePartLink, FileConflictEdge, IssueFileInput, LiveConflictInput, LocalRepoInfo, OpenPr,
-    PrStackEdge, RepoPrs, SourceControlInput, TargetPath,
+    self, ActiveBranchLink, ActivePartLink, CodeDepEdge, FileConflictEdge, IssueFileInput, LiveConflictInput,
+    LocalRepoInfo, OpenPr, PrStackEdge, RepoPrs, SourceControlInput, TargetPath,
 };
 use crate::github::{FLOW_BRANCH_MERGED, FLOW_OPEN_PRS, FLOW_PR_FILES, errors};
 use crate::wf::Wf;
@@ -115,6 +115,7 @@ pub const BLOCKED_BY: &str = "blockedBy";
 pub const PARENT: &str = "parent";
 pub const PR_STACK: &str = "prStack";
 pub const FILE_CONFLICT: &str = "fileConflict";
+pub const CODE_DEP: &str = "codeDep";
 pub const SOURCE_GITHUB: &str = "github";
 pub const SOURCE_BODY: &str = "body";
 pub const SOURCE_GIT: &str = "git";
@@ -286,6 +287,10 @@ pub struct GraphEdge {
     pub part: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modules: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub symbols: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -392,6 +397,7 @@ struct ResolvedRepos {
 struct SourceControlEdges {
     pr_stacks: Vec<PrStackEdge>,
     file_conflicts: Vec<FileConflictEdge>,
+    code_deps: Vec<CodeDepEdge>,
     conflict_index: BTreeMap<String, Vec<(String, usize, bool)>>,
     known_refs: BTreeMap<String, (IssueRef, Option<&'static str>)>,
     static_issue_paths: BTreeMap<String, BTreeSet<TargetPath>>,
@@ -400,32 +406,42 @@ struct SourceControlEdges {
     parent_of: BTreeMap<String, Vec<String>>,
 }
 
+struct SourceControlEdgesParts {
+    pr_stacks: Vec<PrStackEdge>,
+    file_conflicts: Vec<FileConflictEdge>,
+    code_deps: Vec<CodeDepEdge>,
+    known_refs: BTreeMap<String, (IssueRef, Option<&'static str>)>,
+    static_issue_paths: BTreeMap<String, BTreeSet<TargetPath>>,
+    analyzed_issues: HashSet<String>,
+    local_repos: BTreeMap<String, LocalRepoInfo>,
+    parent_of: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Copy)]
+struct SourceControlOpts {
+    with_file_conflicts: bool,
+    with_code_deps: bool,
+}
+
 impl SourceControlEdges {
-    fn new(
-        pr_stacks: Vec<PrStackEdge>,
-        file_conflicts: Vec<FileConflictEdge>,
-        known_refs: BTreeMap<String, (IssueRef, Option<&'static str>)>,
-        static_issue_paths: BTreeMap<String, BTreeSet<TargetPath>>,
-        analyzed_issues: HashSet<String>,
-        local_repos: BTreeMap<String, LocalRepoInfo>,
-        parent_of: BTreeMap<String, Vec<String>>,
-    ) -> Self {
+    fn new(parts: SourceControlEdgesParts) -> Self {
         let mut conflict_index: BTreeMap<String, Vec<(String, usize, bool)>> = BTreeMap::new();
-        for (idx, c) in file_conflicts.iter().enumerate() {
+        for (idx, c) in parts.file_conflicts.iter().enumerate() {
             let ka = node_key(&c.from.0, c.from.1);
             let kb = node_key(&c.to.0, c.to.1);
             conflict_index.entry(ka.clone()).or_default().push((kb.clone(), idx, true));
             conflict_index.entry(kb).or_default().push((ka, idx, false));
         }
         Self {
-            pr_stacks,
-            file_conflicts,
+            pr_stacks: parts.pr_stacks,
+            file_conflicts: parts.file_conflicts,
+            code_deps: parts.code_deps,
             conflict_index,
-            known_refs,
-            static_issue_paths,
-            analyzed_issues,
-            local_repos,
-            parent_of,
+            known_refs: parts.known_refs,
+            static_issue_paths: parts.static_issue_paths,
+            analyzed_issues: parts.analyzed_issues,
+            local_repos: parts.local_repos,
+            parent_of: parts.parent_of,
         }
     }
 
@@ -832,6 +848,8 @@ struct EdgeData {
     base_pr: Option<u64>,
     part: Option<String>,
     files: Vec<String>,
+    modules: Vec<String>,
+    symbols: Vec<String>,
 }
 
 #[derive(Default)]
@@ -878,6 +896,18 @@ impl GraphBuild {
                     }
                 }
                 cur.files.sort();
+                for m in &data.modules {
+                    if !cur.modules.iter().any(|x| x == m) {
+                        cur.modules.push(m.clone());
+                    }
+                }
+                cur.modules.sort();
+                for s in &data.symbols {
+                    if !cur.symbols.iter().any(|x| x == s) {
+                        cur.symbols.push(s.clone());
+                    }
+                }
+                cur.symbols.sort();
             })
             .or_insert(data);
     }
@@ -953,7 +983,7 @@ impl GraphBuild {
                 pr: e.pr,
                 base_pr: e.base_pr,
                 part: e.part.clone(),
-                files: Vec::new(),
+                ..EdgeData::default()
             },
         );
     }
@@ -966,6 +996,22 @@ impl GraphBuild {
             FILE_CONFLICT,
             to,
             EdgeData { source: SOURCE_CODE, files: e.files.clone(), ..EdgeData::default() },
+        );
+    }
+
+    fn add_code_dep(&mut self, e: &CodeDepEdge, known: &BTreeMap<String, (IssueRef, Option<&'static str>)>) {
+        let from = self.ref_node(&e.from.0, e.from.1, known);
+        let to = self.ref_node(&e.to.0, e.to.1, known);
+        self.add_edge_data(
+            from,
+            CODE_DEP,
+            to,
+            EdgeData {
+                source: SOURCE_CODE,
+                modules: e.modules.clone(),
+                symbols: e.symbols.clone(),
+                ..EdgeData::default()
+            },
         );
     }
 
@@ -1086,7 +1132,7 @@ impl GraphBuild {
             (n.repo.to_ascii_lowercase(), n.number)
         };
         for (from, kind, to) in self.edges.keys() {
-            if *kind == FILE_CONFLICT {
+            if *kind == FILE_CONFLICT || *kind == CODE_DEP {
                 continue;
             }
             let (a, b) = (root(&mut up, from), root(&mut up, to));
@@ -1121,7 +1167,7 @@ impl GraphBuild {
                     all_pairs.push((from.clone(), to.clone()));
                     blocked_pairs.push((from.clone(), to.clone()));
                 }
-                FILE_CONFLICT => {}
+                FILE_CONFLICT | CODE_DEP => {}
                 _ => {
                     all_pairs.push((from.clone(), to.clone()));
                     parent_pairs.push((from.clone(), to.clone()));
@@ -1154,6 +1200,8 @@ impl GraphBuild {
                 base_pr: data.base_pr,
                 part: data.part.clone(),
                 files: data.files.clone(),
+                modules: data.modules.clone(),
+                symbols: data.symbols.clone(),
             });
         }
         let parent_of: BTreeMap<String, String> = parent_of.into_iter().map(|(k, (_, v))| (k, v)).collect();
@@ -1384,6 +1432,9 @@ fn graph(
     }
     for e in &sc.file_conflicts {
         g.add_file_conflict(e, &sc.known_refs);
+    }
+    for e in &sc.code_deps {
+        g.add_code_dep(e, &sc.known_refs);
     }
     g.finish()
 }
@@ -2680,7 +2731,7 @@ impl Wf {
         reads: &mut Reads,
         extra: &mut [Read],
         closed: &HashSet<String>,
-        with_file_conflicts: bool,
+        opts: SourceControlOpts,
     ) -> Result<SourceControlEdges> {
         let aliases = reads.aliases.clone();
         let mut parent_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -2721,7 +2772,8 @@ impl Wf {
             }
             let gh_default = reads.open_prs.get(&rkey).and_then(|rp| rp.default_branch.as_deref());
             for root in roots {
-                if let Some(info) = flow_git::inspect_local_repo(root, gh_default, with_file_conflicts).await {
+                let with_tree = opts.with_file_conflicts || opts.with_code_deps;
+                if let Some(info) = flow_git::inspect_local_repo(root, gh_default, with_tree).await {
                     local_repos.insert(rkey.clone(), info);
                     break;
                 }
@@ -2752,7 +2804,8 @@ impl Wf {
             active_parts: &active_parts,
             active_branches: &active_branches,
             open_issues: &open_issues,
-            include_file_conflicts: with_file_conflicts,
+            include_file_conflicts: opts.with_file_conflicts,
+            include_code_deps: opts.with_code_deps,
         })
         .await;
 
@@ -2930,15 +2983,16 @@ impl Wf {
             }
         }
 
-        Ok(SourceControlEdges::new(
+        Ok(SourceControlEdges::new(SourceControlEdgesParts {
             pr_stacks,
-            analysis.file_conflicts,
+            file_conflicts: analysis.file_conflicts,
+            code_deps: analysis.code_deps,
             known_refs,
-            analysis.static_issue_paths,
-            analysis.analyzed_issues,
+            static_issue_paths: analysis.static_issue_paths,
+            analyzed_issues: analysis.analyzed_issues,
             local_repos,
             parent_of,
-        ))
+        }))
     }
 
     fn open_tickets(&self) -> Result<Vec<Ticket>> {
@@ -3457,7 +3511,14 @@ impl Wf {
         reads.aliases = aliases;
         self.resolve_body_dependencies(&mut reads, &mut extra, with_graph).await?;
         let with_file_conflicts = with_graph || cfg.as_ref().is_some_and(|c| c.serialize_file_conflicts);
-        let sc = self.resolve_source_control(&mut reads, &mut extra, &closed, with_file_conflicts).await?;
+        let sc = self
+            .resolve_source_control(
+                &mut reads,
+                &mut extra,
+                &closed,
+                SourceControlOpts { with_file_conflicts, with_code_deps: with_graph },
+            )
+            .await?;
         let aliases = reads.aliases.clone();
         let covered = reads.covered.clone();
         let mut all = reads.reads.clone();
@@ -3751,7 +3812,14 @@ impl Wf {
         let (closed, mut extra) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
         reads.aliases = self.repo_aliases_snapshot();
         self.resolve_body_dependencies(&mut reads, &mut extra, false).await?;
-        let sc = self.resolve_source_control(&mut reads, &mut extra, &closed, cfg.serialize_file_conflicts).await?;
+        let sc = self
+            .resolve_source_control(
+                &mut reads,
+                &mut extra,
+                &closed,
+                SourceControlOpts { with_file_conflicts: cfg.serialize_file_conflicts, with_code_deps: false },
+            )
+            .await?;
         self.note_read_titles(reads.reads.iter().chain(&extra));
         let aliases = reads.aliases.clone();
         let conflict_adj = cfg.serialize_file_conflicts.then(|| sc.conflict_adj());
@@ -3878,8 +3946,14 @@ impl Wf {
                 let (closed, mut extra) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
                 reads.aliases = self.repo_aliases_snapshot();
                 self.resolve_body_dependencies(&mut reads, &mut extra, false).await?;
-                let sc =
-                    self.resolve_source_control(&mut reads, &mut extra, &closed, c.serialize_file_conflicts).await?;
+                let sc = self
+                    .resolve_source_control(
+                        &mut reads,
+                        &mut extra,
+                        &closed,
+                        SourceControlOpts { with_file_conflicts: c.serialize_file_conflicts, with_code_deps: false },
+                    )
+                    .await?;
                 Some((reads, closed, sc))
             }
             None => None,

@@ -6,6 +6,8 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::board::parse_github_issue_only;
+pub(crate) use crate::flow_code::CodeDepEdge;
+use crate::flow_code::RepoIssueCodeInput;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_GRAPHQL_ISSUE_NUMBER: u64 = i32::MAX as u64;
@@ -1084,11 +1086,13 @@ pub(crate) struct SourceControlInput<'a> {
     pub(crate) active_branches: &'a [ActiveBranchLink],
     pub(crate) open_issues: &'a [IssueFileInput<'a>],
     pub(crate) include_file_conflicts: bool,
+    pub(crate) include_code_deps: bool,
 }
 
 pub(crate) struct SourceControlAnalysis {
     pub(crate) pr_stacks: Vec<PrStackEdge>,
     pub(crate) file_conflicts: Vec<FileConflictEdge>,
+    pub(crate) code_deps: Vec<CodeDepEdge>,
     pub(crate) static_issue_paths: BTreeMap<String, BTreeSet<TargetPath>>,
     pub(crate) analyzed_issues: HashSet<String>,
 }
@@ -1573,7 +1577,7 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
         }
 
         // 3. Collect modified files from open PRs and active local worktrees for each linked issue in this repo.
-        if input.include_file_conflicts {
+        if input.include_file_conflicts || input.include_code_deps {
             let default_oid = local.and_then(|l| l.default_oid.as_deref());
             for (idx, c) in candidates.iter().enumerate() {
                 let mut c_files: Vec<String> = c.pr_files.clone();
@@ -1650,13 +1654,15 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
         }
     }
 
-    // 5. File-conflict edges across open issues in each repo.
+    // 5. File-conflict and advisory code-dependency edges across open issues in each repo.
     let mut file_conflicts = Vec::new();
+    let mut code_deps = Vec::new();
     let mut static_issue_paths: BTreeMap<String, BTreeSet<TargetPath>> = BTreeMap::new();
     let mut analyzed_issues: HashSet<String> = HashSet::new();
-    if input.include_file_conflicts {
+    if input.include_file_conflicts || input.include_code_deps {
         type RepoIssuePaths = ((String, u64), String, BTreeSet<TargetPath>);
         let mut by_repo: BTreeMap<String, Vec<RepoIssuePaths>> = BTreeMap::new();
+        let mut by_repo_code: BTreeMap<String, Vec<RepoIssueCodeInput>> = BTreeMap::new();
         for item in input.open_issues {
             let canon = canonicalize_repo(input.aliases, item.repo);
             let rkey = canon.to_ascii_lowercase();
@@ -1671,7 +1677,16 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
                 paths.extend(static_paths.iter().cloned());
                 static_issue_paths.insert(ikey.clone(), static_paths);
             }
-            if !paths.is_empty() {
+            if input.include_code_deps {
+                by_repo_code.entry(rkey.clone()).or_default().push(RepoIssueCodeInput {
+                    repo: canon.clone(),
+                    number: item.number,
+                    key: ikey.clone(),
+                    paths: paths.clone(),
+                    body: item.body.to_string(),
+                });
+            }
+            if input.include_file_conflicts && !paths.is_empty() {
                 by_repo.entry(rkey).or_default().push(((canon, item.number), ikey, paths));
             }
         }
@@ -1698,6 +1713,27 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
                 }
             }
         }
+
+        if input.include_code_deps {
+            for (rkey, repo_issues) in by_repo_code {
+                if repo_issues.len() < 2 || repo_issues.iter().all(|i| i.paths.is_empty()) {
+                    continue;
+                }
+                let Some(local) = input.local_repos.get(&rkey) else { continue };
+                if local.tree_files.is_empty() {
+                    continue;
+                }
+                let local_owned = local.clone();
+                let parent_owned = input.parent_of.clone();
+                if let Ok(found) = tokio::task::spawn_blocking(move || {
+                    crate::flow_code::analyze_repo_code_deps(&local_owned, &repo_issues, &parent_owned)
+                })
+                .await
+                {
+                    code_deps.extend(found);
+                }
+            }
+        }
     }
 
     let mut pr_stacks: Vec<PrStackEdge> = merged_stacks.into_values().collect();
@@ -1719,8 +1755,17 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
             .then_with(|| a.to.0.to_ascii_lowercase().cmp(&b.to.0.to_ascii_lowercase()))
             .then(a.to.1.cmp(&b.to.1))
     });
+    code_deps.sort_by(|a, b| {
+        a.from
+            .0
+            .to_ascii_lowercase()
+            .cmp(&b.from.0.to_ascii_lowercase())
+            .then(a.from.1.cmp(&b.from.1))
+            .then_with(|| a.to.0.to_ascii_lowercase().cmp(&b.to.0.to_ascii_lowercase()))
+            .then(a.to.1.cmp(&b.to.1))
+    });
 
-    SourceControlAnalysis { pr_stacks, file_conflicts, static_issue_paths, analyzed_issues }
+    SourceControlAnalysis { pr_stacks, file_conflicts, code_deps, static_issue_paths, analyzed_issues }
 }
 
 pub(crate) async fn live_repo_conflicts_with_running(input: LiveConflictInput<'_>) -> Vec<(String, u64, Vec<String>)> {
