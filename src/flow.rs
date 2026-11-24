@@ -64,20 +64,18 @@ pub const FLOW_OPEN_ISSUES: &str = concat!(
 }"
 );
 
-pub const FLOW_CLOSED_ISSUES: &str = concat!(
-    "query FlowIssues($owner: String!, $name: String!) {
+pub const FLOW_CLOSED_ISSUES: &str = "query FlowIssues($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
     nameWithOwner
-    issues(states: CLOSED, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    issues(states: CLOSED, first: 100, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
       nodes {
-        ",
-    issue_fields!(),
-    "
+        number title url body state
+        parent { number title url state repository { nameWithOwner } }
       }
     }
   }
-}"
-);
+}";
 
 const TRACK: &str = "track:";
 const TRACK_SUFFIX: &str = "-track";
@@ -1419,17 +1417,22 @@ fn seed_known_issue(known: &mut BTreeMap<String, (IssueRef, Option<&'static str>
 fn read_primary_parent_key(
     r: &Read,
     aliases: &std::collections::HashMap<String, String>,
+    own_parents: &BTreeMap<String, String>,
     inferred_parents: &BTreeMap<String, String>,
 ) -> Option<String> {
     if let Some(p) = &r.parent {
         return Some(node_key(&canonicalize_repo(aliases, &p.to.repo), p.to.number));
+    }
+    let me_key = node_key(&r.issue.repo, r.issue.number);
+    if let Some(pk) = own_parents.get(&me_key) {
+        return Some(pk.clone());
     }
     for pref in &r.body_parsed.parents {
         if let BodyRef::Issue { repo, number } = pref {
             return Some(node_key(&canonicalize_repo(aliases, repo), *number));
         }
     }
-    inferred_parents.get(&node_key(&r.issue.repo, r.issue.number)).cloned()
+    inferred_parents.get(&me_key).cloned()
 }
 
 fn record_unresolved_ref(
@@ -1453,6 +1456,7 @@ fn record_unresolved_ref(
 fn build_candidates(
     all_reads: &[&Read],
     aliases: &std::collections::HashMap<String, String>,
+    own_parents: &BTreeMap<String, String>,
     inferred_parents: &BTreeMap<String, String>,
 ) -> Vec<Candidate> {
     let mut seen = HashSet::new();
@@ -1467,7 +1471,7 @@ fn build_candidates(
             number: r.issue.number,
             label: r.issue.label.clone(),
             title: r.issue.title.clone(),
-            parent_key: read_primary_parent_key(r, aliases, inferred_parents),
+            parent_key: read_primary_parent_key(r, aliases, own_parents, inferred_parents),
             declared_phase: r.body_parsed.declared_phase,
         });
     }
@@ -1506,8 +1510,8 @@ impl Wf {
         }
 
         // For repos with any symbolic sibling reference, fetch unlabelled open siblings (when
-        // `all_open` is false) and recent closed siblings so identity resolution stays stable
-        // after a blocker closes instead of dropping to unresolved or rebinding to another issue.
+        // `all_open` is false) and closed siblings so identity resolution stays stable after a
+        // blocker closes instead of dropping to unresolved or rebinding to another issue.
         let mut symbolic_pool: Vec<Read> = Vec::new();
         let mut need_repos: Vec<String> = Vec::new();
         for r in reads.reads.iter().chain(extra.iter()) {
@@ -1549,8 +1553,11 @@ impl Wf {
 
         // Collect parent links implied by tasklist sub-issues ("- [ ] #N") so sibling phase resolution
         // knows epic membership even when only the parent epic lists its children.
-        let mut inferred_parents: BTreeMap<String, (String, u64, String)> = BTreeMap::new();
+        // Open epics always outrank closed epics, and a closed epic's tasklist never claims an open issue.
+        let mut inferred_parents: BTreeMap<String, (u8, String, u64, String)> = BTreeMap::new();
         for r in reads.reads.iter().chain(extra.iter()).chain(symbolic_pool.iter()) {
+            let parent_closed = r.state == Some("closed");
+            let rank = u8::from(parent_closed);
             let p_repo = r.issue.repo.clone();
             let p_num = r.issue.number;
             let p_key = node_key(&p_repo, p_num);
@@ -1558,30 +1565,33 @@ impl Wf {
                 if let BodyRef::Issue { repo, number } = sref {
                     let canon = canonicalize_repo(&aliases, repo);
                     let ck = node_key(&canon, *number);
+                    if parent_closed && known.get(&ck).is_none_or(|(_, st)| *st != Some("closed")) {
+                        continue;
+                    }
                     inferred_parents
                         .entry(ck)
                         .and_modify(|cur| {
-                            if (p_repo.to_ascii_lowercase(), p_num) < (cur.0.to_ascii_lowercase(), cur.1) {
-                                *cur = (p_repo.clone(), p_num, p_key.clone());
+                            if (rank, p_repo.to_ascii_lowercase(), p_num) < (cur.0, cur.1.to_ascii_lowercase(), cur.2) {
+                                *cur = (rank, p_repo.clone(), p_num, p_key.clone());
                             }
                         })
-                        .or_insert_with(|| (p_repo.clone(), p_num, p_key.clone()));
+                        .or_insert_with(|| (rank, p_repo.clone(), p_num, p_key.clone()));
                 }
             }
         }
-        let mut inferred_parent_keys: BTreeMap<String, String> =
-            inferred_parents.iter().map(|(k, (_, _, pk))| (k.clone(), pk.clone())).collect();
+        let inferred_parent_keys: BTreeMap<String, String> =
+            inferred_parents.iter().map(|(k, (_, _, _, pk))| (k.clone(), pk.clone())).collect();
 
         // Pass 1: resolve parent refs (explicit + symbolic) so Pass 2 knows every node's epic.
         let mut pool_refs: Vec<&Read> = reads.reads.iter().chain(extra.iter()).chain(symbolic_pool.iter()).collect();
-        let initial_candidates = build_candidates(&pool_refs, &aliases, &inferred_parent_keys);
+        let mut own_parent_keys: BTreeMap<String, String> = BTreeMap::new();
+        let initial_candidates = build_candidates(&pool_refs, &aliases, &own_parent_keys, &inferred_parent_keys);
 
         let total = reads.reads.len() + extra.len();
         let mut resolved: Vec<ResolvedBodyRefs> = (0..total)
             .map(|_| ResolvedBodyRefs { blockers: Vec::new(), parents: Vec::new(), subs: Vec::new() })
             .collect();
 
-        let mut resolved_parent_keys: BTreeMap<String, String> = inferred_parent_keys.clone();
         for idx in 0..total {
             let r = if idx < reads.reads.len() { &mut reads.reads[idx] } else { &mut extra[idx - reads.reads.len()] };
             let me_key = node_key(&r.issue.repo, r.issue.number);
@@ -1593,7 +1603,7 @@ impl Wf {
                 match pref {
                     BodyRef::Issue { repo, number } => {
                         let canon = canonicalize_repo(&aliases, &repo);
-                        resolved_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
+                        own_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
                         resolved[idx].parents.push((canon, number));
                     }
                     BodyRef::Symbolic(raw) => {
@@ -1607,7 +1617,7 @@ impl Wf {
                         ) {
                             ResolveOutcome::Resolved(repo, number) => {
                                 let canon = canonicalize_repo(&aliases, &repo);
-                                resolved_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
+                                own_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
                                 resolved[idx].parents.push((canon, number));
                             }
                             ResolveOutcome::Ambiguous(matches) => {
@@ -1659,7 +1669,7 @@ impl Wf {
         // keeps their epic membership intact.
         for r in &symbolic_pool {
             let me_key = node_key(&r.issue.repo, r.issue.number);
-            if resolved_parent_keys.contains_key(&me_key) || r.parent.is_some() {
+            if own_parent_keys.contains_key(&me_key) || r.parent.is_some() {
                 continue;
             }
             for pref in &r.body_parsed.parents {
@@ -1674,21 +1684,20 @@ impl Wf {
                     )
                 {
                     let canon = canonicalize_repo(&aliases, &repo);
-                    resolved_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
+                    own_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
                     break;
                 }
             }
         }
-        inferred_parent_keys.extend(resolved_parent_keys);
 
         // Pass 2: resolve blocker refs (explicit + symbolic) with full epic membership.
         pool_refs = reads.reads.iter().chain(extra.iter()).chain(symbolic_pool.iter()).collect();
-        let candidates = build_candidates(&pool_refs, &aliases, &inferred_parent_keys);
+        let candidates = build_candidates(&pool_refs, &aliases, &own_parent_keys, &inferred_parent_keys);
         for idx in 0..total {
             let r = if idx < reads.reads.len() { &mut reads.reads[idx] } else { &mut extra[idx - reads.reads.len()] };
             let me_repo = r.issue.repo.clone();
             let me_num = r.issue.number;
-            let me_parent = read_primary_parent_key(r, &aliases, &inferred_parent_keys);
+            let me_parent = read_primary_parent_key(r, &aliases, &own_parent_keys, &inferred_parent_keys);
             let blockers_in = r.body_parsed.blockers.clone();
             for bref in blockers_in {
                 match bref {
@@ -1797,7 +1806,7 @@ impl Wf {
         let aliases = reads.aliases.clone();
 
         // Pass 4: merge resolved body links into each Read, preserving native GitHub precedence.
-        let mut sub_parent_fill: BTreeMap<String, IssueRef> = BTreeMap::new();
+        let mut sub_parent_fill: BTreeMap<String, (u8, IssueRef)> = BTreeMap::new();
         for (idx, res) in resolved.into_iter().enumerate() {
             let r = if idx < reads.reads.len() { &mut reads.reads[idx] } else { &mut extra[idx - reads.reads.len()] };
             let home = r.issue.repo.clone();
@@ -1914,16 +1923,17 @@ impl Wf {
                 if seen_subs.insert(k.clone()) {
                     r.subs.push(lookup_target(&canon, number));
                 }
+                let parent_rank = u8::from(r.state == Some("closed"));
                 sub_parent_fill
                     .entry(k)
                     .and_modify(|cur| {
-                        if (me_ref.repo.to_ascii_lowercase(), me_ref.number)
-                            < (cur.repo.to_ascii_lowercase(), cur.number)
+                        if (parent_rank, me_ref.repo.to_ascii_lowercase(), me_ref.number)
+                            < (cur.0, cur.1.repo.to_ascii_lowercase(), cur.1.number)
                         {
-                            *cur = me_ref.clone();
+                            *cur = (parent_rank, me_ref.clone());
                         }
                     })
-                    .or_insert_with(|| me_ref.clone());
+                    .or_insert_with(|| (parent_rank, me_ref.clone()));
             }
 
             r.unresolved_blockers.sort_by_key(|u| u.to_ascii_lowercase());
@@ -1936,7 +1946,7 @@ impl Wf {
         // Propagate parent ref onto child reads that only had a parent via an epic's tasklist.
         for r in reads.reads.iter_mut().chain(extra.iter_mut()) {
             if r.issue.parent.is_none()
-                && let Some(p) = sub_parent_fill.get(&node_key(&r.issue.repo, r.issue.number))
+                && let Some((_, p)) = sub_parent_fill.get(&node_key(&r.issue.repo, r.issue.number))
             {
                 r.issue.parent = Some(p.clone());
             }
@@ -1993,24 +2003,42 @@ impl Wf {
     async fn read_closed_repo(&self, repo: &str) -> std::result::Result<(String, Vec<Read>), RepoReadError> {
         let (owner, name) =
             repo.split_once('/').ok_or_else(|| RepoReadError::Graphql(anyhow!("flow: {repo:?} is not owner/name")))?;
-        let resp = self
-            .github
-            .graphql(FLOW_CLOSED_ISSUES, json!({"owner": owner, "name": name}))
-            .await
-            .map_err(RepoReadError::Transport)?;
-        if let Some(e) = errors(&resp) {
-            return Err(RepoReadError::Graphql(anyhow!("wf.flow: reading {repo}'s closed issues failed: {e}")));
-        }
-        let r = &resp["data"]["repository"];
-        if r.is_null() {
-            return Err(RepoReadError::Graphql(anyhow!("wf.flow: GitHub returned no repository {repo}")));
-        }
-        let full = r["nameWithOwner"].as_str().unwrap_or(repo).to_string();
+        let mut after: Option<String> = None;
+        let mut seen_cursors: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
-        for n in r["issues"]["nodes"].as_array().into_iter().flatten() {
-            out.push(parse_node(&full, n).map_err(RepoReadError::Graphql)?);
+        let mut full = repo.to_string();
+        loop {
+            let resp = self
+                .github
+                .graphql(FLOW_CLOSED_ISSUES, json!({"owner": owner, "name": name, "after": after}))
+                .await
+                .map_err(RepoReadError::Transport)?;
+            if let Some(e) = errors(&resp) {
+                return Err(RepoReadError::Graphql(anyhow!("wf.flow: reading {repo}'s closed issues failed: {e}")));
+            }
+            let r = &resp["data"]["repository"];
+            if r.is_null() {
+                return Err(RepoReadError::Graphql(anyhow!("wf.flow: GitHub returned no repository {repo}")));
+            }
+            if let Some(n) = r["nameWithOwner"].as_str() {
+                full = n.to_string();
+            }
+            for n in r["issues"]["nodes"].as_array().into_iter().flatten() {
+                out.push(parse_node(&full, n).map_err(RepoReadError::Graphql)?);
+            }
+            let page = &r["issues"]["pageInfo"];
+            match page["endCursor"].as_str() {
+                Some(c) if page["hasNextPage"] == true => {
+                    if !seen_cursors.insert(c.to_string()) {
+                        return Err(RepoReadError::Graphql(anyhow!(
+                            "wf.flow: GitHub repeated page cursor {c:?} while reading {repo}'s closed issues"
+                        )));
+                    }
+                    after = Some(c.to_string());
+                }
+                _ => return Ok((full, out)),
+            }
         }
-        Ok((full, out))
     }
 
     async fn read_repo(
@@ -2209,7 +2237,7 @@ impl Wf {
                 if issue.is_object() {
                     if full {
                         reads.push(parse_node(final_repo, issue)?);
-                    } else if issue["state"] != "CLOSED" {
+                    } else {
                         let mut parsed = parse_node(final_repo, issue)?;
                         if !parsed.body_parsed.sub_issues.is_empty() {
                             parsed.body_parsed.blockers.clear();

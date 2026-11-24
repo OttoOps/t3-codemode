@@ -66,41 +66,196 @@ enum FlowListKey {
     Touches,
 }
 
-fn strip_quote_prefix(line: &str) -> (usize, &str) {
-    let mut depth = 0usize;
-    let mut s = line;
-    loop {
-        let bytes = s.as_bytes();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Container {
+    Quote,
+    ListItem { content_col: usize },
+}
+
+#[derive(Clone, Debug)]
+struct ActiveFence {
+    containers: Vec<Container>,
+    ch: u8,
+    len: usize,
+}
+
+#[derive(Clone, Copy)]
+struct LineCursor<'a> {
+    rest: &'a str,
+    virtual_spaces: usize,
+    col: usize,
+}
+
+impl<'a> LineCursor<'a> {
+    fn new(line: &'a str) -> Self {
+        Self { rest: line, virtual_spaces: 0, col: 0 }
+    }
+
+    fn is_blank(&self) -> bool {
+        self.rest.bytes().all(|b| b == b' ' || b == b'\t' || b == b'\r')
+    }
+
+    fn leading_cols(&self) -> (usize, usize) {
+        let mut cols = self.virtual_spaces;
+        let mut cur_col = self.col + self.virtual_spaces;
+        let bytes = self.rest.as_bytes();
         let mut i = 0;
-        while i < bytes.len() && i < 3 && bytes[i] == b' ' {
-            i += 1;
-        }
-        if bytes.get(i) == Some(&b'>') {
-            depth += 1;
-            s = &s[i + 1..];
-            if let Some(after_sp) = s.strip_prefix(' ') {
-                s = after_sp;
+        while i < bytes.len() {
+            match bytes[i] {
+                b' ' => {
+                    cols += 1;
+                    cur_col += 1;
+                    i += 1;
+                }
+                b'\t' => {
+                    let adv = 4 - (cur_col % 4);
+                    cols += adv;
+                    cur_col += adv;
+                    i += 1;
+                }
+                _ => break,
             }
-        } else {
-            return (depth, s);
         }
+        (cols, i)
+    }
+
+    fn consume_cols(&mut self, mut need: usize) -> bool {
+        let use_virt = need.min(self.virtual_spaces);
+        self.virtual_spaces -= use_virt;
+        self.col += use_virt;
+        need -= use_virt;
+        let bytes = self.rest.as_bytes();
+        let mut i = 0;
+        while need > 0 && i < bytes.len() {
+            match bytes[i] {
+                b' ' => {
+                    need -= 1;
+                    self.col += 1;
+                    i += 1;
+                }
+                b'\t' => {
+                    let adv = 4 - (self.col % 4);
+                    if adv <= need {
+                        need -= adv;
+                        self.col += adv;
+                    } else {
+                        self.col += need;
+                        self.virtual_spaces = adv - need;
+                        need = 0;
+                    }
+                    i += 1;
+                }
+                _ => return false,
+            }
+        }
+        self.rest = &self.rest[i..];
+        need == 0
+    }
+
+    fn consume_quote(&mut self) -> bool {
+        let (cols, off) = self.leading_cols();
+        if cols > 3 || self.rest.as_bytes().get(off) != Some(&b'>') {
+            return false;
+        }
+        self.col += cols + 1;
+        self.virtual_spaces = 0;
+        self.rest = &self.rest[off + 1..];
+        match self.rest.as_bytes().first() {
+            Some(b' ') => {
+                self.col += 1;
+                self.rest = &self.rest[1..];
+            }
+            Some(b'\t') => {
+                let adv = 4 - (self.col % 4);
+                self.col += 1;
+                self.virtual_spaces = adv - 1;
+                self.rest = &self.rest[1..];
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn consume_list_marker(&mut self) -> Option<usize> {
+        let (indent, off) = self.leading_cols();
+        if indent > 3 {
+            return None;
+        }
+        let after = &self.rest[off..];
+        let bytes = after.as_bytes();
+        let marker_len = match bytes.first().copied()? {
+            b'-' | b'*' | b'+' if bytes.len() == 1 || matches!(bytes[1], b' ' | b'\t' | b'\r') => 1,
+            b'0'..=b'9' => {
+                let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+                if digits == 0 || digits > 9 || !matches!(bytes.get(digits), Some(b'.' | b')')) {
+                    return None;
+                }
+                if bytes.len() == digits + 1 || matches!(bytes[digits + 1], b' ' | b'\t' | b'\r') {
+                    digits + 1
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+        // Thematic breaks ("- - -", "* * *") are not list items.
+        let mch = bytes[0];
+        if matches!(mch, b'-' | b'*') {
+            let rest_after = &after[1..];
+            if rest_after.bytes().all(|b| b == mch || b == b' ' || b == b'\t' || b == b'\r')
+                && rest_after.bytes().filter(|&b| b == mch).count() >= 2
+            {
+                return None;
+            }
+        }
+        self.col += indent + marker_len;
+        self.virtual_spaces = 0;
+        self.rest = &after[marker_len..];
+        if self.is_blank() {
+            self.rest = "";
+            return Some(indent + marker_len + 1);
+        }
+        let (after_sp, _) = self.leading_cols();
+        if after_sp == 0 {
+            return None;
+        }
+        let sp = if after_sp >= 5 { 1 } else { after_sp };
+        self.consume_cols(sp);
+        Some(indent + marker_len + sp)
     }
 }
 
-fn fence_open(line: &str) -> Option<(u8, usize)> {
-    let mut s = line.trim_start();
-    // Allow fences starting directly after a list item marker (e.g. "- ```").
-    if let Some(rest) = s.strip_prefix("- ").or_else(|| s.strip_prefix("* ")).or_else(|| s.strip_prefix("+ ")) {
-        s = rest.trim_start();
-    } else {
-        let digits = s.bytes().take_while(u8::is_ascii_digit).count();
-        if digits > 0
-            && let Some(rest) = s[digits..].strip_prefix(". ").or_else(|| s[digits..].strip_prefix(") "))
-        {
-            s = rest.trim_start();
+fn match_containers<'a>(raw_line: &'a str, containers: &[Container]) -> (usize, LineCursor<'a>) {
+    let mut cursor = LineCursor::new(raw_line);
+    let mut matched = 0;
+    for &c in containers {
+        match c {
+            Container::Quote => {
+                if !cursor.consume_quote() {
+                    break;
+                }
+            }
+            Container::ListItem { content_col } => {
+                if cursor.is_blank() {
+                    matched += 1;
+                    continue;
+                }
+                if cursor.leading_cols().0 < content_col || !cursor.consume_cols(content_col) {
+                    break;
+                }
+            }
         }
+        matched += 1;
     }
-    let bytes = s.as_bytes();
+    (matched, cursor)
+}
+
+fn fence_open(cursor: &LineCursor<'_>) -> Option<(u8, usize)> {
+    let (cols, off) = cursor.leading_cols();
+    if cols > 3 {
+        return None;
+    }
+    let bytes = &cursor.rest.as_bytes()[off..];
     let ch = *bytes.first()?;
     if ch != b'`' && ch != b'~' {
         return None;
@@ -115,13 +270,17 @@ fn fence_open(line: &str) -> Option<(u8, usize)> {
     Some((ch, len))
 }
 
-fn fence_close(line: &str, open_ch: u8, open_len: usize) -> bool {
-    let bytes = line.trim_start().as_bytes();
+fn fence_close(cursor: &LineCursor<'_>, open_ch: u8, open_len: usize) -> bool {
+    let (cols, off) = cursor.leading_cols();
+    if cols > 3 {
+        return false;
+    }
+    let bytes = &cursor.rest.as_bytes()[off..];
     let len = bytes.iter().take_while(|b| **b == open_ch).count();
     if len < open_len {
         return false;
     }
-    bytes[len..].iter().all(|b| *b == b' ' || *b == b'\t')
+    bytes[len..].iter().all(|b| *b == b' ' || *b == b'\t' || *b == b'\r')
 }
 
 fn strip_html_comments(line: &str, in_comment: &mut bool) -> String {
@@ -575,7 +734,13 @@ fn parse_ref_list(default_repo: &str, raw: &str, strip_backticks: bool) -> Vec<B
         return Vec::new();
     }
     let mut out = Vec::new();
-    for seg in split_top_level(trimmed) {
+    for (seg_idx, seg) in split_top_level(trimmed).into_iter().enumerate() {
+        let seg = if seg_idx > 0 {
+            let t = seg.trim_start();
+            strip_leading_kw(t, "and").or_else(|| t.strip_prefix('&')).map_or(seg.as_str(), str::trim_start).to_string()
+        } else {
+            seg
+        };
         for piece in split_and_clauses(&seg) {
             let piece = piece.trim().trim_end_matches(['.', '!', '?']).trim();
             if piece.is_empty() || is_placeholder(piece) {
@@ -662,7 +827,7 @@ fn starts_with_explicit_ref(s: &str) -> bool {
         return false;
     }
     if t.starts_with('#') {
-        return true;
+        return t.as_bytes().get(1).is_some_and(u8::is_ascii_alphanumeric);
     }
     if t.starts_with('[') && t.contains("](") && t.to_ascii_lowercase().contains("github.com/") {
         return true;
@@ -676,6 +841,120 @@ fn starts_with_explicit_ref(s: &str) -> bool {
     token.split_once('#').is_some_and(|(prefix, _)| {
         prefix.split_once('/').is_some_and(|(o, r)| !r.contains('/') && gh_name(o) && gh_name(r))
     })
+}
+
+fn starts_with_prose_clause_word(s: &str) -> bool {
+    let t = s.trim_start();
+    if t.is_empty() {
+        return false;
+    }
+    let bytes = t.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && (bytes[i].is_ascii_alphabetic() || matches!(bytes[i], b'\'' | b'-' | b'.')) {
+        i += 1;
+    }
+    if i == 0 || bytes.get(i).is_some_and(u8::is_ascii_alphanumeric) {
+        return false;
+    }
+    let word = t[..i].to_ascii_lowercase();
+    let word = word.trim_end_matches('.');
+    matches!(
+        word,
+        "which"
+            | "who"
+            | "whom"
+            | "whose"
+            | "where"
+            | "when"
+            | "while"
+            | "whilst"
+            | "that"
+            | "because"
+            | "since"
+            | "as"
+            | "so"
+            | "then"
+            | "therefore"
+            | "thus"
+            | "hence"
+            | "however"
+            | "otherwise"
+            | "unless"
+            | "until"
+            | "before"
+            | "after"
+            | "if"
+            | "though"
+            | "although"
+            | "but"
+            | "yet"
+            | "or"
+            | "nor"
+            | "once"
+            | "whereas"
+            | "not"
+            | "no"
+            | "never"
+            | "see"
+            | "note"
+            | "also"
+            | "etc"
+            | "eg"
+            | "e.g"
+            | "ie"
+            | "i.e"
+            | "meaning"
+            | "needed"
+            | "required"
+            | "assuming"
+            | "it"
+            | "its"
+            | "it's"
+            | "this"
+            | "these"
+            | "those"
+            | "we"
+            | "we'll"
+            | "we're"
+            | "we've"
+            | "they"
+            | "they'll"
+            | "they're"
+            | "i"
+            | "you"
+            | "there"
+            | "here"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "be"
+            | "been"
+            | "will"
+            | "would"
+            | "should"
+            | "can"
+            | "could"
+            | "may"
+            | "might"
+            | "must"
+            | "has"
+            | "have"
+            | "had"
+            | "does"
+            | "do"
+            | "did"
+            | "doesn't"
+            | "don't"
+            | "isn't"
+            | "aren't"
+            | "won't"
+            | "can't"
+            | "for"
+            | "to"
+            | "with"
+            | "without"
+    )
 }
 
 fn starts_with_quoted(s: &str) -> bool {
@@ -882,6 +1161,140 @@ fn capture_inline_target(rest: &str, inside_parens: bool) -> (&str, &str) {
                 continue;
             }
             break;
+        } else if ws_skip > 0 && starts_with_explicit_ref(after_ws) {
+            pos += ws_skip;
+            continue;
+        } else {
+            break;
+        }
+    }
+    if end == 0 || end == tail.len() { (tail, after_tail) } else { (&tail[..end], &rest[end..]) }
+}
+
+fn scan_unquoted_item_end(tail: &str, start: usize) -> usize {
+    let bytes = tail.as_bytes();
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    let mut in_quote: Option<u8> = None;
+    let mut i = start;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = in_quote {
+            if b == q {
+                in_quote = None;
+            }
+            i = next_char(tail, i);
+            continue;
+        }
+        match b {
+            b'"' | b'\'' => in_quote = Some(b),
+            b'(' => paren += 1,
+            b')' => paren = paren.saturating_sub(1),
+            b'[' => bracket += 1,
+            b']' => bracket = bracket.saturating_sub(1),
+            b',' | b';' if paren == 0 && bracket == 0 => return i,
+            _ => {}
+        }
+        i = next_char(tail, i);
+    }
+    tail.len()
+}
+
+fn capture_line_target(rest: &str) -> (&str, &str) {
+    // Line-start blocker directive capture: retains space-separated explicit refs ("#42 #43") and
+    // mixed explicit + unquoted sibling titles ("#42, Setup auth"), while stopping before ordinary
+    // trailing prose clauses (", which adds OAuth support.", "because ...").
+    let (tail, after_tail) = slice_directive_tail(rest, false);
+    let mut end = 0usize;
+    let mut pos = 0usize;
+    let bytes = tail.as_bytes();
+    while pos < bytes.len() {
+        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+            pos += 1;
+        }
+        if pos >= bytes.len() {
+            break;
+        }
+        let slice = &tail[pos..];
+        let bold_skip = if slice.starts_with("**") || slice.starts_with("__") { 2 } else { 0 };
+        let inner = &slice[bold_skip..];
+        let inner_pos = pos + bold_skip;
+        let structured_end = if let Some(q @ (b'"' | b'\'')) = bytes.get(inner_pos).copied() {
+            tail[inner_pos + 1..].find(q as char).map(|k| inner_pos + 1 + k + 1)
+        } else if let Some((_, plen)) = extract_leading_phase(inner)
+            && !inner[plen..].trim_start().starts_with([':', '-', '—', '–'])
+        {
+            Some(inner_pos + plen)
+        } else if inner.starts_with('[')
+            && let Some(cb) = inner[1..].find(']')
+            && inner[1 + cb + 1..].starts_with('(')
+            && let Some(cp) = inner[1 + cb + 2..].find(')')
+            && parse_github_issue_only(inner[1 + cb + 2..1 + cb + 2 + cp].trim()).is_some()
+        {
+            Some(inner_pos + 1 + cb + 2 + cp + 1)
+        } else if starts_with_explicit_ref(inner) {
+            let mut k = inner_pos;
+            while k < bytes.len() && !bytes[k].is_ascii_whitespace() && !matches!(bytes[k], b',' | b';' | b')') {
+                k = next_char(tail, k);
+            }
+            Some(k)
+        } else {
+            None
+        };
+
+        if let Some(mut next_pos) = structured_end {
+            if bold_skip == 2 && (tail[next_pos..].starts_with("**") || tail[next_pos..].starts_with("__")) {
+                next_pos += 2;
+            }
+            let after_item = tail[next_pos..].trim_start();
+            if after_item.starts_with('(')
+                && let Some(cp) = after_item.find(')')
+            {
+                next_pos = tail.len() - after_item.len() + cp + 1;
+            }
+            end = next_pos;
+            pos = next_pos;
+        } else {
+            let next_pos = scan_unquoted_item_end(tail, pos);
+            let trimmed_end = tail[pos..next_pos].trim_end().len();
+            if trimmed_end == 0 {
+                break;
+            }
+            end = pos + trimmed_end;
+            pos = next_pos;
+        }
+
+        let after_ws = tail[pos..].trim_start();
+        let ws_skip = tail[pos..].len() - after_ws.len();
+        if after_ws.is_empty() {
+            break;
+        }
+        if let Some(r) = after_ws.strip_prefix(',').or_else(|| after_ws.strip_prefix(';')) {
+            let after_sep = r.trim_start();
+            if after_sep.is_empty() || starts_with_directive_keyword(after_sep) {
+                break;
+            }
+            let candidate = strip_leading_kw(after_sep, "and")
+                .or_else(|| after_sep.strip_prefix('&'))
+                .map_or(after_sep, str::trim_start);
+            if candidate.is_empty() || starts_with_directive_keyword(candidate) {
+                break;
+            }
+            if !starts_with_explicit_or_phase_or_quote(candidate) && starts_with_prose_clause_word(candidate) {
+                break;
+            }
+            pos = tail.len() - candidate.len();
+            continue;
+        } else if let Some(and_rest) = strip_leading_kw(after_ws, "and").or_else(|| after_ws.strip_prefix('&')) {
+            let after_and = and_rest.trim_start();
+            if starts_with_explicit_or_phase_or_quote(after_and) {
+                pos = tail.len() - after_and.len();
+                continue;
+            }
+            break;
+        } else if ws_skip > 0 && starts_with_explicit_ref(after_ws) {
+            pos += ws_skip;
+            continue;
         } else {
             break;
         }
@@ -903,7 +1316,7 @@ fn scan_prose_segment(default_repo: &str, segment: &str, line_start: bool, parse
             let (target, rem) = if starts_with_explicit_ref(rest) || starts_with_quoted(rest) {
                 capture_inline_target(rest, false)
             } else {
-                slice_directive_tail(rest, false)
+                capture_line_target(rest)
             };
             for r in parse_ref_list(default_repo, target, false) {
                 push_unique_ref(&mut parsed.parents, r);
@@ -924,11 +1337,12 @@ fn scan_prose_segment(default_repo: &str, segment: &str, line_start: bool, parse
                 if rest.is_empty() {
                     return has_colon.then_some(role);
                 }
-                let (target, rem) = if starts_with_explicit_ref(rest) || starts_with_quoted(rest) {
-                    capture_inline_target(rest, false)
-                } else {
-                    slice_directive_tail(rest, false)
-                };
+                let (target, rem) =
+                    if role == RefRole::Parent && (starts_with_explicit_ref(rest) || starts_with_quoted(rest)) {
+                        capture_inline_target(rest, false)
+                    } else {
+                        capture_line_target(rest)
+                    };
                 let refs = parse_ref_list(default_repo, target, false);
                 let dest = match role {
                     RefRole::Blocker => &mut parsed.blockers,
@@ -950,11 +1364,8 @@ fn scan_prose_segment(default_repo: &str, segment: &str, line_start: bool, parse
                 return has_colon.then_some(RefRole::Blocker);
             }
             if has_colon || starts_with_explicit_or_phase_or_quote(rest) {
-                let (target, rem) = if starts_with_explicit_ref(rest) || starts_with_quoted(rest) || !has_colon {
-                    capture_inline_target(rest, false)
-                } else {
-                    slice_directive_tail(rest, false)
-                };
+                let (target, rem) =
+                    if has_colon { capture_line_target(rest) } else { capture_inline_target(rest, false) };
                 for r in parse_ref_list(default_repo, target, false) {
                     push_unique_ref(&mut parsed.blockers, r);
                 }
@@ -1094,7 +1505,8 @@ fn extract_leading_issue_ref(default_repo: &str, text: &str) -> Option<BodyRef> 
 
 pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
     let mut parsed = ParsedBody::default();
-    let mut fence: Option<(usize, u8, usize)> = None;
+    let mut containers: Vec<Container> = Vec::new();
+    let mut fence: Option<ActiveFence> = None;
     let mut in_comment = false;
     let mut flow_level: Option<usize> = None;
     let mut flow_list_key: Option<FlowListKey> = None;
@@ -1102,21 +1514,40 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
     let mut in_dep_section = false;
 
     for raw_line in body.lines() {
-        let (qdepth, unquoted) = strip_quote_prefix(raw_line);
-        if let Some((f_qdepth, ch, len)) = fence {
-            if qdepth < f_qdepth {
-                // Blockquote container ended, closing the fenced block inside it.
-                fence = None;
-            } else {
-                if qdepth == f_qdepth && fence_close(unquoted, ch, len) {
+        if let Some(active) = fence.as_ref() {
+            let (matched, cursor) = match_containers(raw_line, &active.containers);
+            if matched == active.containers.len() {
+                if fence_close(&cursor, active.ch, active.len) {
+                    containers = active.containers.clone();
                     fence = None;
                 }
                 continue;
             }
+            // Enclosing blockquote or list item ended, closing the unclosed fence.
+            containers = active.containers[..matched].to_vec();
+            fence = None;
         }
-        if !in_comment && let Some((ch, len)) = fence_open(unquoted) {
-            fence = Some((qdepth, ch, len));
-            continue;
+        let (matched, mut cursor) = match_containers(raw_line, &containers);
+        containers.truncate(matched);
+        if !cursor.is_blank() {
+            loop {
+                if cursor.consume_quote() {
+                    containers.push(Container::Quote);
+                    continue;
+                }
+                if let Some(content_col) = cursor.consume_list_marker() {
+                    containers.push(Container::ListItem { content_col });
+                    continue;
+                }
+                break;
+            }
+            if !in_comment
+                && !cursor.is_blank()
+                && let Some((ch, len)) = fence_open(&cursor)
+            {
+                fence = Some(ActiveFence { containers: containers.clone(), ch, len });
+                continue;
+            }
         }
         let line = strip_html_comments(raw_line, &mut in_comment);
         if line.trim().is_empty() {
@@ -1830,5 +2261,58 @@ After: #13, which ships the migration.
         );
         assert_eq!(p.parents, vec![BodyRef::Issue { repo: REPO.into(), number: 1 }]);
         assert_eq!(p.declared_phase, Some(2));
+    }
+
+    #[test]
+    fn enforces_list_fence_boundaries_and_closing_indent_and_mixed_line_refs() {
+        // S5a: unclosed fence inside a list item ends when the list item ends.
+        let list_unclosed = "\
+- Example:
+  ```
+  Depends on #99
+
+Depends on #42
+";
+        assert_eq!(parse_body(REPO, list_unclosed).blockers, vec![BodyRef::Issue { repo: REPO.into(), number: 42 }]);
+
+        // S5b: unclosed fence right after "- " ends at sibling list item.
+        let list_sibling = "\
+- ```
+  Depends on #98
+- Depends on #43
+";
+        assert_eq!(parse_body(REPO, list_sibling).blockers, vec![BodyRef::Issue { repo: REPO.into(), number: 43 }]);
+
+        // S5c: four-space-indented backticks inside a top-level fence do NOT close it early.
+        let indented_inner = "\
+```markdown
+    ```
+    Depends on #97
+```
+Depends on #44
+";
+        assert_eq!(parse_body(REPO, indented_inner).blockers, vec![BodyRef::Issue { repo: REPO.into(), number: 44 }]);
+
+        // S6: space-separated explicit refs and mixed explicit + unquoted sibling titles stay intact,
+        // while trailing explanatory prose still stops cleanly.
+        let mixed = "\
+Depends on #42 #43
+Blocked by #44, Setup auth
+Depends on #45, and Migrate DB, which adds the index.
+After: #46, Phase 1: Auth setup, because it defines the schema.
+";
+        assert_eq!(
+            parse_body(REPO, mixed).blockers,
+            vec![
+                BodyRef::Issue { repo: REPO.into(), number: 42 },
+                BodyRef::Issue { repo: REPO.into(), number: 43 },
+                BodyRef::Issue { repo: REPO.into(), number: 44 },
+                BodyRef::Symbolic("Setup auth".into()),
+                BodyRef::Issue { repo: REPO.into(), number: 45 },
+                BodyRef::Symbolic("Migrate DB".into()),
+                BodyRef::Issue { repo: REPO.into(), number: 46 },
+                BodyRef::Symbolic("Phase 1: Auth setup".into()),
+            ]
+        );
     }
 }

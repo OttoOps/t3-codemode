@@ -807,11 +807,11 @@ blocks, inline code spans and HTML comments:
   Tasklists emit sub-issues by default, or blockers under a `## Dependencies`,
   `## Blockers` or `## Prerequisites` heading.
 - Sibling title and phase references, such as `Depends on Phase 1` or
-  `Blocked by "Setup auth"`, resolve against open and recently closed issues in
-  the same epic or repository when unambiguous, so closing a referenced sibling
-  unblocks its dependents cleanly. t3cm flags unresolved or ambiguous
-  references with a diagnostic, and unresolved blocker references keep the
-  issue out of the ready queue.
+  `Blocked by "Setup auth"`, resolve against open and closed issues in the same
+  epic or repository when unambiguous, so closing a referenced sibling unblocks
+  its dependents cleanly. t3cm flags unresolved or ambiguous references with a
+  diagnostic, and unresolved blocker references keep the issue out of the ready
+  queue.
 
 `edges` lists each link once, from the issue that has it. Each edge carries
 `source` as `github`, `body`, `git` or `code`, and native `github` wins when
