@@ -405,18 +405,20 @@ records the rules.
 
 ### wf.flow
 
-`wf.flow()` reads each covered repo's open issues that carry the opt-in label
-through `gh api graphql`, then applies the [ready rules](config.md#flow). It
-needs no caller and changes nothing. It returns:
+`wf.flow()` reads each covered repo's open issues through `gh api graphql`,
+then applies the [ready rules](config.md#flow) when `flow.maxTickets` is
+configured. Covered repos come from `flow.repos`, or from active T3 projects'
+GitHub remotes when `flow.repos` is omitted, with `flow.includeRepos` and
+`flow.excludeRepos` applied. It needs no caller and changes nothing. It returns:
 
 | Field | Holds |
 |---|---|
-| `enabled` | `false` when the config has no `flow` block. Then every list is empty and `wf.flow()` reads nothing from GitHub. |
-| `launch`, `maxTickets` | The config's values, or `null` and `0` when the flow is off. |
+| `enabled` | `false` when `flow.maxTickets` is unset, whether the config has no `flow` block or sets repo overrides only. Without `{ graph: true }`, every list is empty and `wf.flow()` reads nothing from GitHub. |
+| `launch`, `maxTickets` | The config's values, or `null` and `0` when the launch queue is off. |
 | `free` | `maxTickets` minus the flow tickets running, never below zero. |
 | `running` | The flow tickets: `label`, `repo`, `number`, `url`, and the ticket's `thread` and `link`. `thread` is `null` for a launch that hasn't joined yet. A ticket whose issue has closed isn't listed. |
 | `queue` | The ready issues in launch order. |
-| `blocked` | The opt-in issues held back by an open blocker or by `blocked: external`, in the same order. |
+| `blocked` | The matching issues held back by an open blocker or by `blocked: external`, in the same order. |
 | `skipped` | Ready issues kept out of the picks, in the same order: skipped on a launch card, or still open after their own ticket finished. Each comes back once its labels or blockers change. |
 
 Each issue in `queue`, `blocked` and `skipped` has `repo`, `number`, `label`, `url`,
@@ -426,15 +428,17 @@ Each issue in `queue`, `blocked` and `skipped` has `repo`, `number`, `label`, `u
 block it. A `blocked` issue adds `blockers`, the open
 issues that block it, and `external`, which is `true` when it carries
 `blocked: external`. An issue with more blockers than GitHub returned in one
-read stays in `blocked` with `moreBlockers: true`. When `gh` can't read a
-covered repo, the call throws and names the repo.
+read stays in `blocked` with `moreBlockers: true`. When `gh` can't read an explicitly configured repo, or cannot read any
+discovered repo, the call throws and names the repo.
 
 `wf.flow({ graph: true })` also returns `graph`, the dependency graph the
-board reads from `GET /api/flow`. It makes no GitHub call per issue. It
-reuses the flow's reads and the batched tickets query, which then also reads
-tickets in repositories the flow does not cover. `wf.flow()` leaves it out by
-default because it can be large. [The dependency
-graph](board.md#the-dependency-graph) describes its nodes and edges.
+board reads from `GET /api/flow`, even when `config.json` has no `flow` block.
+It reads all open issues across covered repos, keeping transitive blocker
+chains intact through unlabelled issues, and uses the batched tickets query for
+any active ticket whose issue was not in that read. `wf.flow()` leaves `graph`
+out by default because it can be large. [The dependency
+graph](board.md#the-dependency-graph) describes its nodes, edges and smart lane
+rules.
 
 ```js
 async () => {

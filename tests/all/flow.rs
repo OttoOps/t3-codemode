@@ -168,6 +168,7 @@ async fn the_queue_reads_every_page_of_a_repo() {
     for n in 1..=5 {
         issue(&h, REPO, n, &[FLOW], n as u32);
     }
+    issue(&h, REPO, 6, &[], 6);
     h.github.set_issue_page(2);
 
     let f = flow(&h).await;
@@ -282,11 +283,11 @@ async fn the_graph_covers_flow_issues_and_active_tickets_with_their_edges() {
     let four = node(&f, "acme/widgets#4");
     assert_eq!(four["parent"], "acme/widgets#5");
     assert_eq!(four["milestone"]["title"], "v0.9.0");
-    assert_eq!((four["track"].as_str(), four["trackBy"].as_str()), (Some("v0.9.0"), Some("milestone")));
+    assert_eq!((four["track"].as_str(), four["trackBy"].as_str()), (Some("widgets#5"), Some("epic")));
     let five = node(&f, "acme/widgets#5");
-    assert_eq!((five["tracked"].as_bool(), five["state"].as_str()), (Some(false), Some("open")));
+    assert_eq!((five["tracked"].as_bool(), five["state"].as_str()), (Some(true), Some("open")));
     assert_eq!(ids(&five["subIssues"]), ["acme/widgets#4"]);
-    assert_eq!((five["track"].as_str(), five["trackBy"].as_str()), (Some("v0.9.0"), Some("component")));
+    assert_eq!((five["track"].as_str(), five["trackBy"].as_str()), (Some("widgets#5"), Some("epic")));
 
     let six = node(&f, "acme/widgets#6");
     assert_eq!(six["tracked"], true);
@@ -342,6 +343,7 @@ async fn the_ticket_reads_share_one_query_per_fifty_tickets() {
     let h = flowing(80);
     for n in 1..=60 {
         issue(&h, REPO, n, &[], 1);
+        h.github.close_issue(REPO, n);
         ticket(&h, &format!("mcp:t{n}"), &format!("widgets#{n}")).await;
     }
     let before = h.github.calls().len();
@@ -357,10 +359,13 @@ async fn the_ticket_reads_share_one_query_per_fifty_tickets() {
 }
 
 #[tokio::test]
-async fn with_no_flow_block_the_graph_holds_the_active_tickets_and_reads_nothing() {
+async fn with_no_flow_block_the_graph_discovers_t3_project_repos_and_reads_their_dag() {
     let h = H::new();
     h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
     h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    issue(&h, REPO, 1, &[], 1);
+    issue(&h, REPO, 2, &[], 2);
+    h.github.set_blockers(REPO, 2, &[(REPO, 1)]);
     let mut th = t3_codemode::fake::thread("mcp:t1", "running", T0);
     th["projectId"] = json!("p-widgets");
     h.fake.put(th);
@@ -370,14 +375,19 @@ async fn with_no_flow_block_the_graph_holds_the_active_tickets_and_reads_nothing
 
     let f = graph(&h).await;
 
-    assert_eq!(h.github.calls().len(), before);
+    assert_eq!(h.github.operations()[before..], ["flowIssues"]);
     assert_eq!(f["enabled"], false);
-    let n = node(&f, "acme/widgets#1");
-    assert_eq!(n["tracked"], true);
-    assert_eq!(n["title"], Value::Null);
-    assert_eq!(n["ticket"]["thread"], "mcp:t1");
-    assert_eq!((n["track"].as_str(), n["trackBy"].as_str()), (Some("widgets#1"), Some("component")));
-    assert_eq!(f["graph"]["edges"], json!([]));
+    assert_eq!(f["launch"], Value::Null);
+    assert_eq!(f["maxTickets"], 0);
+    assert_eq!(f["queue"], json!([]));
+    let n1 = node(&f, "acme/widgets#1");
+    assert_eq!(n1["tracked"], true);
+    assert_eq!(n1["title"], "Issue 1");
+    assert_eq!(n1["ticket"]["thread"], "mcp:t1");
+    assert_eq!((n1["track"].as_str(), n1["trackBy"].as_str()), (Some("widgets#1"), Some("component")));
+    let n2 = node(&f, "acme/widgets#2");
+    assert_eq!(ids(&n2["blockedBy"]), ["acme/widgets#1"]);
+    assert_eq!(f["graph"]["edges"], json!([{"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy"}]));
 }
 
 #[tokio::test]
@@ -431,7 +441,7 @@ fn the_flow_block_is_validated() {
     let cfg = Config::from_value(json!({ "flow": ok })).unwrap();
     let flow = cfg.flow.unwrap();
     assert_eq!(flow.launch, t3_codemode::config::Launch::Ask);
-    assert_eq!(flow.max_tickets, 2);
+    assert_eq!(flow.max_tickets, Some(2));
 
     let auto = Config::from_value(
         json!({"flow": {"repos": [REPO], "optIn": {"label": FLOW}, "maxTickets": 1, "launch": "auto"}}),
@@ -458,8 +468,49 @@ fn the_flow_block_is_validated() {
     assert!(msg.contains("now"), "{msg}");
     let (_, msg) = config_error(json!({"repos": [REPO], "optIn": {"label": FLOW}, "maxTickets": 1, "project": 3}));
     assert!(msg.contains("project"), "{msg}");
-    let (_, msg) = config_error(json!({"repos": [REPO], "maxTickets": 1}));
-    assert!(msg.contains("optIn"), "{msg}");
+
+    // Optional repos, optIn, includeRepos/excludeRepos, and graph-only flow blocks.
+    let no_opt_in = Config::from_value(json!({"flow": {"repos": [REPO], "maxTickets": 1}})).unwrap().flow.unwrap();
+    assert!(no_opt_in.opt_in.is_none());
+    assert_eq!(no_opt_in.launch, t3_codemode::config::Launch::Ask);
+    assert!(no_opt_in.queue_enabled());
+
+    let discovered = Config::from_value(
+        json!({"flow": {"includeRepos": [REPO], "excludeRepos": [TOOLS], "optIn": {"milestone": "v1.0"}, "maxTickets": 2}}),
+    )
+    .unwrap()
+    .flow
+    .unwrap();
+    assert!(discovered.repos.is_none());
+    assert_eq!(discovered.include_repos, [REPO]);
+    assert_eq!(discovered.exclude_repos, [TOOLS]);
+    assert_eq!(discovered.opt_in.as_ref().unwrap().milestone.as_deref(), Some("v1.0"));
+    assert_eq!(discovered.launch, t3_codemode::config::Launch::Ask);
+
+    let graph_only = Config::from_value(json!({"flow": {"excludeRepos": [TOOLS]}})).unwrap().flow.unwrap();
+    assert!(!graph_only.queue_enabled());
+    assert_eq!(graph_only.launch, t3_codemode::config::Launch::Off);
+
+    let (at, _) = config_error(json!({"launch": "ask"}));
+    assert_eq!(at, "flow.maxTickets");
+    let (at, _) = config_error(json!({"launch": "auto"}));
+    assert_eq!(at, "flow.maxTickets");
+    let (at, _) = config_error(json!({"optIn": {}, "maxTickets": 1}));
+    assert_eq!(at, "flow.optIn");
+    let (at, _) = config_error(json!({"optIn": {"milestone": " "}, "maxTickets": 1}));
+    assert_eq!(at, "flow.optIn.milestone");
+    let (at, msg) = config_error(json!({"includeRepos": ["widgets"]}));
+    assert_eq!(at, "flow.includeRepos.0");
+    assert!(msg.contains("not an owner/name"), "{msg}");
+    let (at, msg) = config_error(json!({"includeRepos": [REPO, "Acme/Widgets"]}));
+    assert_eq!(at, "flow.includeRepos.1");
+    assert!(msg.contains("twice"), "{msg}");
+    let (at, msg) = config_error(json!({"excludeRepos": ["widgets"]}));
+    assert_eq!(at, "flow.excludeRepos.0");
+    assert!(msg.contains("not an owner/name"), "{msg}");
+    let (at, msg) = config_error(json!({"excludeRepos": [REPO, "Acme/Widgets"]}));
+    assert_eq!(at, "flow.excludeRepos.1");
+    assert!(msg.contains("twice"), "{msg}");
 }
 
 fn flow_cards(h: &H) -> Vec<Value> {
@@ -1257,7 +1308,7 @@ return {{ first, same: JSON.stringify(again) === JSON.stringify(first.at), hover
     let f = &r["first"];
     assert_eq!(
         f["lanes"],
-        json!(["widgets#6", "board", "tools#7"]),
+        json!(["acme/widgets: Independent", "board", "widgets#5", "acme/tools: Independent"]),
         "lanes follow each node's track, and lanes holding a ticket come first: {r}"
     );
     assert_eq!(
@@ -1266,8 +1317,8 @@ return {{ first, same: JSON.stringify(again) === JSON.stringify(first.at), hover
             "acme/widgets#6",
             "acme/widgets#1",
             "acme/widgets#3",
-            "acme/widgets#5",
             "acme/widgets#2",
+            "acme/widgets#5",
             "acme/widgets#4",
             "acme/tools#7"
         ]),
@@ -1275,7 +1326,7 @@ return {{ first, same: JSON.stringify(again) === JSON.stringify(first.at), hover
     );
     assert_eq!(f["edges"], json!(["ge", "ge", "ge", "ge par"]), "three blocked-by links and one parent link: {r}");
     assert_eq!(f["n"], "7", "{r}");
-    assert!(f["note"].as_str().unwrap().starts_with("3 lanes by track"), "{r}");
+    assert!(f["note"].as_str().unwrap().starts_with("4 lanes by track"), "{r}");
     let at = |id: &str| f["at"][id].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect::<Vec<_>>();
     assert!(at("acme/widgets#1")[0] < at("acme/widgets#2")[0], "a blocker sits left of what it blocks: {r}");
     assert!(at("acme/widgets#2")[0] < at("acme/widgets#4")[0], "{r}");
@@ -1362,7 +1413,7 @@ return {{ issue, moved, parent, ticket, back: document.activeElement === btn("ac
     assert!(p["note"].as_str().unwrap().starts_with("Not opted into the flow"), "{r}");
     assert_eq!(
         r["ticket"],
-        json!({"kind": "ticket", "id": "widgets#6", "deps": false, "lane": "Lane widgets#6."}),
+        json!({"kind": "ticket", "id": "widgets#6", "deps": false, "lane": "Lane acme/widgets: Independent, from unlinked issues in its repository."}),
         "{r}"
     );
     assert_eq!(r["back"], true, "Esc-style close returns focus to the node: {r}");
@@ -1401,4 +1452,487 @@ return { good, failed, dismissed, back: note() };
         json!({"good": false, "failed": [true, 7], "dismissed": true, "back": false}),
         "the last graph stays, says it is stale, and recovers on the same payload: {r}"
     );
+}
+
+#[tokio::test]
+async fn zero_config_graph_discovers_t3_project_repos_and_keeps_launching_off() {
+    let h = H::new();
+    let mut tools_proj = project("p-tools", "/src/tools");
+    tools_proj["repositoryIdentity"] = json!({
+        "canonicalKey": "github.com/acme/tools", "owner": "acme", "name": "tools",
+        "locator": {"source": "git-remote", "remoteName": "origin", "remoteUrl": "https://github.com/acme/tools.git"}
+    });
+    let mut archived = project("p-old", "/src/old");
+    archived["archivedAt"] = json!("2026-10-01T00:00:00Z");
+    let gitlab = project("p-gl", "/src/gl");
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets"), tools_proj, archived, gitlab]);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    h.remotes.set("/src/old", "git@github.com:acme/old.git");
+    h.remotes.set("/src/gl", "https://gitlab.example.com/team/app.git");
+
+    issue(&h, REPO, 1, &[], 1);
+    issue(&h, REPO, 2, &[], 2);
+    issue(&h, REPO, 3, &[], 3);
+    issue(&h, REPO, 4, &[], 4);
+    issue(&h, TOOLS, 10, &[], 5);
+    issue(&h, TOOLS, 11, &[], 6);
+    h.github.set_blockers(REPO, 2, &[(REPO, 1)]);
+
+    // Viewing the graph never implies launching: wf.flow() and wf.flow.next() stay off and read nothing.
+    let lean = flow(&h).await;
+    assert_eq!(lean["enabled"], false);
+    assert_eq!(lean["launch"], Value::Null);
+    assert_eq!(lean["queue"], json!([]));
+    let pick = next(&h).await;
+    assert_eq!(pick["launch"], Value::Null);
+    assert_eq!(pick["picked"], json!([]));
+    assert!(h.github.calls().is_empty(), "off flow makes no GitHub reads: {:?}", h.github.calls());
+    assert!(h.fake.launched().is_empty());
+
+    // GET /api/flow and the Graph tab discover acme/widgets and acme/tools (ignoring archived and GitLab).
+    let (html, st, view) = panel_page(h).await;
+    assert_eq!(st["flow"], false);
+    assert_eq!(st["flowMaxTickets"], Value::Null);
+    assert_eq!(view["enabled"], false);
+    assert_eq!(view["launch"], Value::Null);
+    assert_eq!(view["queue"], json!([]));
+    assert_eq!(
+        view["graph"]["edges"],
+        json!([{"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy"}])
+    );
+    for id in ["acme/widgets#3", "acme/widgets#4"] {
+        assert_eq!(
+            (node(&view, id)["track"].as_str(), node(&view, id)["trackBy"].as_str()),
+            (Some("acme/widgets: Independent"), Some("independent")),
+            "widgets singletons share one lane: {view}"
+        );
+    }
+    for id in ["acme/tools#10", "acme/tools#11"] {
+        assert_eq!(
+            (node(&view, id)["track"].as_str(), node(&view, id)["trackBy"].as_str()),
+            (Some("acme/tools: Independent"), Some("independent")),
+            "tools singletons share one lane: {view}"
+        );
+    }
+
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        &format!(
+            r##"{GRAPH}
+let fail = false;
+fetchReply = (url) => url === "/api/flow" ? (fail ? reply(502, {{ error: "gh down" }}) : reply(200, view)) : new Promise(() => {{}});
+emitState(base);
+await tick();
+const onOpen = {{ flowHidden: q("#p-flow").hidden, fetches: flowFetches() }};
+selectTab("graph");
+await tick();
+const onGraph = {{
+  flowHidden: q("#p-flow").hidden,
+  fetches: flowFetches(),
+  lanes: lanes(),
+  nodes: nodes(),
+  edges: edges(),
+  n: q("#n-graph").textContent,
+  note: q("#graph-note").textContent,
+}};
+fail = true;
+loadFlow();
+await tick();
+const afterErr = {{
+  flowHidden: q("#p-flow").hidden,
+  flowErrHidden: q("#flow-err").hidden,
+  stale: q("#graph-note").textContent.startsWith("Could not refresh"),
+}};
+return {{ onOpen, onGraph, afterErr }};
+"##
+        ),
+    );
+    assert_eq!(r["onOpen"], json!({"flowHidden": true, "fetches": 0}), "{r}");
+    assert_eq!(r["onGraph"]["flowHidden"], true, "Graph tab never reveals Up next without launch config: {r}");
+    assert_eq!(r["onGraph"]["fetches"], 1, "{r}");
+    assert_eq!(
+        r["onGraph"]["lanes"],
+        json!(["widgets#1", "acme/tools: Independent", "acme/widgets: Independent"]),
+        "{r}"
+    );
+    assert_eq!(r["onGraph"]["edges"], json!(["ge"]), "{r}");
+    assert_eq!(r["onGraph"]["n"], "6", "{r}");
+    assert!(r["onGraph"]["note"].as_str().unwrap().starts_with("3 lanes by track"), "{r}");
+    assert_eq!(
+        r["afterErr"],
+        json!({"flowHidden": true, "flowErrHidden": true, "stale": true}),
+        "Graph refresh error with no flow block keeps Up next hidden: {r}"
+    );
+}
+
+#[tokio::test]
+async fn discovered_repos_skip_an_unreadable_repo_when_others_succeed_and_fail_when_all_fail() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets"), project("p-missing", "/src/missing")]);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    h.remotes.set("/src/missing", "git@github.com:acme/missing.git");
+    issue(&h, REPO, 1, &[], 1);
+
+    let f = graph(&h).await;
+    assert_eq!(node(&f, "acme/widgets#1")["title"], "Issue 1");
+
+    let only_missing = H::new();
+    only_missing.fake.set_projects(vec![project("p-missing", "/src/missing")]);
+    only_missing.remotes.set("/src/missing", "git@github.com:acme/missing.git");
+    let err = only_missing.app.wf.flow(true).await.unwrap_err();
+    assert!(format!("{err:#}").contains("reading acme/missing's issues failed"), "{err:#}");
+}
+
+#[tokio::test]
+async fn flow_repos_defaults_to_discovered_projects_with_include_and_exclude_overrides() {
+    let cfg = Config::from_value(json!({
+        "flow": {
+            "includeRepos": ["acme/extra"],
+            "excludeRepos": ["acme/archive"],
+            "maxTickets": 2,
+            "launch": "ask"
+        }
+    }))
+    .unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets"), project("p-archive", "/src/archive")]);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    h.remotes.set("/src/archive", "git@github.com:acme/archive.git");
+    issue(&h, REPO, 1, &[], 1);
+    issue(&h, "acme/extra", 2, &[], 2);
+    // acme/archive is intentionally NOT registered on fake GitHub; excluding it prevents any query for it.
+
+    let f = graph(&h).await;
+    assert_eq!(f["enabled"], true);
+    assert_eq!(labels(&f["queue"]), ["widgets#1", "extra#2"]);
+    assert_eq!(node(&f, "acme/widgets#1")["ready"], true);
+    assert_eq!(node(&f, "acme/extra#2")["ready"], true);
+
+    // Graph-only override (no maxTickets) keeps launching and snapshot.flow off while still honoring overrides.
+    let graph_only_cfg = Config::from_value(json!({"flow": {"excludeRepos": ["acme/archive"]}})).unwrap();
+    let g = H::build(Vec::new(), graph_only_cfg);
+    g.fake.set_projects(vec![project("p-widgets", "/src/widgets"), project("p-archive", "/src/archive")]);
+    g.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    g.remotes.set("/src/archive", "git@github.com:acme/archive.git");
+    issue(&g, REPO, 5, &[], 1);
+
+    assert_eq!(g.app.wf.snapshot().unwrap()["flow"], false);
+    assert_eq!(g.app.wf.snapshot().unwrap()["flowMaxTickets"], Value::Null);
+    assert_eq!(flow(&g).await["enabled"], false);
+    assert!(g.github.calls().is_empty());
+    let gv = graph(&g).await;
+    assert_eq!(gv["enabled"], false);
+    assert_eq!(node(&gv, "acme/widgets#5")["title"], "Issue 5");
+}
+
+#[tokio::test]
+async fn optional_opt_in_supports_milestone_and_combined_label_filters() {
+    let ms_cfg = Config::from_value(json!({
+        "flow": {"repos": [REPO], "optIn": {"milestone": "v1.0"}, "maxTickets": 3}
+    }))
+    .unwrap();
+    let h = H::build(Vec::new(), ms_cfg);
+    issue(&h, REPO, 1, &[], 1);
+    issue(&h, REPO, 2, &[], 2);
+    issue(&h, REPO, 3, &[], 3);
+    h.github.set_milestone(REPO, 1, "V1.0", None);
+    h.github.set_milestone(REPO, 2, "v2.0", None);
+
+    let f = flow(&h).await;
+    assert_eq!(labels(&f["queue"]), ["widgets#1"]);
+
+    let both_cfg = Config::from_value(json!({
+        "flow": {"repos": [REPO], "optIn": {"label": "ready", "milestone": "v1.0"}, "maxTickets": 3}
+    }))
+    .unwrap();
+    let h2 = H::build(Vec::new(), both_cfg);
+    issue(&h2, REPO, 1, &["ready"], 1);
+    issue(&h2, REPO, 2, &["ready"], 2);
+    issue(&h2, REPO, 3, &[], 3);
+    h2.github.set_milestone(REPO, 1, "v1.0", None);
+    h2.github.set_milestone(REPO, 3, "v1.0", None);
+
+    let f2 = flow(&h2).await;
+    assert_eq!(labels(&f2["queue"]), ["widgets#1"]);
+}
+
+#[tokio::test]
+async fn transitive_blocker_chains_survive_unlabelled_intermediates() {
+    let h = flowing(2);
+    issue(&h, REPO, 1, &[], 1);
+    issue(&h, REPO, 2, &[], 2);
+    issue(&h, REPO, 3, &[FLOW], 3);
+    h.github.set_blockers(REPO, 2, &[(REPO, 1)]);
+    h.github.set_blockers(REPO, 3, &[(REPO, 2)]);
+
+    let f = graph(&h).await;
+
+    assert_eq!(labels(&f["queue"]), Vec::<String>::new());
+    assert_eq!(labels(&f["blocked"]), ["widgets#3"]);
+    for id in ["acme/widgets#1", "acme/widgets#2", "acme/widgets#3"] {
+        assert_eq!(node(&f, id)["tracked"], true, "{id} should be fully read: {f}");
+    }
+    assert_eq!(ids(&node(&f, "acme/widgets#3")["blockedBy"]), ["acme/widgets#2"]);
+    assert_eq!(ids(&node(&f, "acme/widgets#2")["blockedBy"]), ["acme/widgets#1"]);
+    assert_eq!(ids(&node(&f, "acme/widgets#2")["unlocks"]), ["acme/widgets#3"]);
+    assert_eq!(ids(&node(&f, "acme/widgets#1")["unlocks"]), ["acme/widgets#2"]);
+    assert_eq!(node(&f, "acme/widgets#1")["flowList"], Value::Null);
+    assert_eq!(node(&f, "acme/widgets#2")["flowList"], Value::Null);
+    assert_eq!(node(&f, "acme/widgets#3")["flowList"], "blocked");
+    assert_eq!(
+        f["graph"]["edges"],
+        json!([
+            {"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy"},
+            {"from": "acme/widgets#3", "to": "acme/widgets#2", "kind": "blockedBy"},
+        ])
+    );
+}
+
+#[tokio::test]
+async fn smart_lane_grouping_follows_five_tier_precedence_and_collapses_singletons() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets"), project("p-tools", "/src/tools")]);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    h.remotes.set("/src/tools", "git@github.com:acme/tools.git");
+
+    // Tier 1: track:<name> > *-track > area:* (all beat parent epic and milestone).
+    issue(&h, REPO, 1, &["workflow-track", "area: ui", "track: flow-dag"], 1);
+    issue(&h, REPO, 2, &["area: ui", "workflow-track"], 2);
+    issue(&h, REPO, 3, &["area: board"], 3);
+    h.github.set_milestone(REPO, 1, "m1", None);
+    h.github.set_milestone(REPO, 2, "m1", None);
+    h.github.set_milestone(REPO, 3, "m1", None);
+
+    // Tier 2a: sub-issue with no label inherits parent epic's explicit track even when it has a milestone.
+    issue(&h, REPO, 4, &[], 4);
+    h.github.set_parent(REPO, 4, (REPO, 1));
+    h.github.set_milestone(REPO, 4, "m2", None);
+
+    // Tier 2b: unlabelled epic root + sub-issues + grandchild share one epic lane, beating milestone.
+    issue(&h, REPO, 10, &[], 10);
+    issue(&h, REPO, 11, &[], 11);
+    issue(&h, REPO, 12, &[], 12);
+    h.github.set_parent(REPO, 11, (REPO, 10));
+    h.github.set_parent(REPO, 12, (REPO, 11));
+    h.github.set_milestone(REPO, 11, "m2", None);
+
+    // Tier 2c: unlabelled epic root whose sub-issues all have explicit labels joins their component track.
+    issue(&h, REPO, 15, &[], 15);
+    issue(&h, REPO, 16, &["area: docs"], 16);
+    h.github.set_parent(REPO, 16, (REPO, 15));
+
+    // Tier 3: milestone when no track label and no parent epic.
+    issue(&h, REPO, 20, &[], 20);
+    h.github.set_milestone(REPO, 20, "v1.0", None);
+
+    // Tier 4: connected component only when size >= 2.
+    issue(&h, REPO, 25, &[], 25);
+    issue(&h, REPO, 26, &[], 26);
+    h.github.set_blockers(REPO, 26, &[(REPO, 25)]);
+    issue(&h, REPO, 27, &[], 27);
+    issue(&h, REPO, 28, &[], 28);
+    h.github.set_milestone(REPO, 27, "v2.0", None);
+    h.github.set_blockers(REPO, 28, &[(REPO, 27)]);
+
+    // Tier 5: singleton unlinked issues share one per-repo Independent lane.
+    issue(&h, REPO, 30, &[], 30);
+    issue(&h, REPO, 31, &[], 31);
+    issue(&h, TOOLS, 40, &[], 40);
+    issue(&h, TOOLS, 41, &[], 41);
+
+    let f = graph(&h).await;
+    let lane = |id: &str| {
+        let n = node(&f, id);
+        (n["track"].as_str().unwrap().to_string(), n["trackBy"].as_str().unwrap().to_string())
+    };
+
+    assert_eq!(lane("acme/widgets#1"), ("flow-dag".into(), "label".into()));
+    assert_eq!(lane("acme/widgets#2"), ("workflow".into(), "label".into()));
+    assert_eq!(lane("acme/widgets#3"), ("board".into(), "label".into()));
+    assert_eq!(lane("acme/widgets#4"), ("flow-dag".into(), "epic".into()));
+    assert_eq!(lane("acme/widgets#10"), ("widgets#10".into(), "epic".into()));
+    assert_eq!(lane("acme/widgets#11"), ("widgets#10".into(), "epic".into()));
+    assert_eq!(lane("acme/widgets#12"), ("widgets#10".into(), "epic".into()));
+    assert_eq!(lane("acme/widgets#15"), ("docs".into(), "component".into()));
+    assert_eq!(lane("acme/widgets#16"), ("docs".into(), "label".into()));
+    assert_eq!(lane("acme/widgets#20"), ("v1.0".into(), "milestone".into()));
+    assert_eq!(lane("acme/widgets#25"), ("widgets#25".into(), "component".into()));
+    assert_eq!(lane("acme/widgets#26"), ("widgets#25".into(), "component".into()));
+    assert_eq!(lane("acme/widgets#27"), ("v2.0".into(), "milestone".into()));
+    assert_eq!(lane("acme/widgets#28"), ("v2.0".into(), "component".into()));
+    assert_eq!(lane("acme/widgets#30"), ("acme/widgets: Independent".into(), "independent".into()));
+    assert_eq!(lane("acme/widgets#31"), ("acme/widgets: Independent".into(), "independent".into()));
+    assert_eq!(lane("acme/tools#40"), ("acme/tools: Independent".into(), "independent".into()));
+    assert_eq!(lane("acme/tools#41"), ("acme/tools: Independent".into(), "independent".into()));
+}
+
+#[tokio::test]
+async fn shared_short_repo_names_from_discovered_projects_keep_separate_lanes() {
+    let h = H::new();
+    h.fake.set_projects(vec![project("p-acme", "/src/acme"), project("p-fork", "/src/fork")]);
+    h.remotes.set("/src/acme", "git@github.com:acme/widgets.git");
+    h.remotes.set("/src/fork", "git@github.com:fork/widgets.git");
+    issue(&h, "acme/widgets", 1, &[], 1);
+    issue(&h, "acme/widgets", 2, &[], 2);
+    issue(&h, "acme/widgets", 3, &[], 3);
+    issue(&h, "fork/widgets", 1, &[], 1);
+    issue(&h, "fork/widgets", 2, &[], 2);
+    issue(&h, "fork/widgets", 3, &[], 3);
+    h.github.set_parent("acme/widgets", 2, ("acme/widgets", 1));
+    h.github.set_parent("fork/widgets", 2, ("fork/widgets", 1));
+
+    let f = graph(&h).await;
+
+    assert_eq!(node(&f, "acme/widgets#2")["track"], "acme/widgets#1");
+    assert_eq!(node(&f, "fork/widgets#2")["track"], "fork/widgets#1");
+    assert_eq!(node(&f, "acme/widgets#3")["track"], "acme/widgets: Independent");
+    assert_eq!(node(&f, "fork/widgets#3")["track"], "fork/widgets: Independent");
+}
+
+#[tokio::test]
+async fn graph_paginates_past_ten_pages_while_queue_reads_keep_label_filter() {
+    let h = flowing(2);
+    for n in 1..=12 {
+        let lbls: &[&str] = if n == 12 { &[FLOW] } else { &[] };
+        issue(&h, REPO, n, lbls, n as u32);
+    }
+    h.github.set_issue_page(1);
+
+    let before_queue = h.github.calls().len();
+    let f = flow(&h).await;
+    let queue_reads: Vec<Value> = h.github.calls()[before_queue..]
+        .iter()
+        .filter(|c| c["operation"] == "flowIssues" && c["variables"]["name"] == "widgets")
+        .cloned()
+        .collect();
+    assert_eq!(labels(&f["queue"]), ["widgets#12"]);
+    assert_eq!(queue_reads.len(), 1, "queue read filters server-side by optIn.label: {queue_reads:?}");
+    assert_eq!(queue_reads[0]["variables"]["label"], FLOW);
+
+    let before_graph = h.github.calls().len();
+    let g = graph(&h).await;
+    let graph_reads: Vec<Value> = h.github.calls()[before_graph..]
+        .iter()
+        .filter(|c| c["operation"] == "flowIssues" && c["variables"]["name"] == "widgets")
+        .cloned()
+        .collect();
+    assert_eq!(graph_reads.len(), 12, "graph read paginates through all 12 pages: {graph_reads:?}");
+    assert!(graph_reads[0]["variables"].get("label").is_none());
+    assert_eq!(g["graph"]["nodes"].as_array().unwrap().len(), 12);
+}
+
+#[tokio::test]
+async fn an_identity_only_discovered_project_launches_ready_issues() {
+    let cfg = Config::from_value(json!({"flow": {"maxTickets": 1, "launch": "auto"}})).unwrap();
+    let h = H::build(Vec::new(), cfg);
+    let mut tools_proj = project("p-tools", "/src/tools");
+    tools_proj["repositoryIdentity"] = json!({
+        "canonicalKey": "github.com/acme/tools", "owner": "acme", "name": "tools",
+        "locator": {"source": "git-remote", "remoteName": "origin", "remoteUrl": "https://github.com/acme/tools.git"}
+    });
+    h.fake.set_projects(vec![tools_proj]);
+    issue(&h, TOOLS, 7, &[], 1);
+
+    let pick = next(&h).await;
+
+    assert_eq!(pick["picked"][0]["launched"]["ok"], true, "{pick}");
+    assert_eq!(h.fake.launched().len(), 1);
+    assert_eq!(h.fake.launched()[0]["projectId"], "p-tools");
+    assert_eq!(h.fake.launched()[0]["title"], "tools#7: Issue 7");
+}
+
+#[tokio::test]
+async fn switching_to_graph_only_flow_retires_open_launch_cards() {
+    let mut h = flowing(1);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    let picked = next(&h).await;
+    let id = picked["picked"][0]["card"].as_str().unwrap().to_string();
+    assert_eq!(flow_cards(&h).len(), 1);
+
+    h.config = Config::from_value(json!({"flow": {"excludeRepos": [TOOLS]}})).unwrap();
+    h.reopen();
+    reconcile(&h).await;
+
+    assert!(flow_cards(&h).is_empty(), "stale launch card should be retired");
+    let resolved = h.app.wf.cards_with(true).unwrap();
+    let card = resolved.iter().find(|c| c.id == id).unwrap();
+    assert_eq!(card.resolution.as_deref(), Some("flow.launch is off"));
+}
+
+#[tokio::test]
+async fn padded_opt_in_label_matches_identically_in_queue_and_graph_reads() {
+    let cfg = Config::from_value(json!({
+        "flow": {"repos": [REPO], "optIn": {"label": " flow "}, "maxTickets": 2}
+    }))
+    .unwrap();
+    let h = H::build(Vec::new(), cfg);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    issue(&h, REPO, 2, &[], 2);
+
+    let q = flow(&h).await;
+    let g = graph(&h).await;
+
+    assert_eq!(labels(&q["queue"]), ["widgets#1"]);
+    assert_eq!(labels(&g["queue"]), ["widgets#1"]);
+    assert_eq!(node(&g, "acme/widgets#1")["ready"], true);
+    let queue_call = h.github.calls().into_iter().find(|c| c["operation"] == "flowIssues").unwrap();
+    assert_eq!(queue_call["variables"]["label"], FLOW);
+}
+
+#[tokio::test]
+async fn launch_routing_prefers_matching_origin_port_before_identity_fallback() {
+    let cfg = Config::from_value(json!({"flow": {"repos": [REPO], "maxTickets": 1, "launch": "auto"}})).unwrap();
+    let h = H::build(Vec::new(), cfg.clone());
+    let mut wrong_port = project("p-port", "/src/port");
+    wrong_port["repositoryIdentity"] = json!({"owner": "acme", "name": "widgets"});
+    let right_origin = project("p-origin", "/src/origin");
+    h.fake.set_projects(vec![wrong_port.clone(), right_origin]);
+    h.remotes.set("/src/port", "https://github.com:8443/acme/widgets.git");
+    h.remotes.set("/src/origin", "https://github.com/acme/widgets.git");
+    issue(&h, REPO, 4, &[], 1);
+
+    let pick = next(&h).await;
+
+    assert_eq!(pick["picked"][0]["launched"]["ok"], true, "{pick}");
+    assert_eq!(h.fake.launched()[0]["projectId"], "p-origin");
+
+    // When only a mismatched-origin project exists, identity fallback must not select it.
+    let h2 = H::build(Vec::new(), cfg);
+    h2.fake.set_projects(vec![wrong_port]);
+    h2.remotes.set("/src/port", "https://github.com:8443/acme/widgets.git");
+    issue(&h2, REPO, 5, &[], 1);
+
+    let pick2 = next(&h2).await;
+
+    assert_eq!(pick2["picked"][0]["launched"]["ok"], false, "{pick2}");
+    assert!(h2.fake.launched().is_empty());
+}
+
+#[tokio::test]
+async fn local_mirror_origin_falls_back_to_github_identity_for_discovery_and_launch() {
+    let mut mirror = project("p-mirror", "/src/mirror");
+    mirror["repositoryIdentity"] = json!({"owner": "acme", "name": "widgets"});
+
+    // Zero-config graph discovers the repo via repositoryIdentity when origin is a local path.
+    let h_graph = H::build(Vec::new(), Config::default());
+    h_graph.fake.set_projects(vec![mirror.clone()]);
+    h_graph.remotes.set("/src/mirror", "/mirrors/widgets.git");
+    issue(&h_graph, REPO, 1, &[], 1);
+
+    let g = graph(&h_graph).await;
+    assert_eq!(g["graph"]["nodes"].as_array().unwrap().len(), 1, "{g}");
+    assert_eq!(node(&g, "acme/widgets#1")["repo"], REPO);
+
+    // Auto-launch also falls back to repositoryIdentity when origin cannot be parsed as a remote.
+    let cfg = Config::from_value(json!({"flow": {"repos": [REPO], "maxTickets": 1, "launch": "auto"}})).unwrap();
+    let h_launch = H::build(Vec::new(), cfg);
+    h_launch.fake.set_projects(vec![mirror]);
+    h_launch.remotes.set("/src/mirror", "/mirrors/widgets.git");
+    issue(&h_launch, REPO, 2, &[], 1);
+
+    let pick = next(&h_launch).await;
+    assert_eq!(pick["picked"][0]["launched"]["ok"], true, "{pick}");
+    assert_eq!(h_launch.fake.launched()[0]["projectId"], "p-mirror");
 }

@@ -776,22 +776,24 @@ nothing for it.
 
 ### The dependency graph
 
-`GET /api/flow` also returns `graph`, the issues the flow and the board know
-about and the links between them. The graph covers each open opt-in issue and
-each active board ticket, including a ticket launched by hand outside the
-flow. Each of these is a node with `tracked: true`. An issue they link to,
-such as a closed blocker or a parent epic, is also a node, with
-`tracked: false` and only what the link carries: `repo`, `number`, `label`,
+`GET /api/flow` also returns `graph`, the issues across the covered repositories
+and the board's open tickets with the links between them. With no `flow` block,
+or when `flow.repos` is omitted, t3cm discovers covered repositories from active
+T3 projects' GitHub remotes and applies optional `flow.includeRepos` and
+`flow.excludeRepos` overrides. The graph reads every open issue across those
+repositories, so transitive blocker chains stay intact across unlabelled
+intermediates. Each open issue in a covered repo and each active board ticket is
+a node with `tracked: true`. An issue they link to outside that set, such as a
+closed blocker or an open blocker in an uncovered repository, is also a node
+with `tracked: false` and what the link carries: `repo`, `number`, `label`,
 `url`, `title` and `state`.
 
-The graph makes no GitHub call per issue. The flow's read of each covered repo
-asks for each issue's sub-issues next to its blockers and parent, and the
-batched query that checks whether the open tickets' issues are closed reads
-their blockers, parent and sub-issues too. That query also reads a ticket in
-a repository the flow does not cover, once the board knows the ticket's
-repository. Without a `flow` block, the graph holds only the active tickets
-the board can place in a repository, with no GitHub data and no edges, and
-the board reads nothing from GitHub.
+The graph makes no GitHub call per issue. The repo read asks for each open
+issue's sub-issues next to its blockers and parent, and the batched tickets
+query reads only active board tickets whose issues were not already in that
+read, such as closed issues or tickets in uncovered repositories. Viewing the
+graph never enables auto-launching. Without `flow.maxTickets`, `enabled` stays
+`false` and the Up next panel stays hidden.
 
 `edges` lists each link once, from the issue that has it:
 
@@ -810,7 +812,7 @@ Each node's `id` is `owner/name#N`, and its lists use those ids:
 | `labels`, `priority`, `milestone` | As GitHub gives them, with `priority` read from a `priority:` label. |
 | `track`, `trackBy` | The lane it belongs to, by the rules below. |
 | `flowList` | `queue`, `blocked` or `skipped` when it is in that list, else `null`. |
-| `ready` | `true` while it is in the ready queue: opted in, no open blocker, no ticket. |
+| `ready` | `true` while it is in the ready queue: opted in when `optIn` is set, no open blocker, no ticket. |
 | `external` | `true` when it is labelled `blocked: external`, or when it has open blockers, GitHub listed all of them, and none is in a covered repo. |
 | `ticket` | Its board ticket's `thread`, `link` and `status`, or `null`. |
 
@@ -819,14 +821,21 @@ the label alone.
 
 A node's track follows the first rule that applies:
 
-1. Its `track:` label. A `track: board` label puts it in track `board`. When
-   it has several, the first in alphabetical order counts. `trackBy` is
-   `label`.
-2. Its milestone's title. `trackBy` is `milestone`.
-3. The track of its connected component, the nodes that any chain of edges
-   joins it to. The component takes the track of its member with the lowest
-   repo and number that has a label or milestone track, or else that member's
-   label, such as `widgets#3`. `trackBy` is `component`.
+1. An explicit track label, checking `track:<name>` first, then `*-track`, then
+   `area:<name>`. For example, `track: board` maps to `board`, `workflow-track`
+   maps to `workflow`, and `area: api` maps to `api`. Within each form,
+   alphabetical order wins. `trackBy` is `label`.
+2. Its parent epic. A sub-issue inherits the nearest ancestor's explicit track
+   label if one exists; otherwise it and its unlabelled root epic group under
+   the root epic's label, such as `widgets#10`. `trackBy` is `epic`.
+3. Its milestone's title. `trackBy` is `milestone`.
+4. The track of its connected component, only when the component has at least
+   two nodes. It inherits the highest-precedence track among its members,
+   preferring `label`, then `epic`, then `milestone`, or else the label of the
+   member with the lowest repo and number. `trackBy` is `component`.
+5. One shared per-repo `Independent` lane named `<owner>/<repo>: Independent`
+   for singleton unlinked issues with no track label, parent epic or milestone.
+   `trackBy` is `independent`.
 
 Ticket rows on the board carry an **external** pill when their node is
 external, and the inspector shows the same pill.
@@ -834,16 +843,18 @@ external, and the inspector shows the same pill.
 ### The Graph tab
 
 The Graph tab in the Tickets pane draws the dependency graph as an SVG
-swimlane view, with no library and no request beyond `GET /api/flow`. This
-browser remembers whether you left the Tickets pane on Graph, and opens it
-there after a reload; `#tickets-graph` in the address opens it too.
+swimlane view, with no library and no request beyond `GET /api/flow`, even when
+`config.json` has no `flow` block. This browser remembers whether you left the
+Tickets pane on Graph, and opens it there after a reload; `#tickets-graph` in
+the address opens it too.
 
 - **Lanes.** Each lane is a track, by the rules in
-  [the dependency graph](#the-dependency-graph): a `track:` label, else a
-  milestone, else the issues linked to it, so an issue with no link, label or
-  milestone has a lane of its own. Its heading names the track, what set it
-  and how many issues it holds. Lanes holding a ticket come first, then label,
-  milestone and linked tracks, each in name order.
+  [the dependency graph](#the-dependency-graph): a track label, else a parent
+  epic, else a milestone, else linked issues when a component has at least two
+  issues, with unlinked singletons sharing one `Independent` lane per
+  repository. Its heading names the track, what set it and how many issues it
+  holds. Lanes holding a ticket come first, then label, epic, milestone, linked
+  and independent lanes, each in name order.
 - **Layout.** A blocker sits to the left of what it blocks, and a parent to
   the left of its sub-issues, so work flows left to right. The same graph
   always lays out the same way. A wide graph scrolls inside the tab, never
@@ -874,11 +885,11 @@ there after a reload; `#tickets-graph` in the address opens it too.
   focus is in the graph, a change that would move issues waits until it
   leaves, so nothing shifts under the pointer.
 
-Without a `flow` block, or while `/api/flow` is loading or failing, the tab
-draws the open tickets with no links, one lane per repository and a
-**Tickets** lane for those the board has not placed, and says so above the
-graph. When a refresh fails after a good read, the tab keeps the last graph
-it read and says so.
+While `/api/flow` is loading or failing, or when no GitHub repositories are
+discovered from T3 projects, the tab draws the open tickets with no links, one
+lane per repository and a **Tickets** lane for those the board has not placed,
+and says so above the graph. When a refresh fails after a good read, the tab
+keeps the last graph it read and says so.
 
 ## GitHub reconcile
 

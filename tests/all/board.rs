@@ -10202,8 +10202,8 @@ return {{ restored, lanes, nodes, moved, end, keysOff, keysOn, tabs, opened, dep
         json!([["t:t-acme/a#1", "0", "idle"], ["t:t-acme/b#2", "-1", "running"], ["t:t-loose#3", "-1", "idle"]]),
         "open tickets only, one roving tab stop: {r}"
     );
-    assert!(r["note"].as_str().unwrap().starts_with("No flow in the config"), "{r}");
-    assert_eq!((&r["edges"], &r["flowFetches"]), (&json!(0), &json!(0)), "{r}");
+    assert!(r["note"].as_str().unwrap().starts_with("Reading the dependency graph"), "{r}");
+    assert_eq!((&r["edges"], &r["flowFetches"]), (&json!(0), &json!(1)), "{r}");
     assert_eq!((&r["moved"], &r["end"]), (&json!("t:t-acme/b#2"), &json!("t:t-loose#3")), "{r}");
     assert_eq!(
         (&r["keysOff"], &r["keysOn"]),
