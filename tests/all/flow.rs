@@ -2616,3 +2616,75 @@ async fn body_blocker_changes_invalidate_skip_memory() {
     h.github.close_issue(REPO, 2);
     assert_eq!(labels(&flow(&h).await["queue"]), ["widgets#1"]);
 }
+
+#[tokio::test]
+async fn closing_a_symbolic_sibling_unblocks_its_dependent_without_rebinding_or_warning() {
+    let h = flowing(4);
+    // Epic #10 with Phase 1 (#11) and Phase 2 (#12, Depends on Phase 1) and title-ref (#13).
+    h.github.set_issue(REPO, github_issue(10, "Epic: DAG", &[], "2026-10-01T09:00:00Z"));
+    h.github.set_issue(REPO, github_issue(11, "feat: zero-config graph", &[], "2026-10-02T09:00:00Z"));
+    h.github.set_issue(REPO, github_issue(12, "feat: body parser", &[FLOW], "2026-10-03T09:00:00Z"));
+    h.github.set_issue(REPO, github_issue(13, "feat: UI edges", &[FLOW], "2026-10-04T09:00:00Z"));
+    h.github.set_body(REPO, 11, "## Scope (Phase 1 of #10)\n");
+    h.github.set_body(REPO, 12, "Part of #10\nDepends on Phase 1\n");
+    h.github.set_body(REPO, 13, "Part of #10\nBlocked by \"zero-config graph\"\n");
+
+    // Second open Phase 1 in another epic must never steal resolution when #11 closes, and an
+    // unparented issue referencing ambiguous "Phase 1" must stay ambiguous after #11 closes.
+    h.github.set_issue(REPO, github_issue(20, "Epic: Other", &[], "2026-10-05T09:00:00Z"));
+    h.github.set_issue(REPO, github_issue(21, "Phase 1: other work", &[], "2026-10-06T09:00:00Z"));
+    h.github.set_issue(REPO, github_issue(30, "Ambiguous dep", &[FLOW], "2026-10-07T09:00:00Z"));
+    h.github.set_body(REPO, 21, "Part of #20\n");
+    h.github.set_body(REPO, 30, "Depends on Phase 1\n");
+
+    // While #11 is open, #12 and #13 are blocked by #11.
+    assert_eq!(labels(&flow(&h).await["queue"]), Vec::<String>::new());
+
+    // Closing #11 unblocks #12 and #13 cleanly in both wf.flow() and graph, while #30 stays ambiguous.
+    h.github.close_issue(REPO, 11);
+    let q = flow(&h).await;
+    assert_eq!(labels(&q["queue"]), ["widgets#12", "widgets#13"], "{q}");
+    assert_eq!(labels(&q["queue"][0]["unblockedBy"]), ["widgets#11"]);
+    assert_eq!(labels(&q["queue"][1]["unblockedBy"]), ["widgets#11"]);
+    assert_eq!(labels(&q["blocked"]), ["widgets#30"], "ambiguous ref must not rebind to #21: {q}");
+
+    let g = graph(&h).await;
+    assert_eq!(labels(&g["queue"]), ["widgets#12", "widgets#13"], "{g}");
+    assert_eq!(node(&g, "acme/widgets#11")["state"], "closed");
+    assert_eq!(ids(&node(&g, "acme/widgets#12")["blockedBy"]), ["acme/widgets#11"]);
+    assert_eq!(node(&g, "acme/widgets#12")["warnings"], json!([]));
+    assert_eq!(node(&g, "acme/widgets#13")["warnings"], json!([]));
+    assert_eq!(node(&g, "acme/widgets#30")["warnings"][0]["kind"], "unresolved");
+}
+
+#[tokio::test]
+async fn active_unlabelled_epic_tasklist_suppresses_its_child_in_queue_and_launch() {
+    let h = flowing_with(2, "auto");
+    // Unlabelled epic #10 lists #11 in a tasklist; #11 has optIn label but no Parent: line of its own.
+    issue(&h, REPO, 10, &[], 1);
+    issue(&h, REPO, 11, &[FLOW], 2);
+    issue(&h, REPO, 12, &[FLOW], 3);
+    h.github.set_body(REPO, 10, "## Tasks\n- [ ] #11 Build parser\n");
+    // Also verify trailing prose after an explicit ref (#10) does not leave #12 blocked after #10 closes.
+    h.github.set_body(REPO, 12, "Depends on #10, which sets up the epic.\n");
+    ticket(&h, "mcp:t10", "widgets#10").await;
+
+    // Both wf.flow() and wf.flow({ graph: true }) must suppress #11 while #10 has an active ticket.
+    let q = flow(&h).await;
+    let g = graph(&h).await;
+    assert_eq!(labels(&q["queue"]), Vec::<String>::new(), "wf.flow() must suppress tasklist child #11: {q}");
+    assert_eq!(labels(&g["queue"]), Vec::<String>::new(), "graph must suppress tasklist child #11: {g}");
+    assert_eq!(labels(&q["blocked"]), ["widgets#12"], "{q}");
+    assert_eq!(node(&g, "acme/widgets#12")["warnings"], json!([]), "trailing prose must not warn: {g}");
+
+    // wf.flow.next() must not launch #11 either.
+    let pick = next(&h).await;
+    assert_eq!(pick["picked"], json!([]), "auto launch must not pick tasklist child #11: {pick}");
+    assert!(h.fake.launched().is_empty());
+
+    // Closing #10 unblocks #12 with no leftover unresolved warning from ", which sets up the epic.".
+    h.github.close_issue(REPO, 10);
+    let q2 = flow(&h).await;
+    assert_eq!(labels(&q2["queue"]), ["widgets#11", "widgets#12"], "{q2}");
+    assert_eq!(labels(&q2["queue"][1]["unblockedBy"]), ["widgets#10"]);
+}
