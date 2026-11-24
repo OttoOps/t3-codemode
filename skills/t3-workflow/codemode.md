@@ -136,8 +136,9 @@ async () => {
 and the next worker reads it with
 `(await mem.ns("work:widgets#41").get("handoff:pr1"))`.
 
-A ticket merges every PR with `wf.merge`, never with `gh pr merge`,
-`glab mr merge`, or T3's own merge button or PR action: on a repo with a
+A ticket merges every PR on GitHub or a tracked GitLab host (below) with
+`wf.merge`, never with `gh pr merge`, `glab mr merge`, or T3's own merge
+button or PR action: on a repo with a
 merge queue, T3 turns on auto-merge, and a PR whose checks have already
 passed never joins the queue. `wf.merge` reads per PR whether the repo has a
 queue (a merge train on GitLab), so no skill or config lists those repos.

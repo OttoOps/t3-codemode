@@ -129,7 +129,7 @@ class MergeRouteTests(unittest.TestCase):
 
     def test_no_skill_merges_through_t3s_merge_button_or_pr_action(self):
         rules = section(self.ticket, "## Hard rules")
-        self.assertIn("Never merge through `gh pr merge`, `glab mr merge`, or T3's own merge button or its PR",
+        self.assertIn("never merge through `gh pr merge`, `glab mr merge`, or T3's own merge button or its PR",
                       " ".join(rules.split()))
         self.assertIn("merge queue", rules)
         codemode = " ".join((SKILLS / "t3-workflow" / "codemode.md").read_text().split())
@@ -587,7 +587,8 @@ class GitlabForgeTests(unittest.TestCase):
         for token in ("**Tracked GitLab:**", "`detailed_merge_status` `mergeable`", "`refs/merge-requests/<iid>/train`",
                       "projects/<enc path>/merge_requests/<iid>/pipelines",
                       "projects/<enc path>/repository/commits/<sha>/statuses",
-                      "merge_requests/<iid>/diffs?per_page=100", "**Untracked forge:**",
+                      "merge_requests/<iid>/diffs?per_page=100", "until a page holds fewer than 100", "`changes_count`", "`old_path` and `new_path`", "--no-renames", "or the GitLab path set above",
+                      "in a repo with no CI there is none", "**Untracked forge:**",
                       "`state` `merged` on a tracked GitLab host", "`squash_commit_sha`"):
             self.assertIn(token, ready)
         word = self.flat(self.ticket, "### On the user's word")
@@ -617,6 +618,7 @@ class GitlabForgeTests(unittest.TestCase):
         self.assertIn("On an untracked forge (step 1 item 3)", resume)
         self.assertIn("when `list_scheduled_tasks` shows no merge watch for it", resume)
         self.assertIn("a stop between deleting the watch and item 3 would otherwise skip", resume)
+        self.assertIn("before this thread has gone on from \"On the user's word\" item 3 for it", resume)
         self.assertIn("create the merge watch again at the head the worker last named", resume)
         watch = self.flat(self.ticket, "#### The merge watch")
         moved = watch.split("**Head moved away from the head the prompt names:**", 1)[1].split("**Still open", 1)[0]
@@ -626,8 +628,10 @@ class GitlabForgeTests(unittest.TestCase):
         link_proto = self.flat(self.worker, "## The link protocol")
         self.assertIn("GitHub or a tracked GitLab host (step 3 item 2)", link_proto)
         self.assertIn("`glab mr view <iid> --output json`", link_proto)
+        self.assertIn("projects/<enc path>/merge_requests/<iid>/pipelines", link_proto)
+        self.assertNotIn("glab ci list", link_proto)
         open_pr = self.flat(self.worker, "## 3. Open the PR and watch it")
-        for token in ("**Tracked GitLab:**", "`t3cm config get forges`", "`<host>/<full path>`",
+        for token in ("`git config --get remote.origin.url`", "**Tracked GitLab:**", "`t3cm config get forges`", "`<host>/<full path>`",
                       "or the MR URL with `pr` left out", "`glab mr create --source-branch <branch> --target-branch main",
                       '`glab mr update <iid> --description "$(cat <file>)"`', "**Untracked forge:**",
                       "listing the host under `forges` would let t3cm follow its merge requests",
