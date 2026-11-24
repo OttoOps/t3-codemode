@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{GhChecks, GhPrModel, HEADS, REPO};
+use super::{GhChecks, GhPrModel, HEADS, repo_key, sender};
 use crate::common::{CardView, LinkView, SeenView, Snapshot, WaitView};
 
 const BOARD: &str = "board";
-const GITHUB: &str = "github";
 const T3CM: &str = "t3cm";
 const MAX_FAILURES: u32 = 3;
 const EXIT_WINDOW_MINS: i64 = 30;
@@ -71,7 +70,7 @@ impl CardM {
             kind: self.kind.into(),
             ticket: self.ticket.clone(),
             worker: self.worker.clone(),
-            pr: self.pr.map(|n| (REPO.into(), n)),
+            pr: self.pr.map(|n| (repo_key().into(), n)),
             head: self.head.clone(),
             ready: self.ready,
         }
@@ -371,15 +370,15 @@ impl Model {
             .iter()
             .map(|(id, l)| {
                 let pr = l.pr.as_ref().map(|p| {
-                    let followups = p.followups.iter().map(|&n| (REPO.into(), n)).collect();
-                    (REPO.into(), p.number, p.head.clone(), p.waiting, followups)
+                    let followups = p.followups.iter().map(|&n| (repo_key().into(), n)).collect();
+                    (repo_key().into(), p.number, p.head.clone(), p.waiting, followups)
                 });
                 let view = LinkView {
                     parent: l.parent.clone(),
                     closed: !l.open,
                     paused: l.paused,
                     gate: l.gate.clone(),
-                    gate_pr: l.gate_pr.map(|n| (REPO.into(), n)),
+                    gate_pr: l.gate_pr.map(|n| (repo_key().into(), n)),
                     pr,
                 };
                 (id.clone(), view)
@@ -389,7 +388,10 @@ impl Model {
             .waits
             .iter()
             .map(|(n, w)| {
-                ((REPO.into(), *n), (format!("{:?}", w.status), w.head.clone(), Some(w.thread.clone()), w.failures))
+                (
+                    (repo_key().into(), *n),
+                    (format!("{:?}", w.status), w.head.clone(), Some(w.thread.clone()), w.failures),
+                )
             })
             .collect();
         let mut outbox = BTreeMap::new();
@@ -400,11 +402,13 @@ impl Model {
             links,
             cards: self.cards.iter().map(CardM::view).collect(),
             waits,
-            events: self.events.iter().map(|(n, e, t)| (REPO.into(), *n, e.clone(), t.clone())).collect(),
+            events: self.events.iter().map(|(n, e, t)| (repo_key().into(), *n, e.clone(), t.clone())).collect(),
             seen: self
                 .seen
                 .iter()
-                .map(|(n, r)| ((REPO.into(), *n), (r.queued, r.since.clone(), r.left.clone(), r.queued_at.clone())))
+                .map(|(n, r)| {
+                    ((repo_key().into(), *n), (r.queued, r.since.clone(), r.left.clone(), r.queued_at.clone()))
+                })
                 .collect(),
             outbox,
         }
@@ -1461,7 +1465,7 @@ impl Model {
             if code.as_ref().is_some_and(|c| c.ticket == *t) {
                 self.mark(pr, &event, t);
             } else if self.is_open(t) && self.mark(pr, &event, t) {
-                self.deliver(t, "event", GITHUB);
+                self.deliver(t, "event", sender());
                 told += 1;
             }
         }

@@ -47,9 +47,13 @@ impl H {
     }
 
     pub fn new_memory() -> H {
+        H::new_memory_with(Config::default())
+    }
+
+    pub fn new_memory_with(config: Config) -> H {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_memory().unwrap();
-        H::build_with_store(dir, Vec::new(), Config::default(), store, true)
+        H::build_with_store(dir, Vec::new(), config, store, true)
     }
 
     pub fn with_tools() -> H {
