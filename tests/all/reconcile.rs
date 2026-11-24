@@ -2217,3 +2217,139 @@ async fn a_moved_ready_card_with_a_matching_merge_wait_under_a_non_merge_gate_re
         );
     }
 }
+
+#[tokio::test]
+async fn a_sent_wait_retired_by_head_move_after_queue_exit_clears_left_and_reconciles_idempotently() {
+    for move_at in [37, 10] {
+        let h = H::new();
+        ticket_with_worker(&h, 0).await;
+        h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+        assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "queued");
+        check(&h, 1).await;
+
+        h.github.update_pr(
+            REPO,
+            7,
+            json!({"isMergeQueueEnabled": false, "isInMergeQueue": false, "mergeQueueEntry": null}),
+        );
+        check(&h, 2).await;
+        assert!(h.app.store.pr_seen_get(REPO, 7).unwrap().unwrap().left.is_some());
+        assert!(cards(&h, false).is_empty());
+
+        h.github.update_pr(REPO, 7, json!({"headRefOid": MOVED}));
+        let sent_before = h.sent().len();
+        check(&h, move_at).await;
+
+        assert!(h.app.store.merge_waits().unwrap().is_empty(), "move_at={move_at}: Sent wait must retire");
+        assert_eq!(
+            h.app.store.pr_seen_get(REPO, 7).unwrap().unwrap().left,
+            None,
+            "move_at={move_at}: head move superseding Sent wait must clear pr_seen.left"
+        );
+        let open_after_first = result(&h.exec("async () => wf.cards()").await);
+        let open_after_first = open_after_first.as_array().unwrap().clone();
+        assert_eq!(open_after_first.len(), 1, "move_at={move_at}: {open_after_first:?}");
+        assert_eq!(open_after_first[0]["kind"], "gate");
+        assert!(
+            open_after_first[0]["text"].as_str().unwrap().contains("moved to head 2222222"),
+            "move_at={move_at}: {open_after_first:?}"
+        );
+        assert!(
+            !open_after_first[0]["text"].as_str().unwrap().contains("no reason recorded"),
+            "move_at={move_at}: {open_after_first:?}"
+        );
+
+        let actions_second = check(&h, move_at).await;
+        assert!(actions_second.is_empty(), "move_at={move_at}: pass 2 must be idempotent: {actions_second:?}");
+        let open_after_second = result(&h.exec("async () => wf.cards()").await);
+        assert_eq!(open_after_second.as_array().unwrap(), &open_after_first);
+        assert_eq!(h.sent().len(), sent_before);
+
+        // Even well past EXIT_WINDOW_MINS, no spurious no-reason exit card appears later.
+        let actions_later = check(&h, move_at + 35).await;
+        assert!(actions_later.is_empty(), "move_at={move_at}: later pass must stay quiet: {actions_later:?}");
+        let open_later = result(&h.exec("async () => wf.cards()").await);
+        assert_eq!(open_later.as_array().unwrap(), &open_after_first);
+        assert_eq!(h.sent().len(), sent_before);
+    }
+}
+
+#[tokio::test]
+async fn a_sent_wait_retired_by_failed_after_exit_window_reconciles_idempotently() {
+    // Single ticket: 3rd failed check past EXIT_WINDOW_MINS retires the Sent wait,
+    // raises one refusal card, clears pr_seen.left in pass 1, and pass 2 is a no-op.
+    {
+        let h = H::new();
+        ticket_with_worker(&h, 0).await;
+        h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+        assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "queued");
+        check(&h, 1).await;
+
+        h.github.update_pr(REPO, 7, json!({"isInMergeQueue": false, "mergeQueueEntry": null}));
+        check(&h, 2).await;
+        check(&h, 33).await;
+        assert!(cards(&h, false).is_empty());
+
+        check(&h, 64).await;
+        assert!(h.app.store.merge_waits().unwrap().is_empty());
+        assert_eq!(
+            h.app.store.pr_seen_get(REPO, 7).unwrap().unwrap().left,
+            None,
+            "pass 1 must clear pr_seen.left once failed retires the Sent wait past EXIT_WINDOW_MINS"
+        );
+        let after_first = result(&h.exec("async () => wf.cards()").await);
+        let after_first = after_first.as_array().unwrap().clone();
+        assert_eq!(after_first.len(), 1, "{after_first:?}");
+        assert!(after_first[0]["text"].as_str().unwrap().contains("GitHub would not keep acme/widgets#7"));
+
+        let actions_second = check(&h, 64).await;
+        assert!(actions_second.is_empty(), "pass 2 must be idempotent: {actions_second:?}");
+        let after_second = result(&h.exec("async () => wf.cards()").await);
+        assert_eq!(after_second.as_array().unwrap(), &after_first);
+    }
+
+    // Two live tickets tracking the same PR: pass 1 raises the refusal card for the
+    // approving ticket, raises the no-reason exit card for the second ticket in the
+    // same pass, clears pr_seen.left, and pass 2 is a complete no-op.
+    {
+        let h = H::new();
+        ticket_with_worker(&h, 0).await;
+        h.fake.put(t3_codemode::fake::thread("mcp:ticket2", "idle", T0));
+        h.wf("mcp:ticket2", "join", json!({"parent": BOARD, "label": "widgets#42", "role": "ticket"})).await;
+        let worker2 = "mcp:worker-2";
+        h.fake.put(t3_codemode::fake::thread(worker2, "idle", T0));
+        h.wf(worker2, "join", json!({"parent": "mcp:ticket2", "label": "#42 PR 1/1", "role": "worker"})).await;
+        h.fake.set_prs(worker2, vec![pull_request(REPO, 7, "open")]);
+        h.tick(0).await;
+
+        h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+        assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "queued");
+        check(&h, 1).await;
+
+        h.github.update_pr(REPO, 7, json!({"isInMergeQueue": false, "mergeQueueEntry": null}));
+        check(&h, 2).await;
+        check(&h, 33).await;
+        assert!(cards(&h, false).is_empty());
+
+        let sent_before = h.sent().len();
+        check(&h, 64).await;
+        assert!(h.app.store.merge_waits().unwrap().is_empty());
+        assert_eq!(h.app.store.pr_seen_get(REPO, 7).unwrap().unwrap().left, None);
+
+        let after_first = result(&h.exec("async () => wf.cards()").await);
+        let after_first = after_first.as_array().unwrap().clone();
+        assert_eq!(after_first.len(), 2, "{after_first:?}");
+        let t1_cards: Vec<&Value> = after_first.iter().filter(|c| c["ticket"] == TICKET).collect();
+        let t2_cards: Vec<&Value> = after_first.iter().filter(|c| c["ticket"] == "mcp:ticket2").collect();
+        assert_eq!(t1_cards.len(), 1, "approving ticket must get only the refusal card: {after_first:?}");
+        assert!(t1_cards[0]["text"].as_str().unwrap().contains("GitHub would not keep acme/widgets#7"));
+        assert_eq!(t2_cards.len(), 1, "second ticket must get its no-reason exit card on pass 1: {after_first:?}");
+        assert!(t2_cards[0]["text"].as_str().unwrap().contains("no reason recorded"));
+
+        let actions_second = check(&h, 64).await;
+        assert!(actions_second.is_empty(), "pass 2 must be idempotent: {actions_second:?}");
+        let after_second = result(&h.exec("async () => wf.cards()").await);
+        assert_eq!(after_second.as_array().unwrap(), &after_first);
+        assert_eq!(h.sent().len(), sent_before);
+    }
+}

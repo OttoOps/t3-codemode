@@ -242,6 +242,11 @@ struct Pass {
     woken: Vec<String>,
 }
 
+struct OpenOutcome {
+    advance: Option<MergeWait>,
+    clear_left: bool,
+}
+
 fn add<'a>(map: &'a mut BTreeMap<(String, u64), Tracked>, repo: &str, n: u64) -> &'a mut Tracked {
     let repo = repo.to_ascii_lowercase();
     map.entry((repo.clone(), n)).or_insert_with(|| Tracked { repo, number: n, ..Tracked::default() })
@@ -574,7 +579,6 @@ impl Wf {
             let cards: Vec<Card> = self.cards()?.into_iter().filter(|c| t.cards.contains(&c.seq)).collect();
             let wait = self.wait(t)?;
             let sent = wait.as_ref().filter(|w| w.status == WaitStatus::Sent).map(|w| w.at.clone());
-            let status = wait.as_ref().map(|w| w.status);
             let prev = self.store.pr_seen_get(&t.repo, t.number)?;
             let live_tickets = self.live_tickets(t, &cards, wait.as_ref(), prev.as_ref(), floor)?;
             if self.reach.take_adopted(&t.repo, t.number, &live_tickets) {
@@ -587,7 +591,7 @@ impl Wf {
                 .filter(|s| !s.is_empty())
                 .min()
                 .unwrap_or(t.since.as_str());
-            let left = if o.state != "OPEN" || o.queued {
+            let mut left = if o.state != "OPEN" || o.queued {
                 None
             } else if prev.as_ref().is_some_and(|p| p.queued) {
                 Some(self.now())
@@ -612,7 +616,11 @@ impl Wf {
                     if prev.as_ref().is_some_and(|p| p.state == "CLOSED") {
                         self.reach.hit(ReachPoint::PrReopenedReconciled);
                     }
-                    self.open(t, &o, &cards, wait, &live_tickets, after, left.as_deref(), pass)?
+                    let outcome = self.open(t, &o, &cards, wait, &live_tickets, after, left.as_deref(), pass)?;
+                    if outcome.clear_left {
+                        left = None;
+                    }
+                    outcome.advance
                 }
                 _ => None,
             };
@@ -622,7 +630,10 @@ impl Wf {
                 None => None,
             };
             let left = match left {
-                Some(l) => self.exited(t, &o, &l, &live_tickets, after, status, pass)?,
+                Some(l) => {
+                    let status = self.wait(t)?.map(|w| w.status);
+                    self.exited(t, &o, &l, &live_tickets, after, status, pass)?
+                }
                 None => None,
             };
             let seen = PrSeen {
@@ -782,7 +793,7 @@ impl Wf {
         after: &str,
         left: Option<&str>,
         pass: &mut Pass,
-    ) -> Result<Option<MergeWait>> {
+    ) -> Result<OpenOutcome> {
         if self.dropped(t, o, wait.as_ref(), live_tickets, after, pass)?
             && let Some(w) = wait.take()
         {
@@ -849,6 +860,7 @@ impl Wf {
         {
             moved.push((w.thread.clone(), w.head.clone(), Vec::new()));
         }
+        let mut clear_left = false;
         for (ticket, base, seqs) in &moved {
             if wait.as_ref().is_some_and(|w| w.thread == *ticket && w.head == o.head) {
                 self.resolve_releasing(seqs, ticket.as_deref().as_slice(), "superseded by a newer merge approval")?;
@@ -858,10 +870,15 @@ impl Wf {
             self.moved(t, o, ticket.as_deref(), base, seqs, approval, pass)?;
             if let Some(w) = wait.take_if(|w| w.thread == *ticket) {
                 self.retire_merge_wait(&w)?;
+                if w.status == WaitStatus::Sent {
+                    clear_left = true;
+                }
             }
         }
-        let Some(mut w) = wait.filter(|w| w.head == o.head) else { return Ok(None) };
-        match (w.status, o.queued) {
+        let Some(mut w) = wait.filter(|w| w.head == o.head) else {
+            return Ok(OpenOutcome { advance: None, clear_left });
+        };
+        let advance = match (w.status, o.queued) {
             (WaitStatus::Waiting, true) => {
                 w.status = WaitStatus::Sent;
                 if self.store.merge_wait_swap(&w)? {
@@ -870,44 +887,46 @@ impl Wf {
                         &format!("{} is in the merge queue at its approved head", t.label()),
                     )?;
                 }
-                Ok(None)
+                None
             }
             (WaitStatus::Waiting, false) if !o.draft && o.ready != Ready::Yes => {
                 if let Ready::Failing(why) = &o.ready {
                     self.held(t, o, &w, why, pass)?;
                 }
-                Ok(None)
+                None
             }
             (WaitStatus::Waiting, false) if !o.draft => {
                 if !w.pull_request_id.is_empty() && w.pull_request_id == o.id {
-                    return Ok(Some(w));
+                    Some(w)
+                } else {
+                    self.reach.hit(ReachPoint::ReassignedIdRejected);
+                    let ask = Ask {
+                        what: format!("{} is no longer the pull request that was approved", t.label()),
+                        reply: "reply \"merge\" to approve it again, or \"hold\" to leave it",
+                        context: format!(
+                            "The approval was for GitHub node \"{}\". That number now resolves to \"{}\".",
+                            w.pull_request_id, o.id
+                        ),
+                    };
+                    self.raise(t, w.thread.as_deref(), "report", &ask, &o.head, None, Some(&w.approval), pass)?;
+                    self.retire_merge_wait(&w)?;
+                    None
                 }
-                self.reach.hit(ReachPoint::ReassignedIdRejected);
-                let ask = Ask {
-                    what: format!("{} is no longer the pull request that was approved", t.label()),
-                    reply: "reply \"merge\" to approve it again, or \"hold\" to leave it",
-                    context: format!(
-                        "The approval was for GitHub node \"{}\". That number now resolves to \"{}\".",
-                        w.pull_request_id, o.id
-                    ),
-                };
-                self.raise(t, w.thread.as_deref(), "report", &ask, &o.head, None, Some(&w.approval), pass)?;
-                self.retire_merge_wait(&w)?;
-                Ok(None)
             }
             (WaitStatus::Sent, true) if w.failures > 0 => {
                 w.failures = 0;
                 w.last_error = None;
                 self.store.merge_wait_swap(&w)?;
-                Ok(None)
+                None
             }
             (WaitStatus::Sent, false) => {
                 let event = left.map(|l| format!("left:{l}"));
                 self.failed(t, w, "it left the merge queue and GitHub recorded no reason", event.as_deref(), pass)?;
-                Ok(None)
+                None
             }
-            _ => Ok(None),
-        }
+            _ => None,
+        };
+        Ok(OpenOutcome { advance, clear_left })
     }
 
     fn held(&self, t: &Tracked, o: &Obs, w: &MergeWait, why: &str, pass: &mut Pass) -> Result<()> {
