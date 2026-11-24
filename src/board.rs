@@ -908,10 +908,30 @@ pub fn identity_repo(project: &Value) -> Option<String> {
     }
 }
 
+const REPO_CANONICAL_QUERY: &str = "query RepoCanonical($owner: String!, $name: String!) { \
+    repository(owner: $owner, name: $name) { nameWithOwner } }";
+
 enum ProjectGithubRepo {
     Github(String),
     NonGithub,
     Unknown,
+}
+
+enum DiscoveredProject {
+    Repo(String),
+    None,
+    Unavailable,
+}
+
+pub(crate) struct DiscoveredRepos {
+    pub(crate) repos: Vec<(String, Vec<String>)>,
+    pub(crate) unavailable_projects: Vec<String>,
+}
+
+enum ProjectMatch {
+    Found(Value),
+    Missing,
+    OriginUnavailable,
 }
 
 fn github_remote_path(url: &str) -> Option<String> {
@@ -1151,21 +1171,21 @@ impl Wf {
         self.remotes.origin(root).await.as_deref().and_then(parse_remote).map(|r| r.path)
     }
 
-    async fn project_github_repo(&self, project: &Value) -> Option<String> {
+    async fn project_github_repo(&self, project: &Value) -> DiscoveredProject {
         if let Some(root) = project["workspaceRoot"].as_str() {
             match self.remotes.origin_lookup(root).await {
                 Origin::Url(url) => match classify_github_remote(&url) {
-                    ProjectGithubRepo::Github(r) => return Some(r),
-                    ProjectGithubRepo::NonGithub => return None,
+                    ProjectGithubRepo::Github(r) => return DiscoveredProject::Repo(r),
+                    ProjectGithubRepo::NonGithub => return DiscoveredProject::None,
                     ProjectGithubRepo::Unknown => {}
                 },
-                Origin::Unavailable => return None,
+                Origin::Unavailable => return DiscoveredProject::Unavailable,
                 Origin::Absent => {}
             }
         }
         match project_identity_github_repo(project) {
-            ProjectGithubRepo::Github(r) => Some(r),
-            ProjectGithubRepo::NonGithub | ProjectGithubRepo::Unknown => None,
+            ProjectGithubRepo::Github(r) => DiscoveredProject::Repo(r),
+            ProjectGithubRepo::NonGithub | ProjectGithubRepo::Unknown => DiscoveredProject::None,
         }
     }
 
@@ -1177,6 +1197,14 @@ impl Wf {
         } else {
             aliases.insert(key, canonical.to_string());
         }
+    }
+
+    pub(crate) fn repo_aliases_snapshot(&self) -> std::collections::HashMap<String, String> {
+        self.repo_aliases.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn has_github_repo_alias(&self, repo: &str) -> bool {
+        self.repo_aliases.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&repo.to_ascii_lowercase())
     }
 
     pub(crate) fn canonical_github_repo(&self, repo: &str) -> String {
@@ -1192,32 +1220,77 @@ impl Wf {
         cur
     }
 
-    pub(crate) async fn discovered_github_repos_with_projects(&self) -> Result<Vec<(String, Vec<String>)>> {
-        let projects = self.projects().await?;
-        let resolved = futures_util::future::join_all(projects.iter().map(|p| self.project_github_repo(p))).await;
-        let mut out: Vec<(String, Vec<String>)> = Vec::new();
-        let mut by_key: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        for (p, repo) in projects.iter().zip(resolved) {
-            let Some(repo) = repo else { continue };
-            let pid = p["id"].as_str().filter(|s| !s.is_empty()).map(String::from);
-            let key = repo.to_ascii_lowercase();
-            let idx = match by_key.get(&key).copied() {
-                Some(i) => i,
-                None => {
-                    let i = out.len();
-                    by_key.insert(key, i);
-                    out.push((repo, Vec::new()));
-                    i
-                }
-            };
-            if let Some(pid) = pid
-                && !out[idx].1.contains(&pid)
-            {
-                out[idx].1.push(pid);
+    async fn verify_github_repo_canonical(&self, repo: &str) -> Result<Option<String>> {
+        let Some((owner, name)) = repo.split_once('/') else {
+            return Ok(None);
+        };
+        let resp = self.github.graphql(REPO_CANONICAL_QUERY, json!({"owner": owner, "name": name})).await?;
+        let canonical = resp["data"]["repository"]["nameWithOwner"].as_str().filter(|s| s.contains('/'));
+        match canonical {
+            Some(fresh) => {
+                self.record_github_repo_alias(repo, fresh);
+                Ok(Some(fresh.to_string()))
+            }
+            None => {
+                self.repo_aliases.lock().unwrap_or_else(|e| e.into_inner()).remove(&repo.to_ascii_lowercase());
+                Ok(None)
             }
         }
-        out.sort_by_key(|(r, _)| r.to_ascii_lowercase());
-        Ok(out)
+    }
+
+    fn same_issue_slug(&self, a: &str, b: &str) -> bool {
+        if same_issue_slug(a, b) {
+            return true;
+        }
+        match (parse_github_issue_only(a), parse_github_issue_only(b)) {
+            (Some(ia), Some(ib)) => {
+                ia.key == ib.key
+                    && self
+                        .canonical_github_repo(&ia.scope)
+                        .eq_ignore_ascii_case(&self.canonical_github_repo(&ib.scope))
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) async fn discover_github_repos(&self) -> Result<DiscoveredRepos> {
+        let projects = self.projects().await?;
+        let resolved = futures_util::future::join_all(projects.iter().map(|p| self.project_github_repo(p))).await;
+        let mut repos: Vec<(String, Vec<String>)> = Vec::new();
+        let mut by_key: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut unavailable_projects: Vec<String> = Vec::new();
+        for (p, found) in projects.iter().zip(resolved) {
+            let pid = p["id"].as_str().filter(|s| !s.is_empty()).map(String::from);
+            match found {
+                DiscoveredProject::Repo(repo) => {
+                    let key = repo.to_ascii_lowercase();
+                    let idx = match by_key.get(&key).copied() {
+                        Some(i) => i,
+                        None => {
+                            let i = repos.len();
+                            by_key.insert(key, i);
+                            repos.push((repo, Vec::new()));
+                            i
+                        }
+                    };
+                    if let Some(pid) = pid
+                        && !repos[idx].1.contains(&pid)
+                    {
+                        repos[idx].1.push(pid);
+                    }
+                }
+                DiscoveredProject::Unavailable => {
+                    if let Some(pid) = pid
+                        && !unavailable_projects.contains(&pid)
+                    {
+                        unavailable_projects.push(pid);
+                    }
+                }
+                DiscoveredProject::None => {}
+            }
+        }
+        repos.sort_by_key(|(r, _)| r.to_ascii_lowercase());
+        Ok(DiscoveredRepos { repos, unavailable_projects })
     }
 
     async fn hydrate(&self, ln: &Link) -> Result<Option<String>> {
@@ -1665,8 +1738,8 @@ impl Wf {
 
     fn ensure_not_on_board(&self, label: &str, issue: Option<&str>) -> Result<()> {
         let same = |l: &str, i: Option<&str>| match (issue, i) {
-            (Some(a), Some(b)) => same_issue_slug(a, b),
-            _ => l == label || issue.is_some_and(|a| same_issue_slug(a, l)),
+            (Some(a), Some(b)) => self.same_issue_slug(a, b),
+            _ => l == label || issue.is_some_and(|a| self.same_issue_slug(a, l)),
         };
         if let Some(l) = self.store.children(BOARD, true)?.iter().find(|l| same(&l.label, l.identity.issue.as_deref()))
         {
@@ -1735,11 +1808,14 @@ impl Wf {
         Ok(out)
     }
 
-    async fn find_project(&self, issue: &Issue, wanted: Option<&str>) -> Result<Option<Value>> {
+    async fn find_project(&self, issue: &Issue, wanted: Option<&str>) -> Result<ProjectMatch> {
         let projects = self.projects().await?;
         if let Some(w) = wanted {
-            return pick_project(projects, w).map(Some).ok_or_else(|| anyhow!("no T3 project with id or title {w:?}"));
+            return pick_project(projects, w)
+                .map(ProjectMatch::Found)
+                .ok_or_else(|| anyhow!("no T3 project with id or title {w:?}"));
         }
+        let mut had_unavailable = false;
         if matches!(issue.tracker, Tracker::Github | Tracker::Gitlab)
             && let Some(host) = issue.host.as_deref()
         {
@@ -1762,7 +1838,7 @@ impl Wf {
                             && remote.host.eq_ignore_ascii_case(host)
                             && remote.path.eq_ignore_ascii_case(&issue.scope)
                         {
-                            return Ok(Some(p.clone()));
+                            return Ok(ProjectMatch::Found(p.clone()));
                         }
                         let block_fallback = parsed.is_some() || remote_authority_host(&url).is_some();
                         let gh_origin = (port_ok
@@ -1770,7 +1846,10 @@ impl Wf {
                         .then(|| parsed.unwrap().path);
                         origin_states.push((gh_origin, block_fallback));
                     }
-                    Origin::Unavailable => origin_states.push((None, true)),
+                    Origin::Unavailable => {
+                        had_unavailable = true;
+                        origin_states.push((None, true));
+                    }
                     Origin::Absent => origin_states.push((None, false)),
                 }
             }
@@ -1778,23 +1857,74 @@ impl Wf {
                 && host.eq_ignore_ascii_case("github.com")
                 && issue_web_port.is_none_or(|p| p == 443)
             {
-                let target_canonical = self.canonical_github_repo(&issue.scope);
+                let mut verified_target: Option<Option<String>> = None;
+                let cached_target = self.canonical_github_repo(&issue.scope);
                 for (p, (gh_origin, _)) in projects.iter().zip(&origin_states) {
                     if let Some(path) = gh_origin.as_deref()
-                        && self.canonical_github_repo(path).eq_ignore_ascii_case(&target_canonical)
+                        && self.canonical_github_repo(path).eq_ignore_ascii_case(&cached_target)
                     {
-                        return Ok(Some(p.clone()));
+                        let target = if self.has_github_repo_alias(&issue.scope) {
+                            match &verified_target {
+                                Some(t) => t.clone(),
+                                None => match self.verify_github_repo_canonical(&issue.scope).await {
+                                    Ok(t) => {
+                                        verified_target = Some(t.clone());
+                                        t
+                                    }
+                                    Err(_) => {
+                                        had_unavailable = true;
+                                        continue;
+                                    }
+                                },
+                            }
+                        } else {
+                            Some(issue.scope.clone())
+                        };
+                        let Some(target) = target else { continue };
+                        match self.verify_github_repo_canonical(path).await {
+                            Ok(Some(fresh)) if fresh.eq_ignore_ascii_case(&target) => {
+                                return Ok(ProjectMatch::Found(p.clone()));
+                            }
+                            Ok(_) => {}
+                            Err(_) => had_unavailable = true,
+                        }
                     }
                 }
                 for (p, (_, block_fallback)) in projects.iter().zip(origin_states) {
                     if block_fallback {
                         continue;
                     }
-                    if let ProjectGithubRepo::Github(repo) = project_identity_github_repo(p)
-                        && (repo.eq_ignore_ascii_case(&issue.scope)
-                            || self.canonical_github_repo(&repo).eq_ignore_ascii_case(&target_canonical))
-                    {
-                        return Ok(Some(p.clone()));
+                    if let ProjectGithubRepo::Github(repo) = project_identity_github_repo(p) {
+                        if repo.eq_ignore_ascii_case(&issue.scope) {
+                            return Ok(ProjectMatch::Found(p.clone()));
+                        }
+                        if self.canonical_github_repo(&repo).eq_ignore_ascii_case(&cached_target) {
+                            let target = if self.has_github_repo_alias(&issue.scope) {
+                                match &verified_target {
+                                    Some(t) => t.clone(),
+                                    None => match self.verify_github_repo_canonical(&issue.scope).await {
+                                        Ok(t) => {
+                                            verified_target = Some(t.clone());
+                                            t
+                                        }
+                                        Err(_) => {
+                                            had_unavailable = true;
+                                            continue;
+                                        }
+                                    },
+                                }
+                            } else {
+                                Some(issue.scope.clone())
+                            };
+                            let Some(target) = target else { continue };
+                            match self.verify_github_repo_canonical(&repo).await {
+                                Ok(Some(fresh)) if fresh.eq_ignore_ascii_case(&target) => {
+                                    return Ok(ProjectMatch::Found(p.clone()));
+                                }
+                                Ok(_) => {}
+                                Err(_) => had_unavailable = true,
+                            }
+                        }
                     }
                 }
             }
@@ -1821,10 +1951,10 @@ impl Wf {
         };
         if let Some((source, target)) = mapped {
             return pick_project(projects, &target)
-                .map(Some)
+                .map(ProjectMatch::Found)
                 .ok_or_else(|| anyhow!("{source} maps to T3 project {target:?}, which was not found"));
         }
-        Ok(None)
+        if had_unavailable { Ok(ProjectMatch::OriginUnavailable) } else { Ok(ProjectMatch::Missing) }
     }
 
     async fn resolve_ask_model(&self) -> Result<ResolvedLaunch> {
@@ -2168,10 +2298,18 @@ impl Wf {
             Err(e) => return self.launch_failed(&err_label, &format!("Cannot launch {err_label}: {e:#}")),
         };
         let project = match found {
-            Some(p) => p,
-            None => {
+            ProjectMatch::Found(p) => p,
+            ProjectMatch::Missing => {
                 let text = unmapped_project_error(&err_label, &issue);
                 return self.launch_failed(&err_label, &text);
+            }
+            ProjectMatch::OriginUnavailable => {
+                return Ok(json!({
+                    "ok": false,
+                    "retryable": true,
+                    "label": err_label,
+                    "error": format!("Cannot launch {err_label}: verifying a T3 project's git repository failed, so retry once it responds"),
+                }));
             }
         };
         let project_id = project["id"].as_str().unwrap_or_default().to_string();
