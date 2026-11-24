@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
-use crate::codehost::{Branch, Change, ChangeRef, CodeHost, Forge, Landed, Landing, Read, Rollup, State, Viewed};
+use crate::codehost::{
+    Branch, Change, ChangeRef, CodeHost, Detail, Forge, Landed, Landing, Read, Rollup, State, Viewed,
+};
 use crate::github::errors;
 use crate::gitlab::{GitLab, Target, project_id};
 use crate::t3::BoxFut;
@@ -15,6 +17,9 @@ const QUEUED: &[&str] = &["idle", "fresh", "stale", "merging"];
 const PENDING: &[&str] =
     &["created", "waiting_for_resource", "preparing", "pending", "running", "scheduled", "waiting_for_callback"];
 const LATER: &str = "is not supported for GitLab merge requests yet";
+const PER_PAGE: usize = 100;
+const PIPELINE_PAGES: usize = 5;
+const DIFF_PAGES: usize = 1;
 
 pub type CliFor = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
@@ -55,9 +60,14 @@ pub fn merge_state(detailed: &str) -> &'static str {
 
 pub fn rollup(pipelines: &Value, head: &str, iid: u64) -> Rollup {
     let train = format!("refs/merge-requests/{iid}/train");
-    let own = pipelines.as_array().into_iter().flatten().find(|p| {
-        p["sha"].as_str().is_some_and(|s| s.eq_ignore_ascii_case(head)) && p["ref"].as_str() != Some(train.as_str())
-    });
+    let own = pipelines
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| {
+            p["sha"].as_str().is_some_and(|s| s.eq_ignore_ascii_case(head)) && p["ref"].as_str() != Some(train.as_str())
+        })
+        .max_by_key(|p| p["id"].as_u64());
     let Some(p) = own else { return Rollup::default() };
     let name = format!("pipeline {}", p["id"]);
     let status = text(&p["status"]);
@@ -69,6 +79,32 @@ pub fn rollup(pipelines: &Value, head: &str, iid: u64) -> Rollup {
         s => r.failing.push(format!("{name} ({s})")),
     }
     r
+}
+
+pub fn all_listed(mr: &Value, listed: usize) -> bool {
+    mr["changes_count"].as_str().and_then(|n| n.trim().parse::<usize>().ok()).is_some_and(|n| n <= listed)
+}
+
+pub fn changed_files(diffs: &[Value]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for d in diffs {
+        for k in ["new_path", "old_path"] {
+            if let Some(p) = d[k].as_str().filter(|p| !p.is_empty())
+                && !out.iter().any(|o| o == p)
+            {
+                out.push(p.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn graphql_shape(mr: &Value) -> Value {
+    json!({
+        "state": mr["state"], "draft": mr["draft"], "diffHeadSha": mr["sha"],
+        "detailedMergeStatus": mr["detailed_merge_status"], "mergedAt": mr["merged_at"],
+        "mergeCommitSha": mr["merge_commit_sha"], "mergeTrainCar": null,
+    })
 }
 
 fn batch_query(chunk: &[&ChangeRef]) -> (String, Value) {
@@ -94,7 +130,38 @@ impl GitlabHost {
         }
     }
 
-    async fn change(&self, to: Target<'_>, r: &ChangeRef, mr: &Value) -> std::result::Result<Change, String> {
+    async fn pages(
+        &self,
+        to: Target<'_>,
+        r: &ChangeRef,
+        tail: &str,
+        max: usize,
+    ) -> std::result::Result<(Vec<Value>, bool), String> {
+        let list = |body: Value| match body {
+            Value::Array(items) => Ok(items),
+            _ => Err(format!("GitLab returned no list for {tail}")),
+        };
+        let mut out = Vec::new();
+        for page in 1..=max {
+            let items = list(self.rest(to, r, &format!("{tail}?per_page={PER_PAGE}&page={page}")).await?)?;
+            let full = items.len() >= PER_PAGE;
+            out.extend(items);
+            if !full {
+                return Ok((out, false));
+            }
+        }
+        let beyond = max * PER_PAGE + 1;
+        let more = !list(self.rest(to, r, &format!("{tail}?per_page=1&page={beyond}")).await?)?.is_empty();
+        Ok((out, more))
+    }
+
+    async fn change(
+        &self,
+        to: Target<'_>,
+        r: &ChangeRef,
+        mr: &Value,
+        full: Option<&Value>,
+    ) -> std::result::Result<Change, String> {
         let state = state(mr)?;
         let head = text(&mr["diffHeadSha"]);
         let car = mr["mergeTrainCar"].as_object();
@@ -102,7 +169,10 @@ impl GitlabHost {
         let mut commit = mr["mergeCommitSha"].as_str().filter(|c| !c.is_empty()).map(String::from);
         let mut ended = mr["mergedAt"].as_str().map(String::from).filter(|_| state == State::Merged);
         if state == State::Closed || (state == State::Merged && commit.is_none()) {
-            let full = self.rest(to, r, "").await?;
+            let full = match full {
+                Some(f) => f.clone(),
+                None => self.rest(to, r, "").await?,
+            };
             if state == State::Merged {
                 commit = ["merge_commit_sha", "squash_commit_sha"]
                     .iter()
@@ -113,7 +183,10 @@ impl GitlabHost {
             }
         }
         let checks = match state {
-            State::Open => Some(rollup(&self.rest(to, r, "/pipelines").await?, &head, r.number)),
+            State::Open => {
+                let (pipelines, _) = self.pages(to, r, "/pipelines", PIPELINE_PAGES).await?;
+                Some(rollup(&Value::Array(pipelines), &head, r.number))
+            }
             _ => None,
         };
         Ok(Change {
@@ -151,7 +224,7 @@ impl GitlabHost {
         if !mr.is_object() {
             return Read::NotFound(format!("GitLab shows no merge request !{} in {}", r.number, r.repo));
         }
-        match self.change(to, r, mr).await {
+        match self.change(to, r, mr, None).await {
             Ok(c) => Read::Found(Box::new(c)),
             Err(e) => Read::Failed(e),
         }
@@ -217,8 +290,33 @@ impl CodeHost for GitlabHost {
         })
     }
 
-    fn view<'a>(&'a self, _r: &'a ChangeRef) -> BoxFut<'a, Result<Viewed>> {
-        Box::pin(async move { Ok(Viewed::Refused(format!("reading the full merge request {LATER}"))) })
+    fn view<'a>(&'a self, r: &'a ChangeRef) -> BoxFut<'a, Result<Viewed>> {
+        Box::pin(async move {
+            let Forge::Gitlab { host } = &r.forge else {
+                return Ok(Viewed::Refused(format!("{}#{} is not on GitLab", r.repo, r.number)));
+            };
+            let cli = (self.cli)(host).ok_or_else(|| anyhow!("{host} is not listed under forges in config.json"))?;
+            let to = Target { host, cli: &cli };
+            let path = format!("projects/{}/merge_requests/{}", project_id(&r.repo), r.number);
+            let mr = match self.lab.get(to, &path).await? {
+                rest if rest.status == 404 => return Ok(Viewed::NotFound),
+                rest if rest.status == 200 => rest.body,
+                rest => return Err(anyhow!("GitLab answered HTTP {} for {path}", rest.status)),
+            };
+            let change = self.change(to, r, &graphql_shape(&mr), Some(&mr)).await.map_err(|e| anyhow!(e))?;
+            let (diffs, more) = self.pages(to, r, "/diffs", DIFF_PAGES).await.map_err(|e| anyhow!(e))?;
+            let after = self.rest(to, r, "").await.map_err(|e| anyhow!(e))?;
+            if text(&after["sha"]) != change.head {
+                return Err(anyhow!("the merge request head moved while t3cm read it"));
+            }
+            Ok(Viewed::Found(Box::new(Detail {
+                change,
+                body: mr["description"].as_str().unwrap_or_default().to_string(),
+                files: changed_files(&diffs),
+                more_files: more || !all_listed(&after, diffs.len()),
+                change_requests: Vec::new(),
+            })))
+        })
     }
 
     fn merge<'a>(
@@ -268,5 +366,27 @@ mod tests {
         let failed = json!([{"id": 3, "sha": head, "ref": "feat", "status": "canceled"}]);
         assert_eq!(rollup(&failed, &head, 4).failing, ["pipeline 3 (canceled)"]);
         assert!(!rollup(&json!([]), &head, 4).complete);
+        let grouped = json!([
+            {"id": 7, "sha": head, "ref": "refs/merge-requests/4/head", "status": "success"},
+            {"id": 12, "sha": head, "ref": "feat", "status": "failed"},
+        ]);
+        assert_eq!(rollup(&grouped, &head, 4).failing, ["pipeline 12 (failed)"]);
+    }
+
+    #[test]
+    fn trusts_the_diff_list_only_up_to_the_changes_count() {
+        assert!(all_listed(&json!({"changes_count": "3"}), 3));
+        assert!(!all_listed(&json!({"changes_count": "4"}), 3));
+        assert!(!all_listed(&json!({"changes_count": "1000+"}), 100));
+        assert!(!all_listed(&json!({"changes_count": null}), 3));
+    }
+
+    #[test]
+    fn lists_new_and_renamed_paths_once() {
+        let diffs = [
+            json!({"old_path": "src/a.rs", "new_path": "src/a.rs"}),
+            json!({"old_path": "src/old.rs", "new_path": "src/new.rs", "renamed_file": true}),
+        ];
+        assert_eq!(changed_files(&diffs), ["src/a.rs", "src/new.rs", "src/old.rs"]);
     }
 }

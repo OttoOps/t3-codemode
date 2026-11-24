@@ -5,10 +5,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::board::{BOARD, Card, NewCard, Tracker, checked_options, gh_name, parse_issue_only};
-use crate::codehost::{ChangeRef, CodeHost, Detail, State, Viewed};
+use crate::codehost::{ChangeRef, CodeHost, Detail, Forge, State, Viewed};
+use crate::config::{Forges, gitlab_cli};
 use crate::merge::{CheckState, check_state};
 use crate::reach::ReachPoint;
-use crate::reconcile::{CardPr, CardStage};
+use crate::reconcile::{CardPr, CardStage, change_refs, gl_name};
 use crate::slots::{Caps, glob_matches};
 use crate::store::{Link, LinkPr, PrBrief};
 use crate::wf::{HANDLED, NO_CALLER, SendArgs, WATCHER, Wf, header};
@@ -25,6 +26,7 @@ const FENCE: &str = "```";
 struct PrArgs {
     event: String,
     repo: String,
+    #[serde(default)]
     pr: u64,
     head: String,
     publishing: Option<String>,
@@ -41,6 +43,7 @@ enum Kind {
 
 struct Event {
     kind: Kind,
+    change: ChangeRef,
     repo: String,
     number: u64,
     url: String,
@@ -51,23 +54,14 @@ struct Event {
 }
 
 impl Event {
-    fn checked(a: PrArgs, host: &dyn CodeHost) -> Result<Event> {
+    fn checked(a: PrArgs, host: &dyn CodeHost, forges: &Forges) -> Result<Event> {
         let kind = match a.event.as_str() {
             "opened" => Kind::Opened,
             "updated" => Kind::Updated,
             "ready" => Kind::Ready,
             other => bail!("wf.pr: event must be opened, updated or ready, got {other:?}"),
         };
-        let repo = a
-            .repo
-            .trim()
-            .split_once('/')
-            .filter(|(o, n)| gh_name(o) && gh_name(n))
-            .map(|(o, n)| format!("{o}/{n}").to_ascii_lowercase())
-            .ok_or_else(|| anyhow!("wf.pr: repo must be \"owner/name\", got {:?}", a.repo))?;
-        if a.pr == 0 {
-            bail!("wf.pr: pr must be a pull request number");
-        }
+        let change = change_of(&a.repo, a.pr, forges)?;
         let head = a.head.trim().to_ascii_lowercase();
         if !(7..=40).contains(&head.len()) || !head.chars().all(|c| c.is_ascii_hexdigit()) {
             bail!("wf.pr: head must be the head commit SHA, 7 to 40 hex characters, got {:?}", a.head);
@@ -85,16 +79,19 @@ impl Event {
             bail!("wf.pr: checks applies only to opened");
         }
         let body = a.body.map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
-        let url = host.url(&ChangeRef::github(&repo, a.pr));
-        Ok(Event { kind, repo, number: a.pr, url, head, publishing, no_ci, body })
+        let url = host.url(&change);
+        let (repo, number) = (change.key(), change.number);
+        Ok(Event { kind, change, repo, number, url, head, publishing, no_ci, body })
     }
 
     fn of_link(p: &LinkPr, host: &dyn CodeHost) -> Event {
+        let change = ChangeRef::of_key(&p.repo, p.number);
         Event {
             kind: Kind::Ready,
+            url: host.url(&change),
+            change,
             repo: p.repo.clone(),
             number: p.number,
-            url: host.url(&ChangeRef::of_key(&p.repo, p.number)),
             head: p.head.clone(),
             publishing: String::new(),
             no_ci: false,
@@ -106,12 +103,47 @@ impl Event {
         &self.url
     }
 
+    fn forge(&self) -> &'static str {
+        self.change.forge.name()
+    }
+
     fn label(&self) -> String {
         format!("{}#{}", self.repo, self.number)
     }
 
     fn short(&self) -> &str {
         short(&self.head)
+    }
+}
+
+fn change_of(repo: &str, pr: u64, forges: &Forges) -> Result<ChangeRef> {
+    let raw = repo.trim();
+    if raw.contains("://")
+        && let Some(r) = change_refs(raw, forges).into_iter().next()
+    {
+        if pr != 0 && pr != r.number {
+            bail!("wf.pr: pr {pr} does not match {raw}, which names #{}", r.number);
+        }
+        return Ok(r);
+    }
+    if pr == 0 {
+        bail!("wf.pr: pr must be a pull request or merge request number");
+    }
+    let bare = ["https://", "http://"].iter().find_map(|p| raw.strip_prefix(p)).unwrap_or(raw).trim_end_matches('/');
+    let parts: Vec<&str> = bare.split('/').collect();
+    match parts.as_slice() {
+        [o, n] if gh_name(o) && gh_name(n) => Ok(ChangeRef::github(&format!("{o}/{n}").to_ascii_lowercase(), pr)),
+        [host, path @ ..] if path.len() >= 2 && path.iter().all(|p| gl_name(p)) => {
+            if gitlab_cli(forges, host).is_none() {
+                bail!(
+                    "wf.pr: {host} is not listed under forges in t3cm's config.json, so t3cm cannot read merge requests there"
+                );
+            }
+            Ok(ChangeRef::gitlab(host, &path.join("/"), pr))
+        }
+        _ => bail!(
+            "wf.pr: repo must be \"owner/name\", \"<host>/<group>/<project>\" for a GitLab host listed under forges, or a merge request URL, got {repo:?}"
+        ),
     }
 }
 
@@ -325,7 +357,11 @@ fn issue_refs(ln: &Link, repo: &str) -> Vec<(String, String)> {
             if out.iter().any(|(x, _)| x == &slug) {
                 continue;
             }
-            let same = i.tracker == Tracker::Github && i.scope.eq_ignore_ascii_case(repo);
+            let same = match (i.tracker, i.host.as_deref()) {
+                (Tracker::Github, _) => i.scope.eq_ignore_ascii_case(repo),
+                (Tracker::Gitlab, Some(h)) => format!("{h}/{}", i.scope).eq_ignore_ascii_case(repo),
+                _ => false,
+            };
             let shown = if same { format!("#{}", i.key) } else { i.slug() };
             out.push((slug, shown));
         }
@@ -465,14 +501,21 @@ fn action_line(e: &Event, head: &str, options: &[String], blocker: Option<&str>)
         _ => clauses.join(", or "),
     };
     let block = blocker
-        .map(|b| {
-            format!(
+        .map(|b| match e.change.forge {
+            Forge::Github => format!(
                 " (GitHub blocks it: {b}; an admin can merge it over the block on GitHub, and the board picks that up)"
-            )
+            ),
+            Forge::Gitlab { .. } => {
+                format!(" (GitLab blocks it: {b}; once it merges on GitLab, the board picks that up)")
+            }
         })
         .unwrap_or_default();
+    let relay = match e.change.forge {
+        Forge::Github => "",
+        Forge::Gitlab { .. } => " (t3cm sends your answer to the ticket, which merges it on GitLab)",
+    };
     format!(
-        "**ACTION NEEDED:** merge #{} at head {}{block}: reply {}, or review it first, here: {}",
+        "**ACTION NEEDED:** merge #{} at head {}{relay}{block}: reply {}, or review it first, here: {}",
         e.number,
         short(head),
         reply,
@@ -512,7 +555,7 @@ impl Wf {
         let me = caller.filter(|c| !c.is_empty()).ok_or_else(|| anyhow!(NO_CALLER))?;
         let args = if args.is_null() { json!({}) } else { args };
         let a: PrArgs = serde_json::from_value(args).map_err(|e| anyhow!("wf.pr: {e}"))?;
-        let e = Event::checked(a, &*self.host)?;
+        let e = Event::checked(a, &*self.host, &self.config().forges)?;
         let (ln, ticket) = {
             let _g = self.lock.lock().await;
             let (mut ln, ticket) = self.route(me, &e)?;
@@ -739,7 +782,7 @@ impl Wf {
         let pr = match self.read_pr(&e.repo, e.number).await {
             Ok(pr) => pr,
             Err(err) => {
-                let why = format!("t3cm could not read {} on GitHub ({err:#})", e.label());
+                let why = format!("t3cm could not read {} on {} ({err:#})", e.label(), e.forge());
                 return self.to_ticket(me, ln, e, &why, None, true).await;
             }
         };
@@ -866,7 +909,7 @@ impl Wf {
         let pr = match self.read_pr(&e.repo, e.number).await {
             Ok(pr) => pr,
             Err(err) => {
-                let why = format!("t3cm could not read {} on GitHub ({err:#})", e.label());
+                let why = format!("t3cm could not read {} on {} ({err:#})", e.label(), e.forge());
                 return self.fallback(me, ln, e, &why, None, false).await;
             }
         };
@@ -881,7 +924,8 @@ impl Wf {
         }
         if !same_head(&head, &e.head) {
             let reason = format!(
-                "the head moved: GitHub shows {} at {head}; send wf.pr updated for it, then ready once its checks pass",
+                "the head moved: {} shows {} at {head}; send wf.pr updated for it, then ready once its checks pass",
+                e.forge(),
                 e.label()
             );
             return self.refuse_ready(me, ln, e, source, reason).await;
@@ -890,7 +934,7 @@ impl Wf {
         let checks = check_state(&pr.change);
         let pending = match (&checks, state) {
             (CheckState::Pending(p), _) => Some(format!("checks still running: {p}")),
-            (CheckState::Passed(_), "UNKNOWN") => Some("GitHub is still computing the merge state".into()),
+            (CheckState::Passed(_), "UNKNOWN") => Some(format!("{} is still computing the merge state", e.forge())),
             _ => None,
         };
         let non_success = match checks {
@@ -923,10 +967,11 @@ impl Wf {
                 return Ok(out);
             }
             CheckState::Unread => {
-                let why = format!(
-                    "GitHub shows no finished check run at head {}, so t3cm cannot verify the checks",
-                    short(&head)
-                );
+                let what = match e.change.forge {
+                    Forge::Github => "GitHub shows no finished check run",
+                    Forge::Gitlab { .. } => "GitLab shows no finished pipeline",
+                };
+                let why = format!("{what} at head {}, so t3cm cannot verify the checks", short(&head));
                 return self.fallback(me, ln, e, &why, None, false).await;
             }
             CheckState::Passed(settled) => settled,
@@ -956,7 +1001,7 @@ impl Wf {
             let detail = if reconcile {
                 "t3cm opens the merge gate once they finish; a failed check comes back to you as a reply"
             } else {
-                "GitHub reconcile is off, so send wf.pr ready again once they finish"
+                "PR reconcile is off, so send wf.pr ready again once they finish"
             };
             return Ok(json!({"status": "waiting", "pending": wait, "detail": detail}));
         }
@@ -1075,14 +1120,15 @@ impl Wf {
         }
         let quoted: Vec<String> = plan.options.iter().map(|o| json!(o).to_string()).collect();
         let mut note = format!(
-            "{} sent ready for {} ({h}); t3cm checked it on GitHub at head {} and opened merge card {card} with {}",
+            "{} sent ready for {} ({h}); t3cm checked it on {} at head {} and opened merge card {card} with {}",
             ln.label,
             e.url(),
+            e.forge(),
             short(&head),
             quoted.join(", ")
         );
         if let Some(b) = &blocker {
-            note.push_str(&format!("; GitHub blocks it: {b}"));
+            note.push_str(&format!("; {} blocks it: {b}", e.forge()));
         }
         if !plan.skipped.is_empty() {
             note.push_str(&format!("; skipped {}", plan.skipped.join(", ")));
@@ -1133,10 +1179,10 @@ impl Wf {
             }
         }
         for (repo, number) in prs {
-            let pr = self
-                .read_pr(&repo, number)
-                .await
-                .map_err(|err| format!("t3cm could not read {repo}#{number} on GitHub ({err:#})"))?;
+            let pr = self.read_pr(&repo, number).await.map_err(|err| {
+                let forge = ChangeRef::of_key(&repo, number).forge.name();
+                format!("t3cm could not read {repo}#{number} on {forge} ({err:#})")
+            })?;
             if pr.change.state == State::Closed {
                 continue;
             }

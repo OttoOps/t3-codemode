@@ -1711,6 +1711,7 @@ struct GlState {
     calls: Vec<Value>,
     read_errors: BTreeMap<MrKey, String>,
     rest_status: BTreeMap<String, u16>,
+    after: BTreeMap<String, Value>,
     down: bool,
 }
 
@@ -1721,7 +1722,8 @@ pub fn gitlab_mr(head: &str, detailed_merge_status: &str) -> Value {
     json!({
         "state": "opened", "draft": false, "sha": head, "detailed_merge_status": detailed_merge_status,
         "merged_at": null, "closed_at": null, "updated_at": null, "merge_commit_sha": null, "squash_commit_sha": null,
-        "squash_on_merge": false, "squash": false, "head_pipeline": null, "pipelines": [], "train": null
+        "squash_on_merge": false, "squash": false, "head_pipeline": null, "pipelines": [], "train": null,
+        "description": "", "diffs": [], "changes_count": "0"
     })
 }
 
@@ -1754,6 +1756,7 @@ fn rest_mr(iid: u64, mr: &Value) -> Value {
     if let Some(o) = out.as_object_mut() {
         o.remove("pipelines");
         o.remove("train");
+        o.remove("diffs");
         o.insert("iid".into(), json!(iid));
     }
     out
@@ -1789,6 +1792,12 @@ impl FakeGitLab {
         let sha = mr["sha"].as_str().unwrap_or_default().to_string();
         let pipe = gitlab_pipeline(100 + iid, &sha, &format!("refs/merge-requests/{iid}/head"), status);
         self.update_mr(host, path, iid, json!({"pipelines": [pipe.clone()], "head_pipeline": pipe}));
+    }
+
+    pub fn set_files(&self, host: &str, path: &str, iid: u64, files: &[&str]) {
+        let diffs: Vec<Value> = files.iter().map(|f| json!({"old_path": f, "new_path": f})).collect();
+        let count = if files.len() > 1000 { "1000+".to_string() } else { files.len().to_string() };
+        self.update_mr(host, path, iid, json!({"diffs": diffs, "changes_count": count}));
     }
 
     pub fn join_train(&self, host: &str, path: &str, iid: u64, index: u64) {
@@ -1831,6 +1840,10 @@ impl FakeGitLab {
         self.st().read_errors.clear();
     }
 
+    pub fn patch_after(&self, operation: &str, patch: Value) {
+        self.st().after.insert(operation.into(), patch);
+    }
+
     pub fn fail_rest(&self, suffix: &str, status: u16) {
         self.st().rest_status.insert(suffix.into(), status);
     }
@@ -1848,7 +1861,15 @@ impl FakeGitLab {
     }
 }
 
+fn page_of(items: &Value, query: &str) -> Value {
+    let arg = |k: &str| query.split('&').find_map(|kv| kv.strip_prefix(k)?.strip_prefix('=')?.parse::<usize>().ok());
+    let (per, page) = (arg("per_page").unwrap_or(20).max(1), arg("page").unwrap_or(1).max(1));
+    let all = items.as_array().cloned().unwrap_or_default();
+    json!(all.into_iter().skip((page - 1) * per).take(per).collect::<Vec<_>>())
+}
+
 fn rest_path(path: &str) -> Option<(String, u64, &str)> {
+    let path = path.split_once('?').map_or(path, |(p, _)| p);
     let rest = path.strip_prefix("projects/")?;
     let (project, tail) = rest.split_once("/merge_requests/")?;
     let (iid, sub) = tail.split_once('/').unwrap_or((tail, ""));
@@ -1910,23 +1931,34 @@ impl crate::gitlab::GitLab for FakeGitLab {
             let op = match parsed.as_ref().map(|(_, _, sub)| *sub) {
                 Some("") => "mergeRequest",
                 Some("pipelines") => "pipelines",
+                Some("diffs") => "diffs",
                 _ => "unknown",
             };
+            let (bare, query) = path.split_once('?').unwrap_or((path, ""));
             st.calls.push(json!({"operation": op, "host": to.host, "cli": to.cli, "path": path}));
             if st.down {
                 anyhow::bail!("{} api failed: glab: not authenticated", to.cli);
             }
             let missing = || crate::gitlab::Rest { status: 404, body: json!({"message": "404 Not found"}) };
-            if let Some((_, status)) = st.rest_status.iter().find(|(s, _)| path.ends_with(s.as_str())) {
+            if let Some((_, status)) = st.rest_status.iter().find(|(s, _)| bare.ends_with(s.as_str())) {
                 return Ok(crate::gitlab::Rest { status: *status, body: json!({"message": "fake failure"}) });
             }
             let Some((project, iid, _)) = parsed else { return Ok(missing()) };
-            let Some(mr) = st.mrs.get(&mr_key(to.host, &project, iid)) else { return Ok(missing()) };
+            let key = mr_key(to.host, &project, iid);
+            let Some(mr) = st.mrs.get(&key) else { return Ok(missing()) };
             let body = match op {
                 "mergeRequest" => rest_mr(iid, mr),
-                "pipelines" => mr["pipelines"].clone(),
+                "pipelines" => page_of(&mr["pipelines"], query),
+                "diffs" => page_of(&mr["diffs"], query),
                 _ => return Ok(missing()),
             };
+            if let Some(patch) = st.after.remove(op)
+                && let Some(mr) = st.mrs.get_mut(&key)
+            {
+                for (k, v) in patch.as_object().into_iter().flatten() {
+                    mr[k] = v.clone();
+                }
+            }
             Ok(crate::gitlab::Rest { status: 200, body })
         })
     }
