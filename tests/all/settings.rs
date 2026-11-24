@@ -1630,6 +1630,38 @@ async fn the_flow_section_clears_optional_keys_and_surfaces_validation_errors() 
     assert_eq!(live.repos, None);
     assert!(live.opt_in.is_none());
 
+    // 1b. Clearing the last flow.optIn field when flow.optIn existed in conf.base prunes empty draft.flow.
+    let before_opt_only = json!({
+        "flow": {
+            "optIn": {"label": "flow"},
+        }
+    });
+    let (b2, r2) = drive(
+        &before_opt_only,
+        r#"await open();
+  showSection("flow");
+  enter(field("flow.optIn.label"), "");
+  await saveSettings();
+  return { puts: puts(), draft: conf.draft };"#,
+    )
+    .await;
+    let put2 = &r2["puts"][0];
+    assert_eq!(put2["file"], json!({}), "clearing last flow.optIn field must prune empty flow object: {r2}");
+    assert_eq!(b2.put(put2).await.0, 200);
+    assert!(b2.h.app.config().flow.is_none());
+
+    // 1c. Typing and clearing optIn.label when conf.base already had flow: {} keeps draft clean.
+    let (_, clean_empty_flow) = drive(
+        &json!({"flow": {}}),
+        r#"await open();
+  showSection("flow");
+  enter(field("flow.optIn.label"), "ready");
+  enter(field("flow.optIn.label"), "");
+  return { draft: conf.draft, dirty: confDirty() };"#,
+    )
+    .await;
+    assert_eq!(clean_empty_flow, json!({"draft": {"flow": {}}, "dirty": false}));
+
     // 2. Typing and clearing optIn.label from an empty config leaves draft clean (not dirty).
     let (_, clean) = drive(
         &json!({}),

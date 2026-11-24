@@ -72,11 +72,16 @@ CREATE TABLE IF NOT EXISTS board_sessions (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, token_hash TEXT NOT NULL UNIQUE, label TEXT,
   created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS board_sessions_expires ON board_sessions (expires_at);
+CREATE TABLE IF NOT EXISTS flow_dismissed_edges (
+  from_key TEXT NOT NULL, kind TEXT NOT NULL, to_key TEXT NOT NULL, at TEXT NOT NULL,
+  PRIMARY KEY (from_key, kind, to_key));
 "#;
 
 const KEEP_MESSAGES: i64 = 5000;
 pub const KEEP_PICKS: i64 = 2000;
 const UNSETTLED: &str = "json_extract(data, '$.settledAt') IS NULL";
+const REGULAR_ASK: &str = "COALESCE(json_extract(data, '$.kind'), '') != 'triageDag'";
+const TRIAGE_ASK: &str = "json_extract(data, '$.kind') = 'triageDag'";
 
 pub type WaitingRow = (WaitingItem, Option<Value>, Option<(String, Option<String>)>, i64);
 
@@ -453,6 +458,15 @@ pub struct BoardSession {
     pub created_at: String,
     pub last_seen_at: String,
     pub expires_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DismissedEdgeRow {
+    pub from_key: String,
+    pub kind: String,
+    pub to_key: String,
+    pub at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1346,6 +1360,71 @@ impl Store {
         Ok(())
     }
 
+    pub fn ask_update_if_open_unsettled(&self, seq: i64, open: bool, data: &Value) -> Result<bool> {
+        Ok(self.with(|c| {
+            c.execute(
+                &format!("UPDATE asks SET open = ?2, data = ?3 WHERE seq = ?1 AND open = 1 AND {UNSETTLED}"),
+                params![seq, open as i64, data.to_string()],
+            )
+        })? > 0)
+    }
+
+    pub fn ask_is_open_unsettled(&self, seq: i64) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT EXISTS (SELECT 1 FROM asks WHERE seq = ?1 AND open = 1 AND {UNSETTLED})"),
+                [seq],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    pub fn triage_thread(&self, thread: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT EXISTS (SELECT 1 FROM asks WHERE thread = ?1 AND {TRIAGE_ASK})"),
+                params![thread],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    pub fn triage_live(&self) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM asks WHERE {TRIAGE_ASK} AND \
+                     (open = 1 OR COALESCE(json_extract(data, '$.threadStopped'), 0) = 0))"
+                ),
+                [],
+                |r| r.get(0),
+            )
+        })
+    }
+
+    pub fn triage_unstopped_closed(&self) -> Result<Vec<(i64, Value)>> {
+        self.asks_where(&format!(
+            "WHERE open = 0 AND {TRIAGE_ASK} AND COALESCE(json_extract(data, '$.threadStopped'), 0) = 0 ORDER BY seq"
+        ))
+    }
+
+    pub fn triage_mark_stopped(&self, seq: i64, archived: bool) -> Result<bool> {
+        Ok(self.with(|c| {
+            let sql = if archived {
+                format!(
+                    "UPDATE asks SET data = json_set(data, '$.threadStopped', json('true'), '$.archived', json('true')) \
+                     WHERE seq = ?1 AND {TRIAGE_ASK} AND COALESCE(json_extract(data, '$.threadStopped'), 0) = 0"
+                )
+            } else {
+                format!(
+                    "UPDATE asks SET data = json_set(data, '$.threadStopped', json('true')) \
+                     WHERE seq = ?1 AND {TRIAGE_ASK} AND COALESCE(json_extract(data, '$.threadStopped'), 0) = 0"
+                )
+            };
+            c.execute(&sql, [seq])
+        })? > 0)
+    }
+
     fn asks_where(&self, sql: &str) -> Result<Vec<(i64, Value)>> {
         let rows: Vec<(i64, String)> = self.with(|c| {
             let mut st = c.prepare(&format!("SELECT seq, data FROM asks {sql}"))?;
@@ -1384,26 +1463,89 @@ impl Store {
     }
 
     pub fn asks_closed_unsettled(&self) -> Result<Vec<(i64, Value)>> {
-        self.asks_where(&format!("WHERE open = 0 AND {UNSETTLED} ORDER BY seq"))
+        self.asks_where(&format!("WHERE open = 0 AND {UNSETTLED} AND {REGULAR_ASK} ORDER BY seq"))
     }
 
     pub fn asks_unsettled(&self, limit: usize) -> Result<Vec<(i64, Value)>> {
         self.asks_where(&format!(
-            "WHERE {UNSETTLED} ORDER BY COALESCE(json_extract(data, '$.restoredAt'), json_extract(data, '$.at')) DESC, \
+            "WHERE {UNSETTLED} AND {REGULAR_ASK} ORDER BY COALESCE(json_extract(data, '$.restoredAt'), json_extract(data, '$.at')) DESC, \
              seq DESC LIMIT {limit}"
         ))
     }
 
     pub fn asks_settled(&self, limit: usize) -> Result<Vec<(i64, Value)>> {
         self.asks_where(&format!(
-            "WHERE NOT {UNSETTLED} ORDER BY json_extract(data, '$.settledAt') DESC, seq DESC LIMIT {limit}"
+            "WHERE NOT {UNSETTLED} AND {REGULAR_ASK} ORDER BY json_extract(data, '$.settledAt') DESC, seq DESC LIMIT {limit}"
         ))
     }
 
     pub fn asks_settled_count(&self) -> Result<usize> {
-        let n: i64 =
-            self.with(|c| c.query_row(&format!("SELECT COUNT(*) FROM asks WHERE NOT {UNSETTLED}"), [], |r| r.get(0)))?;
+        let n: i64 = self.with(|c| {
+            c.query_row(&format!("SELECT COUNT(*) FROM asks WHERE NOT {UNSETTLED} AND {REGULAR_ASK}"), [], |r| r.get(0))
+        })?;
         Ok(n as usize)
+    }
+
+    pub fn triage_open(&self) -> Result<Option<(i64, Value)>> {
+        Ok(self.asks_where(&format!("WHERE open = 1 AND {TRIAGE_ASK} ORDER BY seq DESC LIMIT 1"))?.pop())
+    }
+
+    pub fn triage_latest_active(&self) -> Result<Option<(i64, bool, Value)>> {
+        let row: Option<(i64, bool, String)> = self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT seq, open, data FROM asks WHERE {UNSETTLED} AND {TRIAGE_ASK} ORDER BY seq DESC LIMIT 1"
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+        })?;
+        row.map(|(seq, open, d)| Ok((seq, open, serde_json::from_str(&d)?))).transpose()
+    }
+
+    pub fn triage_get(&self, seq: i64) -> Result<Option<(bool, Value)>> {
+        let row: Option<(bool, String)> = self.with(|c| {
+            c.query_row(&format!("SELECT open, data FROM asks WHERE seq = ?1 AND {TRIAGE_ASK}"), [seq], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()
+        })?;
+        row.map(|(open, d)| Ok((open, serde_json::from_str(&d)?))).transpose()
+    }
+
+    pub fn triage_unsettled_closed(&self) -> Result<Vec<(i64, Value)>> {
+        self.asks_where(&format!("WHERE open = 0 AND {UNSETTLED} AND {TRIAGE_ASK} ORDER BY seq"))
+    }
+
+    pub fn flow_dismissed_edge_add(&self, from_key: &str, kind: &str, to_key: &str, at: &str) -> Result<bool> {
+        Ok(self.with(|c| {
+            c.execute(
+                "INSERT OR IGNORE INTO flow_dismissed_edges (from_key, kind, to_key, at) VALUES (?1, ?2, ?3, ?4)",
+                params![from_key, kind, to_key, at],
+            )
+        })? > 0)
+    }
+
+    pub fn flow_dismissed_edge_remove(&self, from_key: &str, kind: &str, to_key: &str) -> Result<bool> {
+        Ok(self.with(|c| {
+            c.execute(
+                "DELETE FROM flow_dismissed_edges WHERE from_key = ?1 AND kind = ?2 AND to_key = ?3",
+                params![from_key, kind, to_key],
+            )
+        })? > 0)
+    }
+
+    pub fn flow_dismissed_edges(&self) -> Result<Vec<DismissedEdgeRow>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT from_key, kind, to_key, at FROM flow_dismissed_edges ORDER BY from_key, kind, to_key",
+            )?;
+            st.query_map([], |r| {
+                Ok(DismissedEdgeRow { from_key: r.get(0)?, kind: r.get(1)?, to_key: r.get(2)?, at: r.get(3)? })
+            })?
+            .collect()
+        })
     }
 
     fn contexts_in(c: &Connection) -> rusqlite::Result<Vec<BoardContext>> {

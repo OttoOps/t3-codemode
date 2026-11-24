@@ -261,11 +261,23 @@ pub struct NodeWarning {
     pub raw: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DismissedEdge {
+    pub from: String,
+    pub to: String,
+    pub kind: String,
+    pub at: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Graph {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
     pub warnings: Vec<GraphWarning>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dismissed_edges: Vec<DismissedEdge>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -526,7 +538,7 @@ struct Read {
     warnings: Vec<NodeWarning>,
 }
 
-fn label_of(repo: &str, number: u64) -> String {
+pub(crate) fn label_of(repo: &str, number: u64) -> String {
     let name = repo.rsplit_once('/').map_or(repo, |(_, n)| n);
     format!("{name}#{number}")
 }
@@ -754,8 +766,31 @@ fn ticket_repo_canonical(
     Some((canonicalize_repo(aliases, &repo), number))
 }
 
-fn node_key(repo: &str, number: u64) -> String {
+pub(crate) fn node_key(repo: &str, number: u64) -> String {
     format!("{}#{number}", repo.to_ascii_lowercase())
+}
+
+pub(crate) fn canonical_dismissed_edge_key(
+    kind: &str,
+    from_repo: &str,
+    from_num: u64,
+    to_repo: &str,
+    to_num: u64,
+) -> (String, String) {
+    let f = node_key(from_repo, from_num);
+    let t = node_key(to_repo, to_num);
+    if kind == FILE_CONFLICT {
+        let ord = from_repo.to_ascii_lowercase().cmp(&to_repo.to_ascii_lowercase()).then(from_num.cmp(&to_num));
+        if ord == Ordering::Greater {
+            return (t, f);
+        }
+    }
+    (f, t)
+}
+
+fn split_key(key: &str) -> Option<(&str, u64)> {
+    let (repo, num) = key.rsplit_once('#')?;
+    Some((repo, num.parse().ok()?))
 }
 
 fn prefix_label(labels: &[String], prefix: &str) -> Option<String> {
@@ -1404,7 +1439,7 @@ impl GraphBuild {
                 .then_with(|| a.nodes.cmp(&b.nodes))
                 .then_with(|| a.message.cmp(&b.message))
         });
-        Graph { nodes, edges, warnings }
+        Graph { nodes, edges, warnings, dismissed_edges: Vec::new() }
     }
 }
 
@@ -1912,6 +1947,7 @@ fn read_primary_parent_key(
     aliases: &std::collections::HashMap<String, String>,
     own_parents: &BTreeMap<String, String>,
     inferred_parents: &BTreeMap<String, String>,
+    dismissed: &HashSet<(String, String, String)>,
 ) -> Option<String> {
     if let Some(p) = &r.parent {
         return Some(node_key(&canonicalize_repo(aliases, &p.to.repo), p.to.number));
@@ -1922,10 +1958,25 @@ fn read_primary_parent_key(
     }
     for pref in &r.body_parsed.parents {
         if let BodyRef::Issue { repo, number } = pref {
-            return Some(node_key(&canonicalize_repo(aliases, repo), *number));
+            let canon = canonicalize_repo(aliases, repo);
+            if !is_dismissed(dismissed, PARENT, &r.issue.repo, r.issue.number, &canon, *number) {
+                return Some(node_key(&canon, *number));
+            }
         }
     }
     inferred_parents.get(&me_key).cloned()
+}
+
+fn is_dismissed(
+    dismissed: &HashSet<(String, String, String)>,
+    kind: &str,
+    from_repo: &str,
+    from_num: u64,
+    to_repo: &str,
+    to_num: u64,
+) -> bool {
+    let (f, t) = canonical_dismissed_edge_key(kind, from_repo, from_num, to_repo, to_num);
+    dismissed.contains(&(f, kind.to_string(), t))
 }
 
 fn record_unresolved_ref(
@@ -1951,6 +2002,7 @@ fn build_candidates(
     aliases: &std::collections::HashMap<String, String>,
     own_parents: &BTreeMap<String, String>,
     inferred_parents: &BTreeMap<String, String>,
+    dismissed: &HashSet<(String, String, String)>,
 ) -> Vec<Candidate> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -1964,7 +2016,7 @@ fn build_candidates(
             number: r.issue.number,
             label: r.issue.label.clone(),
             title: r.issue.title.clone(),
-            parent_key: read_primary_parent_key(r, aliases, own_parents, inferred_parents),
+            parent_key: read_primary_parent_key(r, aliases, own_parents, inferred_parents, dismissed),
             declared_phase: r.body_parsed.declared_phase,
         });
     }
@@ -1991,7 +2043,73 @@ fn build_candidates(
     out
 }
 
+pub(crate) struct TriageSnapshot {
+    pub(crate) covered_repos: Vec<String>,
+    pub(crate) graph: Graph,
+    pub(crate) bodies: BTreeMap<String, String>,
+    pub(crate) repo_trees: BTreeMap<String, Vec<String>>,
+}
+
 impl Wf {
+    fn dismissed_edge_set(
+        &self,
+        aliases: &std::collections::HashMap<String, String>,
+    ) -> Result<HashSet<(String, String, String)>> {
+        let mut out = HashSet::new();
+        for row in self.store.flow_dismissed_edges()? {
+            out.insert((row.from_key.clone(), row.kind.clone(), row.to_key.clone()));
+            if let (Some((fr, fn_)), Some((tr, tn))) = (split_key(&row.from_key), split_key(&row.to_key)) {
+                let cfr = canonicalize_repo(aliases, fr);
+                let ctr = canonicalize_repo(aliases, tr);
+                let (cf, ct) = canonical_dismissed_edge_key(&row.kind, &cfr, fn_, &ctr, tn);
+                out.insert((cf, row.kind, ct));
+            }
+        }
+        Ok(out)
+    }
+
+    fn dismissed_edges_for_graph(
+        &self,
+        graph: &Graph,
+        covered: &CoveredRepos,
+        aliases: &std::collections::HashMap<String, String>,
+    ) -> Result<Vec<DismissedEdge>> {
+        let id_by_key: std::collections::HashMap<String, String> =
+            graph.nodes.iter().map(|n| (node_key(&n.repo, n.number), n.id.clone())).collect();
+        let mut by_key: BTreeMap<(String, String, String), DismissedEdge> = BTreeMap::new();
+        for row in self.store.flow_dismissed_edges()? {
+            let (from_key, to_key, from_id, to_id, in_scope) =
+                if let (Some((fr, fn_)), Some((tr, tn))) = (split_key(&row.from_key), split_key(&row.to_key)) {
+                    let cfr = canonicalize_repo(aliases, fr);
+                    let ctr = canonicalize_repo(aliases, tr);
+                    let (cf, ct) = canonical_dismissed_edge_key(&row.kind, &cfr, fn_, &ctr, tn);
+                    let (f_repo, f_num) = split_key(&cf).unwrap_or((cfr.as_str(), fn_));
+                    let (t_repo, t_num) = split_key(&ct).unwrap_or((ctr.as_str(), tn));
+                    let f_canon = canonicalize_repo(aliases, f_repo);
+                    let t_canon = canonicalize_repo(aliases, t_repo);
+                    let fid = id_by_key.get(&cf).cloned().unwrap_or_else(|| format!("{f_canon}#{f_num}"));
+                    let tid = id_by_key.get(&ct).cloned().unwrap_or_else(|| format!("{t_canon}#{t_num}"));
+                    let scope = id_by_key.contains_key(&cf)
+                        || id_by_key.contains_key(&ct)
+                        || covered.contains(&f_canon)
+                        || covered.contains(&t_canon);
+                    (cf, ct, fid, tid, scope)
+                } else {
+                    continue;
+                };
+            if !in_scope {
+                continue;
+            }
+            by_key.entry((from_key, row.kind.clone(), to_key)).or_insert(DismissedEdge {
+                from: from_id,
+                to: to_id,
+                kind: row.kind,
+                at: row.at,
+            });
+        }
+        Ok(by_key.into_values().collect())
+    }
+
     async fn resolve_body_dependencies(&self, reads: &mut Reads, extra: &mut [Read], all_open: bool) -> Result<()> {
         let has_any_body_refs = reads.reads.iter().chain(extra.iter()).any(|r| {
             !r.body_parsed.blockers.is_empty()
@@ -2065,6 +2183,7 @@ impl Wf {
         }
         reads.aliases = self.repo_aliases_snapshot();
         let aliases = reads.aliases.clone();
+        let dismissed = self.dismissed_edge_set(&aliases)?;
         let failed_open_repos: HashSet<String> =
             failed_open_repos.into_iter().map(|r| canonicalize_repo(&aliases, &r).to_ascii_lowercase()).collect();
         let mut known: BTreeMap<String, (IssueRef, Option<&'static str>)> = BTreeMap::new();
@@ -2085,6 +2204,9 @@ impl Wf {
             for sref in &r.body_parsed.sub_issues {
                 if let BodyRef::Issue { repo, number } = sref {
                     let canon = canonicalize_repo(&aliases, repo);
+                    if is_dismissed(&dismissed, PARENT, &canon, *number, &p_repo, p_num) {
+                        continue;
+                    }
                     let ck = node_key(&canon, *number);
                     inferred_parents
                         .entry(ck)
@@ -2103,7 +2225,8 @@ impl Wf {
         // Pass 1: resolve parent refs (explicit + symbolic) so Pass 2 knows every node's epic.
         let mut pool_refs: Vec<&Read> = reads.reads.iter().chain(extra.iter()).chain(symbolic_pool.iter()).collect();
         let mut own_parent_keys: BTreeMap<String, String> = BTreeMap::new();
-        let initial_candidates = build_candidates(&pool_refs, &aliases, &own_parent_keys, &inferred_parent_keys);
+        let initial_candidates =
+            build_candidates(&pool_refs, &aliases, &own_parent_keys, &inferred_parent_keys, &dismissed);
 
         let total = reads.reads.len() + extra.len();
         let mut resolved: Vec<ResolvedBodyRefs> = (0..total)
@@ -2121,8 +2244,10 @@ impl Wf {
                 match pref {
                     BodyRef::Issue { repo, number } => {
                         let canon = canonicalize_repo(&aliases, &repo);
-                        own_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
-                        resolved[idx].parents.push((canon, number));
+                        if !is_dismissed(&dismissed, PARENT, &me_repo, me_num, &canon, number) {
+                            own_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
+                            resolved[idx].parents.push((canon, number));
+                        }
                     }
                     BodyRef::Symbolic(raw) | BodyRef::OptionalSymbolic(raw) => {
                         match flow_body::resolve_symbolic(
@@ -2135,8 +2260,10 @@ impl Wf {
                         ) {
                             ResolveOutcome::Resolved(repo, number) => {
                                 let canon = canonicalize_repo(&aliases, &repo);
-                                own_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
-                                resolved[idx].parents.push((canon, number));
+                                if !is_dismissed(&dismissed, PARENT, &me_repo, me_num, &canon, number) {
+                                    own_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
+                                    resolved[idx].parents.push((canon, number));
+                                }
                             }
                             ResolveOutcome::Ambiguous(matches) => {
                                 let msg =
@@ -2169,7 +2296,9 @@ impl Wf {
                 match sref {
                     BodyRef::Issue { repo, number } => {
                         let canon = canonicalize_repo(&aliases, &repo);
-                        resolved[idx].subs.push((canon, number));
+                        if !is_dismissed(&dismissed, PARENT, &canon, number, &me_repo, me_num) {
+                            resolved[idx].subs.push((canon, number));
+                        }
                     }
                     BodyRef::Symbolic(raw) | BodyRef::OptionalSymbolic(raw) | BodyRef::Malformed(raw) => {
                         record_unresolved_ref(
@@ -2202,26 +2331,30 @@ impl Wf {
                     )
                 {
                     let canon = canonicalize_repo(&aliases, &repo);
-                    own_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
-                    break;
+                    if !is_dismissed(&dismissed, PARENT, &r.issue.repo, r.issue.number, &canon, number) {
+                        own_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
+                        break;
+                    }
                 }
             }
         }
 
         // Pass 2: resolve blocker refs (explicit + symbolic) with full epic membership.
         pool_refs = reads.reads.iter().chain(extra.iter()).chain(symbolic_pool.iter()).collect();
-        let candidates = build_candidates(&pool_refs, &aliases, &own_parent_keys, &inferred_parent_keys);
+        let candidates = build_candidates(&pool_refs, &aliases, &own_parent_keys, &inferred_parent_keys, &dismissed);
         for idx in 0..total {
             let r = if idx < reads.reads.len() { &mut reads.reads[idx] } else { &mut extra[idx - reads.reads.len()] };
             let me_repo = r.issue.repo.clone();
             let me_num = r.issue.number;
-            let me_parent = read_primary_parent_key(r, &aliases, &own_parent_keys, &inferred_parent_keys);
+            let me_parent = read_primary_parent_key(r, &aliases, &own_parent_keys, &inferred_parent_keys, &dismissed);
             let blockers_in = r.body_parsed.blockers.clone();
             for bref in blockers_in {
                 match bref {
                     BodyRef::Issue { repo, number } => {
                         let canon = canonicalize_repo(&aliases, &repo);
-                        resolved[idx].blockers.push((canon, number));
+                        if !is_dismissed(&dismissed, BLOCKED_BY, &me_repo, me_num, &canon, number) {
+                            resolved[idx].blockers.push((canon, number));
+                        }
                     }
                     BodyRef::Symbolic(raw) => {
                         let canon_me = canonicalize_repo(&aliases, &me_repo).to_ascii_lowercase();
@@ -2248,7 +2381,7 @@ impl Wf {
                                         raw,
                                         Some(msg),
                                     );
-                                } else {
+                                } else if !is_dismissed(&dismissed, BLOCKED_BY, &me_repo, me_num, &canon, number) {
                                     resolved[idx].blockers.push((canon, number));
                                 }
                             }
@@ -2298,7 +2431,7 @@ impl Wf {
                                         raw,
                                         Some(msg),
                                     );
-                                } else {
+                                } else if !is_dismissed(&dismissed, BLOCKED_BY, &me_repo, me_num, &canon, number) {
                                     resolved[idx].blockers.push((canon, number));
                                 }
                             }
@@ -2397,6 +2530,7 @@ impl Wf {
         }
         reads.aliases = self.repo_aliases_snapshot();
         let aliases = reads.aliases.clone();
+        let dismissed = self.dismissed_edge_set(&aliases)?;
 
         // Pass 4: merge resolved body links into each Read, preserving native GitHub precedence.
         let mut sub_parent_fill: BTreeMap<String, (u8, IssueRef)> = BTreeMap::new();
@@ -2436,6 +2570,9 @@ impl Wf {
                 r.blockers.iter().map(|b| node_key(&canonicalize_repo(&aliases, &b.to.repo), b.to.number)).collect();
             for (repo, number) in res.blockers {
                 let canon = canonicalize_repo(&aliases, &repo);
+                if is_dismissed(&dismissed, BLOCKED_BY, &home, r.issue.number, &canon, number) {
+                    continue;
+                }
                 let k = node_key(&canon, number);
                 if missing_refs.contains(&k) {
                     let disp = disp_issue_ref(&home, &canon, number);
@@ -2467,6 +2604,9 @@ impl Wf {
             // Merge parents
             for (repo, number) in res.parents {
                 let canon = canonicalize_repo(&aliases, &repo);
+                if is_dismissed(&dismissed, PARENT, &home, r.issue.number, &canon, number) {
+                    continue;
+                }
                 let k = node_key(&canon, number);
                 if missing_refs.contains(&k) {
                     let disp = disp_issue_ref(&home, &canon, number);
@@ -2500,6 +2640,9 @@ impl Wf {
                 r.subs.iter().map(|s| node_key(&canonicalize_repo(&aliases, &s.to.repo), s.to.number)).collect();
             for (repo, number) in res.subs {
                 let canon = canonicalize_repo(&aliases, &repo);
+                if is_dismissed(&dismissed, PARENT, &canon, number, &home, r.issue.number) {
+                    continue;
+                }
                 let k = node_key(&canon, number);
                 if missing_refs.contains(&k) {
                     let disp = disp_issue_ref(&home, &canon, number);
@@ -2553,6 +2696,9 @@ impl Wf {
             for sref in &r.body_parsed.sub_issues {
                 if let BodyRef::Issue { repo, number } = sref {
                     let canon = canonicalize_repo(&aliases, repo);
+                    if is_dismissed(&dismissed, PARENT, &canon, *number, &r.issue.repo, r.issue.number) {
+                        continue;
+                    }
                     let k = node_key(&canon, *number);
                     sub_parent_fill
                         .entry(k)
@@ -2983,10 +3129,30 @@ impl Wf {
             }
         }
 
+        let dismissed = self.dismissed_edge_set(aliases)?;
+        let file_conflicts: Vec<FileConflictEdge> = analysis
+            .file_conflicts
+            .into_iter()
+            .filter(|e| {
+                let fr = canonicalize_repo(aliases, &e.from.0);
+                let tr = canonicalize_repo(aliases, &e.to.0);
+                !is_dismissed(&dismissed, FILE_CONFLICT, &fr, e.from.1, &tr, e.to.1)
+            })
+            .collect();
+        let code_deps: Vec<CodeDepEdge> = analysis
+            .code_deps
+            .into_iter()
+            .filter(|e| {
+                let fr = canonicalize_repo(aliases, &e.from.0);
+                let tr = canonicalize_repo(aliases, &e.to.0);
+                !is_dismissed(&dismissed, CODE_DEP, &fr, e.from.1, &tr, e.to.1)
+            })
+            .collect();
+
         Ok(SourceControlEdges::new(SourceControlEdgesParts {
             pr_stacks,
-            file_conflicts: analysis.file_conflicts,
-            code_deps: analysis.code_deps,
+            file_conflicts,
+            code_deps,
             known_refs,
             static_issue_paths: analysis.static_issue_paths,
             analyzed_issues: analysis.analyzed_issues,
@@ -3489,20 +3655,36 @@ impl Wf {
     }
 
     pub(crate) async fn flow_view(&self, with_graph: bool) -> Result<FlowView> {
+        Ok(self.flow_view_inner(with_graph, false).await?.0)
+    }
+
+    pub(crate) async fn flow_triage_snapshot(&self) -> Result<TriageSnapshot> {
+        let (_, snap) = self.flow_view_inner(true, true).await?;
+        snap.ok_or_else(|| anyhow!("flow graph unavailable"))
+    }
+
+    async fn flow_view_inner(
+        &self,
+        with_graph: bool,
+        capture_triage: bool,
+    ) -> Result<(FlowView, Option<TriageSnapshot>)> {
         let cfg = self.config().flow.clone();
         let queue_enabled = cfg.as_ref().is_some_and(FlowConfig::queue_enabled);
         if !queue_enabled && !with_graph {
-            return Ok(FlowView {
-                enabled: false,
-                launch: None,
-                max_tickets: 0,
-                free: 0,
-                running: Vec::new(),
-                queue: Vec::new(),
-                blocked: Vec::new(),
-                skipped: Vec::new(),
-                graph: None,
-            });
+            return Ok((
+                FlowView {
+                    enabled: false,
+                    launch: None,
+                    max_tickets: 0,
+                    free: 0,
+                    running: Vec::new(),
+                    queue: Vec::new(),
+                    blocked: Vec::new(),
+                    skipped: Vec::new(),
+                    graph: None,
+                },
+                None,
+            ));
         }
         let mut reads = self.flow_reads(cfg.as_ref(), with_graph).await?;
         let tickets = self.open_tickets()?;
@@ -3524,6 +3706,14 @@ impl Wf {
         let mut all = reads.reads.clone();
         all.extend(extra);
         self.note_read_titles(&all);
+        let bodies = if capture_triage {
+            all.iter()
+                .filter(|r| r.state != Some("closed"))
+                .map(|r| (node_key(&r.issue.repo, r.issue.number), r.body_text.clone()))
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
         let mut view = match cfg.as_ref().filter(|c| c.queue_enabled()) {
             Some(c) => self.flow_build(c, reads, tickets.clone(), &closed, &sc, false)?,
             None => FlowView {
@@ -3539,15 +3729,32 @@ impl Wf {
             },
         };
         if !with_graph {
-            return Ok(view);
+            return Ok((view, None));
         }
         let mut lists: BTreeMap<String, &'static str> = BTreeMap::new();
         for (name, list) in [("queue", &view.queue), ("skipped", &view.skipped)] {
             lists.extend(list.iter().map(|i| (node_key(&i.repo, i.number), name)));
         }
         lists.extend(view.blocked.iter().map(|b| (node_key(&b.issue.repo, b.issue.number), "blocked")));
-        view.graph = Some(graph(&covered, &aliases, all, &tickets, &lists, &sc));
-        Ok(view)
+        let mut g = graph(&covered, &aliases, all, &tickets, &lists, &sc);
+        g.dismissed_edges = self.dismissed_edges_for_graph(&g, &covered, &aliases)?;
+        let triage = if capture_triage {
+            let mut repo_trees: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for repo in &covered.all {
+                if let Some(local) = sc.local_repos.get(&repo.to_ascii_lowercase()) {
+                    let mut files: Vec<String> = local.tree_files.iter().cloned().collect();
+                    files.sort();
+                    if !files.is_empty() {
+                        repo_trees.insert(repo.clone(), files);
+                    }
+                }
+            }
+            Some(TriageSnapshot { covered_repos: covered.all.clone(), graph: g.clone(), bodies, repo_trees })
+        } else {
+            None
+        };
+        view.graph = Some(g);
+        Ok((view, triage))
     }
 
     async fn revalidate_live_file_conflicts(
@@ -3659,8 +3866,13 @@ impl Wf {
             static_paths: &static_paths,
         })
         .await;
+        let dismissed = self.dismissed_edge_set(aliases)?;
         let mut out = Vec::new();
         for (repo, number, files) in overlaps {
+            let canon = canonicalize_repo(aliases, &repo);
+            if is_dismissed(&dismissed, FILE_CONFLICT, &cand_repo, candidate.number, &canon, number) {
+                continue;
+            }
             let tk = node_key(&repo, number);
             let iref = extra_refs.get(&tk).or_else(|| sc.known_refs.get(&tk).map(|(r, _)| r));
             out.push(FileConflictBlock {

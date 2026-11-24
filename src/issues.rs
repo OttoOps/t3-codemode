@@ -7,10 +7,11 @@ use serde_json::{Value, json};
 
 use crate::board::{BOARD, Issue, LaunchArgs, gh_name, parse_github_issue_only};
 use crate::clock::local_clock;
-use crate::flow::{BLOCKED_BY, PARENT, SOURCE_BODY};
+use crate::flow::{BLOCKED_BY, CODE_DEP, FILE_CONFLICT, PARENT, SOURCE_BODY, canonical_dismissed_edge_key};
 use crate::flow_body;
 use crate::github::{
     self, EnsureLabelOutcome, GraphQlError, IssueNode, IssueNodeRef, LabelNode, LabelSpec, LinkOutcome, RepoNode,
+    UnlinkOutcome,
 };
 use crate::store::NewIssue;
 use crate::wf::{NO_CALLER, Wf};
@@ -18,7 +19,7 @@ use crate::wf::{NO_CALLER, Wf};
 const MAX_TITLE: usize = 300;
 const MAX_NOTE: usize = 2000;
 const MAX_LABEL: usize = 50;
-const MAX_GRAPHQL_ISSUE_NUMBER: u64 = i32::MAX as u64;
+pub(crate) const MAX_GRAPHQL_ISSUE_NUMBER: u64 = i32::MAX as u64;
 
 const COLOR_TRACK: &str = "1d76db";
 const COLOR_PRIORITY_HIGH: &str = "b60205";
@@ -175,18 +176,85 @@ pub struct WiringReport {
 }
 
 #[derive(Clone, Debug)]
-struct DesiredLabel {
-    name: String,
-    alt_name: Option<String>,
-    color: &'static str,
-    description: Option<&'static str>,
+pub(crate) struct DesiredLabel {
+    pub(crate) name: String,
+    pub(crate) alt_name: Option<String>,
+    pub(crate) color: &'static str,
+    pub(crate) description: Option<&'static str>,
 }
 
 #[derive(Clone, Debug)]
-struct WiringPlan {
-    blocked_by: Vec<(String, u64)>,
-    parent: Option<(String, u64)>,
-    labels: Vec<DesiredLabel>,
+pub(crate) struct WiringPlan {
+    pub(crate) blocked_by: Vec<(String, u64)>,
+    pub(crate) parent: Option<(String, u64)>,
+    pub(crate) replace_parent: bool,
+    pub(crate) labels: Vec<DesiredLabel>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowEdgeArgs {
+    pub action: String,
+    pub from: String,
+    pub to: String,
+    pub kind: String,
+    #[serde(default)]
+    pub replace_parent: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowEdgeResponse {
+    pub ok: bool,
+    pub action: String,
+    pub from: String,
+    pub to: String,
+    pub kind: String,
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub permission: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conflict: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub existing_parent: Option<String>,
+    pub flow: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_error: Option<String>,
+}
+
+fn deserialize_patch_string<'de, D>(de: D) -> std::result::Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(de).map(Some)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowIssueUpdateArgs {
+    pub issue: String,
+    #[serde(default, deserialize_with = "deserialize_patch_string")]
+    pub track: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_patch_string")]
+    pub priority: Option<Option<String>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowIssueUpdateResponse {
+    pub ok: bool,
+    pub issue: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<Option<String>>,
+    pub labels: Vec<LabelReport>,
+    pub errors: Vec<WiringError>,
+    pub flow: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -230,13 +298,13 @@ struct PlannedIssue {
     note: Option<String>,
 }
 
-struct WireCaches {
-    nodes: HashMap<(String, u64), IssueNode>,
-    labels: HashMap<(String, String), LabelNode>,
+pub(crate) struct WireCaches {
+    pub(crate) nodes: HashMap<(String, u64), IssueNode>,
+    pub(crate) labels: HashMap<(String, String), LabelNode>,
 }
 
 impl WireCaches {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { nodes: HashMap::new(), labels: HashMap::new() }
     }
 }
@@ -245,16 +313,28 @@ pub fn issue_key(i: &Issue) -> String {
     i.slug().to_ascii_lowercase()
 }
 
-fn node_cache_key(repo: &str, number: u64) -> (String, u64) {
+pub(crate) fn node_cache_key(repo: &str, number: u64) -> (String, u64) {
     (repo.to_ascii_lowercase(), number)
 }
 
-fn ref_slug(repo: &str, number: u64) -> String {
+pub(crate) fn ref_slug(repo: &str, number: u64) -> String {
     format!("{repo}#{number}")
 }
 
 fn format_flow_ref(item_repo: &str, target_repo: &str, number: u64) -> String {
     if item_repo.eq_ignore_ascii_case(target_repo) { format!("#{number}") } else { format!("{target_repo}#{number}") }
+}
+
+fn is_track_prefix_label(name: &str) -> bool {
+    name.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("track:")) && !name[6..].trim().is_empty()
+}
+
+fn is_priority_prefix_label(name: &str) -> bool {
+    let Some(head) = name.get(..9) else { return false };
+    if !head.eq_ignore_ascii_case("priority:") {
+        return false;
+    }
+    matches!(name[9..].trim().to_ascii_lowercase().as_str(), "high" | "medium" | "low")
 }
 
 fn priority_color(priority: &str) -> &'static str {
@@ -281,7 +361,7 @@ fn parse_repo_name(raw: &str, method: &str, field: &str) -> Result<String> {
     Ok(format!("{owner}/{name}"))
 }
 
-fn parse_github_ref(raw: &str, default_repo: &str, method: &str, field: &str) -> Result<(String, u64)> {
+pub(crate) fn parse_github_ref(raw: &str, default_repo: &str, method: &str, field: &str) -> Result<(String, u64)> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         bail!("{method}: {field} must not be empty");
@@ -309,7 +389,7 @@ fn parse_github_ref(raw: &str, default_repo: &str, method: &str, field: &str) ->
     Ok((format!("{owner}/{repo}"), number))
 }
 
-fn normalize_priority(raw: Option<String>, method: &str) -> Result<Option<&'static str>> {
+pub(crate) fn normalize_priority(raw: Option<String>, method: &str) -> Result<Option<&'static str>> {
     let Some(raw) = raw else { return Ok(None) };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -325,7 +405,7 @@ fn normalize_priority(raw: Option<String>, method: &str) -> Result<Option<&'stat
     }
 }
 
-fn normalize_track(raw: Option<String>, method: &str) -> Result<Option<String>> {
+pub(crate) fn normalize_track(raw: Option<String>, method: &str) -> Result<Option<String>> {
     let Some(raw) = raw else { return Ok(None) };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -377,7 +457,7 @@ fn normalize_touches(raw: Vec<String>, method: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
-fn desired_labels(
+pub(crate) fn desired_labels(
     track: Option<&str>,
     priority: Option<&str>,
     opt_in_label: Option<&str>,
@@ -870,7 +950,7 @@ impl Wf {
         Ok(json!({"added": true, "issue": issue_view(seq, &entry), "message": message}))
     }
 
-    async fn resolve_issue_cached(
+    pub(crate) async fn resolve_issue_cached(
         &self,
         caches: &mut WireCaches,
         repo: &str,
@@ -889,7 +969,7 @@ impl Wf {
         Ok(node)
     }
 
-    async fn wire_issue_node(
+    pub(crate) async fn wire_issue_node(
         &self,
         issue_node: &IssueNode,
         plan: &WiringPlan,
@@ -921,7 +1001,9 @@ impl Wf {
                     }
                     Ok(parent_node) => {
                         let canon = ref_slug(&parent_node.repo, parent_node.number);
-                        match github::add_sub_issue(&*self.github, &parent_node.id, &issue_node.id, false).await {
+                        match github::add_sub_issue(&*self.github, &parent_node.id, &issue_node.id, plan.replace_parent)
+                            .await
+                        {
                             Ok(LinkOutcome::Linked) => {
                                 parent_report = Some(LinkReport::ok(canon, "linked"));
                             }
@@ -1335,6 +1417,7 @@ impl Wf {
             let plan = WiringPlan {
                 blocked_by: group.blockers.iter().map(|(_, r, n, _)| (r.clone(), *n)).collect(),
                 parent: primary_parents.first().map(|(_, r, n, _)| (r.clone(), *n)),
+                replace_parent: false,
                 labels: Vec::new(),
             };
             let report = self.wire_issue_node(&from_node, &plan, &mut caches).await;
@@ -1487,6 +1570,379 @@ impl Wf {
         })
     }
 
+    pub(crate) fn clear_dismissed_edge(
+        &self,
+        kind: &str,
+        from_repo: &str,
+        from_num: u64,
+        to_repo: &str,
+        to_num: u64,
+    ) -> Result<bool> {
+        let from_canon = self.canonical_github_repo(from_repo);
+        let to_canon = self.canonical_github_repo(to_repo);
+        let (cf, ct) = canonical_dismissed_edge_key(kind, &from_canon, from_num, &to_canon, to_num);
+        let mut removed = self.store.flow_dismissed_edge_remove(&cf, kind, &ct)?;
+        let (rf, rt) = canonical_dismissed_edge_key(kind, from_repo, from_num, to_repo, to_num);
+        if (rf != cf || rt != ct) && self.store.flow_dismissed_edge_remove(&rf, kind, &rt)? {
+            removed = true;
+        }
+        Ok(removed)
+    }
+
+    pub(crate) async fn apply_track_and_priority(
+        &self,
+        issue_node: &IssueNode,
+        track_edit: Option<Option<&str>>,
+        priority_edit: Option<Option<&str>>,
+        caches: &mut WireCaches,
+    ) -> (Vec<LabelReport>, Vec<WiringError>) {
+        let mut label_reports = Vec::new();
+        let mut errors = Vec::new();
+
+        // Attach replacements before removing old labels so an add/ensure failure never drops the prior value.
+        let desired = desired_labels(track_edit.flatten(), priority_edit.flatten(), None, &[]);
+        let mut track_add_ok = true;
+        let mut prio_add_ok = true;
+        if !desired.is_empty() {
+            let plan = WiringPlan { blocked_by: Vec::new(), parent: None, replace_parent: false, labels: desired };
+            let report = self.wire_issue_node(issue_node, &plan, caches).await;
+            for lr in &report.labels {
+                if lr.status == "error" {
+                    if is_track_prefix_label(&lr.name) {
+                        track_add_ok = false;
+                    }
+                    if is_priority_prefix_label(&lr.name) {
+                        prio_add_ok = false;
+                    }
+                }
+            }
+            label_reports.extend(report.labels);
+            errors.extend(report.errors);
+        }
+
+        let mut to_remove: Vec<&LabelNode> = Vec::new();
+        for lbl in &issue_node.labels {
+            if let Some(want_track) = track_edit
+                && track_add_ok
+                && is_track_prefix_label(&lbl.name)
+            {
+                let cur = lbl.name[6..].trim();
+                if want_track.is_none_or(|w| !cur.eq_ignore_ascii_case(w)) {
+                    to_remove.push(lbl);
+                    continue;
+                }
+            }
+            if let Some(want_prio) = priority_edit
+                && prio_add_ok
+                && is_priority_prefix_label(&lbl.name)
+            {
+                let cur = lbl.name[9..].trim();
+                if want_prio.is_none_or(|w| !cur.eq_ignore_ascii_case(w)) {
+                    to_remove.push(lbl);
+                }
+            }
+        }
+        if !to_remove.is_empty() {
+            let ids: Vec<String> = to_remove.iter().map(|l| l.id.clone()).collect();
+            match github::remove_labels(&*self.github, &issue_node.id, &ids).await {
+                Ok(()) => {
+                    for lbl in to_remove {
+                        label_reports.push(LabelReport { name: lbl.name.clone(), status: "removed", error: None });
+                    }
+                }
+                Err(e) => {
+                    errors.push(WiringError {
+                        op: "removeLabels",
+                        target: ref_slug(&issue_node.repo, issue_node.number),
+                        message: e.message.clone(),
+                        permission: e.permission,
+                    });
+                    for lbl in to_remove {
+                        label_reports.push(LabelReport {
+                            name: lbl.name.clone(),
+                            status: "error",
+                            error: Some(e.message.clone()),
+                        });
+                    }
+                }
+            }
+        }
+        (label_reports, errors)
+    }
+
+    pub async fn edit_flow_edge(&self, args: FlowEdgeArgs) -> Result<FlowEdgeResponse> {
+        let action = args.action.trim().to_string();
+        let kind = args.kind.trim().to_string();
+        if !matches!(action.as_str(), "add" | "remove" | "confirm" | "dismiss" | "restore") {
+            bail!(
+                "edit_flow_edge: unknown action {action:?}; use \"add\", \"remove\", \"confirm\", \"dismiss\", or \"restore\""
+            );
+        }
+        if !matches!(kind.as_str(), BLOCKED_BY | PARENT | FILE_CONFLICT | CODE_DEP) {
+            bail!(
+                "edit_flow_edge: unknown kind {kind:?}; use \"blockedBy\", \"parent\", \"fileConflict\", or \"codeDep\""
+            );
+        }
+        if matches!(action.as_str(), "add" | "remove") && !matches!(kind.as_str(), BLOCKED_BY | PARENT) {
+            bail!("edit_flow_edge: action {action:?} only applies to \"blockedBy\" or \"parent\"");
+        }
+
+        let from_issue = parse_github_issue_only(args.from.trim()).ok_or_else(|| {
+            anyhow!(
+                "edit_flow_edge: from {:?} is not a GitHub issue; use <owner>/<repo>#<n> or a GitHub issue URL",
+                args.from
+            )
+        })?;
+        let (f_owner, f_repo, from_num) = from_issue.github_parts().expect("GitHub issue has parts");
+        if from_num == 0 || from_num > MAX_GRAPHQL_ISSUE_NUMBER {
+            bail!("edit_flow_edge: from {:?} has an out-of-range issue number", args.from);
+        }
+        let from_repo = format!("{f_owner}/{f_repo}");
+        let (to_repo, to_num) = parse_github_ref(&args.to, &from_repo, "edit_flow_edge", "to")?;
+        if from_num == to_num && from_repo.eq_ignore_ascii_case(&to_repo) {
+            bail!("edit_flow_edge: issue cannot link to itself");
+        }
+
+        let mut from_canon = ref_slug(&from_repo, from_num);
+        let mut to_canon = ref_slug(&to_repo, to_num);
+        let mut ok = true;
+        let status: &'static str;
+        let mut error_msg: Option<String> = None;
+        let mut permission = false;
+        let mut conflict = false;
+        let mut existing_parent: Option<String> = None;
+
+        match action.as_str() {
+            "dismiss" => {
+                let fc = self.canonical_github_repo(&from_repo);
+                let tc = self.canonical_github_repo(&to_repo);
+                let (fk, tk) = canonical_dismissed_edge_key(&kind, &fc, from_num, &tc, to_num);
+                let inserted = self.store.flow_dismissed_edge_add(&fk, &kind, &tk, &self.now())?;
+                from_canon = ref_slug(&fc, from_num);
+                to_canon = ref_slug(&tc, to_num);
+                status = if inserted { "dismissed" } else { "alreadyDismissed" };
+            }
+            "restore" => {
+                let fc = self.canonical_github_repo(&from_repo);
+                let tc = self.canonical_github_repo(&to_repo);
+                let removed = self.clear_dismissed_edge(&kind, &from_repo, from_num, &to_repo, to_num)?;
+                from_canon = ref_slug(&fc, from_num);
+                to_canon = ref_slug(&tc, to_num);
+                status = if removed { "restored" } else { "notDismissed" };
+            }
+            "add" | "confirm" => {
+                let mut caches = WireCaches::new();
+                match self.resolve_issue_cached(&mut caches, &from_repo, from_num).await {
+                    Err(e) => {
+                        ok = false;
+                        status = "error";
+                        error_msg = Some(e.message);
+                        permission = e.permission;
+                    }
+                    Ok(from_node) => {
+                        from_canon = ref_slug(&from_node.repo, from_node.number);
+                        if kind == PARENT {
+                            let plan = WiringPlan {
+                                blocked_by: Vec::new(),
+                                parent: Some((to_repo.clone(), to_num)),
+                                replace_parent: args.replace_parent,
+                                labels: Vec::new(),
+                            };
+                            let report = self.wire_issue_node(&from_node, &plan, &mut caches).await;
+                            let lr = report.parent.expect("parent plan produces parent report");
+                            to_canon = lr.reference;
+                            if lr.status == "error" {
+                                ok = false;
+                                status = "error";
+                                let msg = lr.error.unwrap_or_else(|| "GitHub returned an error".to_string());
+                                let existing = from_node.parent.as_ref().map(|p| ref_slug(&p.repo, p.number));
+                                conflict =
+                                    !lr.permission && (github::is_parent_conflict_message(&msg) || existing.is_some());
+                                existing_parent = conflict.then_some(existing).flatten();
+                                permission = lr.permission;
+                                error_msg = Some(msg);
+                            } else {
+                                status = lr.status;
+                                let (canon_to_repo, canon_to_num) = caches
+                                    .nodes
+                                    .get(&node_cache_key(&to_repo, to_num))
+                                    .map(|n| (n.repo.clone(), n.number))
+                                    .unwrap_or((to_repo.clone(), to_num));
+                                let _ = self.clear_dismissed_edge(
+                                    PARENT,
+                                    &from_node.repo,
+                                    from_node.number,
+                                    &canon_to_repo,
+                                    canon_to_num,
+                                );
+                                let _ = self.clear_dismissed_edge(PARENT, &from_repo, from_num, &to_repo, to_num);
+                            }
+                        } else {
+                            // blockedBy (native or body) OR confirming advisory fileConflict/codeDep -> native blockedBy
+                            let plan = WiringPlan {
+                                blocked_by: vec![(to_repo.clone(), to_num)],
+                                parent: None,
+                                replace_parent: false,
+                                labels: Vec::new(),
+                            };
+                            let report = self.wire_issue_node(&from_node, &plan, &mut caches).await;
+                            let lr = report.blocked_by.into_iter().next().expect("blockedBy plan produces report");
+                            to_canon = lr.reference;
+                            if lr.status == "error" {
+                                ok = false;
+                                status = "error";
+                                permission = lr.permission;
+                                error_msg = lr.error;
+                            } else {
+                                status = lr.status;
+                                let (canon_to_repo, canon_to_num) = caches
+                                    .nodes
+                                    .get(&node_cache_key(&to_repo, to_num))
+                                    .map(|n| (n.repo.clone(), n.number))
+                                    .unwrap_or((to_repo.clone(), to_num));
+                                let _ = self.clear_dismissed_edge(
+                                    BLOCKED_BY,
+                                    &from_node.repo,
+                                    from_node.number,
+                                    &canon_to_repo,
+                                    canon_to_num,
+                                );
+                                let _ = self.clear_dismissed_edge(BLOCKED_BY, &from_repo, from_num, &to_repo, to_num);
+                                if matches!(kind.as_str(), FILE_CONFLICT | CODE_DEP) {
+                                    let (fk, tk) = canonical_dismissed_edge_key(
+                                        &kind,
+                                        &from_node.repo,
+                                        from_node.number,
+                                        &canon_to_repo,
+                                        canon_to_num,
+                                    );
+                                    let _ = self.store.flow_dismissed_edge_add(&fk, &kind, &tk, &self.now());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "remove" => {
+                let mut caches = WireCaches::new();
+                match (
+                    self.resolve_issue_cached(&mut caches, &from_repo, from_num).await,
+                    self.resolve_issue_cached(&mut caches, &to_repo, to_num).await,
+                ) {
+                    (Err(e), _) | (_, Err(e)) => {
+                        ok = false;
+                        status = "error";
+                        error_msg = Some(e.message);
+                        permission = e.permission;
+                    }
+                    (Ok(from_node), Ok(to_node)) => {
+                        from_canon = ref_slug(&from_node.repo, from_node.number);
+                        to_canon = ref_slug(&to_node.repo, to_node.number);
+                        let res = if kind == PARENT {
+                            github::remove_sub_issue(&*self.github, &to_node.id, &from_node.id).await
+                        } else {
+                            github::remove_blocked_by(&*self.github, &from_node.id, &to_node.id).await
+                        };
+                        match res {
+                            Ok(UnlinkOutcome::Removed) => status = "removed",
+                            Ok(UnlinkOutcome::NotLinked) => status = "notLinked",
+                            Err(e) => {
+                                ok = false;
+                                status = "error";
+                                permission = e.permission;
+                                error_msg = Some(e.message);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => unreachable!("validated action"),
+        }
+
+        let (flow, refresh_error) = match self.flow_view(true).await {
+            Ok(fresh) => (Some(serde_json::to_value(fresh)?), None),
+            Err(e) => (None, Some(format!("{e:#}"))),
+        };
+        Ok(FlowEdgeResponse {
+            ok,
+            action,
+            from: from_canon,
+            to: to_canon,
+            kind,
+            status,
+            error: error_msg,
+            permission,
+            conflict,
+            existing_parent,
+            flow,
+            refresh_error,
+        })
+    }
+
+    pub async fn update_flow_issue(&self, args: FlowIssueUpdateArgs) -> Result<FlowIssueUpdateResponse> {
+        if args.track.is_none() && args.priority.is_none() {
+            bail!("update_flow_issue: specify track and/or priority");
+        }
+        let parsed = parse_github_issue_only(args.issue.trim()).ok_or_else(|| {
+            anyhow!(
+                "update_flow_issue: issue {:?} is not a GitHub issue; use <owner>/<repo>#<n> or a GitHub issue URL",
+                args.issue
+            )
+        })?;
+        let (owner, repo, number) = parsed.github_parts().expect("GitHub issue has parts");
+        if number == 0 || number > MAX_GRAPHQL_ISSUE_NUMBER {
+            bail!("update_flow_issue: issue {:?} has an out-of-range issue number", args.issue);
+        }
+        let full_repo = format!("{owner}/{repo}");
+        let track_edit: Option<Option<String>> = match args.track {
+            None => None,
+            Some(opt) => Some(normalize_track(opt, "update_flow_issue")?),
+        };
+        let priority_edit: Option<Option<&'static str>> = match args.priority {
+            None => None,
+            Some(opt) => Some(normalize_priority(opt, "update_flow_issue")?),
+        };
+
+        let mut caches = WireCaches::new();
+        let (issue_canon, labels, errors) = match self.resolve_issue_cached(&mut caches, &full_repo, number).await {
+            Err(e) => {
+                let target = ref_slug(&full_repo, number);
+                (
+                    target.clone(),
+                    Vec::new(),
+                    vec![WiringError { op: "readIssue", target, message: e.message, permission: e.permission }],
+                )
+            }
+            Ok(node) => {
+                let canon = ref_slug(&node.repo, node.number);
+                let (lbls, errs) = self
+                    .apply_track_and_priority(
+                        &node,
+                        track_edit.as_ref().map(|o| o.as_deref()),
+                        priority_edit,
+                        &mut caches,
+                    )
+                    .await;
+                (canon, lbls, errs)
+            }
+        };
+
+        let (flow, refresh_error) = match self.flow_view(true).await {
+            Ok(fresh) => (Some(serde_json::to_value(fresh)?), None),
+            Err(e) => (None, Some(format!("{e:#}"))),
+        };
+        Ok(FlowIssueUpdateResponse {
+            ok: errors.is_empty(),
+            issue: issue_canon,
+            track: track_edit,
+            priority: priority_edit.map(|o| o.map(String::from)),
+            labels,
+            errors,
+            flow,
+            refresh_error,
+        })
+    }
+
     pub async fn report_issue(&self, me: &str, a: IssueArgs) -> Result<Value> {
         let issue = parse_github_issue_only(&a.url).ok_or_else(|| {
             anyhow!(
@@ -1535,7 +1991,7 @@ impl Wf {
         }
         let mut out = self.record_board_issue(me, &issue, title, note, None).await?;
         if should_sync {
-            let plan = WiringPlan { blocked_by, parent, labels };
+            let plan = WiringPlan { blocked_by, parent, replace_parent: false, labels };
             let report = self.wire_existing_issue(&full_repo, number, &plan).await;
             if !report.ok {
                 let summary: Vec<String> = report
@@ -1737,8 +2193,12 @@ impl Wf {
             let labels = desired_labels(item.track.as_deref(), item.priority, item_opt_in, &item.labels);
 
             let wiring = if sync {
-                let plan =
-                    WiringPlan { blocked_by: resolved_blockers.clone(), parent: resolved_parent.clone(), labels };
+                let plan = WiringPlan {
+                    blocked_by: resolved_blockers.clone(),
+                    parent: resolved_parent.clone(),
+                    replace_parent: false,
+                    labels,
+                };
                 if plan.blocked_by.is_empty() && plan.parent.is_none() && plan.labels.is_empty() {
                     None
                 } else {
