@@ -5,6 +5,8 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::platform;
+use crate::release::Version;
 use crate::skills::{self, Bundle, Foreign, Paths, SkillState, Status};
 use crate::steps::{self, ConfigState, Env, Kind, Missing, Steps};
 
@@ -27,6 +29,10 @@ pub fn current(st: &Status, setup: &Steps) -> bool {
     st.current && !setup.needs_update()
 }
 
+pub fn newer(installed: &str, release: &str) -> bool {
+    matches!((Version::parse(installed), Version::parse(release)), (Some(i), Some(r)) if i > r)
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Drift {
@@ -35,6 +41,7 @@ pub struct Drift {
     pub present: bool,
     pub current: bool,
     pub fix: Option<String>,
+    pub service_stale: bool,
     pub foreign: Option<Foreign>,
     pub missing_steps: Vec<Missing>,
     pub config_state: Option<ConfigState>,
@@ -47,19 +54,24 @@ pub struct Drift {
 
 impl Drift {
     pub fn of(st: &Status, setup: &Steps) -> Drift {
-        let mut fixes: Vec<String> = match &st.fix {
+        let service_stale = st.installed.as_deref().is_some_and(|i| newer(i, &st.release));
+        let fix = if service_stale { Some(platform::SERVICE.restart.to_string()) } else { st.fix.clone() };
+        let mut fixes: Vec<String> = match &fix {
             Some(f) => vec![f.clone()],
             None => setup.missing.iter().filter(|m| m.kind == Kind::Auto).map(|m| m.fix.clone()).take(1).collect(),
         };
-        fixes.extend(steps::setup_fix(setup));
+        if !service_stale {
+            fixes.extend(steps::setup_fix(setup));
+        }
         Drift {
             release: st.release.clone(),
             installed: st.installed.clone(),
             present: st.installed.is_some()
                 || st.foreign.is_some()
                 || st.skills.iter().any(|k| k.state != SkillState::Missing),
-            current: current(st, setup),
-            fix: st.fix.clone(),
+            current: current(st, setup) && !service_stale,
+            fix,
+            service_stale,
             foreign: st.foreign.clone(),
             missing_steps: setup.missing.clone(),
             config_state: Some(setup.config_state),
@@ -76,6 +88,7 @@ impl Drift {
             present: true,
             current: false,
             fix: None,
+            service_stale: false,
             foreign: None,
             missing_steps: Vec::new(),
             config_state: None,

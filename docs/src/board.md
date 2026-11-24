@@ -277,6 +277,12 @@ drifted and lists each command that fixes it, such as `t3cm skills update` or
 goes away on the next check after the fix. A machine with no skills installed
 shows nothing.
 
+When the skills are newer than the release the service runs, the service is
+the stale part, so the button reads **Service needs a restart** and its fix is
+this platform's restart command, such as
+`systemctl --user restart t3-codemode`. `t3cm doctor` reports the same
+mismatch with the same command.
+
 ## Launch routing
 
 To the right of the connection status, the header shows where board ticket

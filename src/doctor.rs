@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use crate::agent_link::{self, Agent, LinkState};
 use crate::config::{Config, RemoteMode};
 use crate::drift::{self, Home};
+use crate::platform;
 use crate::skills::Bundle;
 use crate::slots::{self, Enabled, Folders, Inputs, Resolved};
 use crate::store::InstanceFolder;
@@ -23,13 +24,26 @@ impl Findings {
     }
 }
 
-pub fn skills(home: &Home, bundle: &Bundle) -> Findings {
+pub fn skills(home: &Home, bundle: &Bundle, served: Option<&str>) -> Findings {
     let mut f = Findings::default();
     let d = drift::check(home, bundle);
+    let stale = served.zip(d.installed.as_deref()).filter(|(s, i)| drift::newer(i, s));
+    if let Some((s, i)) = stale {
+        f.problems.push(format!(
+            "service: runs t3cm {s}, but the T3 workflow skills are at {i}; restart the service to load {i}: {}",
+            platform::SERVICE.restart
+        ));
+        if d.service_stale {
+            return f;
+        }
+    }
     if let Some(e) = &d.error {
         f.problems.push(format!("skills: {e}"));
     } else if !d.present {
         f.warnings.push("skills: t3cm has not installed the T3 workflow skills; run t3cm skills install".into());
+    } else if d.service_stale {
+        let i = d.installed.as_deref().unwrap_or_default();
+        f.warnings.push(format!("skills: at {i}, newer than this t3cm {}; run doctor from t3cm {i}", d.release));
     } else if !d.current {
         let fix = if d.fixes.is_empty() { "t3cm skills update".to_string() } else { d.fixes.join(", then ") };
         f.problems.push(format!("skills: not current with release {}; fix: {fix}", d.release));

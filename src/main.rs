@@ -1218,7 +1218,7 @@ async fn run_doctor(a: DoctorArgs) -> Result<ExitCode> {
     f.extend(doctor::remote_board(cfg.as_ref(), a.port, health_val.as_ref(), &TailscaleCli::from_env()));
     let home = t3_codemode::drift::Home::from_env()?;
     let bundle = skills::Bundle::embedded();
-    f.extend(doctor::skills(&home, &bundle));
+    f.extend(doctor::skills(&home, &bundle, health_val.as_ref().and_then(|h| h["version"].as_str())));
     f.extend(doctor::stale_copies(&home, &bundle, &folders.codex));
     f.extend(doctor::t3wf_leftovers(&folders));
     let store_dir = state_dir(&a.state);
