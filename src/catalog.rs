@@ -26,7 +26,7 @@ pub struct Catalog {
 }
 
 const WAKE_RESULT: &str = r#"{ handle: string; delivery: "noted" | "sent" | "queued" | "board"; detail?: string; card?: string; options?: string[]; warning?: string; closed?: boolean }"#;
-const MERGE_SIGNATURE: &str = r#"wf.merge(input: { repo: string; pr: number; head: string; method?: "merge" | "squash" | "rebase" }): Promise<{ repo: string; pr: number; head: string } & ({ status: "queued"; position: number | null; approval: string } | { status: "merged"; commit: string | null; method?: "merge" | "squash" | "rebase" } | { status: "waiting"; mergeState: string; approval: string } | { status: "refused"; reason: string })>;"#;
+const MERGE_SIGNATURE: &str = r#"wf.merge(input: { repo: string; pr?: number; head: string; method?: "merge" | "squash" | "rebase" }): Promise<{ repo: string; pr: number; head: string } & ({ status: "queued"; position: number | null; approval: string } | { status: "merged"; commit: string | null; method?: "merge" | "squash" | "rebase" } | { status: "waiting"; mergeState: string; approval: string; reason?: string } | { status: "refused"; reason: string })>;"#;
 const CARD: &str = r#"{ id: string; kind: string; label: string | null; ticket: string | null; link: string | null; text: string; handle: string | null; options: string[]; at: string; atLocal: string; resolved?: string; resolution?: string | null; token: string; approval?: string; repo: string | null; project: { id: string; title: string | null } | null }"#;
 
 const NEW_ISSUE: &str = "{ id: string; url: string; repo: string; number: number; label: string; title: string | null; note: string | null; thread: string; threadLink: string | null; threadTitle: string | null; at: string; atLocal: string; dismissed: boolean; dismissedAt: string | null; dismissedAtLocal: string | null; restoredAt: string | null }";
@@ -424,13 +424,14 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.merge",
             "wf",
-            "Merge a GitHub pull request through the service's gh login, only at the approved head commit (refused when the PR's head differs). On a repo with a merge queue: a mergeable PR is enqueued (never auto-merge); one not yet mergeable is recorded as waiting to be queued and returns waiting. Without a merge queue: merged directly with method, or the repo's default method. Throws when gh cannot reach GitHub.",
+            "Merge a GitHub pull request through the service's gh login, or a GitLab merge request on a host listed under forges through its glab login, only at the approved head commit (refused when the head differs). On a repo with a merge queue or a GitLab project with merge trains: a mergeable PR is enqueued or joins the train (never auto-merge); one not yet mergeable is recorded as waiting and returns waiting. Without one: merged directly with method, or the repo's default method (on GitLab, the merge request's squash setting; squash is the only method GitLab takes per merge). A GitLab answer that it cannot merge yet (HTTP 405), or an auto-merge it set that t3cm takes back, returns waiting with reason. Throws when gh or glab cannot reach the forge.",
             MERGE_SIGNATURE,
             obj(
-                json!({"repo": {"type": "string", "description": "owner/name"}, "pr": {"type": "integer"},
+                json!({"repo": {"type": "string", "description": "owner/name, <host>/<full path> for a GitLab host listed under forges, or a merge request URL"},
+                       "pr": {"type": "integer", "description": "the PR number or merge request iid; optional with a merge request URL"},
                        "head": {"type": "string", "description": "the approved head commit, full 40-character SHA"},
                        "method": {"enum": ["merge", "squash", "rebase"]}}),
-                &["repo", "pr", "head"],
+                &["repo", "head"],
             ),
         ),
         builtin(

@@ -1,6 +1,6 @@
 use crate::common::*;
 use serde_json::{Value, json};
-use t3_codemode::board::{BOARD, card_text, reply_options};
+use t3_codemode::board::{BOARD, reply_options};
 use t3_codemode::config::Config;
 use t3_codemode::fake::{gitlab_mr, gitlab_pipeline, project, thread};
 
@@ -84,9 +84,7 @@ async fn a_merge_request_url_is_checked_and_its_ready_opens_a_merge_card() {
     let body = shown["body"].as_str().unwrap();
     assert!(body.starts_with("**ACTION NEEDED:** merge #7 at head 1111111"), "{body}");
     assert!(body.contains(&format!("here: {URL}")), "{body}");
-    let shown = card_text(body);
-    let note = shown.find("t3cm sends your answer to the ticket, which merges it on GitLab");
-    assert!(note.is_some_and(|i| i < shown.find("reply").unwrap()), "the note leads the reply clause: {shown}");
+    assert!(body.starts_with("**ACTION NEEDED:** merge #7 at head 1111111: reply"), "{body}");
     assert_eq!(reply_options(body), ["merge"]);
     let paths: Vec<String> = h.gitlab.calls().iter().filter_map(|c| c["path"].as_str().map(String::from)).collect();
     assert!(paths.iter().any(|p| p.ends_with("/merge_requests/7/diffs?per_page=100&page=1")), "{paths:?}");

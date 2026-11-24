@@ -10,6 +10,7 @@ mod config_reload;
 mod flow;
 mod flow_chaos;
 mod gitlab;
+mod gitlab_merge;
 mod gitlab_pr;
 mod issues;
 mod live_github;
