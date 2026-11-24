@@ -2835,24 +2835,36 @@ async fn failed_sibling_read_and_out_of_range_issue_numbers_keep_dependents_safe
     h.github.set_issue(REPO, github_issue(11, "After failed open read", &[FLOW], "2026-03-04T00:00:00Z"));
     h.github.set_body(REPO, 11, "After #1, Setup auth\n");
 
+    // #12 uses a required symbolic ref `After #1, "Dup auth"` where closed #3 and open unlabelled
+    // #4 share the title "Dup auth". When the open-sibling read fails, Flow must NOT accept closed
+    // #3 as definitive and launch #12 while #4 is open.
+    h.github.set_issue(REPO, github_issue(3, "Dup auth", &[], "2026-03-01T10:00:00Z"));
+    h.github.close_issue(REPO, 3);
+    h.github.set_issue(REPO, github_issue(4, "Dup auth", &[], "2026-03-02T10:00:00Z"));
+    h.github.set_issue(REPO, github_issue(12, "Required symbolic failed open read", &[FLOW], "2026-03-05T00:00:00Z"));
+    h.github.set_body(REPO, 12, "After #1, \"Dup auth\"\n");
+
     h.github.fail_unlabelled_open_issues(Some("transient GraphQL error on open siblings"));
 
     let q = flow(&h).await;
-    assert_eq!(labels(&q["queue"]), Vec::<String>::new(), "neither #10 nor #11 may enter queue: {q}");
-    assert_eq!(labels(&q["blocked"]), ["widgets#10", "widgets#11"], "{q}");
+    assert_eq!(labels(&q["queue"]), Vec::<String>::new(), "none of #10, #11, #12 may enter queue: {q}");
+    assert_eq!(labels(&q["blocked"]), ["widgets#10", "widgets#11", "widgets#12"], "{q}");
     assert_eq!(labels(&q["blocked"][0]["blockers"]), ["tools#7"]);
     assert_eq!(q["blocked"][0]["unresolved"], json!(["#9999999999999"]));
     assert_eq!(q["blocked"][1]["unresolved"], json!(["Setup auth"]));
+    assert_eq!(q["blocked"][2]["unresolved"], json!(["Dup auth"]));
 
-    // wf.flow.next() must refuse to launch #11 while its supplemental open-sibling read failed.
+    // wf.flow.next() must refuse to launch #11 or #12 while the supplemental open-sibling read failed.
     let pick = next(&h).await;
     assert_eq!(pick["picked"], json!([]), "{pick}");
     assert!(h.fake.launched().is_empty());
 
-    // Once the supplemental open read recovers, #10 still resolves tools#7 and #11 resolves #2 cleanly.
+    // Once the supplemental open read recovers, #10 resolves tools#7, #11 resolves open #2, and
+    // #12 stays blocked as ambiguous between closed #3 and open #4.
     h.github.fail_unlabelled_open_issues(None);
     let q2 = flow(&h).await;
-    assert_eq!(labels(&q2["blocked"]), ["widgets#10", "widgets#11"], "{q2}");
+    assert_eq!(labels(&q2["blocked"]), ["widgets#10", "widgets#11", "widgets#12"], "{q2}");
     assert_eq!(labels(&q2["blocked"][1]["blockers"]), ["widgets#2"]);
     assert!(q2["blocked"][1].get("unresolved").is_none());
+    assert_eq!(q2["blocked"][2]["unresolved"], json!(["Dup auth"]));
 }

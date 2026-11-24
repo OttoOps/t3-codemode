@@ -1739,6 +1739,8 @@ impl Wf {
                         resolved[idx].blockers.push((canon, number));
                     }
                     BodyRef::Symbolic(raw) => {
+                        let canon_me = canonicalize_repo(&aliases, &me_repo).to_ascii_lowercase();
+                        let open_failed = failed_open_repos.contains(&canon_me);
                         match flow_body::resolve_symbolic(
                             &raw,
                             RefRole::Blocker,
@@ -1749,7 +1751,21 @@ impl Wf {
                         ) {
                             ResolveOutcome::Resolved(repo, number) => {
                                 let canon = canonicalize_repo(&aliases, &repo);
-                                resolved[idx].blockers.push((canon, number));
+                                let k = node_key(&canon, number);
+                                if open_failed && known.get(&k).is_some_and(|(_, st)| *st == Some("closed")) {
+                                    let msg = format!(
+                                        "Could not verify blocker reference \"{raw}\" (reading open siblings in {me_repo} failed)"
+                                    );
+                                    record_unresolved_ref(
+                                        &mut r.warnings,
+                                        &mut r.unresolved_blockers,
+                                        RefRole::Blocker,
+                                        raw,
+                                        Some(msg),
+                                    );
+                                } else {
+                                    resolved[idx].blockers.push((canon, number));
+                                }
                             }
                             ResolveOutcome::Ambiguous(matches) => {
                                 let msg =
