@@ -1324,7 +1324,6 @@ impl Model {
         let head = gh_head(m);
         let wait = self.waits.get(&pr).cloned();
         let sent = wait.as_ref().filter(|w| w.status == St::Sent).map(|w| w.at.clone());
-        let status = wait.as_ref().map(|w| w.status);
         let prev = self.seen.get(&pr).cloned();
         let live = self.live_tickets(pr, seqs);
         let since = live
@@ -1333,7 +1332,7 @@ impl Model {
             .chain(std::iter::once(t_since.to_string()))
             .min_by_key(|s| ts(s))
             .unwrap();
-        let left = if m.state != "OPEN" || m.queued {
+        let mut left = if m.state != "OPEN" || m.queued {
             None
         } else if prev.as_ref().is_some_and(|p| p.queued) {
             Some(self.now.clone())
@@ -1352,7 +1351,13 @@ impl Model {
         let mut advance = None;
         match m.state {
             "MERGED" | "CLOSED" => code = self.finished(pr, m, seqs, wait.as_ref(), &live, &since),
-            _ => advance = self.open(pr, m, seqs, wait, &live, &after, left.as_deref()),
+            _ => {
+                let (next, clear_left) = self.open(pr, m, seqs, wait, &live, &after, left.as_deref());
+                if clear_left {
+                    left = None;
+                }
+                advance = next;
+            }
         }
         let queued_at = if m.state == "OPEN" && m.queued {
             Some(self.now.clone())
@@ -1360,7 +1365,10 @@ impl Model {
             prev.as_ref().and_then(|p| p.queued_at.clone())
         };
         let left = match left {
-            Some(l) => self.exited(pr, m, &l, &live, &after, status),
+            Some(l) => {
+                let status = self.waits.get(&pr).map(|w| w.status);
+                self.exited(pr, m, &l, &live, &after, status)
+            }
             None => None,
         };
         let row = SeenM {
@@ -1504,7 +1512,7 @@ impl Model {
         live: &[(String, String)],
         after: &str,
         left: Option<&str>,
-    ) -> Option<WaitM> {
+    ) -> (Option<WaitM>, bool) {
         let head = gh_head(m);
         if self.dropped(pr, m, live, after) {
             wait.take();
@@ -1579,6 +1587,7 @@ impl Model {
         {
             moved.push((w.thread.clone(), w.head.clone(), Vec::new()));
         }
+        let mut clear_left = false;
         for (t, old) in moved.into_iter().map(|(t, _, old)| (t, old)) {
             if wait.as_ref().is_some_and(|w| w.thread == t && w.head == head) {
                 self.resolve(|c| old.contains(&c.seq));
@@ -1591,13 +1600,17 @@ impl Model {
             if kind == "report" {
                 self.release_and_sync(std::slice::from_ref(&t));
             }
-            if wait.as_ref().is_some_and(|w| w.thread == t) {
-                wait = None;
+            if let Some(w) = wait.take_if(|w| w.thread == t) {
+                if w.status == St::Sent {
+                    clear_left = true;
+                }
                 self.waits.remove(&pr);
             }
         }
-        let mut w = wait.filter(|w| w.head == head)?;
-        match (w.status, m.queued) {
+        let Some(mut w) = wait.filter(|w| w.head == head) else {
+            return (None, clear_left);
+        };
+        let advance = match (w.status, m.queued) {
             (St::Waiting, true) => {
                 w.status = St::Sent;
                 self.waits.insert(pr, w);
@@ -1614,11 +1627,12 @@ impl Model {
             }
             (St::Waiting, false) if !m.draft => {
                 if w.id_ok {
-                    return Some(w);
+                    Some(w)
+                } else {
+                    self.raise(pr, Some(&w.thread.clone()), "report", &head, None, Tag::Plain);
+                    self.waits.remove(&pr);
+                    None
                 }
-                self.raise(pr, Some(&w.thread.clone()), "report", &head, None, Tag::Plain);
-                self.waits.remove(&pr);
-                None
             }
             (St::Sent, true) if w.failures > 0 => {
                 w.failures = 0;
@@ -1631,7 +1645,8 @@ impl Model {
                 None
             }
             _ => None,
-        }
+        };
+        (advance, clear_left)
     }
 
     fn failed(&mut self, pr: u64, mut w: WaitM, event: Option<&str>) {

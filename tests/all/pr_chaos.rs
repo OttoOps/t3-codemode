@@ -1329,14 +1329,16 @@ async fn run_sequential_ops(
                                 trace.join("\n")
                             );
                         }
-                        let retrying_prs: BTreeSet<(String, u64)> = h
-                            .app
-                            .store
-                            .merge_waits()
-                            .unwrap()
-                            .into_iter()
+                        let retrying_waits = h.app.store.merge_waits().unwrap();
+                        let retrying_prs: BTreeSet<(String, u64)> = retrying_waits
+                            .iter()
                             .filter(|w| w.failures > 0)
-                            .map(|w| (w.repo, w.pr))
+                            .map(|w| (w.repo.clone(), w.pr))
+                            .collect();
+                        let retrying_sent_prs: BTreeSet<(String, u64)> = retrying_waits
+                            .iter()
+                            .filter(|w| w.status == WaitStatus::Sent && w.failures > 0)
+                            .map(|w| (w.repo.clone(), w.pr))
                             .collect();
                         let before_msgs = h.sent().len();
                         let before_cards: Vec<String> =
@@ -1351,6 +1353,16 @@ async fn run_sequential_ops(
                             "second reconcile failed: {rec2:?}\nseed={run_id}\n{}",
                             trace.join("\n")
                         );
+                        let remaining_waits: BTreeSet<(String, u64)> = h
+                            .app
+                            .store
+                            .merge_waits()
+                            .unwrap()
+                            .into_iter()
+                            .map(|w| (w.repo, w.pr))
+                            .collect();
+                        let retired_sent_prs: BTreeSet<(String, u64)> =
+                            retrying_sent_prs.into_iter().filter(|k| !remaining_waits.contains(k)).collect();
                         let after_cards: Vec<String> = h
                             .app
                             .wf
@@ -1360,10 +1372,12 @@ async fn run_sequential_ops(
                             .filter(|c| {
                                 before_set.contains(&c.id)
                                     || !(c.kind == "report"
-                                        && c.text.contains("GitHub would not ")
-                                        && c.pr
-                                            .as_ref()
-                                            .is_some_and(|p| retrying_prs.contains(&(p.repo.clone(), p.number))))
+                                        && c.pr.as_ref().is_some_and(|p| {
+                                            let key = (p.repo.clone(), p.number);
+                                            (c.text.contains("GitHub would not ") && retrying_prs.contains(&key))
+                                                || (c.text.contains("no reason recorded")
+                                                    && retired_sent_prs.contains(&key))
+                                        }))
                             })
                             .map(|c| c.id)
                             .collect();
@@ -3060,4 +3074,71 @@ async fn widened_alphabet_ops_exercise_new_workflow_transitions() {
     assert!(h.app.store.pending_all().unwrap().is_empty());
     let second = h.wf(TICKETS[0], "sweep", json!({})).await;
     assert_eq!(second["dropped"], json!([]));
+}
+
+#[tokio::test]
+async fn sent_wait_retired_after_exit_window_reconciles_idempotently() {
+    // Regression for #286: PR #8 has a Sent MergeWait, leaves the merge queue without a
+    // removal reason, passes EXIT_WINDOW_MINS, and moves head before the next reconcile.
+    let seven_ops = vec![
+        Op::MergeWaitPut { pr: PrSym(1), ticket: TSym(0), reassigned_id: false },
+        Op::Reconcile,
+        Op::GhQueueConfig { pr: PrSym(1), enabled: false, queued: false },
+        Op::Reconcile,
+        Op::AdvanceTick { minutes: 35 },
+        Op::GhPush { pr: PrSym(1) },
+        Op::Reconcile,
+    ];
+    let (trace, _, _) = run_sequential_ops(&seven_ops, None, true, "issue-286").await;
+    assert_eq!(trace.iter().filter(|l| l.contains("reconcile -> ok=true")).count(), 3, "trace:\n{}", trace.join("\n"));
+
+    // Wf::failed retiring a Sent wait past EXIT_WINDOW_MINS while a second live ticket
+    // tracks PR #8: pass 1 retires the wait, reports to the second ticket, and clears left.
+    let failed_two_tickets = vec![
+        Op::FakeSetPrs { worker: WSym(2), pr: PrSym(1) },
+        Op::AdvanceTick { minutes: 1 },
+        Op::MergeWaitPut { pr: PrSym(1), ticket: TSym(0), reassigned_id: false },
+        Op::Reconcile,
+        Op::GhQueueConfig { pr: PrSym(1), enabled: false, queued: false },
+        Op::Reconcile,
+        Op::AdvanceTick { minutes: 35 },
+        Op::Reconcile,
+    ];
+    let (failed_trace, _, _) = run_sequential_ops(&failed_two_tickets, None, true, "issue-286-failed").await;
+    assert_eq!(
+        failed_trace.iter().filter(|l| l.contains("reconcile -> ok=true")).count(),
+        3,
+        "failed trace:\n{}",
+        failed_trace.join("\n")
+    );
+
+    // Same Wf::failed two-ticket case where pass 2 of the final Reconcile hits MAX_FAILURES
+    // (after an earlier read error on tracked PR #7 kept PR #8's failures at 1 instead of 2).
+    let failed_on_pass2 = vec![
+        Op::FakeSetPrs { worker: WSym(0), pr: PrSym(0) },
+        Op::FakeSetPrs { worker: WSym(2), pr: PrSym(1) },
+        Op::AdvanceTick { minutes: 1 },
+        Op::MergeWaitPut { pr: PrSym(1), ticket: TSym(0), reassigned_id: false },
+        Op::Reconcile,
+        Op::GhQueueConfig { pr: PrSym(1), enabled: false, queued: false },
+        Op::GhReadError { pr: PrSym(0), fail: true },
+        Op::Reconcile,
+        Op::GhClearReadErrors,
+        Op::AdvanceTick { minutes: 35 },
+        Op::Reconcile,
+        Op::Reconcile,
+    ];
+    let (pass2_trace, _, _) = run_sequential_ops(&failed_on_pass2, None, true, "issue-286-failed-pass2").await;
+    assert_eq!(
+        pass2_trace.iter().filter(|l| l.contains("reconcile -> ok=false")).count(),
+        1,
+        "pass2 trace:\n{}",
+        pass2_trace.join("\n")
+    );
+    assert_eq!(
+        pass2_trace.iter().filter(|l| l.contains("reconcile -> ok=true")).count(),
+        3,
+        "pass2 trace:\n{}",
+        pass2_trace.join("\n")
+    );
 }
