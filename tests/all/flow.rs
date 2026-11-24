@@ -4761,3 +4761,21 @@ async fn exact_spaced_paths_pending_worktrees_priority_displacement_optional_pr_
         "live worktree edit by running #1 on src/beta.rs must block auto-launch of #3 while #2 still launches: {launched_live:?}"
     );
 }
+
+#[tokio::test]
+async fn a_flow_read_gives_a_url_titled_ticket_its_issue_title_with_no_extra_read() {
+    let h = flowing(3);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    h.fake.put(t3_codemode::fake::thread("mcp:t1", "running", T0));
+    h.fake.update("mcp:t1", json!({"title": "widgets#1: https://github.com/acme/widgets/issues/1"}));
+    h.wf("mcp:t1", "join", json!({"parent": BOARD, "label": "widgets#1", "role": "ticket", "issue": "acme/widgets#1"}))
+        .await;
+    h.tick(0).await;
+    assert_eq!(h.app.wf.tree().unwrap()[0]["humanTitle"], Value::Null);
+
+    flow(&h).await;
+
+    assert_eq!(h.app.wf.tree().unwrap()[0]["humanTitle"], "Issue 1");
+    h.app.wf.board_tick().await.unwrap();
+    assert!(!h.github.operations().iter().any(|o| o == "issueNode"), "{:?}", h.github.operations());
+}

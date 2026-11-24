@@ -10220,3 +10220,192 @@ return {{ restored, lanes, nodes, moved, end, keysOff, keysOn, tabs, opened, dep
     let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/board.md")).unwrap();
     assert!(doc.contains("### The Graph tab"), "docs/src/board.md documents the Graph tab");
 }
+
+#[test]
+fn human_titles_drop_the_label_and_skip_urls_refs_and_slugs() {
+    use t3_codemode::board::human_title;
+    let cases = [
+        ("widgets#41: Fix the grader", "widgets#41", Some("Fix the grader")),
+        ("#287 PR 2/4: feat: enrich board titles", "#287 PR 2/4", Some("feat: enrich board titles")),
+        ("other#9: Tidy the docs", "widgets#41", Some("Tidy the docs")),
+        ("widgets#41: https://github.com/acme/widgets/issues/41", "widgets#41", None),
+        ("widgets#41: merge-gate", "widgets#41", None),
+        ("widgets#41: acme/widgets#41", "widgets#41", None),
+        ("widgets#41", "widgets#41", None),
+        ("", "widgets#41", None),
+    ];
+    for (title, label, want) in cases {
+        assert_eq!(human_title(title, label), want, "{title:?} under {label:?}");
+    }
+}
+
+#[test]
+fn a_pr_verdict_reads_its_state_and_readiness() {
+    use t3_codemode::board::pr_verdict;
+    let pr = |state: &str, r: Value| {
+        let mut p = json!({"number": 7, "url": "https://github.com/acme/widgets/pull/7", "state": state});
+        if !r.is_null() {
+            p["readiness"] = r;
+        }
+        p
+    };
+    let r = |draft: bool, merge: &str, review: Value, checks: Value| json!({"isDraft": draft, "mergeStateStatus": merge, "reviewDecision": review, "checks": checks});
+    let cases = [
+        (pr("merged", Value::Null), "merged"),
+        (pr("closed", Value::Null), "closed"),
+        (pr("queued", Value::Null), "queued"),
+        (pr("open", Value::Null), "open"),
+        (pr("open", r(false, "CLEAN", json!("APPROVED"), json!("passing"))), "ready"),
+        (pr("open", r(false, "UNSTABLE", Value::Null, Value::Null)), "ready"),
+        (pr("open", r(false, "BLOCKED", json!("APPROVED"), json!("failing"))), "failing"),
+        (pr("open", r(true, "CLEAN", Value::Null, json!("passing"))), "draft"),
+        (pr("open", r(false, "BLOCKED", json!("CHANGES_REQUESTED"), json!("passing"))), "changes"),
+        (pr("open", r(false, "BLOCKED", Value::Null, json!("failing"))), "checksFailing"),
+        (pr("open", r(false, "BLOCKED", Value::Null, json!("pending"))), "checksPending"),
+        (pr("open", r(false, "DIRTY", Value::Null, json!("passing"))), "conflict"),
+        (pr("open", r(false, "BEHIND", Value::Null, json!("passing"))), "behind"),
+        (pr("open", r(false, "BLOCKED", json!("REVIEW_REQUIRED"), json!("passing"))), "review"),
+    ];
+    for (p, want) in cases {
+        assert_eq!(pr_verdict(&p), Some(want), "{p}");
+    }
+    assert_eq!(pr_verdict(&Value::Null), None);
+}
+
+#[tokio::test]
+async fn a_url_titled_ticket_is_served_with_its_issue_title() {
+    let s = start(H::new()).await;
+    s.h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    s.h.remotes.set("/src/widgets", "https://github.com/acme/widgets.git");
+    s.h.github.set_issue("acme/widgets", t3_codemode::fake::github_issue(41, "Fix the grader", &[], T0));
+    let url = "https://github.com/acme/widgets/issues/41";
+    let r = result(&s.h.exec(&format!("async () => wf.launchTicket({{ issue: '{url}' }})")).await);
+    assert_eq!(r["title"], format!("widgets#41: {url}"), "{r}");
+    let mut th = thread("launch:1", "running", T0);
+    th["title"] = json!(format!("widgets#41: {url}"));
+    s.h.fake.put(th);
+    let state =
+        || async { s.http.get(format!("{}/api/state", s.base)).send().await.unwrap().json::<Value>().await.unwrap() };
+
+    let st = state().await;
+    assert_eq!((&st["tree"][0]["humanTitle"], &st["tree"][0]["issueTitle"]), (&Value::Null, &Value::Null), "{st}");
+
+    s.h.app.wf.board_tick().await.unwrap();
+    let st = state().await;
+    let t = &st["tree"][0];
+    assert_eq!(t["title"], format!("widgets#41: {url}"), "the thread title itself is unchanged: {t}");
+    assert_eq!((&t["humanTitle"], &t["issueTitle"]), (&json!("Fix the grader"), &json!("Fix the grader")), "{t}");
+    let reads = || s.h.github.operations().iter().filter(|o| *o == "issueNode").count();
+    assert_eq!(reads(), 1);
+
+    s.h.app.wf.board_tick().await.unwrap();
+    assert_eq!(reads(), 1, "a known title is not read again");
+    s.h.wf(
+        "launch:1",
+        "join",
+        json!({"parent": BOARD, "label": "widgets#41", "role": "ticket", "issue": "acme/widgets#41"}),
+    )
+    .await;
+    assert_eq!(state().await["tree"][0]["humanTitle"], "Fix the grader", "the joined ticket keeps it");
+}
+
+#[tokio::test]
+async fn a_missing_issue_title_is_read_once_and_a_slug_title_falls_back_to_the_report() {
+    let h = H::new();
+    h.wf(TICKET, "join", json!({"parent": BOARD, "label": "widgets#42", "role": "ticket", "issue": "acme/widgets#42"}))
+        .await;
+    let mut th = thread(TICKET, "running", T0);
+    th["title"] = json!("widgets#42: merge-gate");
+    h.fake.put(th);
+    h.app.wf.board_tick().await.unwrap();
+    h.app.wf.board_tick().await.unwrap();
+    let reads = h.github.operations().iter().filter(|o| *o == "issueNode").count();
+    assert_eq!(reads, 1, "an issue GitHub cannot find is not read on every tick");
+    assert_eq!(h.app.wf.tree().unwrap()[0]["humanTitle"], Value::Null);
+
+    h.exec_as(BOSS, "async () => wf.issue({ url: 'acme/widgets#42', title: 'Tidy the merge gate' })").await;
+    let t = &h.app.wf.tree().unwrap()[0];
+    assert_eq!(
+        (&t["humanTitle"], &t["issueTitle"]),
+        (&json!("Tidy the merge gate"), &json!("Tidy the merge gate")),
+        "{t}"
+    );
+}
+
+const SECOND: &str = "mcp:worker-2";
+const PR_HEAD: &str = "1111111111111111111111111111111111111111";
+
+async fn two_step_ticket(h: &H) {
+    h.wf(TICKET, "join", json!({"parent": BOARD, "label": "widgets#50", "role": "ticket", "issue": "acme/widgets#50"}))
+        .await;
+    h.wf(
+        WORKER,
+        "join",
+        json!({"parent": TICKET, "label": "#50 PR 1/3", "role": "worker",
+                                "issue": "acme/widgets#50", "part": "1/3"}),
+    )
+    .await;
+    h.wf(
+        SECOND,
+        "join",
+        json!({"parent": TICKET, "label": "#50 PR 2/3", "role": "worker",
+                                "issue": "acme/widgets#282", "parentIssue": "acme/widgets#50", "part": "2/3"}),
+    )
+    .await;
+    h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 6, "merged")]);
+    h.fake.set_prs(SECOND, vec![pull_request("acme/widgets", 7, "open")]);
+    let mut th = thread(SECOND, "running", T0);
+    th["title"] = json!("#50 PR 2/3: feat: wire the grader");
+    h.fake.put(th);
+    h.tick(0).await;
+}
+
+#[tokio::test]
+async fn workers_carry_their_step_pr_verdict_and_the_ticket_its_progress() {
+    let h = H::new();
+    two_step_ticket(&h).await;
+    h.github.set_pr("acme/widgets", 7, t3_codemode::fake::github_pr(PR_HEAD, "CLEAN", false));
+    h.github.update_pr("acme/widgets", 7, json!({"reviewDecision": "APPROVED"}));
+    h.github.set_checks("acme/widgets", 7, json!([t3_codemode::fake::check_run("build", "SUCCESS")]));
+    h.clock.set(&at(1));
+    h.app.wf.reconcile().await.unwrap();
+
+    let t = &h.app.wf.tree().unwrap()[0];
+    assert_eq!(t["progress"], json!({"step": 2, "of": 3, "merged": 1}), "{t}");
+    let w: Vec<&Value> = t["workers"].as_array().unwrap().iter().collect();
+    assert_eq!((&w[0]["step"], &w[1]["step"]), (&json!({"n": 1, "of": 3}), &json!({"n": 2, "of": 3})));
+    assert_eq!((&w[0]["pr"]["verdict"], &w[0]["pr"]["ready"]), (&json!("merged"), &json!(false)), "{}", w[0]);
+    assert_eq!((&w[1]["pr"]["verdict"], &w[1]["pr"]["ready"]), (&json!("ready"), &json!(true)), "{}", w[1]);
+    assert_eq!(w[1]["humanTitle"], "feat: wire the grader");
+    assert_eq!(h.app.wf.snapshot().unwrap()["tree"][0]["progress"], t["progress"]);
+}
+
+#[tokio::test]
+async fn a_new_issue_a_worker_already_covers_names_that_worker_and_pr() {
+    let h = H::new();
+    h.exec_as(BOSS, "async () => wf.issue({ url: 'acme/widgets#282', title: 'Seed 1080 race' })").await;
+    h.exec_as(BOSS, "async () => wf.issue({ url: 'acme/widgets#283', title: 'Unrelated' })").await;
+    two_step_ticket(&h).await;
+
+    let snap = h.app.wf.snapshot().unwrap();
+    let issues = snap["newIssues"].as_array().unwrap();
+    let by = |n: u64| issues.iter().find(|i| i["number"] == n).unwrap()["coveredBy"].clone();
+    let covered = by(282);
+    assert_eq!(covered.as_array().unwrap().len(), 1, "{covered}");
+    let c = &covered[0];
+    assert_eq!(
+        (&c["kind"], &c["ticket"], &c["worker"]),
+        (&json!("pr"), &json!("widgets#50"), &json!("#50 PR 2/3")),
+        "{c}"
+    );
+    assert_eq!((&c["thread"], &c["ticketThread"]), (&json!(SECOND), &json!(TICKET)));
+    assert_eq!((&c["pr"]["repository"], &c["pr"]["number"]), (&json!("acme/widgets"), &json!(7)), "{c}");
+    assert_eq!(by(283), json!([]));
+    assert_eq!(snap["counts"]["newIssues"], 2, "covered issues stay on the list, marked");
+
+    h.fake.set_prs(SECOND, vec![pull_request("acme/widgets", 7, "merged")]);
+    h.tick(2).await;
+    let snap = h.app.wf.snapshot().unwrap();
+    let issue = snap["newIssues"].as_array().unwrap().iter().find(|i| i["number"] == 282).unwrap().clone();
+    assert_eq!(issue["coveredBy"][0]["kind"], "merged", "{issue}");
+}

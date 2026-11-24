@@ -896,6 +896,120 @@ pub fn chip(live: Option<&Value>) -> &'static str {
     }
 }
 
+const TITLE_READS_PER_TICK: usize = 8;
+
+fn ref_prefix(head: &str) -> bool {
+    head.split_once('#').is_some_and(|(repo, n)| {
+        !n.is_empty()
+            && n.chars().all(|c| c.is_ascii_digit())
+            && repo.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+    })
+}
+
+fn without_label<'a>(title: &'a str, label: &str) -> &'a str {
+    let t = title.trim();
+    if let Some(rest) = strip_prefix_ci(t, label).and_then(|r| r.strip_prefix(':')) {
+        return rest.trim();
+    }
+    match t.split_once(": ") {
+        Some((head, rest)) if ref_prefix(head) => rest.trim(),
+        _ => t,
+    }
+}
+
+pub fn human_title<'a>(title: &'a str, label: &str) -> Option<&'a str> {
+    let rest = without_label(title, label);
+    let machine = rest.is_empty()
+        || rest.starts_with("https://")
+        || rest.starts_with("http://")
+        || rest.eq_ignore_ascii_case(label)
+        || !rest.contains(char::is_whitespace)
+        || parse_issue(rest).is_some();
+    (!machine).then_some(rest)
+}
+
+pub fn step_of(part: Option<&str>) -> Value {
+    match part
+        .and_then(|p| p.split_once('/'))
+        .and_then(|(n, of)| Some((n.parse::<u32>().ok()?, of.parse::<u32>().ok()?)))
+    {
+        Some((n, of)) => json!({"n": n, "of": of}),
+        None => Value::Null,
+    }
+}
+
+fn progress_of(workers: &[Value]) -> Value {
+    let steps: Vec<(&Value, u64, u64)> =
+        workers.iter().filter_map(|w| Some((w, w["step"]["n"].as_u64()?, w["step"]["of"].as_u64()?))).collect();
+    if steps.is_empty() {
+        return Value::Null;
+    }
+    let step = steps
+        .iter()
+        .rev()
+        .find(|(w, ..)| w["done"] == false)
+        .map(|(_, n, _)| *n)
+        .unwrap_or_else(|| steps.iter().map(|(_, n, _)| *n).max().unwrap_or(1));
+    let of = steps.iter().map(|(.., of)| *of).max().unwrap_or(step).max(step);
+    let merged = workers.iter().filter(|w| w["pr"]["state"] == "merged").count();
+    json!({"step": step, "of": of, "merged": merged})
+}
+
+const MERGEABLE: [&str; 3] = ["CLEAN", "HAS_HOOKS", "UNSTABLE"];
+
+pub fn pr_verdict(pr: &Value) -> Option<&'static str> {
+    pr["url"].as_str()?;
+    match pr["state"].as_str().unwrap_or("open").to_ascii_lowercase().as_str() {
+        "queued" => return Some("queued"),
+        "merged" => return Some("merged"),
+        "closed" => return Some("closed"),
+        _ => {}
+    }
+    let r = &pr["readiness"];
+    if !r.is_object() {
+        return Some("open");
+    }
+    let draft = r["isDraft"] == true;
+    let checks = r["checks"].as_str();
+    let review = r["reviewDecision"].as_str();
+    let merge = r["mergeStateStatus"].as_str();
+    if checks == Some("failing") && review == Some("APPROVED") {
+        return Some("failing");
+    }
+    let held = matches!(review, Some("CHANGES_REQUESTED" | "REVIEW_REQUIRED"));
+    let checks_ok = matches!(checks, None | Some("passing"));
+    Some(if !draft && checks_ok && merge.is_some_and(|m| MERGEABLE.contains(&m)) && !held {
+        "ready"
+    } else if draft {
+        "draft"
+    } else if review == Some("CHANGES_REQUESTED") {
+        "changes"
+    } else if checks == Some("failing") {
+        "checksFailing"
+    } else if checks == Some("pending") {
+        "checksPending"
+    } else if merge == Some("DIRTY") {
+        "conflict"
+    } else if merge == Some("BEHIND") {
+        "behind"
+    } else {
+        "review"
+    })
+}
+
+pub fn with_verdict(mut pr: Value) -> Value {
+    if let Some(v) = pr_verdict(&pr) {
+        pr["verdict"] = json!(v);
+        pr["ready"] = json!(matches!(v, "ready" | "queued"));
+    }
+    pr
+}
+
+fn not_found(e: &crate::github::GraphQlError) -> bool {
+    let m = e.message.to_ascii_lowercase();
+    e.permission || m.contains("could not resolve") || m.contains("not found")
+}
+
 fn web_link(v: Option<String>) -> Option<String> {
     v.filter(|l| l.starts_with("https://") || l.starts_with("http://"))
 }
@@ -1132,6 +1246,114 @@ impl Wf {
         self.live.lock().unwrap_or_else(|e| e.into_inner()).get(id).map(|(_, v)| v.clone())
     }
 
+    fn canonical_issue_key(&self, slug: &str) -> Option<String> {
+        let gh = parse_github_issue_only(slug)?;
+        Some(format!("{}#{}", self.canonical_github_repo(&gh.scope), gh.key).to_ascii_lowercase())
+    }
+
+    pub(crate) fn issue_title(&self, slug: &str) -> Option<String> {
+        let canon = self.canonical_issue_key(slug);
+        let titles = self.issue_titles.lock().unwrap_or_else(|e| e.into_inner());
+        titles.get(&slug.to_ascii_lowercase()).or_else(|| canon.and_then(|c| titles.get(&c))).cloned()
+    }
+
+    pub(crate) fn note_issue_title(&self, repo: &str, number: u64, title: &str) -> bool {
+        let title = title.trim();
+        if title.is_empty() || !repo.contains('/') {
+            return false;
+        }
+        let slug = format!("{repo}#{number}").to_ascii_lowercase();
+        let canon = self.canonical_issue_key(&slug);
+        let mut titles = self.issue_titles.lock().unwrap_or_else(|e| e.into_inner());
+        let mut changed = false;
+        for key in std::iter::once(slug).chain(canon) {
+            if titles.get(&key).map(String::as_str) != Some(title) {
+                titles.insert(key, title.to_string());
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn untitled_issues(&self) -> Result<Vec<String>> {
+        let mut out: Vec<String> = Vec::new();
+        let mut want = |issue: Option<&str>, label: &str, thread: Option<&str>| {
+            let Some(issue) = issue.filter(|i| parse_github_issue_only(i).is_some()) else { return };
+            let live = thread.and_then(|t| self.live_of(t)).unwrap_or(Value::Null);
+            if live["title"].as_str().is_some_and(|t| human_title(t, label).is_some())
+                || self.issue_title(issue).is_some()
+            {
+                return;
+            }
+            if !out.iter().any(|o| o.eq_ignore_ascii_case(issue)) {
+                out.push(issue.to_string());
+            }
+        };
+        for t in self.store.children(BOARD, true)? {
+            want(t.identity.issue.as_deref(), &t.label, Some(&t.child));
+            for w in self.store.children(&t.child, false)? {
+                want(w.identity.issue.as_deref(), &w.label, Some(&w.child));
+            }
+        }
+        for p in self.store.pending_all()?.into_iter().filter(|p| p.parent == BOARD) {
+            want(p.identity.issue.as_deref(), &p.label, p.thread.as_deref());
+        }
+        Ok(out)
+    }
+
+    pub(crate) async fn refresh_titles(&self) -> Result<bool> {
+        let wanted = self.untitled_issues()?;
+        if wanted.is_empty() {
+            return Ok(false);
+        }
+        let mut changed = false;
+        for (_, i) in self.store.new_issues()? {
+            if let Some(t) = &i.title {
+                changed |= self.note_issue_title(&i.repo, i.number, t);
+            }
+        }
+        let misses = self.title_misses.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let reads: Vec<String> = wanted
+            .into_iter()
+            .filter(|s| self.issue_title(s).is_none() && !misses.contains(&s.to_ascii_lowercase()))
+            .take(TITLE_READS_PER_TICK)
+            .collect();
+        for slug in reads {
+            let Some((owner, repo, number)) = parse_github_issue_only(&slug).and_then(|i| {
+                let (o, r, n) = i.github_parts()?;
+                Some((o.to_string(), r.to_string(), n))
+            }) else {
+                continue;
+            };
+            match crate::github::read_issue_node(&*self.github, &owner, &repo, number).await {
+                Ok(node) => {
+                    changed |= self.note_issue_title(&format!("{owner}/{repo}"), number, &node.title);
+                    changed |= self.note_issue_title(&node.repo, node.number, &node.title);
+                }
+                Err(e) if not_found(&e) => {
+                    self.title_misses.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.to_ascii_lowercase());
+                }
+                Err(e) => {
+                    tracing::debug!("board titles: reading {slug} failed: {e}");
+                    break;
+                }
+            }
+        }
+        if changed {
+            self.changed();
+        }
+        Ok(changed)
+    }
+
+    fn titled(&self, mut v: Value, label: &str, issue: Option<&str>, part: Option<&str>) -> Value {
+        let issue_title = issue.and_then(|i| self.issue_title(i));
+        let human = v["title"].as_str().and_then(|t| human_title(t, label)).map(String::from);
+        v["humanTitle"] = json!(human.or_else(|| issue_title.clone()));
+        v["issueTitle"] = json!(issue_title);
+        v["step"] = step_of(part);
+        v
+    }
+
     fn known_project(&self, id: &str) -> Option<Value> {
         self.known_projects.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
     }
@@ -1241,7 +1463,7 @@ impl Wf {
         }
     }
 
-    fn same_issue_slug(&self, a: &str, b: &str) -> bool {
+    pub(crate) fn same_issue_slug(&self, a: &str, b: &str) -> bool {
         if same_issue_slug(a, b) {
             return true;
         }
@@ -2340,7 +2562,12 @@ impl Wf {
             };
         let label = self.reserve_label(&issue.label(), false, Some(&project_id), Some(&issue), &identity).await?;
         let title = match nonempty(a.title) {
-            Some(t) => format!("{label}: {t}"),
+            Some(t) => {
+                if let Some((owner, repo, n)) = issue.github_parts() {
+                    self.note_issue_title(&format!("{owner}/{repo}"), n, &t);
+                }
+                format!("{label}: {t}")
+            }
             None => match issue.url() {
                 Some(u) => format!("{label}: {u}"),
                 None => label.clone(),
@@ -2741,6 +2968,9 @@ impl Wf {
         if let Err(e) = self.learn_projects().await {
             tracing::debug!("board projects not refreshed: {e:#}");
         }
+        if let Err(e) = self.refresh_titles().await {
+            tracing::debug!("board titles not refreshed: {e:#}");
+        }
         let hours = self.config().board.settle_after_hours;
         if hours > 0 {
             self.settle_closed(Some(hours as f64 * 60.0)).await?;
@@ -3010,7 +3240,7 @@ impl Wf {
         };
         let live = live.unwrap_or(Value::Null);
         let (repo, project) = self.place(ln.project.as_deref(), &live);
-        json!({
+        let v = json!({
             "title": live["title"], "repo": repo, "project": project,
             "thread": ln.child, "label": ln.label, "status": status, "t3Status": live["status"],
             "gate": if ln.closed { None } else { ln.gate.clone() },
@@ -3019,7 +3249,8 @@ impl Wf {
             "link": web_link(ln.link.clone().or_else(|| live["link"].as_str().map(String::from))),
             "pr": self.pr_view(&live["pr"]), "done": ln.closed, "closedHow": ln.closed_how, "lastUp": local_clock(&ln.last_up),
             "upAt": ln.last_up,
-        })
+        });
+        self.titled(v, &ln.label, ln.identity.issue.as_deref(), ln.identity.part.as_deref())
     }
 
     fn settled_tickets(&self) -> Result<Vec<Value>> {
@@ -3048,6 +3279,7 @@ impl Wf {
         for t in open.iter().chain(closed.iter()) {
             let mut v = self.node_view(t);
             let workers: Vec<Value> = self.store.children(&t.child, false)?.iter().map(|w| self.node_view(w)).collect();
+            v["progress"] = progress_of(&workers);
             v["workers"] = json!(workers);
             v["ticket"] = json!(t.child);
             v["joined"] = json!(true);
@@ -3080,15 +3312,17 @@ impl Wf {
             let status = if p.thread.is_none() { "launching" } else { chip(live.as_ref()) };
             let live = live.unwrap_or(Value::Null);
             let (repo, project) = self.place(None, &live);
-            pending.push(json!({
+            let v = json!({
                 "title": live["title"], "repo": repo, "project": project,
                 "ticket": p.thread, "thread": p.thread, "label": p.label, "status": status,
                 "t3Status": live["status"], "gate": null,
                 "link": web_link(p.link.clone().or_else(|| live["link"].as_str().map(String::from))),
-                "pr": live["pr"], "done": false, "closedHow": null, "joined": false, "workers": [],
+                "pr": self.pr_view(&live["pr"]), "done": false, "closedHow": null, "joined": false, "workers": [],
+                "progress": null,
                 "issue": p.identity.issue, "parentIssue": p.identity.parent_issue, "part": p.identity.part,
                 "lastUp": local_clock(&p.at), "upAt": p.at, "last": null,
-            }));
+            });
+            pending.push(self.titled(v, &p.label, p.identity.issue.as_deref(), p.identity.part.as_deref()));
         }
         out.splice(open.len()..open.len(), pending);
         Ok(out)
