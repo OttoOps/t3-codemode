@@ -15,7 +15,7 @@ use crate::board::{
 use crate::clock::{Clock, iso, local_clock, minutes_since};
 use crate::config::{CLOSING, Config, LinkParams, UP_KINDS};
 use crate::github::GitHub;
-use crate::issues::IssueArgs;
+use crate::issues::{FileIssuesArgs, IssueArgs};
 use crate::merge::MergeArgs;
 use crate::reach::{Reach, ReachPoint};
 use crate::sentinels::{Sentinel, Sentinels};
@@ -604,6 +604,11 @@ impl Wf {
                 return Ok(self.service_view());
             }
             "merge" => return self.merge(caller.filter(|c| !c.is_empty()), parse::<MergeArgs>(method, args)?).await,
+            "fileIssues" => {
+                return self
+                    .file_issues(caller.filter(|c| !c.is_empty()), parse::<FileIssuesArgs>(method, args)?)
+                    .await;
+            }
             "launchTicket" => {
                 let r = self.launch_ticket(parse::<LaunchArgs>(method, args)?).await?;
                 if r["ok"] == false {

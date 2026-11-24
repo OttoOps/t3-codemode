@@ -534,18 +534,21 @@ impl T3Client for FakeT3 {
 struct GhState {
     delay: Duration,
     repos: BTreeMap<String, Value>,
+    repo_names: BTreeMap<String, String>,
     repo_aliases: BTreeMap<String, String>,
+    repo_labels: BTreeMap<String, Vec<(String, String, String)>>,
     prs: BTreeMap<(String, u64), Value>,
     issues: BTreeMap<(String, u64), Value>,
     issue_page: usize,
     calls: Vec<Value>,
-    errors: BTreeMap<String, String>,
+    errors: BTreeMap<String, (String, String)>,
     unlabelled_open_error: Option<String>,
     read_errors: BTreeMap<(String, u64), String>,
     field_errors: BTreeMap<(String, u64), (String, String)>,
     down: bool,
     queue: u64,
     merges: u64,
+    label_seq: u64,
     unknown_reads: usize,
 }
 
@@ -581,7 +584,31 @@ fn issue_key(repo: &str, number: u64) -> (String, u64) {
 }
 
 fn gh_error(message: &str) -> Value {
-    json!({"data": null, "errors": [{"type": "UNPROCESSABLE", "message": message}]})
+    gh_typed_error("UNPROCESSABLE", message)
+}
+
+fn gh_typed_error(err_type: &str, message: &str) -> Value {
+    json!({"data": null, "errors": [{"type": err_type, "message": message}]})
+}
+
+fn repo_node_id(repo_lower: &str) -> String {
+    format!("R_{repo_lower}")
+}
+
+fn issue_node_id(repo_lower: &str, number: u64) -> String {
+    format!("I_{repo_lower}#{number}")
+}
+
+fn ensure_repo_label_entry(st: &mut GhState, repo_lower: &str, name: &str, color: &str) -> (String, String) {
+    if let Some(existing) =
+        st.repo_labels.get(repo_lower).and_then(|list| list.iter().find(|(_, n, _)| n.eq_ignore_ascii_case(name)))
+    {
+        return (existing.0.clone(), existing.1.clone());
+    }
+    st.label_seq += 1;
+    let id = format!("LA_{repo_lower}_{}", st.label_seq);
+    st.repo_labels.entry(repo_lower.to_string()).or_default().push((id.clone(), name.to_string(), color.to_string()));
+    (id, name.to_string())
 }
 
 impl FakeGitHub {
@@ -653,7 +680,15 @@ impl FakeGitHub {
     }
 
     pub fn fail_operation(&self, operation: &str, message: &str) {
-        self.st().errors.insert(operation.into(), message.into());
+        self.st().errors.insert(operation.into(), ("UNPROCESSABLE".into(), message.into()));
+    }
+
+    pub fn fail_operation_with_type(&self, operation: &str, err_type: &str, message: &str) {
+        self.st().errors.insert(operation.into(), (err_type.into(), message.into()));
+    }
+
+    pub fn clear_operation_errors(&self) {
+        self.st().errors.clear();
     }
 
     pub fn fail_unlabelled_open_issues(&self, message: Option<&str>) {
@@ -683,19 +718,50 @@ impl FakeGitHub {
     }
 
     pub fn add_repo(&self, repo: &str) {
+        let mut st = self.st();
+        let key = repo.to_ascii_lowercase();
+        st.repos.entry(key.clone()).or_insert_with(|| json!({"viewerDefaultMergeMethod": "MERGE"}));
+        st.repo_names.entry(key).or_insert_with(|| repo.to_string());
+    }
+
+    pub fn add_label(&self, repo: &str, name: &str, color: &str) {
+        let mut st = self.st();
+        let key = repo.to_ascii_lowercase();
+        st.repos.entry(key.clone()).or_insert_with(|| json!({"viewerDefaultMergeMethod": "MERGE"}));
+        st.repo_names.entry(key.clone()).or_insert_with(|| repo.to_string());
+        ensure_repo_label_entry(&mut st, &key, name, color);
+    }
+
+    pub fn repo_labels(&self, repo: &str) -> Vec<String> {
         self.st()
-            .repos
-            .entry(repo.to_ascii_lowercase())
-            .or_insert_with(|| json!({"viewerDefaultMergeMethod": "MERGE"}));
+            .repo_labels
+            .get(&repo.to_ascii_lowercase())
+            .map(|list| list.iter().map(|(_, n, _)| n.clone()).collect())
+            .unwrap_or_default()
     }
 
     pub fn set_issue(&self, repo: &str, issue: Value) {
         let mut st = self.st();
         let mut issue = issue;
         let number = issue["number"].as_u64().expect("issue number");
+        let key = repo.to_ascii_lowercase();
         issue["nameWithOwner"] = json!(repo);
-        st.repos.entry(repo.to_ascii_lowercase()).or_insert_with(|| json!({"viewerDefaultMergeMethod": "MERGE"}));
+        st.repos.entry(key.clone()).or_insert_with(|| json!({"viewerDefaultMergeMethod": "MERGE"}));
+        st.repo_names.entry(key.clone()).or_insert_with(|| repo.to_string());
+        let label_names: Vec<String> = issue["labels"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|l| l["name"].as_str().map(String::from))
+            .collect();
+        for name in label_names {
+            ensure_repo_label_entry(&mut st, &key, &name, "ededed");
+        }
         st.issues.insert(issue_key(repo, number), issue);
+    }
+
+    pub fn issue(&self, repo: &str, number: u64) -> Option<Value> {
+        self.st().issues.get(&issue_key(repo, number)).cloned()
     }
 
     pub fn update_issue(&self, repo: &str, number: u64, patch: Value) {
@@ -747,13 +813,34 @@ fn operation(query: &str) -> &'static str {
     if query.starts_with("query RepoCanonical(") {
         return "repoCanonical";
     }
+    if query.starts_with("query RepoId(") {
+        return "repoId";
+    }
+    if query.starts_with("query IssueNode(") {
+        return "issueNode";
+    }
+    if query.starts_with("query RepoLabel(") {
+        return "repoLabel";
+    }
     if query.starts_with("query FlowIssues(") {
         return "flowIssues";
     }
     if query.starts_with(crate::flow::FLOW_TICKETS) {
         return "flowTickets";
     }
-    for op in ["enqueuePullRequest", "mergePullRequest", "enablePullRequestAutoMerge", "deleteRef"] {
+    for op in [
+        "enqueuePullRequest",
+        "mergePullRequest",
+        "enablePullRequestAutoMerge",
+        "deleteRef",
+        "createLabel",
+        "addLabelsToLabelable",
+        "addBlockedBy",
+        "removeBlockedBy",
+        "addSubIssue",
+        "removeSubIssue",
+        "createIssue",
+    ] {
         if query.contains(op) {
             return op;
         }
@@ -897,8 +984,355 @@ fn flow_tickets(st: &GhState, variables: &Value) -> Value {
     out
 }
 
+fn resolve_repo_lookup(st: &GhState, owner: &str, name: &str) -> Option<(String, String)> {
+    let raw = format!("{owner}/{name}");
+    let key = raw.to_ascii_lowercase();
+    let canonical = st.repo_aliases.get(&key).cloned();
+    let lookup = canonical.as_deref().map(str::to_ascii_lowercase).unwrap_or(key);
+    if !st.repos.contains_key(&lookup) {
+        return None;
+    }
+    let display = st.repo_names.get(&lookup).cloned().or(canonical).unwrap_or(raw);
+    Some((lookup, display))
+}
+
+fn find_repo_by_id(st: &GhState, repo_id: &str) -> Option<(String, String)> {
+    let key = repo_id.strip_prefix("R_")?.to_ascii_lowercase();
+    if !st.repos.contains_key(&key) {
+        return None;
+    }
+    let display = st.repo_names.get(&key).cloned().unwrap_or_else(|| key.clone());
+    Some((key, display))
+}
+
+fn parse_issue_node_id(node_id: &str) -> Option<(String, u64)> {
+    let rest = node_id.strip_prefix("I_")?;
+    let (repo, num) = rest.rsplit_once('#')?;
+    Some((repo.to_ascii_lowercase(), num.parse().ok()?))
+}
+
+fn repo_id_query(st: &GhState, variables: &Value) -> Value {
+    let (owner, name) = (variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap());
+    let Some((lookup, display)) = resolve_repo_lookup(st, owner, name) else {
+        return gh_typed_error(
+            "NOT_FOUND",
+            &format!("Could not resolve to a Repository with the name '{owner}/{name}'."),
+        );
+    };
+    json!({"data": {"repository": {"id": repo_node_id(&lookup), "nameWithOwner": display}}})
+}
+
+fn issue_node_query(st: &mut GhState, variables: &Value) -> Value {
+    let (owner, name) = (variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap());
+    let number = variables["number"].as_u64().unwrap();
+    if number > i32::MAX as u64 {
+        return gh_error(&format!("Variable $number of type Int! was provided invalid value {number}"));
+    }
+    let Some((lookup, display)) = resolve_repo_lookup(st, owner, name) else {
+        return gh_typed_error(
+            "NOT_FOUND",
+            &format!("Could not resolve to a Repository with the name '{owner}/{name}'."),
+        );
+    };
+    let Some(i) = st.issues.get(&(lookup.clone(), number)).cloned() else {
+        return json!({
+            "data": {"repository": {"id": repo_node_id(&lookup), "nameWithOwner": display, "issue": null}},
+            "errors": [{"type": "NOT_FOUND", "message": format!("Could not resolve to an Issue with the number of {number}.")}]
+        });
+    };
+    let name_with_owner = i["nameWithOwner"].as_str().unwrap_or(&display).to_string();
+    let parent = match (i["parentRef"][0].as_str(), i["parentRef"][1].as_u64()) {
+        (Some(pr), Some(pn)) => {
+            let p_low = pr.to_ascii_lowercase();
+            let p_disp = st.issues.get(&(p_low.clone(), pn)).and_then(|pi| pi["nameWithOwner"].as_str()).unwrap_or(pr);
+            json!({"id": issue_node_id(&p_low, pn), "number": pn, "repository": {"nameWithOwner": p_disp}})
+        }
+        _ => Value::Null,
+    };
+    let blockers: Vec<Value> = i["blockers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            let br = r[0].as_str()?;
+            let bn = r[1].as_u64()?;
+            let b_low = br.to_ascii_lowercase();
+            let b_disp = st.issues.get(&(b_low.clone(), bn)).and_then(|bi| bi["nameWithOwner"].as_str()).unwrap_or(br);
+            Some(json!({"id": issue_node_id(&b_low, bn), "number": bn, "repository": {"nameWithOwner": b_disp}}))
+        })
+        .collect();
+    let label_names: Vec<String> = i["labels"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| l["name"].as_str().map(String::from))
+        .collect();
+    let labels: Vec<Value> = label_names
+        .into_iter()
+        .map(|lname| {
+            let (lid, canon) = ensure_repo_label_entry(st, &lookup, &lname, "ededed");
+            json!({"id": lid, "name": canon})
+        })
+        .collect();
+    json!({
+        "data": {
+            "repository": {
+                "id": repo_node_id(&lookup),
+                "nameWithOwner": name_with_owner,
+                "issue": {
+                    "id": issue_node_id(&lookup, number),
+                    "number": number,
+                    "url": format!("https://github.com/{name_with_owner}/issues/{number}"),
+                    "title": i["title"],
+                    "parent": parent,
+                    "blockedBy": {"nodes": blockers},
+                    "labels": {"nodes": labels},
+                }
+            }
+        }
+    })
+}
+
+fn repo_label_query(st: &GhState, variables: &Value) -> Value {
+    let (owner, name) = (variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap());
+    let wanted = variables["label"].as_str().unwrap();
+    let Some((lookup, _)) = resolve_repo_lookup(st, owner, name) else {
+        return gh_typed_error(
+            "NOT_FOUND",
+            &format!("Could not resolve to a Repository with the name '{owner}/{name}'."),
+        );
+    };
+    let found = st
+        .repo_labels
+        .get(&lookup)
+        .and_then(|list| list.iter().find(|(_, n, _)| n.eq_ignore_ascii_case(wanted)))
+        .map(|(id, n, _)| json!({"id": id, "name": n}))
+        .unwrap_or(Value::Null);
+    json!({"data": {"repository": {"id": repo_node_id(&lookup), "label": found}}})
+}
+
+fn create_label_mut(st: &mut GhState, variables: &Value) -> Value {
+    let repo_id = variables["repoId"].as_str().unwrap_or_default();
+    let name = variables["name"].as_str().unwrap_or_default();
+    let color = variables["color"].as_str().unwrap_or("ededed");
+    let Some((lookup, _)) = find_repo_by_id(st, repo_id) else {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to a Repository");
+    };
+    if st.repo_labels.get(&lookup).is_some_and(|list| list.iter().any(|(_, n, _)| n.eq_ignore_ascii_case(name))) {
+        return gh_error("Name has already been taken");
+    }
+    let (id, canon) = ensure_repo_label_entry(st, &lookup, name, color);
+    json!({"data": {"createLabel": {"label": {"id": id, "name": canon}}}})
+}
+
+fn add_labels_mut(st: &mut GhState, variables: &Value) -> Value {
+    let labelable_id = variables["labelableId"].as_str().unwrap_or_default();
+    let Some((repo, num)) = parse_issue_node_id(labelable_id) else {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to a node");
+    };
+    if !st.issues.contains_key(&(repo.clone(), num)) {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to an Issue");
+    }
+    let ids: Vec<&str> = variables["labelIds"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let mut resolved = Vec::new();
+    for lid in ids {
+        let Some((_, lname, _)) = st.repo_labels.get(&repo).and_then(|list| list.iter().find(|(id, _, _)| id == lid))
+        else {
+            return gh_typed_error("NOT_FOUND", &format!("Could not resolve to a Label {lid}"));
+        };
+        resolved.push(lname.clone());
+    }
+    let issue = st.issues.get_mut(&(repo, num)).expect("issue exists");
+    let nodes = issue["labels"]["nodes"].as_array_mut().expect("labels.nodes array");
+    for lname in resolved {
+        if !nodes.iter().any(|n| n["name"].as_str().is_some_and(|s| s.eq_ignore_ascii_case(&lname))) {
+            nodes.push(json!({"name": lname}));
+        }
+    }
+    json!({"data": {"addLabelsToLabelable": {"labelable": {"__typename": "Issue"}}}})
+}
+
+fn add_blocked_by_mut(st: &mut GhState, variables: &Value) -> Value {
+    let issue_id = variables["issueId"].as_str().unwrap_or_default();
+    let blocker_id = variables["blockingIssueId"].as_str().unwrap_or_default();
+    let (Some((repo, num)), Some((b_repo, b_num))) = (parse_issue_node_id(issue_id), parse_issue_node_id(blocker_id))
+    else {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to a node");
+    };
+    let Some(blocker_disp) =
+        st.issues.get(&(b_repo.clone(), b_num)).map(|i| i["nameWithOwner"].as_str().unwrap_or(&b_repo).to_string())
+    else {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to blocking Issue");
+    };
+    let Some(issue) = st.issues.get_mut(&(repo.clone(), num)) else {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to Issue");
+    };
+    let blockers = issue["blockers"].as_array_mut().expect("blockers array");
+    if blockers
+        .iter()
+        .any(|r| r[0].as_str().is_some_and(|s| s.eq_ignore_ascii_case(&b_repo)) && r[1].as_u64() == Some(b_num))
+    {
+        return gh_error("Issue is already blocked by this issue");
+    }
+    blockers.push(json!([blocker_disp, b_num]));
+    json!({
+        "data": {
+            "addBlockedBy": {
+                "issue": {"id": issue_id, "number": num},
+                "blockingIssue": {"id": blocker_id, "number": b_num}
+            }
+        }
+    })
+}
+
+fn remove_blocked_by_mut(st: &mut GhState, variables: &Value) -> Value {
+    let issue_id = variables["issueId"].as_str().unwrap_or_default();
+    let blocker_id = variables["blockingIssueId"].as_str().unwrap_or_default();
+    let (Some((repo, num)), Some((b_repo, b_num))) = (parse_issue_node_id(issue_id), parse_issue_node_id(blocker_id))
+    else {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to a node");
+    };
+    let Some(issue) = st.issues.get_mut(&(repo, num)) else {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to Issue");
+    };
+    let blockers = issue["blockers"].as_array_mut().expect("blockers array");
+    let before = blockers.len();
+    blockers
+        .retain(|r| !(r[0].as_str().is_some_and(|s| s.eq_ignore_ascii_case(&b_repo)) && r[1].as_u64() == Some(b_num)));
+    if blockers.len() == before {
+        return gh_error("Issue is not blocked by this issue");
+    }
+    json!({
+        "data": {
+            "removeBlockedBy": {
+                "issue": {"id": issue_id, "number": num},
+                "blockingIssue": {"id": blocker_id, "number": b_num}
+            }
+        }
+    })
+}
+
+fn add_sub_issue_mut(st: &mut GhState, variables: &Value) -> Value {
+    let parent_id = variables["issueId"].as_str().unwrap_or_default();
+    let child_id = variables["subIssueId"].as_str().unwrap_or_default();
+    let replace = variables["replaceParent"].as_bool().unwrap_or(false);
+    let (Some((p_repo, p_num)), Some((c_repo, c_num))) =
+        (parse_issue_node_id(parent_id), parse_issue_node_id(child_id))
+    else {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to a node");
+    };
+    let Some(parent_disp) =
+        st.issues.get(&(p_repo.clone(), p_num)).map(|i| i["nameWithOwner"].as_str().unwrap_or(&p_repo).to_string())
+    else {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to parent Issue");
+    };
+    let Some(child) = st.issues.get_mut(&(c_repo, c_num)) else {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to sub-issue");
+    };
+    if let (Some(cur_repo), Some(cur_num)) = (child["parentRef"][0].as_str(), child["parentRef"][1].as_u64()) {
+        if cur_repo.eq_ignore_ascii_case(&p_repo) && cur_num == p_num {
+            return gh_error("Sub-issue is already a sub-issue of this issue");
+        }
+        if !replace {
+            return gh_error("Sub-issue already has a parent");
+        }
+    }
+    child["parentRef"] = json!([parent_disp, p_num]);
+    json!({
+        "data": {
+            "addSubIssue": {
+                "issue": {"id": parent_id, "number": p_num},
+                "subIssue": {"id": child_id, "number": c_num}
+            }
+        }
+    })
+}
+
+fn remove_sub_issue_mut(st: &mut GhState, variables: &Value) -> Value {
+    let parent_id = variables["issueId"].as_str().unwrap_or_default();
+    let child_id = variables["subIssueId"].as_str().unwrap_or_default();
+    let (Some((p_repo, p_num)), Some((c_repo, c_num))) =
+        (parse_issue_node_id(parent_id), parse_issue_node_id(child_id))
+    else {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to a node");
+    };
+    let Some(child) = st.issues.get_mut(&(c_repo, c_num)) else {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to sub-issue");
+    };
+    let matches_parent = child["parentRef"][0].as_str().is_some_and(|r| r.eq_ignore_ascii_case(&p_repo))
+        && child["parentRef"][1].as_u64() == Some(p_num);
+    if !matches_parent {
+        return gh_error("Issue is not a sub-issue of this issue");
+    }
+    child["parentRef"] = Value::Null;
+    json!({
+        "data": {
+            "removeSubIssue": {
+                "issue": {"id": parent_id, "number": p_num},
+                "subIssue": {"id": child_id, "number": c_num}
+            }
+        }
+    })
+}
+
+fn create_issue_mut(st: &mut GhState, variables: &Value) -> Value {
+    let repo_id = variables["repoId"].as_str().unwrap_or_default();
+    let title = variables["title"].as_str().unwrap_or_default();
+    let body = variables["body"].as_str().unwrap_or_default();
+    let Some((lookup, display)) = find_repo_by_id(st, repo_id) else {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to a Repository");
+    };
+    let next_num = st.issues.keys().filter(|(r, _)| *r == lookup).map(|(_, n)| *n).max().unwrap_or(0) + 1;
+    let mut label_nodes = Vec::new();
+    for lid in variables["labelIds"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        if let Some((_, lname, _)) =
+            st.repo_labels.get(&lookup).and_then(|list| list.iter().find(|(id, _, _)| id == lid))
+        {
+            label_nodes.push(json!({"name": lname}));
+        }
+    }
+    let created_at = format!("2026-11-17T12:{:02}:{:02}Z", (next_num / 60) % 60, next_num % 60);
+    let url = format!("https://github.com/{display}/issues/{next_num}");
+    st.issues.insert(
+        (lookup.clone(), next_num),
+        json!({
+            "number": next_num,
+            "title": title,
+            "body": body,
+            "state": "OPEN",
+            "createdAt": created_at,
+            "labels": {"nodes": label_nodes},
+            "milestone": null,
+            "blockers": [],
+            "parentRef": null,
+            "nameWithOwner": display,
+        }),
+    );
+    json!({
+        "data": {
+            "createIssue": {
+                "issue": {
+                    "id": issue_node_id(&lookup, next_num),
+                    "number": next_num,
+                    "url": url,
+                    "title": title
+                }
+            }
+        }
+    })
+}
+
 impl crate::github::GitHub for FakeGitHub {
     fn graphql<'a>(&'a self, query: &'a str, variables: Value) -> BoxFut<'a, anyhow::Result<Value>> {
+        self.graphql_with_headers(query, variables, &[])
+    }
+
+    fn graphql_with_headers<'a>(
+        &'a self,
+        query: &'a str,
+        variables: Value,
+        headers: &'a [(&'a str, &'a str)],
+    ) -> BoxFut<'a, anyhow::Result<Value>> {
         Box::pin(async move {
             let delay = self.st().delay;
             if !delay.is_zero() {
@@ -907,15 +1341,51 @@ impl crate::github::GitHub for FakeGitHub {
             tokio::task::yield_now().await;
             let mut st = self.st();
             let op = operation(query);
-            st.calls.push(json!({"operation": op, "query": query, "variables": variables}));
+            let mut call = json!({"operation": op, "query": query, "variables": variables});
+            if !headers.is_empty() {
+                let hdrs: serde_json::Map<String, Value> =
+                    headers.iter().map(|(k, v)| ((*k).to_string(), json!(v))).collect();
+                call["headers"] = Value::Object(hdrs);
+            }
+            st.calls.push(call);
             if st.down {
                 anyhow::bail!("gh api graphql failed: gh: not logged in");
             }
-            if let Some(message) = st.errors.get(op) {
-                return Ok(gh_error(message));
+            if let Some((err_type, message)) = st.errors.get(op) {
+                return Ok(gh_typed_error(err_type, message));
             }
             if op == "repoCanonical" {
                 return Ok(repo_canonical(&st, &variables));
+            }
+            if op == "repoId" {
+                return Ok(repo_id_query(&st, &variables));
+            }
+            if op == "issueNode" {
+                return Ok(issue_node_query(&mut st, &variables));
+            }
+            if op == "repoLabel" {
+                return Ok(repo_label_query(&st, &variables));
+            }
+            if op == "createLabel" {
+                return Ok(create_label_mut(&mut st, &variables));
+            }
+            if op == "addLabelsToLabelable" {
+                return Ok(add_labels_mut(&mut st, &variables));
+            }
+            if op == "addBlockedBy" {
+                return Ok(add_blocked_by_mut(&mut st, &variables));
+            }
+            if op == "removeBlockedBy" {
+                return Ok(remove_blocked_by_mut(&mut st, &variables));
+            }
+            if op == "addSubIssue" {
+                return Ok(add_sub_issue_mut(&mut st, &variables));
+            }
+            if op == "removeSubIssue" {
+                return Ok(remove_sub_issue_mut(&mut st, &variables));
+            }
+            if op == "createIssue" {
+                return Ok(create_issue_mut(&mut st, &variables));
             }
             if op == "flowIssues" {
                 return Ok(flow_issues(&st, query, &variables));
