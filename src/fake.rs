@@ -945,7 +945,7 @@ fn pr_files_page(st: &GhState, pr: &Value, after: Option<&str>) -> Value {
     })
 }
 
-fn full_pr_node(st: &GhState, display_repo: &str, number: u64, pr: &Value) -> Value {
+fn full_pr_node(st: &GhState, display_repo: &str, number: u64, pr: &Value, with_files: bool) -> Value {
     let head_ref = pr["headRefName"].as_str().map(String::from).unwrap_or_else(|| format!("feat/{number}"));
     let base_ref = pr["baseRefName"].as_str().unwrap_or("main");
     let closing = if pr.get("closingIssuesReferences").is_some_and(Value::is_object) {
@@ -953,8 +953,7 @@ fn full_pr_node(st: &GhState, display_repo: &str, number: u64, pr: &Value) -> Va
     } else {
         json!({"nodes": []})
     };
-    let files = pr_files_page(st, pr, None);
-    json!({
+    let mut node = json!({
         "number": pr["number"].as_u64().unwrap_or(number),
         "title": pr["title"].as_str().map(String::from).unwrap_or_else(|| format!("PR {number}")),
         "url": pr["url"].as_str().map(String::from).unwrap_or_else(|| format!("https://github.com/{display_repo}/pull/{number}")),
@@ -964,11 +963,14 @@ fn full_pr_node(st: &GhState, display_repo: &str, number: u64, pr: &Value) -> Va
         "headRefOid": pr["headRefOid"].as_str().unwrap_or(""),
         "isCrossRepository": pr["isCrossRepository"].as_bool().unwrap_or(false),
         "closingIssuesReferences": closing,
-        "files": files,
-    })
+    });
+    if with_files {
+        node["files"] = pr_files_page(st, pr, None);
+    }
+    node
 }
 
-fn open_prs_page(st: &GhState, repo: &str, display: &str, after: Option<&str>) -> Value {
+fn open_prs_page(st: &GhState, repo: &str, display: &str, after: Option<&str>, with_files: bool) -> Value {
     let mut matching: Vec<(u64, &Value)> = st
         .prs
         .iter()
@@ -980,7 +982,7 @@ fn open_prs_page(st: &GhState, repo: &str, display: &str, after: Option<&str>) -
     let size = if st.pr_page == 0 { 100 } else { st.pr_page };
     let end = (start + size).min(matching.len());
     let nodes: Vec<Value> =
-        matching[start.min(end)..end].iter().map(|(n, p)| full_pr_node(st, display, *n, p)).collect();
+        matching[start.min(end)..end].iter().map(|(n, p)| full_pr_node(st, display, *n, p, with_files)).collect();
     json!({
         "pageInfo": {"hasNextPage": end < matching.len(), "endCursor": (end < matching.len()).then(|| end.to_string())},
         "nodes": nodes,
@@ -1051,7 +1053,8 @@ fn flow_open_prs(st: &GhState, variables: &Value) -> Value {
     }
     let display = st.repo_names.get(&repo).cloned().or(canonical).unwrap_or_else(|| repo.clone());
     let default_branch = st.default_branches.get(&repo).map(String::as_str).unwrap_or("main");
-    let prs = open_prs_page(st, &repo, &display, variables["after"].as_str());
+    let with_files = variables.get("withPrFiles").and_then(Value::as_bool).unwrap_or(true);
+    let prs = open_prs_page(st, &repo, &display, variables["after"].as_str(), with_files);
     json!({"data": {"repository": {
         "nameWithOwner": display,
         "defaultBranchRef": {"name": default_branch},
@@ -1117,7 +1120,8 @@ fn flow_issues(st: &GhState, query: &str, variables: &Value) -> Value {
         }
     });
     if variables.get("withPrs").and_then(Value::as_bool).unwrap_or(false) {
-        repository["pullRequests"] = open_prs_page(st, &repo, &name, None);
+        let with_files = variables.get("withPrFiles").and_then(Value::as_bool).unwrap_or(true);
+        repository["pullRequests"] = open_prs_page(st, &repo, &name, None, with_files);
     }
     json!({"data": {"repository": repository}})
 }

@@ -4465,3 +4465,299 @@ async fn squash_merged_base_worktree_and_missing_middle_branch_and_paginated_pr_
         "auto-launch must hold widgets#31 on paginated PR file conflict with empty-body running ticket: {launched:?}"
     );
 }
+
+#[tokio::test]
+async fn exact_spaced_paths_pending_worktrees_priority_displacement_optional_pr_files_and_live_recheck() {
+    // 1. Exact paths with spaces/Unicode in GitHub PRs (including page 2) and dirty local worktrees + UTF-8 PR bodies.
+    let td = tempfile::tempdir().unwrap();
+    let repo_dir = td.path().join("repo");
+    std::fs::create_dir_all(repo_dir.join("docs")).unwrap();
+    std::fs::create_dir_all(repo_dir.join("src")).unwrap();
+    run_git(&repo_dir, &["init", "-b", "main"]);
+    std::fs::write(repo_dir.join("docs/Release Notes.md"), "v1\n").unwrap();
+    std::fs::write(repo_dir.join("docs/café.md"), "c1\n").unwrap();
+    std::fs::write(repo_dir.join("src/alpha.rs"), "pub fn a() {}\n").unwrap();
+    std::fs::write(repo_dir.join("src/beta.rs"), "pub fn b() {}\n").unwrap();
+    std::fs::write(repo_dir.join("src/gamma.rs"), "pub fn g() {}\n").unwrap();
+    run_git(&repo_dir, &["add", "."]);
+    run_git(&repo_dir, &["commit", "-m", "init"]);
+
+    // Pending (unjoined!) ticket #10 on a non-issue branch name with a live worktree editing `docs/Release Notes.md` and `docs/café.md`.
+    let wt10 = td.path().join("wt-10");
+    run_git(&repo_dir, &["worktree", "add", "-b", "wip/scratch", wt10.to_str().unwrap(), "main"]);
+    std::fs::write(wt10.join("docs/Release Notes.md"), "v2 dirty\n").unwrap();
+    std::fs::write(wt10.join("docs/café.md"), "c2 dirty\n").unwrap();
+
+    let cfg = Config::from_value(json!({
+        "flow": {
+            "repos": [REPO],
+            "optIn": {"label": FLOW},
+            "maxTickets": 4,
+            "launch": "ask",
+            "serializeFileConflicts": true
+        }
+    }))
+    .unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.github.add_repo(REPO);
+    h.fake.set_projects(vec![project("p-widgets", repo_dir.to_str().unwrap())]);
+    h.remotes.set(repo_dir.to_str().unwrap(), "git@github.com:acme/widgets.git");
+
+    issue(&h, REPO, 10, &[], 1); // pending unjoined running ticket (unlabelled, empty body)
+    issue(&h, REPO, 11, &[FLOW], 2);
+    issue(&h, REPO, 12, &[FLOW], 3);
+    // PR #111 (closes #11) has `docs/Release Notes.md` on page 2 and PR #112 has multibyte UTF-8 prose + `docs/café.md`.
+    h.github.set_pr(
+        REPO,
+        111,
+        open_pr(111, "main", "feat/11-notes", "Closes #11", &[(REPO, 11)], &["src/alpha.rs", "docs/Release Notes.md"]),
+    );
+    h.github.set_pr(
+        REPO,
+        112,
+        open_pr(112, "main", "feat/12-utf8", "Résumé\nFixes nação\nRefs #12", &[], &["docs/café.md"]),
+    );
+    h.github.set_pr_file_page(1);
+
+    // Put live thread for pending ticket #10 (with worktreePath, branch without issue number, never joined).
+    let mut th10 = t3_codemode::fake::thread("mcp:p10", "running", T0);
+    th10["projectId"] = json!("p-widgets");
+    th10["branch"] = json!("wip/scratch");
+    th10["worktreePath"] = json!(wt10.to_str().unwrap());
+    h.fake.put(th10);
+    let params = h.app.wf.config().link_params("overseer", "ticket").unwrap();
+    h.app
+        .store
+        .pending_put(&Pending {
+            parent: BOARD.into(),
+            label: "widgets#10".into(),
+            role: "ticket".into(),
+            params,
+            at: T0.into(),
+            reported: false,
+            thread: Some("mcp:p10".into()),
+            link: Some("https://t3/mcp:p10".into()),
+            project: Some("p-widgets".into()),
+            identity: t3_codemode::store::Identity {
+                issue: Some("acme/widgets#10".into()),
+                parent_issue: None,
+                part: None,
+            },
+            brief: None,
+        })
+        .unwrap();
+    h.app.wf.board_tick().await.unwrap();
+
+    let f = flow(&h).await;
+    assert_eq!(labels(&f["blocked"]), ["widgets#11", "widgets#12"], "{f}");
+    assert_eq!(f["blocked"][0]["fileConflicts"][0]["label"], "widgets#10");
+    assert_eq!(f["blocked"][0]["fileConflicts"][0]["files"], json!(["docs/Release Notes.md"]));
+    assert_eq!(f["blocked"][1]["fileConflicts"][0]["label"], "widgets#10");
+    assert_eq!(f["blocked"][1]["fileConflicts"][0]["files"], json!(["docs/café.md"]));
+
+    // 2. When serializeFileConflicts is false, queue planning & picking skip PR file reads/pagination entirely
+    // (a failing flowPrFiles page 2 does not break queue reads or picks, while graph still requests PR files).
+    let cfg_off = Config::from_value(json!({
+        "flow": {
+            "repos": [REPO],
+            "optIn": {"label": FLOW},
+            "maxTickets": 2,
+            "launch": "ask",
+            "serializeFileConflicts": false
+        }
+    }))
+    .unwrap();
+    let h_off = H::build(Vec::new(), cfg_off);
+    h_off.github.add_repo(REPO);
+    h_off.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h_off.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    issue(&h_off, REPO, 1, &[FLOW], 1);
+    issue(&h_off, REPO, 2, &[FLOW], 2);
+    h_off.github.set_pr(
+        REPO,
+        201,
+        open_pr(201, "main", "feat/1-base", "Closes #1", &[(REPO, 1)], &["src/a.rs", "src/b.rs"]),
+    );
+    h_off.github.set_pr(
+        REPO,
+        202,
+        open_pr(202, "feat/1-base", "feat/2-stack", "Closes #2", &[(REPO, 2)], &["src/b.rs", "src/c.rs"]),
+    );
+    h_off.github.set_pr_file_page(1);
+    h_off.github.fail_operation("flowPrFiles", "file page 2 unavailable");
+
+    let f_off = flow(&h_off).await;
+    assert_eq!(labels(&f_off["queue"]), ["widgets#1"], "prStack still holds #2 without PR files: {f_off}");
+    assert_eq!(labels(&f_off["blocked"]), ["widgets#2"], "{f_off}");
+    reconcile(&h_off).await;
+    assert_eq!(flow_cards(&h_off).len(), 1);
+    assert!(
+        !h_off.github.operations().iter().any(|op| op == "flowPrFiles"),
+        "queue planning with serializeFileConflicts: false must not call flowPrFiles: {:?}",
+        h_off.github.operations()
+    );
+    let g_err = h_off.app.wf.flow(true).await.unwrap_err().to_string();
+    assert!(g_err.contains("file page 2 unavailable"), "graph view must still paginate PR files: {g_err}");
+
+    // 3. Higher-priority conflicting candidate displaces lower-priority offered card while keeping non-conflicting cards.
+    let cfg_prio = Config::from_value(json!({
+        "flow": {
+            "repos": [REPO],
+            "optIn": {"label": FLOW},
+            "maxTickets": 2,
+            "launch": "ask",
+            "serializeFileConflicts": true
+        }
+    }))
+    .unwrap();
+    let h_prio = H::build(Vec::new(), cfg_prio);
+    h_prio.github.add_repo(REPO);
+    h_prio.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h_prio.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    issue(&h_prio, REPO, 1, &["priority: high"], 1); // not opted in yet
+    issue(&h_prio, REPO, 2, &[FLOW, "priority: low"], 2);
+    issue(&h_prio, REPO, 3, &[FLOW, "priority: low"], 3);
+    h_prio.github.set_body(REPO, 1, "## Flow\n- Touches: `src/alpha.rs`\n");
+    h_prio.github.set_body(REPO, 2, "## Flow\n- Touches: `src/alpha.rs`\n");
+    h_prio.github.set_body(REPO, 3, "## Flow\n- Touches: `src/gamma.rs`\n");
+
+    reconcile(&h_prio).await;
+    let initial_cards = flow_cards(&h_prio);
+    assert_eq!(
+        initial_cards.iter().map(|c| c["label"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["widgets#2", "widgets#3"]
+    );
+    let card3_id = initial_cards[1]["id"].as_str().unwrap().to_string();
+
+    // Now high-priority #1 becomes ready and conflicts with offered #2 (not #3).
+    h_prio.github.update_issue(REPO, 1, json!({"labels": {"nodes": [{"name": FLOW}, {"name": "priority: high"}]}}));
+    reconcile(&h_prio).await;
+    let after_cards = flow_cards(&h_prio);
+    let after_labels: Vec<&str> = after_cards.iter().map(|c| c["label"].as_str().unwrap()).collect();
+    assert_eq!(
+        after_labels,
+        ["widgets#3", "widgets#1"],
+        "higher-priority #1 must displace conflicting #2: {after_cards:?}"
+    );
+    assert_eq!(after_cards[0]["id"], card3_id, "non-conflicting #3 card must be preserved without churn");
+
+    // Even with only 1 free slot held by low-priority #2, higher-priority conflicting #1 displaces #2,
+    // whereas a non-conflicting higher-priority #4 does not churn an existing card.
+    let cfg_one = Config::from_value(json!({
+        "flow": {
+            "repos": [REPO],
+            "optIn": {"label": FLOW},
+            "maxTickets": 1,
+            "launch": "ask",
+            "serializeFileConflicts": true
+        }
+    }))
+    .unwrap();
+    let h_one = H::build(Vec::new(), cfg_one);
+    h_one.github.add_repo(REPO);
+    h_one.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h_one.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    issue(&h_one, REPO, 1, &["priority: high"], 1);
+    issue(&h_one, REPO, 2, &[FLOW, "priority: low"], 2);
+    issue(&h_one, REPO, 4, &["priority: high"], 3);
+    h_one.github.set_body(REPO, 1, "## Flow\n- Touches: `src/alpha.rs`\n");
+    h_one.github.set_body(REPO, 2, "## Flow\n- Touches: `src/alpha.rs`\n");
+    h_one.github.set_body(REPO, 4, "## Flow\n- Touches: `src/gamma.rs`\n");
+    reconcile(&h_one).await;
+    let c2_id = flow_cards(&h_one)[0]["id"].as_str().unwrap().to_string();
+    // Non-conflicting #4 becomes ready while #2 holds the sole slot -> #2 stays untouched.
+    h_one.github.update_issue(REPO, 4, json!({"labels": {"nodes": [{"name": FLOW}, {"name": "priority: high"}]}}));
+    reconcile(&h_one).await;
+    assert_eq!(flow_cards(&h_one).len(), 1);
+    assert_eq!(flow_cards(&h_one)[0]["id"], c2_id, "non-conflicting higher-priority #4 must not churn #2");
+    // Conflicting #1 becomes ready -> displaces #2 even when free == 1.
+    h_one.github.update_issue(REPO, 1, json!({"labels": {"nodes": [{"name": FLOW}, {"name": "priority: high"}]}}));
+    reconcile(&h_one).await;
+    let displaced = flow_cards(&h_one);
+    assert_eq!(displaced.len(), 1);
+    assert_eq!(displaced[0]["label"], "widgets#1", "conflicting higher-priority #1 must displace #2: {displaced:?}");
+
+    // 4. Auto-launch revalidates live worktree edits before launching a subsequent pick.
+    let td2 = tempfile::tempdir().unwrap();
+    let repo2 = td2.path().join("repo");
+    std::fs::create_dir_all(repo2.join("src")).unwrap();
+    run_git(&repo2, &["init", "-b", "main"]);
+    std::fs::write(repo2.join("src/alpha.rs"), "pub fn a() {}\n").unwrap();
+    std::fs::write(repo2.join("src/beta.rs"), "pub fn b() {}\n").unwrap();
+    run_git(&repo2, &["add", "."]);
+    run_git(&repo2, &["commit", "-m", "init"]);
+
+    let wt_run = td2.path().join("wt-run");
+    run_git(&repo2, &["worktree", "add", "-b", "feat/1-running", wt_run.to_str().unwrap(), "main"]);
+
+    struct DirtyWorktreeOnLaunchT3 {
+        inner: std::sync::Arc<t3_codemode::fake::FakeT3>,
+        file_to_dirty: std::path::PathBuf,
+        dirtied: std::sync::atomic::AtomicBool,
+    }
+    impl t3_codemode::t3::T3Client for DirtyWorktreeOnLaunchT3 {
+        fn call<'a>(
+            &'a self,
+            tool: &'a str,
+            args: Value,
+        ) -> t3_codemode::t3::BoxFut<'a, Result<Value, t3_codemode::t3::T3Error>> {
+            if tool == "t3_thread_launch" && !self.dirtied.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                std::fs::write(&self.file_to_dirty, "pub fn b() { /* edited mid-pick */ }\n").unwrap();
+            }
+            self.inner.call(tool, args)
+        }
+
+        fn list_tools(&self) -> t3_codemode::t3::BoxFut<'_, Result<Vec<Value>, t3_codemode::t3::T3Error>> {
+            self.inner.list_tools()
+        }
+    }
+
+    let cfg_live = Config::from_value(json!({
+        "flow": {
+            "repos": [REPO],
+            "optIn": {"label": FLOW},
+            "maxTickets": 3,
+            "launch": "auto",
+            "serializeFileConflicts": true
+        }
+    }))
+    .unwrap();
+    let hl = H::build(Vec::new(), cfg_live);
+    hl.github.add_repo(REPO);
+    hl.fake.set_projects(vec![project("p-widgets", repo2.to_str().unwrap())]);
+    hl.remotes.set(repo2.to_str().unwrap(), "git@github.com:acme/widgets.git");
+    issue(&hl, REPO, 1, &[], 1); // running ticket with clean worktree initially
+    issue(&hl, REPO, 2, &[FLOW, "priority: high"], 2);
+    issue(&hl, REPO, 3, &[FLOW, "priority: medium"], 3);
+    hl.github.set_body(REPO, 2, "## Flow\n- Touches: `src/alpha.rs`\n");
+    hl.github.set_body(REPO, 3, "## Flow\n- Touches: `src/beta.rs`\n");
+    ticket(&hl, "mcp:t1", "widgets#1").await;
+
+    let live_t3 = std::sync::Arc::new(DirtyWorktreeOnLaunchT3 {
+        inner: hl.fake.clone(),
+        file_to_dirty: wt_run.join("src/beta.rs"),
+        dirtied: std::sync::atomic::AtomicBool::new(false),
+    });
+    let live_app = t3_codemode::app::App::with_host_and_tailscale(
+        hl.config.clone(),
+        std::sync::Arc::new(t3_codemode::store::Store::open(hl.dir.path()).unwrap()),
+        live_t3,
+        hl.clock.clone(),
+        hl.remotes.clone(),
+        hl.github.clone(),
+        hl.desktop.clone(),
+        hl.tailscale.clone(),
+    );
+    live_app.wf.set_skills_home(t3_codemode::drift::Home::under(&hl.dir.path().join("home")));
+    live_app.wf.set_slot_folders(t3_codemode::slots::Folders::under(&hl.dir.path().join("home"), None));
+    live_app.wf.set_config_path(hl.dir.path().join("t3cm-config.json"));
+    live_app.wf.reconcile().await.unwrap();
+
+    let launched_live: Vec<String> =
+        hl.fake.launched().iter().map(|l| l["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(
+        launched_live,
+        ["widgets#2: Issue 2"],
+        "live worktree edit by running #1 on src/beta.rs must block auto-launch of #3 while #2 still launches: {launched_live:?}"
+    );
+}
