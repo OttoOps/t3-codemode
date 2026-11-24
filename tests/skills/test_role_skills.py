@@ -129,10 +129,11 @@ class MergeRouteTests(unittest.TestCase):
 
     def test_no_skill_merges_through_t3s_merge_button_or_pr_action(self):
         rules = section(self.ticket, "## Hard rules")
-        self.assertIn("Never merge through `gh pr merge` or T3's own merge button or its PR", rules)
+        self.assertIn("Never merge through `gh pr merge`, `glab mr merge`, or T3's own merge button or its PR",
+                      " ".join(rules.split()))
         self.assertIn("merge queue", rules)
-        codemode = (SKILLS / "t3-workflow" / "codemode.md").read_text()
-        self.assertIn("never with `gh pr merge` or T3's\nown merge button or PR action", codemode)
+        codemode = " ".join((SKILLS / "t3-workflow" / "codemode.md").read_text().split())
+        self.assertIn("never with `gh pr merge`, `glab mr merge`, or T3's own merge button or PR action", codemode)
         worker = (SKILLS / "t3-worker" / "procedure.md").read_text()
         self.assertIn("Never merge the PR yourself", worker)
 
@@ -148,7 +149,7 @@ class MergeRouteTests(unittest.TestCase):
     def test_the_worker_reports_each_pr_step_with_its_head(self):
         worker = " ".join((SKILLS / "t3-worker" / "procedure.md").read_text().split())
         for event in ("opened", "updated", "ready"):
-            self.assertIn(f'wf.pr({{ event: "{event}", repo: "<owner>/<name>", pr: <number>, head: "<', worker)
+            self.assertIn(f'wf.pr({{ event: "{event}", repo: "<repo>", pr: <number>, head: "<', worker)
         self.assertIn('publishing: "<Publishing line>"', worker)
         self.assertIn("A merge approval holds only for the head it names", worker)
         self.assertNotIn('gate: "merge", body', worker)
@@ -238,7 +239,7 @@ class MergeRouteTests(unittest.TestCase):
         self.assertIn("from the moment the PR or MR opens, with or without a parent", watch)
         self.assertIn("`glab mr view <iid> --output json`", watch)
         untracked = watch.split('On an untracked forge (the prompt says "Forge: untracked")', 1)[1]
-        self.assertIn("in place of the GitHub query", untracked)
+        self.assertIn("in place of the GitHub or GitLab reads", untracked)
         for case in ("**Merged:**", "**Closed without merging:**", "**Head moved away from the head the prompt names:**",
                      "**Still open at the prompt's head:**", "**The status command fails:**"):
             self.assertIn(case, untracked, case)
@@ -505,7 +506,7 @@ class NonGithubTrackerTests(unittest.TestCase):
         start = " ".join(section(self.ticket, "## 1. Start").split())
         for token in ("`github-issues`", "`jira`", "`gitlab-issues`", "`none`",
                       "explicit ticket ref always wins over the repo default",
-                      "`533` or `#533`", 'wf.init({ role: "ticket" })', "GitHub `origin`"):
+                      "`533` or `#533`", 'wf.init({ role: "ticket" })', "**Untracked forge:**"):
             self.assertIn(token, start)
 
     def test_ticket_step_2_reads_non_github_without_gh_and_keeps_github_writes(self):
@@ -536,7 +537,7 @@ class NonGithubTrackerTests(unittest.TestCase):
 
     def test_worker_uses_refs_for_non_github_and_keeps_github_trailer(self):
         link_proto = " ".join(section(self.worker, "## The link protocol").split())
-        self.assertIn("On a non-GitHub git host, check the MR/PR state", link_proto)
+        self.assertIn("On an untracked forge, check the MR/PR state", link_proto)
 
         orient = " ".join(section(self.worker, "## 1. Orient").split())
         self.assertIn("Skip `gh issue` commands", orient)
@@ -548,7 +549,7 @@ class NonGithubTrackerTests(unittest.TestCase):
 
         open_pr = " ".join(section(self.worker, "## 3. Open the PR and watch it").split())
         for token in ("`Refs #<number>`", "`Refs PROJ-123`", "`Refs <host>/PROJ-123`",
-                      "`Refs <host>/<scope>#<n>`", "non-GitHub git host"):
+                      "`Refs <host>/<scope>#<n>`", "**Untracked forge:**"):
             self.assertIn(token, open_pr)
 
     def test_workflow_docs_describe_non_github_issue_slugs_with_valid_js(self):
@@ -556,6 +557,94 @@ class NonGithubTrackerTests(unittest.TestCase):
         for text in (" ".join(self.workflow.split()), " ".join(self.codemode.split())):
             for slug in ("<owner>/<repo>#<n>", "KEY-N", "<host>/KEY-N", "<host>/<scope>#<n>"):
                 self.assertIn(slug, text)
+
+
+class GitlabForgeTests(unittest.TestCase):
+    ticket = (SKILLS / "t3-ticket" / "SKILL.md").read_text()
+    worker = (SKILLS / "t3-worker" / "procedure.md").read_text()
+    codemode = (SKILLS / "t3-workflow" / "codemode.md").read_text()
+    config_doc = (ROOT / "docs" / "src" / "config.md").read_text()
+
+    def flat(self, text, heading):
+        return " ".join(section(text, heading).split())
+
+    def test_the_ticket_routes_a_listed_gitlab_host_through_wf_pr_and_wf_merge(self):
+        start = self.flat(self.ticket, "## 1. Start")
+        for token in ("**GitHub:**", "**Tracked GitLab:**", "**Untracked forge:**", "`t3cm config get forges`",
+                      'kind: "gitlab"', "`<host>/<full path>`", "the MR's `iid`",
+                      "`wf.pr`, `wf.merge`, `watch_pull_request` and t3cm's reconcile cover it",
+                      "GitLab ones `forges` does not list included",
+                      "`t3cm config set 'forges.\"<host>\"' '{\"kind\": \"gitlab\", \"cli\": \"glab\"}'`"):
+            self.assertIn(token, start)
+        self.assertIn("### Forges", self.config_doc)
+        split = self.flat(self.ticket, "## 2. Read the work and split it")
+        self.assertIn("`glab mr list -R https://<repo> --source-branch <name> --all`", split)
+
+    def test_the_ticket_reads_a_gitlab_merge_request_with_glab(self):
+        opened = self.flat(self.ticket, "### PR opened")
+        self.assertIn("`glab mr view <iid> -R https://<repo> --output json`", opened)
+        ready = self.flat(self.ticket, "### Ready to merge")
+        for token in ("**Tracked GitLab:**", "`detailed_merge_status` `mergeable`", "`refs/merge-requests/<iid>/train`",
+                      "projects/<enc path>/merge_requests/<iid>/pipelines",
+                      "projects/<enc path>/repository/commits/<sha>/statuses",
+                      "merge_requests/<iid>/diffs?per_page=100", "**Untracked forge:**",
+                      "`state` `merged` on a tracked GitLab host", "`squash_commit_sha`"):
+            self.assertIn(token, ready)
+        word = self.flat(self.ticket, "### On the user's word")
+        self.assertIn('`wf.merge({ repo: "<repo>", pr: <number>, head: "<sha>", method: "<merge method>" })`', word)
+        self.assertIn("(a merge train on GitLab)", word)
+        self.assertIn("`glab mr merge`", word)
+        handoff = self.flat(self.ticket, "### The handoff")
+        self.assertIn("showing `state` `merged` on a tracked GitLab host", handoff)
+
+    def test_the_merge_wait_and_watch_cover_a_tracked_gitlab_host(self):
+        wait = self.flat(self.ticket, "#### The merge wait")
+        self.assertIn("on GitHub and on a tracked GitLab host", wait)
+        self.assertIn("from `github` or `gitlab`", wait)
+        self.assertIn("GitLab records no reason when a car leaves a train", wait)
+        self.assertIn("a host `forges` does not list, or one that is neither GitHub nor GitLab", wait)
+        forge = (ROOT / "src" / "codehost.rs").read_text()
+        self.assertIn('Forge::Gitlab { .. } => "GitLab"', forge)
+        watch = self.flat(self.ticket, "#### The merge watch")
+        for token in ("(GitHub, or the tracked GitLab host and the MR's full path)",
+                      "`projects/<enc path>/merge_trains/merge_requests/<iid>`, where a 404 means none",
+                      "`idle`, `fresh` or `stale` is in the queue", "`merge_when_pipeline_succeeds` true is an `autoMergeRequest`",
+                      "`detailed_merge_status` `mergeable` is `CLEAN`"):
+            self.assertIn(token, watch)
+
+    def test_the_untracked_watch_recovers_on_resume_and_resets_its_auth_flag(self):
+        resume = self.flat(self.ticket, "## On the link protocol")
+        self.assertIn("On an untracked forge (step 1 item 3)", resume)
+        self.assertIn("when `list_scheduled_tasks` shows no merge watch for it", resume)
+        self.assertIn("a stop between deleting the watch and item 3 would otherwise skip", resume)
+        self.assertIn("create the merge watch again at the head the worker last named", resume)
+        watch = self.flat(self.ticket, "#### The merge watch")
+        moved = watch.split("**Head moved away from the head the prompt names:**", 1)[1].split("**Still open", 1)[0]
+        self.assertIn('setting "Auth gate sent" back to "no" when it holds a time', moved)
+
+    def test_the_worker_reports_a_tracked_gitlab_merge_request_with_wf_pr(self):
+        link_proto = self.flat(self.worker, "## The link protocol")
+        self.assertIn("GitHub or a tracked GitLab host (step 3 item 2)", link_proto)
+        self.assertIn("`glab mr view <iid> --output json`", link_proto)
+        open_pr = self.flat(self.worker, "## 3. Open the PR and watch it")
+        for token in ("**Tracked GitLab:**", "`t3cm config get forges`", "`<host>/<full path>`",
+                      "or the MR URL with `pr` left out", "`glab mr create --source-branch <branch> --target-branch main",
+                      '`glab mr update <iid> --description "$(cat <file>)"`', "**Untracked forge:**",
+                      "listing the host under `forges` would let t3cm follow its merge requests",
+                      "When T3 refuses the watch for a GitLab MR"):
+            self.assertIn(token, open_pr)
+        wake = self.flat(self.worker, "## 4. On a wake")
+        for token in ("`glab ci trace <job id>`", "`glab mr view <iid> --comments`",
+                      'wf.pr({ event: "ready", repo: "<repo>"', 'wf.pr({ event: "updated", repo: "<repo>"'):
+            self.assertIn(token, wake)
+        follow = self.flat(self.worker, "## 5. PR delivery stage failed: follow-up PR")
+        self.assertIn("`glab mr list --source-branch <name> --all`", follow)
+
+    def test_codemode_names_the_forges_config(self):
+        text = " ".join(self.codemode.split())
+        self.assertIn("listed under `forges` in t3cm's config", text)
+        self.assertIn("`t3cm config get forges`", text)
+        self.assertIn("t3cm config set 'forges.\"gitlab.acme.example\"'", text)
 
 
 if __name__ == "__main__":

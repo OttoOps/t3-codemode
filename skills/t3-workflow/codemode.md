@@ -136,19 +136,29 @@ async () => {
 and the next worker reads it with
 `(await mem.ns("work:widgets#41").get("handoff:pr1"))`.
 
-A ticket merges every PR with `wf.merge`, never with `gh pr merge` or T3's
-own merge button or PR action: on a repo with a merge queue, T3 turns on
-auto-merge, and a PR whose checks have already passed never joins the
-queue. `wf.merge` reads per PR whether the repo has a queue, so no skill or
-config lists those repos. Its merge gate names the approved head
-(`head <sha>`), and the board holds the approval to that head. After a
-`queued` or `waiting` outcome the ticket polls nothing: the board's GitHub
-reconcile wakes it when the PR merges, closes or leaves the queue, as
-t3-ticket's "The merge wait" says.
+A ticket merges every PR with `wf.merge`, never with `gh pr merge`,
+`glab mr merge`, or T3's own merge button or PR action: on a repo with a
+merge queue, T3 turns on auto-merge, and a PR whose checks have already
+passed never joins the queue. `wf.merge` reads per PR whether the repo has a
+queue (a merge train on GitLab), so no skill or config lists those repos.
+Its merge gate names the approved head (`head <sha>`), and the board holds
+the approval to that head. After a `queued` or `waiting` outcome the ticket
+polls nothing: the board's reconcile wakes it when the PR merges, closes or
+leaves the queue, as t3-ticket's "The merge wait" says.
 
-**Worker.** Join from the brief, send routine progress as notes, the PR as
-an `event`, the merge request as a `gate` that names its head
-(`head <sha>`), and the handoff at the end. Look up `wf.slot("review")`
+`wf.pr`, `wf.merge` and the reconcile cover GitHub and every GitLab host
+listed under `forges` in t3cm's config, where `repo` is
+`<host>/<full path>` (or the merge request's URL) and `pr` is the merge
+request's `iid`. `t3cm config get forges` shows the list. To add a host, run
+`t3cm config set 'forges."gitlab.acme.example"' '{"kind": "gitlab", "cli": "glab"}'`
+and sign `glab` in to it as the user the service runs as. On any other host
+t3cm follows nothing, so the ticket watches the merge itself and the worker
+reports its merge request with `wf.send`, as their skills say.
+
+**Worker.** Join from the brief, send routine progress as notes, report
+its PR's opening, new heads and readiness with `wf.pr` (on a forge t3cm
+does not track, as an `event` naming `head <sha>`), and send the handoff at
+the end. Look up `wf.slot("review")`
 before opening the PR, `wf.slot("passes")` in Publishing, and
 `wf.renewal({ output })` when a command fails. It never merges. On a
 `[t3cm nudge`, run the resume step, then send a note, open a gate, or hand

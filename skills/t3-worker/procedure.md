@@ -40,14 +40,17 @@ orchestrator: built, review started, checks green, a skipped slot), `event`
 
 `t3-workflow` asks each role for one thing. Yours is:
 
-- **Resume step:** re-read the step you were on. Once the PR is open on a
-  GitHub `origin`, run `list_thread_pull_requests`: when this PR (or a
-  follow-up PR) is no longer watched, call `watch_pull_request` on it again.
-  Then check the PR's state (`gh pr view <number> --json
-  state,headRefOid,statusCheckRollup`) and act on any wake you missed (step
-  4). On a non-GitHub git host, check the MR/PR state with the repo's
-  documented workflow instead of `watch_pull_request` and `gh pr view`. Then
-  carry on from that step.
+- **Resume step:** re-read the step you were on. Once the PR is open on
+  GitHub or a tracked GitLab host (step 3 item 2), run
+  `list_thread_pull_requests`: when this PR (or a follow-up PR) is no longer
+  watched, call `watch_pull_request` on it again. Then check the PR's state
+  and act on any wake you missed (step 4): `gh pr view <number> --json
+  state,headRefOid,statusCheckRollup` on GitHub, or on GitLab
+  `glab mr view <iid> --output json` (its `state` and `sha`) and
+  `glab ci list --branch <branch>` for its pipelines. On an untracked forge,
+  check the MR/PR state with the repo's documented workflow instead of
+  `watch_pull_request`, `gh pr view` and `glab`. Then carry on from that
+  step.
 
 When you wait on a person, send the gate:
 `await wf.send({ kind: "gate", gate: "review", body: "<action line>" })` when
@@ -130,7 +133,8 @@ gh api user -q .login
 ```
 
 Each must match what the repo documents (skip `gh api user` when the git
-host is not GitHub). When the repo names no bot, the
+host is not GitHub; on GitLab, `glab auth status --hostname <host>` names
+the account instead). When the repo names no bot, the
 idents must be the user's own (`git config user.name`, `user.email`), the
 remote must be the repo the brief names, and the `gh` login must be the
 user's account on a GitHub repo. When anything differs, stop: send the orchestrator the
@@ -183,48 +187,69 @@ does not.
      `Refs PROJ-123 (<browse URL>)` or `Refs <host>/PROJ-123` for a hosted
      Jira URL, or `Refs <issue URL>` / `Refs <host>/<scope>#<n>` for GitLab,
      matching the worker link's `issue` identity so `wf.pr` accepts it).
-2. Items 2 to 5 below and the GitHub `gh` / `wf.pr` / `watch_pull_request`
-   steps in step 4 apply to a GitHub `origin`. On a non-GitHub git host (such
-   as self-hosted GitLab), follow the repo's documented MR/PR, check, and
-   review workflow in place of those GitHub steps, report the MR's opening,
-   each new head, and readiness to the orchestrator with
-   `wf.send({ kind: "event", body })` (a `note` never wakes it; the body
-   says "PR opened", "PR updated" or "ready to merge" and carries the MR
-   URL, `head <sha>`, and the `Publishing:` line on open), and end the
-   turn. The orchestrator's merge watch follows the MR at the head you last
-   named. T3's pull request watcher does not wake you on a merge there, so
-   the orchestrator messages you when it merges. Otherwise push the branch and open the PR against `main` with that description:
-   `gh pr create --base main --head <branch> --title <title> --body-file
-   <file>`. The title follows Conventional Commits.
-3. `link_pull_request` with the PR URL.
-4. `watch_pull_request` on it.
+2. Find the forge from `git remote get-url origin`:
+   - **GitHub** (github.com): `repo` below is `<owner>/<name>`.
+   - **Tracked GitLab:** a host that `t3cm config get forges` lists with
+     `kind: "gitlab"`. `wf.pr` and t3cm's reconcile cover its merge
+     requests (MRs) as they cover GitHub PRs, so items 3 to 5 and step 4
+     apply, with `repo` as `<host>/<full path>` (such as
+     `gitlab.acme.example/group/sub/widgets`), or the MR URL with `pr` left
+     out, and `pr` as the MR's `iid`. Use the `glab` command each step
+     gives for GitLab in place of its `gh` command.
+   - **Untracked forge:** any other host, GitLab hosts `forges` does not
+     list included. Follow the repo's documented MR/PR, check, and review
+     workflow in place of items 3 to 5 and the `gh` / `glab` / `wf.pr` /
+     `watch_pull_request` steps in step 4. Report the MR's opening, each new
+     head, and readiness to the orchestrator with
+     `wf.send({ kind: "event", body })` (a `note` never wakes it; the body
+     says "PR opened", "PR updated" or "ready to merge" and carries the MR
+     URL, `head <sha>`, and the `Publishing:` line on open), and end the
+     turn. The orchestrator's merge watch follows the MR at the head you
+     last named. T3's pull request watcher does not wake you on a merge
+     there, so the orchestrator messages you when it merges. For a GitLab
+     host, add to the opened event that listing the host under `forges`
+     would let t3cm follow its merge requests.
+
+   On GitHub or a tracked GitLab host, push the branch and open the PR
+   against `main` with that description: `gh pr create --base main --head
+   <branch> --title <title> --body-file <file>` on GitHub, or
+   `glab mr create --source-branch <branch> --target-branch main --title
+   <title> --description "$(cat <file>)" --yes` on GitLab. The title follows
+   Conventional Commits.
+3. `link_pull_request` with the PR or MR URL.
+4. `watch_pull_request` on it. When T3 refuses the watch for a GitLab MR,
+   carry on: the link watcher's nudge runs your resume step, which reads
+   the pipeline.
 5. Report it:
-   `await wf.pr({ event: "opened", repo: "<owner>/<name>", pr: <number>, head: "<sha>", publishing: "<Publishing line>", checks: "pending" })`,
+   `await wf.pr({ event: "opened", repo: "<repo>", pr: <number>, head: "<sha>", publishing: "<Publishing line>", checks: "pending" })`,
    with the `Publishing:` line from Publishing, step 3, and
    `checks: "none"` when the repo runs no CI on PRs. Name any review
    worktree you could not remove in `body`. Act on its `status`:
    - `open`: t3cm checked the description and the Publishing line.
    - `rewrite`: do what `message` says (`gh pr edit <number> --body-file
-     <file>`, through Publishing again), then call the same `wf.pr` opened
+     <file>`, or `glab mr update <iid> --description "$(cat <file>)"` on
+     GitLab, through Publishing again), then call the same `wf.pr` opened
      again with the new Publishing line.
    - `ticket`: t3cm sent it to the orchestrator, for the reason in `why`.
 6. End the turn.
 
 The watcher wakes you on failed checks, passed checks, comments, reviews,
 and conflicts. It never wakes you on a merge or a deploy: t3cm or the
-orchestrator does those and messages you. Never merge the PR yourself, through `gh`,
-`wf.merge`, or T3's merge button or PR action.
+orchestrator does those and messages you. Never merge the PR yourself,
+through `gh`, `glab`, `wf.merge`, or T3's merge button or PR action.
 
 ## 4. On a wake
 
-- **A check failed:** read the run log (`gh run view <run id> --log-failed`),
-  fix the cause, push.
+- **A check failed:** read the run log (`gh run view <run id> --log-failed`,
+  or `glab ci trace <job id>` for the failed job on GitLab), fix the cause,
+  push.
 - **A comment or review from a person:** answer it in the PR or change the
   code, push. A reply posted on the PR goes through Publishing.
 - **A review from a bot reviewer** (CodeRabbit or any other automated
   reviewer): a round is one bot review of one head. Count the rounds this
   PR has had (`gh api repos/<owner>/<repo>/pulls/<number>/reviews`, the
-  bot's reviews, one per distinct `commit_id`).
+  bot's reviews, one per distinct `commit_id`; on GitLab, the bot's review
+  notes in `glab mr view <iid> --comments`, one per head it reviewed).
   - Fix only the Critical and Major findings that still hold against the
     current code, all of them in one push. When you dispute one, reply
     once with why, leave the code, and send it as the `review` gate below
@@ -245,7 +270,7 @@ orchestrator does those and messages you. Never merge the PR yourself, through `
   the head has finished, CodeRabbit's and any other bot reviewer's
   included, even where the repo does not require it, and you have read
   any review a bot posted of that head:
-  `await wf.pr({ event: "ready", repo: "<owner>/<name>", pr: <number>, head: "<sha>" })`.
+  `await wf.pr({ event: "ready", repo: "<repo>", pr: <number>, head: "<sha>" })`.
   A brief that says to report ready whatever the bot's state means its
   review decision, never a check still running. A merge approval holds
   only for the head it names. Call it once per head sha, and never while
@@ -264,7 +289,7 @@ orchestrator does those and messages you. Never merge the PR yourself, through `
     `merge` gate, for the reason in `why`.
 - **After any push:** when you already called `wf.pr` opened or ready for
   an older head, call
-  `await wf.pr({ event: "updated", repo: "<owner>/<name>", pr: <number>, head: "<new sha>", body: "<what changed>" })`.
+  `await wf.pr({ event: "updated", repo: "<repo>", pr: <number>, head: "<new sha>", body: "<what changed>" })`.
   It records the head and drops any merge card for the old one, because the
   orchestrator merges only at the head you named. Then call ready again
   when the new head's checks pass.
@@ -315,7 +340,8 @@ this thread and this worktree:
 
 1. `git fetch origin`, then `git switch -c <brief branch>-fix origin/main`.
    When that name is taken (local branch, `git ls-remote --heads origin`,
-   or `gh pr list --state all --head <name>`), add `-2`, `-3`.
+   `gh pr list --state all --head <name>` on GitHub, or
+   `glab mr list --source-branch <name> --all` on GitLab), add `-2`, `-3`.
 2. Steps 2 to 4 for the new PR, its review included. Its acceptance line is
    "the failed delivery stage succeeds". Its `wf.pr` opened call's `body`
    names it as a follow-up of #<number>.
@@ -438,6 +464,7 @@ not included.
    a pass ran if you skipped part of it.
 
 Text you add or change after step 2, including a `gh pr edit --body-file`
+or `glab mr update --description`
 after the PR opens or an issue number inserted after the draft, goes through
 step 2 again, and the report covers it. A rewrite of the whole description
 starts again at step 1. A fixed-format line that a skill requires word for
