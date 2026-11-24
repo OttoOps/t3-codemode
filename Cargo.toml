@@ -18,6 +18,10 @@ path = "tests/support/fake_mcp_server.rs"
 test = false
 doc = false
 
+[features]
+default = []
+test-sentinels = []
+
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }

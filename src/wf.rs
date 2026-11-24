@@ -18,6 +18,7 @@ use crate::github::GitHub;
 use crate::issues::IssueArgs;
 use crate::merge::MergeArgs;
 use crate::reach::{Reach, ReachPoint};
+use crate::sentinels::{Sentinel, Sentinels};
 use crate::store::{Bind, Identity, Link, Pending, PrBrief, Store};
 use crate::t3::{T3Client, T3Error};
 use crate::tokens::{T3Tokens, TokenSource};
@@ -320,6 +321,7 @@ pub struct Wf {
     pub(crate) context_writes: Mutex<()>,
     pub(crate) routing: Mutex<Option<Value>>,
     pub(crate) reach: Reach,
+    pub(crate) sentinels: Sentinels,
 }
 
 const MAX_PR_PAGES: usize = 20;
@@ -385,11 +387,30 @@ impl Wf {
             context_writes: Mutex::new(()),
             routing: Mutex::new(None),
             reach: Reach::new(),
+            sentinels: Sentinels::new(),
         }
     }
 
     pub fn reach(&self) -> &Reach {
         &self.reach
+    }
+
+    #[cfg(feature = "test-sentinels")]
+    pub fn sentinels(&self) -> &Sentinels {
+        &self.sentinels
+    }
+
+    #[inline(always)]
+    pub(crate) fn sentinel(&self, s: Sentinel) -> bool {
+        self.sentinels.is_set(s)
+    }
+
+    pub(crate) fn retire_merge_wait(&self, w: &crate::store::MergeWait) -> Result<bool> {
+        if self.sentinel(Sentinel::MergeWaitRemoveNotCas) {
+            self.store.merge_wait_remove(&w.repo, w.pr)
+        } else {
+            self.store.merge_wait_retire(w)
+        }
     }
 
     pub fn config(&self) -> Arc<Config> {
@@ -936,7 +957,7 @@ impl Wf {
                 self.flow_soon();
             }
             self.store.link_save(&ln)?;
-            if closing && self.store.outbox_drop_to(&ln.child)? > 0 {
+            if closing && !self.sentinel(Sentinel::OutboxNoPurge) && self.store.outbox_drop_to(&ln.child)? > 0 {
                 self.reach.hit(ReachPoint::OutboxHeldThenClosed);
             }
             return self.board_receive(&ln, &a.kind, &handle, &a.body, options);
@@ -953,7 +974,7 @@ impl Wf {
             capped(&a.body, &handle, policy.body_cap)
         );
         self.store.link_save(&ln)?;
-        if closing && self.store.outbox_drop_to(&ln.child)? > 0 {
+        if closing && !self.sentinel(Sentinel::OutboxNoPurge) && self.store.outbox_drop_to(&ln.child)? > 0 {
             self.reach.hit(ReachPoint::OutboxHeldThenClosed);
         }
         let mut out = self.send_wake(&ln.parent, &text, &handle).await?;
@@ -1130,7 +1151,7 @@ impl Wf {
                     c.kind == "gate"
                         && c.worker.is_none()
                         && c.ticket.as_deref() == Some(ln.child.as_str())
-                        && (!is_ready || matches_gate_pr)
+                        && (self.sentinel(Sentinel::GateClearWipesOtherReady) || !is_ready || matches_gate_pr)
                 },
                 "gate cleared in the ticket",
             )?;
@@ -1197,11 +1218,13 @@ impl Wf {
         ln.closed = true;
         ln.closed_at = Some(self.now());
         ln.closed_how = Some("closed-by-parent".into());
-        ln.gate = None;
-        ln.gate_since = None;
-        ln.gate_pr = None;
+        if !self.sentinel(Sentinel::CloseKeepsGate) {
+            ln.gate = None;
+            ln.gate_since = None;
+            ln.gate_pr = None;
+        }
         self.store.link_save(&ln)?;
-        if self.store.outbox_drop_to(&ln.child)? > 0 {
+        if !self.sentinel(Sentinel::OutboxNoPurge) && self.store.outbox_drop_to(&ln.child)? > 0 {
             self.reach.hit(ReachPoint::OutboxHeldThenClosed);
         }
         if ln.parent == BOARD {
@@ -1521,7 +1544,7 @@ impl Wf {
             if only_to.is_some_and(|o| o != to) {
                 continue;
             }
-            if self.store.link_get(&to)?.is_some_and(|l| l.closed) {
+            if !self.sentinel(Sentinel::OutboxNoPurge) && self.store.link_get(&to)?.is_some_and(|l| l.closed) {
                 let (keep, drop): (Vec<_>, Vec<_>) = items.into_iter().partition(|i| i.allow_closed);
                 if !drop.is_empty() {
                     self.reach.hit(ReachPoint::OutboxHeldThenClosed);
@@ -1610,7 +1633,7 @@ impl Wf {
                 ln.gate = None;
                 ln.gate_since = None;
                 ln.gate_pr = None;
-                if self.store.outbox_drop_to(&ln.child)? > 0 {
+                if !self.sentinel(Sentinel::OutboxNoPurge) && self.store.outbox_drop_to(&ln.child)? > 0 {
                     self.reach.hit(ReachPoint::OutboxHeldThenClosed);
                 }
                 let body = format!("{}'s thread is gone; its link is closed.", ln.label);
@@ -1634,7 +1657,7 @@ impl Wf {
             ln.gate = None;
             ln.gate_since = None;
             ln.gate_pr = None;
-            if self.store.outbox_drop_to(&ln.child)? > 0 {
+            if !self.sentinel(Sentinel::OutboxNoPurge) && self.store.outbox_drop_to(&ln.child)? > 0 {
                 self.reach.hit(ReachPoint::OutboxHeldThenClosed);
             }
             if ln.parent == BOARD {

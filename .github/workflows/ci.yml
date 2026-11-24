@@ -74,6 +74,8 @@ jobs:
           readelf -p .comment target/debug/t3cm
           readelf -p .comment target/debug/t3cm | grep -q 'mold '
       - if: matrix.os == 'ubuntu-latest'
+        run: cargo test --locked --features test-sentinels --test all sentinel_acceptance
+      - if: matrix.os == 'ubuntu-latest'
         run: python3 -m unittest discover -s tests/skills -v
 
   check:

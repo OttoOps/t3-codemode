@@ -31,6 +31,7 @@ pub mod reconcile;
 pub mod release;
 pub mod routing;
 pub mod sandbox;
+pub mod sentinels;
 pub mod server;
 pub mod settings;
 pub mod setup;

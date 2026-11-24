@@ -1497,7 +1497,7 @@ impl Wf {
                         && o.worker.as_ref().map(|w| w.thread.as_str()) == from;
                     if same_owner && o.pr.as_ref().is_some_and(|p| p.ready) {
                         self.reach.hit(crate::reach::ReachPoint::DeliveryGateOverReadyCard);
-                        return false;
+                        return self.sentinel(crate::sentinels::Sentinel::BoardCardWipesReady);
                     }
                     same_owner
                 },
@@ -2852,7 +2852,9 @@ impl Wf {
             ln.gate_pr = None;
             ln.paused_at = None;
             self.store.link_save(&ln)?;
-            self.store.outbox_drop_to(&ln.child)?;
+            if !self.sentinel(crate::sentinels::Sentinel::OutboxNoPurge) {
+                self.store.outbox_drop_to(&ln.child)?;
+            }
             self.resolve_ticket_cards(&ln.child, "ticket closed from the board")?;
             self.flow_soon();
             ln.label
