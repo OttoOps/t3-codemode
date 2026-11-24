@@ -3121,6 +3121,86 @@ async fn board_sync_links_reports_permission_errors_parent_conflicts_and_self_lo
 }
 
 #[tokio::test]
+async fn board_sync_links_writes_graph_primary_parent_and_conflicts_lower_precedence_candidates() {
+    let h = flowing(4);
+    issue(&h, REPO, 10, &[], 1);
+    issue(&h, REPO, 20, &[], 2);
+    issue(&h, REPO, 3, &[FLOW], 3);
+    // Epic #10 lists #3 in its tasklist (sorts before #20), while #3 declares Parent: #20.
+    // The graph picks #20 as #3's primary parent; sync must write #20 and report #10 as a conflict.
+    h.github.set_body(REPO, 10, "- [ ] #3\n");
+    h.github.set_body(REPO, 3, "## Flow\n- Parent: #20\n");
+
+    let s = crate::board::start(h).await;
+    let before = s.get("/api/flow").await;
+    assert_eq!(node(&before, "acme/widgets#3")["parent"], "acme/widgets#20", "{before}");
+
+    let r: Value = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(r["total"], 2, "{r}");
+    assert_eq!(r["synced"], 1, "{r}");
+    assert_eq!(r["failed"], 1, "{r}");
+    assert_eq!(
+        s.h.github.issue(REPO, 3).unwrap()["parentRef"],
+        json!([REPO, 20]),
+        "primary parent #20 must be written to GitHub: {r}"
+    );
+    let errs = r["errors"].as_array().unwrap();
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert_eq!(errs[0]["from"], "acme/widgets#3");
+    assert_eq!(errs[0]["to"], "acme/widgets#10");
+    assert_eq!(errs[0]["kind"], "parent");
+    assert_eq!(errs[0]["conflict"], true);
+    assert_eq!(errs[0]["existingParent"], "acme/widgets#20");
+    let edges = r["flow"]["graph"]["edges"].as_array().unwrap();
+    assert!(
+        edges.contains(
+            &json!({"from": "acme/widgets#3", "to": "acme/widgets#20", "kind": "parent", "source": "github"})
+        ),
+        "{edges:?}"
+    );
+
+    // If the primary parent fails with a permission error, sync must NOT fall back to writing the secondary candidate.
+    issue(&s.h, REPO, 30, &[], 4);
+    issue(&s.h, REPO, 4, &[FLOW], 5);
+    s.h.github.set_body(REPO, 10, "- [ ] #3\n- [ ] #4\n");
+    s.h.github.set_body(REPO, 4, "## Flow\n- Parent: #30\n");
+    s.h.github.fail_operation_with_type("addSubIssue", "FORBIDDEN", "Resource not accessible by integration");
+
+    let denied: Value = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(s.h.github.issue(REPO, 4).unwrap()["parentRef"], Value::Null, "{denied}");
+    let d_errs = denied["errors"].as_array().unwrap();
+    let e30 = d_errs.iter().find(|e| e["from"] == "acme/widgets#4" && e["to"] == "acme/widgets#30").unwrap();
+    assert_eq!(e30["permission"], true, "{e30}");
+    let e10 = d_errs.iter().find(|e| e["from"] == "acme/widgets#4" && e["to"] == "acme/widgets#10").unwrap();
+    assert_eq!(e10["conflict"], true, "{e10}");
+    assert!(e10.get("existingParent").is_none(), "{e10}");
+}
+
+#[tokio::test]
 async fn board_sync_links_enforces_remote_auth_and_csrf() {
     let cfg = Config::from_value(json!({
         "board": {"remote": {"mode": "tailscale", "origin": "https://box.acme.ts.net:47732"}},
@@ -3390,4 +3470,53 @@ return {{ before, drawerBefore, afterOk, dismissedHidden, afterPartial, afterFai
     assert_eq!(r["afterFail"]["btnDisabled"], Value::Null, "{r}");
     assert_eq!(r["afterFail"]["resErr"], true, "{r}");
     assert_eq!(r["afterFail"]["resMsg"], "Could not sync parsed links: gh down", "{r}");
+
+    // Stale GET /api/flow started before sync must not overwrite synced edges or bring back the sync button.
+    let race = panel(
+        &html,
+        &st,
+        &before_view,
+        &format!(
+            r##"{GRAPH}
+const syncedRes = {synced_res};
+let resolveStaleGet = null;
+let getCount = 0;
+fetchReply = (url) => {{
+  if (url === "/api/flow") {{
+    getCount += 1;
+    if (getCount === 1) return reply(200, view);
+    return new Promise((resolve) => {{ resolveStaleGet = () => resolve(reply(200, view)); }});
+  }}
+  if (url === "/api/flow/sync-links") return reply(200, syncedRes);
+  return new Promise(() => {{}});
+}};
+emitState(base);
+await tick();
+selectTab("graph");
+// Start a poll GET /api/flow that stays in flight while sync completes.
+loadFlow();
+q("#graph-sync").dispatch("click");
+await tick();
+const afterSync = {{
+  btnHidden: q("#graph-sync").hidden,
+  edges: document.querySelectorAll(".ge").map((p) => p.getAttribute("data-source")),
+}};
+// Now resolve the pre-sync GET /api/flow with stale body edges.
+resolveStaleGet();
+await tick();
+const afterStaleGet = {{
+  btnHidden: q("#graph-sync").hidden,
+  edges: document.querySelectorAll(".ge").map((p) => p.getAttribute("data-source")),
+}};
+return {{ afterSync, afterStaleGet }};
+"##
+        ),
+    );
+    assert_eq!(race["afterSync"]["btnHidden"], true, "{race}");
+    assert!(race["afterSync"]["edges"].as_array().unwrap().iter().all(|s| s == "github"), "{race}");
+    assert_eq!(race["afterStaleGet"]["btnHidden"], true, "stale poll must not bring back sync button: {race}");
+    assert!(
+        race["afterStaleGet"]["edges"].as_array().unwrap().iter().all(|s| s == "github"),
+        "stale poll must not overwrite synced edges: {race}"
+    );
 }
