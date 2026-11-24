@@ -1141,6 +1141,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
 .gkey .k-body { stroke: var(--pause); stroke-dasharray: 5 3; }
 .gkey .k-stack { stroke: var(--s3); }
 .gkey .k-conflict { stroke: var(--s2); stroke-dasharray: 2 3; }
+.gkey .k-codedep { stroke: var(--s1); stroke-dasharray: 5 3; }
 .gscroll { overflow: auto; overscroll-behavior: contain; }
 #tp-graph > .empty { position: static; }
 .gscroll > svg { display: block; }
@@ -1155,12 +1156,15 @@ kbd { font-family: var(--mono); font-size: 12px; }
 .ge.stack { stroke: var(--s3); stroke-width: 2; }
 .ge.conflict { stroke: var(--s2); stroke-width: 1.75; stroke-dasharray: 2 3; }
 .ge.conflict.hot { stroke-width: 2.5; }
+.ge.codedep { stroke: var(--s1); stroke-width: 1.75; stroke-dasharray: 5 4; }
+.ge.codedep.hot { stroke-width: 2.5; }
 .ge.up { stroke: var(--fail); stroke-width: 2.5; }
 .ge.down { stroke: var(--unlock); stroke-width: 2.5; }
 .ge.dim { stroke-opacity: 0.25; }
 .gmk { fill: var(--border-strong); }
 .gmk.body { fill: var(--pause); }
 .gmk.git { fill: var(--s3); }
+.gmk.code { fill: var(--s1); }
 .gmk.up { fill: var(--fail); }
 .gmk.down { fill: var(--unlock); }
 .gnode {
@@ -1400,6 +1404,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
           <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-body" d="M1 4h20" stroke-width="1.5"/></svg>from body</span>
           <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-stack" d="M1 4h20" stroke-width="2"/></svg>PR stack</span>
           <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-conflict" d="M1 4h20" stroke-width="1.75"/></svg>file conflict</span>
+          <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-codedep" d="M1 4h20" stroke-width="1.75"/></svg>code dep</span>
           <button class="btn gsync" type="button" id="graph-sync" hidden></button>
           <span class="gnote" id="graph-note"></span>
         </div>
@@ -4445,7 +4450,7 @@ function graphLayout(nodes, edges) {
   const succs = list.map(() => []);
   const link = new Set();
   for (const e of edges) {
-    if (e.kind === "fileConflict") continue;
+    if (e.kind === "fileConflict" || e.kind === "codeDep") continue;
     const a = at.get(e.to), b = at.get(e.from);
     if (a === undefined || b === undefined || a === b) continue;
     const k = a + ">" + b;
@@ -4592,6 +4597,10 @@ function graphSub(n) {
 }
 
 function edgeDirected(e) {
+  return e.kind === "blockedBy" || e.kind === "prStack" || e.kind === "codeDep";
+}
+
+function edgeHardDirected(e) {
   return e.kind === "blockedBy" || e.kind === "prStack";
 }
 
@@ -4600,6 +4609,7 @@ function edgeBaseClass(e) {
   if (e.kind === "parent") cls += " par";
   else if (e.kind === "prStack") cls += " stack";
   else if (e.kind === "fileConflict") cls += " conflict";
+  else if (e.kind === "codeDep") cls += " codedep";
   if (e.source && e.source !== "github") cls += " src-" + e.source;
   return cls;
 }
@@ -4608,6 +4618,7 @@ function edgeMarker(e, cls) {
   if (/ up$/.test(cls)) return "url(#gm-up)";
   if (/ down$/.test(cls)) return "url(#gm-down)";
   if (e.kind === "prStack" || e.source === "git") return "url(#gm-git)";
+  if (e.kind === "codeDep") return "url(#gm-code)";
   if (e.source === "body") return "url(#gm-body)";
   return "url(#gm-base)";
 }
@@ -4636,6 +4647,15 @@ function fileConflictDetail(files, limit) {
   return list.join(", ");
 }
 
+function codeDepDetail(e, limit) {
+  const list = [];
+  for (const m of e.modules || []) list.push(m);
+  for (const s of e.symbols || []) list.push("symbol " + s);
+  if (!list.length) return "";
+  if (limit && list.length > limit) return list.slice(0, limit).join(", ") + " (+" + (list.length - limit) + " more)";
+  return list.join(", ");
+}
+
 function edgeTooltip(e) {
   const source = e.source || "github";
   if (e.kind === "prStack") {
@@ -4646,6 +4666,10 @@ function edgeTooltip(e) {
     const detail = fileConflictDetail(e.files, 6);
     return detail ? "File conflict (code): " + detail : "File conflict (code)";
   }
+  if (e.kind === "codeDep") {
+    const detail = codeDepDetail(e, 6);
+    return detail ? "Code dependency hint (code): " + detail : "Code dependency hint (code)";
+  }
   return (e.kind === "blockedBy" ? "Blocked by" : "Parent")
     + (source === "body" ? " (parsed from body)" : source === "github" ? " (GitHub)" : " (" + source + ")");
 }
@@ -4653,7 +4677,7 @@ function edgeTooltip(e) {
 function graphSig(lay, edges) {
   return JSON.stringify([graph.mode, lay.wide, lay.height, lay.lanes.map((l) => [l.name, l.by, l.top, l.h, l.count]),
     [...lay.pos.entries()].map(([id, p]) => [id, p.x, p.y]),
-    edges.map((e) => [e.from, e.to, e.kind, e.source || "github", e.branch || "", e.baseBranch || "", e.pr || 0, e.basePr || 0, e.part || "", e.files || []])]);
+    edges.map((e) => [e.from, e.to, e.kind, e.source || "github", e.branch || "", e.baseBranch || "", e.pr || 0, e.basePr || 0, e.part || "", e.files || [], e.modules || [], e.symbols || []])]);
 }
 
 function paintGraphWarn(warnings) {
@@ -4856,7 +4880,7 @@ function graphBuild(box, lay, edges) {
   const marker = (cls) => svgEl("marker", { id: "gm-" + cls, viewBox: "0 0 8 8", refX: "7", refY: "4", markerWidth: "8", markerHeight: "8", orient: "auto-start-reverse", markerUnits: "userSpaceOnUse" },
     svgEl("path", { class: "gmk" + (cls === "base" ? "" : " " + cls), d: "M0 0L8 4L0 8z" }));
   const root = svgEl("svg", { width: lay.width, height: lay.height, viewBox: "0 0 " + lay.width + " " + lay.height },
-    svgEl("defs", {}, marker("base"), marker("body"), marker("git"), marker("up"), marker("down")));
+    svgEl("defs", {}, marker("base"), marker("body"), marker("git"), marker("code"), marker("up"), marker("down")));
   const wide = lay.wide;
   lay.lanes.forEach((l, i) => {
     const words = { label: "track label", epic: "epic", milestone: "milestone", repo: "repository", component: "linked issues", independent: "" }[l.by] || "";
@@ -4967,7 +4991,7 @@ function graphMark() {
   const kin = new Set(n ? [n.parent, ...(n.subIssues || [])].filter(Boolean) : []);
   if (hot) {
     for (const e of graph.edges || []) {
-      if (e.kind !== "fileConflict") continue;
+      if (e.kind !== "fileConflict" && e.kind !== "codeDep") continue;
       if (e.from === hot) kin.add(e.to);
       else if (e.to === hot) kin.add(e.from);
     }
@@ -4981,11 +5005,11 @@ function graphMark() {
   for (const { el, e } of graph.paths) {
     let cls = edgeBaseClass(e);
     const directed = edgeDirected(e);
-    if (hot && directed) {
+    if (hot && edgeHardDirected(e)) {
       if ((e.from === hot || up.has(e.from)) && up.has(e.to)) cls += " up";
       else if ((e.to === hot || down.has(e.to)) && down.has(e.from)) cls += " down";
       else cls += " dim";
-    } else if (hot && e.kind === "fileConflict") {
+    } else if (hot && (e.kind === "fileConflict" || e.kind === "codeDep")) {
       if (e.from === hot || e.to === hot) cls += " hot";
       else cls += " dim";
     } else if (hot && e.from !== hot && e.to !== hot) cls += " dim";
@@ -6720,6 +6744,8 @@ function drDeps(n) {
   const stackUp = edges.filter((e) => e.kind === "prStack" && e.from === n.id);
   const stackDown = edges.filter((e) => e.kind === "prStack" && e.to === n.id);
   const conflicts = edges.filter((e) => e.kind === "fileConflict" && (e.from === n.id || e.to === n.id));
+  const codeDeps = edges.filter((e) => e.kind === "codeDep" && e.from === n.id);
+  const codeDepBy = edges.filter((e) => e.kind === "codeDep" && e.to === n.id);
   const linked = ["blockedBy", "unlocks", "subIssues"].some((k) => (n[k] || []).length)
     || !!n.parent || stackUp.length > 0 || stackDown.length > 0;
   const why = n.trackBy === "component" && !linked ? "" : LANE_BY[n.trackBy];
@@ -6756,6 +6782,18 @@ function drDeps(n) {
       return entry(otherId, e.source || "code", fileConflictDetail(e.files, 4), full);
     })]);
   }
+  if (codeDeps.length) {
+    rows.push(["codeDep", "Code deps", codeDeps.map((e) => {
+      const full = codeDepDetail(e, 0);
+      return entry(e.to, e.source || "code", codeDepDetail(e, 4), full);
+    })]);
+  }
+  if (codeDepBy.length) {
+    rows.push(["codeDepBy", "Code used by", codeDepBy.map((e) => {
+      const full = codeDepDetail(e, 0);
+      return entry(e.from, e.source || "code", codeDepDetail(e, 4), full);
+    })]);
+  }
   const more = (n.moreBlockers ? ["blockedBy"] : []).concat(n.moreSubIssues ? ["subIssues"] : []);
   rows.splice(0, rows.length, ...rows.filter((r) => r[2].length || more.includes(r[0])));
   const l = drPart("deps-l");
@@ -6763,16 +6801,19 @@ function drDeps(n) {
   if (l._sig === sig) return;
   l._sig = sig;
   const said = (r) => r.length + (r.length === 1 ? " issue" : " issues");
-  const srcTitle = (src) => src === "body" ? "Parsed from issue body"
+  const srcTitle = (src, kind) => src === "body" ? "Parsed from issue body"
     : src === "git" ? "Inferred from git / PR stack"
-    : src === "code" ? "Inferred from overlapping files" : "Source: " + src;
+    : src === "code" ? ((kind === "codeDep" || kind === "codeDepBy")
+      ? "Advisory hint from static module/symbol dependencies"
+      : "Inferred from overlapping files")
+    : "Source: " + src;
   const kids = rows.map(([k, name, list]) => h("div", { class: "dr-dep", "data-dep": k, role: "group", "aria-label": name + ", " + said(list) },
     h("span", {}, name),
     h("ul", {}, ...list.map(([id, label, title, mk, word, src, detail, detailTitle]) => h("li", {},
       graphNode(id) ? ticketChip(label, { onclick: () => drJump(id), name: "Inspect " + label + (title ? ": " + title : "") + (word ? ", " + word : ""), class: "dep" })
         : h("span", { class: "chip gone-dep", title: label }, label),
       mk ? statusPill(mk, word) : null,
-      src && src !== "github" ? h("span", { class: "tag", title: srcTitle(src) }, src) : null,
+      src && src !== "github" ? h("span", { class: "tag", title: srcTitle(src, k) }, src) : null,
       detail ? h("span", { class: "dep-detail mono", title: detailTitle || detail }, detail) : null)),
       more.includes(k) && safeUrl(n.url) ? h("li", {}, h("a", { href: safeUrl(n.url), target: "_blank", rel: "noopener noreferrer" }, "and more on GitHub")) : null)));
   l.replaceChildren(...(kids.length ? kids : [h("p", { class: "meta" }, "No blockers, unlocks, parent or sub-issues.")]));

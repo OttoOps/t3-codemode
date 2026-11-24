@@ -558,9 +558,11 @@ gets the hover shade, so you can find it on the board.
   Pause or Resume. Opened from a worker, the inspector shades that worker.
 - **Dependencies.** With a `flow` block, a ticket or issue in
   [the dependency graph](#the-dependency-graph) shows its lane and its
-  Blocked by, Unlocks, PR stack, Stacked, File conflicts, Parent and Sub-issues
-  as chips, each with its state. PR stack chips include the branch, pull
-  request or part detail, and file conflict chips list the overlapping paths.
+  Blocked by, Unlocks, PR stack, Stacked, File conflicts, Code deps, Code used
+  by, Parent and Sub-issues as chips, each with its state. PR stack chips
+  include the branch, pull request or part detail, file conflict chips list
+  the overlapping paths, and advisory code dependency chips name the module
+  edges or referenced symbols.
   A chip moves the inspector to that issue, or to its ticket when it has one,
   and leaves the board where it was. `Esc` still returns focus to the item
   that first opened the inspector. The pills add the issue's priority and
@@ -862,6 +864,17 @@ worktrees, active ticket links and repository trees:
   default; set [`flow.serializeFileConflicts`](config.md#flow) to `true` to
   hold conflicting issues while a colliding ticket is running and avoid
   launching conflicting issues at the same time.
+- **`codeDep` (`source: "code"`).** Extracts a bounded static dependency graph
+  from the local repository checkout (Cargo workspace crates and Rust
+  `use crate::` / `mod` edges, `package.json` workspaces and JS/TS imports,
+  and Python imports) and maps it against each open issue's resolved target
+  files and symbol references. When issue A touches a lower-level module or
+  defines a unique symbol referenced by issue B's target files or body, t3cm
+  emits an advisory `codeDep` edge from B to A carrying `modules` and/or
+  `symbols`. `codeDep` edges are strictly advisory: they never hold readiness,
+  never enter `blocked`, never hold launches (even when
+  `flow.serializeFileConflicts` is enabled), never raise cycle warnings, and
+  are skipped on queue-only reads.
 
 `edges` lists each link once, from the issue that has it. Each edge carries
 `source` as `github`, `body`, `git` or `code`, and native `github` wins when
@@ -873,6 +886,7 @@ both a native link and a body directive exist:
 | `parent` | the sub-issue, its parent | the parent's sub-issue |
 | `prStack` | the stacked issue, its base issue | the base PR or part unblocks the stacked issue |
 | `fileConflict` | an open issue, a conflicting open issue (undirected) | both issues touch the paths listed in `files` |
+| `codeDep` | the dependent issue, the lower-level module issue | advisory hint from `modules` or `symbols` |
 
 `warnings` lists graph-level diagnostics with `kind`, `message`, `nodes` and
 optional `raw`. `kind` is `cycle` for dependency, parent or mixed cycles,
@@ -936,18 +950,20 @@ the address opens it too.
   and independent lanes, each in name order.
 - **Layout.** A blocker or `prStack` base sits to the left of what it blocks,
   and a parent to the left of its sub-issues, so work flows left to right.
-  Undirected `fileConflict` lines do not constrain column order. The same graph
+  Advisory `fileConflict` and `codeDep` edges do not constrain column order. The same graph
   always lays out the same way. A wide graph scrolls inside the tab, never
   the page. Each issue shows its `repo#N`, title and state: a ticket's live
   state, or for an issue with no ticket ready, blocked, external, skipped,
   closed or open. Amber still marks only a ticket with an open card.
 - **Links.** A solid arrow runs from a native GitHub blocker to the issue it
   blocks, while a dashed purple arrow marks a blocker parsed from an issue
-  body. A solid teal arrow marks a `prStack` dependency (`source: "git"`), and
-  a dotted amber line marks a `fileConflict` (`source: "code"`). A dashed line
+  body. A solid teal arrow marks a `prStack` dependency (`source: "git"`), a
+  dotted amber line marks a `fileConflict` (`source: "code"`), and a dashed
+  blue arrow marks an advisory `codeDep` hint (`source: "code"`). A dashed line
   runs from a parent to its sub-issue, or a dotted purple line when parsed from
   a body. Hovering an edge shows a tooltip naming its source, branch/PR or
-  part chain for `prStack`, or overlapping file paths for `fileConflict`.
+  part chain for `prStack`, overlapping file paths for `fileConflict`, or the
+  module edges and symbols for `codeDep`.
 - **Sync parsed links.** When the graph holds `blockedBy` or `parent` links
   with `source: "body"` that are not yet on GitHub, the Graph bar shows
   **Sync N parsed links to GitHub**. Clicking it calls
@@ -962,8 +978,8 @@ the address opens it too.
   inspector.
 - **Tracing.** Hover or focus an issue, and the chain of issues that block it
   (through `blockedBy` or `prStack`), however far back, turns red, and the
-  chain it unlocks turns blue. Any incident `fileConflict` lines and their
-  conflicting issues stay highlighted, its parent and sub-issues keep their
+  chain it unlocks turns blue. Any incident `fileConflict` or `codeDep` edges
+  and their peer issues stay highlighted, its parent and sub-issues keep their
   look, and everything else turns muted until the pointer leaves and focus
   moves out of the graph. The latest hover or focus picks the issue, and with
   the pointer off the graph, the focused issue keeps its trace.

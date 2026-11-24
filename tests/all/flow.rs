@@ -4779,3 +4779,400 @@ async fn a_flow_read_gives_a_url_titled_ticket_its_issue_title_with_no_extra_rea
     h.app.wf.board_tick().await.unwrap();
     assert!(!h.github.operations().iter().any(|o| o == "issueNode"), "{:?}", h.github.operations());
 }
+
+#[tokio::test]
+async fn code_dep_cargo_workspace_and_rust_modules_and_symbols_are_strictly_advisory() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = td.path().join("repo");
+    for d in ["crates/core/src", "crates/app/src", "crates/unrelated/src"] {
+        std::fs::create_dir_all(repo.join(d)).unwrap();
+    }
+    run_git(&repo, &["init", "-b", "main"]);
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/*\"]\n[workspace.dependencies]\nacme-core = { path = \"crates/core\" }\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("crates/core/Cargo.toml"), "[package]\nname = \"acme-core\"\nversion = \"0.1.0\"\n")
+        .unwrap();
+    std::fs::write(
+        repo.join("crates/core/src/lib.rs"),
+        "pub mod storage;\npub mod cache;\npub mod cycle_a;\npub mod cycle_b;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("crates/core/src/storage.rs"),
+        "pub struct AuditLedger { pub count: u64 }\npub fn write_audit() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("crates/core/src/cache.rs"),
+        "use crate::storage::AuditLedger;\npub fn warm_cache(_l: &AuditLedger) {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("crates/core/src/cycle_a.rs"),
+        "use crate::cycle_b::ping_beta;\npub fn ping_alpha() { ping_beta(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("crates/core/src/cycle_b.rs"),
+        "use crate::cycle_a::ping_alpha;\npub fn ping_beta() { ping_alpha(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("crates/app/Cargo.toml"),
+        "[package]\nname = \"acme-app\"\nversion = \"0.1.0\"\n[dependencies]\nacme-core.workspace = true\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("crates/app/src/main.rs"), "fn main() { acme_core::storage::write_audit(); }\n").unwrap();
+    std::fs::write(
+        repo.join("crates/unrelated/Cargo.toml"),
+        "[package]\nname = \"acme-unrelated\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("crates/unrelated/src/lib.rs"), "pub fn standalone_util() {}\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init workspace"]);
+
+    let cfg = Config::from_value(json!({
+        "flow": {
+            "repos": [REPO],
+            "optIn": {"label": FLOW},
+            "maxTickets": 4,
+            "launch": "auto",
+            "serializeFileConflicts": true
+        }
+    }))
+    .unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.github.add_repo(REPO);
+    h.fake.set_projects(vec![project("p-widgets", repo.to_str().unwrap())]);
+    h.remotes.set(repo.to_str().unwrap(), "git@github.com:acme/widgets.git");
+
+    // #1 runs on storage.rs; #2..#7 are open candidates; #8 is parent epic of #1.
+    issue(&h, REPO, 1, &[FLOW, "priority: high"], 1);
+    issue(&h, REPO, 2, &[FLOW, "priority: high"], 2);
+    issue(&h, REPO, 3, &[FLOW, "priority: medium"], 3);
+    issue(&h, REPO, 4, &[FLOW, "priority: medium"], 4);
+    issue(&h, REPO, 5, &[FLOW, "priority: low"], 5);
+    issue(&h, REPO, 6, &[FLOW, "priority: low"], 6);
+    issue(&h, REPO, 7, &[FLOW, "priority: low"], 7);
+    issue(&h, REPO, 8, &[], 8);
+
+    h.github.set_body(REPO, 1, "## Flow\n- Touches: `crates/core/src/storage.rs`\n");
+    h.github.set_body(REPO, 2, "## Flow\n- Touches: `crates/core/src/cache.rs`\n");
+    h.github.set_body(REPO, 3, "## Flow\n- Touches: `crates/app/src/main.rs`\n");
+    h.github.set_body(REPO, 4, "Extend `AuditLedger` serialization in follow-up work.\n");
+    h.github.set_body(REPO, 5, "## Flow\n- Touches: `crates/core/src/cycle_a.rs`\n");
+    h.github.set_body(REPO, 6, "## Flow\n- Touches: `crates/core/src/cycle_b.rs`\n");
+    h.github.set_body(REPO, 7, "## Flow\n- Touches: `crates/unrelated/src/lib.rs`\n");
+    h.github.set_body(REPO, 8, "## Flow\n- Touches: `crates/app/src/main.rs`\n");
+    h.github.set_parent(REPO, 1, (REPO, 8));
+    ticket(&h, "mcp:t1", "widgets#1").await;
+
+    // Queue-only read skips graph and keeps all codeDep-linked issues ready even with #1 running & serializeFileConflicts=true.
+    let q_only = flow(&h).await;
+    assert!(q_only.get("graph").is_none(), "queue-only read must omit graph: {q_only}");
+    assert_eq!(labels(&q_only["blocked"]), Vec::<String>::new(), "codeDep must never block issues: {q_only}");
+    assert_eq!(
+        labels(&q_only["queue"]),
+        ["widgets#2", "widgets#3", "widgets#4", "widgets#5", "widgets#6", "widgets#7"],
+        "all non-running opted-in issues remain ready: {q_only}"
+    );
+
+    // Graph read emits advisory codeDep edges with module/symbol details and zero cycle warnings.
+    let g = result(&h.exec("async () => wf.flow({ graph: true })").await);
+    assert_eq!(labels(&g["blocked"]), Vec::<String>::new(), "codeDep must not enter blocked: {g}");
+    assert_eq!(labels(&g["queue"]), ["widgets#2", "widgets#3", "widgets#4", "widgets#5", "widgets#6", "widgets#7"]);
+    let warnings = g["graph"]["warnings"].as_array().unwrap();
+    assert!(
+        warnings.iter().all(|w| w["kind"] != "cycle"),
+        "mutual codeDep edges must never raise a cycle warning: {warnings:?}"
+    );
+
+    let code_deps: Vec<&Value> =
+        g["graph"]["edges"].as_array().unwrap().iter().filter(|e| e["kind"] == "codeDep").collect();
+    let find_cd = |from: u64, to: u64| {
+        let f = format!("{REPO}#{from}");
+        let t = format!("{REPO}#{to}");
+        code_deps.iter().copied().find(|e| e["from"] == f && e["to"] == t)
+    };
+
+    let e21 = find_cd(2, 1).expect("#2 -> #1 via Rust use crate::storage");
+    assert_eq!(e21["source"], "code");
+    assert!(
+        e21["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m == "crates/core/src/cache.rs -> crates/core/src/storage.rs"),
+        "{e21}"
+    );
+    assert!(e21["symbols"].as_array().unwrap().iter().any(|s| s == "crates/core/src/storage.rs::AuditLedger"), "{e21}");
+
+    let e31 = find_cd(3, 1).expect("#3 -> #1 via Cargo workspace crate dep");
+    assert_eq!(e31["source"], "code");
+    let e31_mods = e31["modules"].as_array().unwrap();
+    assert!(e31_mods.iter().any(|m| m == "crate acme-app -> acme-core"), "{e31}");
+    assert!(e31_mods.iter().any(|m| m == "crates/app/src/main.rs -> crates/core/src/storage.rs"), "{e31}");
+
+    let e41 = find_cd(4, 1).expect("#4 -> #1 via body symbol reference");
+    assert_eq!(e41["source"], "code");
+    assert!(e41.get("modules").is_none(), "{e41}");
+    assert_eq!(e41["symbols"], json!(["crates/core/src/storage.rs::AuditLedger"]));
+
+    // Mutual module imports emit both directed advisory codeDep edges without cycle warnings.
+    assert!(find_cd(5, 6).is_some(), "expected #5 -> #6 codeDep: {code_deps:?}");
+    assert!(find_cd(6, 5).is_some(), "expected #6 -> #5 codeDep: {code_deps:?}");
+
+    // Unrelated #7 must have zero incident codeDep edges.
+    assert!(
+        code_deps.iter().all(|e| e["from"] != format!("{REPO}#7") && e["to"] != format!("{REPO}#7")),
+        "unrelated #7 must not get any codeDep edge: {code_deps:?}"
+    );
+
+    // Parent epic #8 must not get a codeDep edge to its sub-issue #1.
+    assert!(find_cd(8, 1).is_none(), "parent epic #8 must not emit codeDep to child #1: {code_deps:?}");
+
+    // codeDep must not pull independent issues out of their Independent lane.
+    let node_of = |num: u64| {
+        let id = format!("{REPO}#{num}");
+        g["graph"]["nodes"].as_array().unwrap().iter().find(|n| n["id"] == id).unwrap()
+    };
+    assert_eq!(node_of(2)["trackBy"], "independent");
+    assert_eq!(node_of(3)["trackBy"], "independent");
+    assert_eq!(node_of(4)["trackBy"], "independent");
+    assert_eq!(node_of(7)["trackBy"], "independent");
+
+    // Auto-launch must NOT hold #2, #3, #4 behind running #1 even with serializeFileConflicts=true.
+    reconcile(&h).await;
+    let launched: Vec<String> = h.fake.launched().iter().map(|l| l["title"].as_str().unwrap().to_string()).collect();
+    assert_eq!(
+        launched,
+        ["widgets#2: Issue 2", "widgets#3: Issue 3", "widgets#4: Issue 4"],
+        "advisory codeDep must never hold auto-launches: {launched:?}"
+    );
+
+    // Catalog exposes codeDep, modules and symbols in wf.flow signature.
+    let sig = result(&h.app.search(r#"async () => catalog.find((t) => t.name === "wf.flow").signature"#).await);
+    let sig_s = sig.as_str().unwrap();
+    assert!(
+        sig_s.contains("\"codeDep\"") && sig_s.contains("modules?: string[]") && sig_s.contains("symbols?: string[]"),
+        "wf.flow catalog signature missing codeDep fields: {sig_s}"
+    );
+}
+
+#[tokio::test]
+async fn code_dep_js_ts_workspaces_and_python_imports() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = td.path().join("repo");
+    for d in ["packages/shared/src", "packages/web/src", "packages/standalone/src", "src/acmelib"] {
+        std::fs::create_dir_all(repo.join(d)).unwrap();
+    }
+    run_git(&repo, &["init", "-b", "main"]);
+    std::fs::write(repo.join("package.json"), r#"{"private": true, "workspaces": ["packages/*"]}"#).unwrap();
+    std::fs::write(repo.join("packages/shared/package.json"), r#"{"name": "@acme/shared", "main": "src/index.ts"}"#)
+        .unwrap();
+    std::fs::write(
+        repo.join("packages/shared/src/index.ts"),
+        "export { verifySession } from './auth.js';\nexport { formatMoney } from './money.js';\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("packages/shared/src/auth.ts"),
+        "export function verifySession(tok: string): boolean { return tok.length > 0; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("packages/shared/src/money.ts"),
+        "export function formatMoney(n: number): string { return String(n); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("packages/web/package.json"),
+        r#"{"name": "@acme/web", "dependencies": {"@acme/shared": "workspace:*"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("packages/web/src/page.tsx"),
+        "import { verifySession } from '@acme/shared';\nexport function LoginPage() { return verifySession('x'); }\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("packages/standalone/package.json"), r#"{"name": "@acme/standalone"}"#).unwrap();
+    std::fs::write(repo.join("packages/standalone/src/index.ts"), "export const STANDALONE_FLAG = true;\n").unwrap();
+    std::fs::write(repo.join("pyproject.toml"), "[project]\nname = \"acmelib\"\n").unwrap();
+    std::fs::write(repo.join("src/acmelib/__init__.py"), "from .models import InvoiceLedger\n").unwrap();
+    std::fs::write(repo.join("src/acmelib/models.py"), "class InvoiceLedger:\n    pass\n").unwrap();
+    std::fs::write(repo.join("src/acmelib/views.py"), "from . import InvoiceLedger\n").unwrap();
+    std::fs::write(repo.join("src/acmelib/unrelated.py"), "def isolated_job():\n    return 1\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init polyglot repo"]);
+
+    let h = H::build(Vec::new(), Config::default());
+    h.github.add_repo(REPO);
+    h.fake.set_projects(vec![project("p-widgets", repo.to_str().unwrap())]);
+    h.remotes.set(repo.to_str().unwrap(), "git@github.com:acme/widgets.git");
+
+    for n in 1u64..=6 {
+        issue(&h, REPO, n, &[], n as u32);
+    }
+    h.github.set_body(REPO, 1, "## Flow\n- Touches: `packages/shared/src/auth.ts`\n");
+    h.github.set_body(REPO, 2, "## Flow\n- Touches: `packages/web/src/page.tsx`\n");
+    h.github.set_body(REPO, 3, "## Flow\n- Touches: `packages/standalone/src/index.ts`\n");
+    h.github.set_body(REPO, 4, "## Flow\n- Touches: `src/acmelib/models.py`\n");
+    h.github.set_body(REPO, 5, "## Flow\n- Touches: `src/acmelib/views.py`\n");
+    h.github.set_body(REPO, 6, "## Flow\n- Touches: `src/acmelib/unrelated.py`\n");
+
+    let g = result(&h.exec("async () => wf.flow({ graph: true })").await);
+    let code_deps: Vec<&Value> =
+        g["graph"]["edges"].as_array().unwrap().iter().filter(|e| e["kind"] == "codeDep").collect();
+    let find_cd = |from: u64, to: u64| {
+        let f = format!("{REPO}#{from}");
+        let t = format!("{REPO}#{to}");
+        code_deps.iter().copied().find(|e| e["from"] == f && e["to"] == t)
+    };
+
+    let e21 = find_cd(2, 1).expect("JS/TS workspace + barrel edge #2 -> #1");
+    let e21_mods = e21["modules"].as_array().unwrap();
+    assert!(e21_mods.iter().any(|m| m == "workspace @acme/web -> @acme/shared"), "{e21}");
+    assert!(e21_mods.iter().any(|m| m == "packages/web/src/page.tsx -> packages/shared/src/auth.ts"), "{e21}");
+    assert!(
+        e21["symbols"].as_array().unwrap().iter().any(|s| s == "packages/shared/src/auth.ts::verifySession"),
+        "{e21}"
+    );
+
+    let e54 = find_cd(5, 4).expect("Python __init__ re-export edge #5 -> #4");
+    assert!(
+        e54["modules"].as_array().unwrap().iter().any(|m| m == "src/acmelib/views.py -> src/acmelib/models.py"),
+        "{e54}"
+    );
+    assert!(e54["symbols"].as_array().unwrap().iter().any(|s| s == "src/acmelib/models.py::InvoiceLedger"), "{e54}");
+
+    assert!(
+        code_deps.iter().all(|e| {
+            let f = e["from"].as_str().unwrap();
+            let t = e["to"].as_str().unwrap();
+            f != format!("{REPO}#3") && t != format!("{REPO}#3") && f != format!("{REPO}#6") && t != format!("{REPO}#6")
+        }),
+        "unrelated JS/Python issues must have no codeDep edges: {code_deps:?}"
+    );
+}
+
+#[tokio::test]
+async fn graph_tab_renders_code_dep_dashed_edge_legend_tooltip_hover_and_inspector() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = td.path().join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    run_git(&repo, &["init", "-b", "main"]);
+    std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n").unwrap();
+    std::fs::write(repo.join("src/lib.rs"), "pub mod storage;\npub mod service;\npub mod auth;\npub mod api;\n")
+        .unwrap();
+    std::fs::write(repo.join("src/storage.rs"), "pub struct LedgerStore;\n").unwrap();
+    std::fs::write(repo.join("src/service.rs"), "use crate::storage::LedgerStore;\n").unwrap();
+    std::fs::write(repo.join("src/auth.rs"), "pub struct SessionToken;\n").unwrap();
+    std::fs::write(repo.join("src/api.rs"), "use crate::auth::SessionToken;\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+
+    let cfg = Config::from_value(json!({
+        "flow": {
+            "repos": [REPO],
+            "optIn": {"label": FLOW},
+            "maxTickets": 4,
+            "launch": "ask"
+        }
+    }))
+    .unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.github.add_repo(REPO);
+    h.fake.set_projects(vec![project("p-widgets", repo.to_str().unwrap())]);
+    h.remotes.set(repo.to_str().unwrap(), "git@github.com:acme/widgets.git");
+
+    for n in 1u64..=4 {
+        issue(&h, REPO, n, &[FLOW], n as u32);
+    }
+    h.github.set_body(REPO, 1, "## Flow\n- Touches: `src/storage.rs`\n");
+    h.github.set_body(REPO, 2, "## Flow\n- Touches: `src/service.rs`\n");
+    h.github.set_body(REPO, 3, "## Flow\n- Touches: `src/auth.rs`\n");
+    h.github.set_body(REPO, 4, "## Flow\n- Touches: `src/api.rs`\n");
+
+    let (html, st, view) = panel_page(h).await;
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        &format!(
+            r##"{GRAPH}
+fetchReply = (url) => url === "/api/flow" ? reply(200, view) : new Promise(() => {{}});
+emitState(base);
+await tick();
+selectTab("graph");
+const legend = document.querySelectorAll("#graph-key span").map((s) => s.textContent.trim());
+const edgeInfo = document.querySelectorAll(".ge").map((p) => ({{
+  cls: p.getAttribute("class"),
+  kind: p.getAttribute("data-kind"),
+  source: p.getAttribute("data-source"),
+  marker: p.getAttribute("marker-end"),
+  title: p.querySelector("title") ? p.querySelector("title").textContent : null,
+}}));
+btn("acme/widgets#2").dispatch("pointerover");
+const hover2Edges = document.querySelectorAll(".ge").map((p) => [
+  p.getAttribute("data-kind"),
+  p.getAttribute("class"),
+  p.getAttribute("marker-end"),
+]);
+const hover2Marks = marks();
+btn("acme/widgets#2").dispatch("click");
+const drawer2 = deps();
+btn("acme/widgets#1").dispatch("click");
+const drawer1 = deps();
+return {{ legend, edgeInfo, hover2Edges, hover2Marks, drawer2, drawer1 }};
+"##
+        ),
+    );
+
+    assert!(
+        html.contains(r#"class="k-codedep""#)
+            && html.contains("code dep")
+            && html.contains(".ge.codedep")
+            && html.contains(".gmk.code"),
+        "Graph legend and styles HTML must include codeDep entry"
+    );
+
+    let edges = r["edgeInfo"].as_array().unwrap();
+    let cd = edges
+        .iter()
+        .find(|e| e["kind"] == "codeDep" && e["title"].as_str().unwrap().contains("src/service.rs -> src/storage.rs"))
+        .expect("service -> storage codeDep edge");
+    assert_eq!(cd["cls"], "ge codedep src-code");
+    assert_eq!(cd["source"], "code");
+    assert_eq!(cd["marker"], "url(#gm-code)");
+    assert!(cd["title"].as_str().unwrap().starts_with("Code dependency hint (code):"), "{cd}");
+
+    // Hovering #2 highlights incident #2->#1 codeDep as hot (keeping code marker) and keeps #1 undimmed (not red "up"),
+    // while dimming unrelated #3, #4 and their #4->#3 codeDep edge.
+    assert_eq!(r["hover2Marks"]["acme/widgets#2"], "hot", "{r}");
+    assert_eq!(r["hover2Marks"]["acme/widgets#1"], "", "{r}");
+    assert_eq!(r["hover2Marks"]["acme/widgets#3"], "dim", "{r}");
+    assert_eq!(r["hover2Marks"]["acme/widgets#4"], "dim", "{r}");
+    let h2 = r["hover2Edges"].as_array().unwrap();
+    assert!(h2.contains(&json!(["codeDep", "ge codedep src-code hot", "url(#gm-code)"])), "{h2:?}");
+    assert!(h2.contains(&json!(["codeDep", "ge codedep src-code dim", "url(#gm-code)"])), "{h2:?}");
+
+    // Inspector shows outgoing Code deps on #2 and incoming Code used by on #1 with module details.
+    let d2: Vec<&str> = r["drawer2"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(
+        d2.iter().any(|s| s.contains("Code deps")
+            && s.contains("widgets#1")
+            && s.contains("src/service.rs -> src/storage.rs")),
+        "drawer #2 Code deps detail missing: {d2:?}"
+    );
+    let d1: Vec<&str> = r["drawer1"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(
+        d1.iter().any(|s| s.contains("Code used by")
+            && s.contains("widgets#2")
+            && s.contains("src/service.rs -> src/storage.rs")),
+        "drawer #1 Code used by detail missing: {d1:?}"
+    );
+}
