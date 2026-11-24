@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/OttoOps/t3-codemode/compare/v0.10.2...v0.11.0) - 2026-11-24
+
+### Added
+
+- verify GitLab merge requests in wf.pr
+- move secondary board views to full-width tabs
+- reconcile GitLab merge requests
+- add Flow settings and setup interview
+- port board to Swiss Railway Dispatch shell
+- add advisory codeDep module hints
+- enrich board titles and issue overlap
+- infer PR-stack and file-conflict edges
+- sync parsed links to GitHub from board
+- wire GitHub dependencies in wf.issue
+
+### Fixed
+
+- tighten board PR rows and merge gates
+- bound workspace globs and UTF-8 py escapes
+- simplify stopword check for clippy
+- isolate JS pkg dirs and regex/division scan
+- scope JS bare imports and handle regex quotes
+- harden codeDep scanner and curve routing
+- suggest service restart when skills are newer
+- restart launchd and schtasks services on update
+- harden PR-stack and file-conflict analysis
+- verify merged base PR commit on same repo
+- address PR-stack and conflict edge cases
+- pass fresh wait status to exited
+- address CodeRabbit major review findings
+- strip bold markers before backticked targets
+- ignore inline-code keywords in form cue check
+- route form tasklist directives and cues
+- preserve form lists, parent race, poll queue
+- address review findings in board link sync
+- replace moved ready card with matching wait
+- address CodeRabbit review findings
+- keep reconcile idempotent on queue drops
+
+### Other
+
+- document GitLab merge requests in wf.pr
+- run wf.pr chaos ops against GitLab
+- document GitLab forges and their reconcile
+- run the PR chaos suite against GitLab
+- cover GitLab merge, train, squash and close
+- record the CodeHost interface ADR
+- add the CodeHost forge interface
+- run untracked post-merge steps once
+- watch merges on untracked forges
+- recheck shrunk ops and keep full signatures
+- shrink chaos failures with ddmin
+- add board dispatch design artifacts
+- cover sweep pending drops and probe lookup
+- widen the sequential chaos op alphabet
+- map created sub-issue numbers into split
+- use as_chunks_mut in seed_bytes
+- support per-PR read error recovery
+- decode chaos ops with swarm weights
+- add in-memory store for chaos soaks
+
 ## [0.10.2](https://github.com/OttoOps/t3-codemode/compare/v0.10.1...v0.10.2) - 2026-11-24
 
 ### Fixed
