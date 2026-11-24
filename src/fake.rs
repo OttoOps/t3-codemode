@@ -1712,6 +1712,8 @@ struct GlState {
     read_errors: BTreeMap<MrKey, String>,
     rest_status: BTreeMap<String, u16>,
     after: BTreeMap<String, Value>,
+    trains: std::collections::BTreeSet<(String, String)>,
+    merges: u64,
     down: bool,
 }
 
@@ -1739,11 +1741,26 @@ fn upper(v: &Value) -> Value {
     v.as_str().map_or(Value::Null, |s| json!(s.to_ascii_uppercase()))
 }
 
-fn graphql_mr(mr: &Value) -> Value {
+pub fn gitlab_mr_id(iid: u64) -> u64 {
+    1000 + iid
+}
+
+pub fn gitlab_gid(iid: u64) -> String {
+    format!("gid://gitlab/MergeRequest/{}", gitlab_mr_id(iid))
+}
+
+fn mr_id(iid: u64, mr: &Value) -> u64 {
+    mr["id"].as_u64().unwrap_or_else(|| gitlab_mr_id(iid))
+}
+
+const HIDDEN: &[&str] =
+    &["pipelines", "train", "diffs", "branch_deleted", "branch_tip", "train_when_pipeline_succeeds", "cancel_fails"];
+
+fn graphql_mr(iid: u64, mr: &Value) -> Value {
     let pipe = &mr["head_pipeline"];
     let car = &mr["train"];
     json!({
-        "state": mr["state"], "draft": mr["draft"], "diffHeadSha": mr["sha"],
+        "id": format!("gid://gitlab/MergeRequest/{}", mr_id(iid, mr)), "state": mr["state"], "draft": mr["draft"], "diffHeadSha": mr["sha"],
         "detailedMergeStatus": upper(&mr["detailed_merge_status"]), "mergedAt": mr["merged_at"],
         "squashOnMerge": mr["squash_on_merge"], "mergeCommitSha": mr["merge_commit_sha"],
         "headPipeline": if pipe.is_object() { json!({"status": upper(&pipe["status"]), "ref": pipe["ref"]}) } else { Value::Null },
@@ -1754,10 +1771,14 @@ fn graphql_mr(mr: &Value) -> Value {
 fn rest_mr(iid: u64, mr: &Value) -> Value {
     let mut out = mr.clone();
     if let Some(o) = out.as_object_mut() {
-        o.remove("pipelines");
-        o.remove("train");
-        o.remove("diffs");
+        for k in HIDDEN {
+            o.remove(*k);
+        }
         o.insert("iid".into(), json!(iid));
+        o.insert("id".into(), json!(mr_id(iid, mr)));
+        o.entry("source_branch").or_insert_with(|| json!(format!("fix/{iid}")));
+        o.entry("source_project_id").or_insert(json!(1));
+        o.entry("target_project_id").or_insert(json!(1));
     }
     out
 }
@@ -1844,6 +1865,16 @@ impl FakeGitLab {
         self.st().after.insert(operation.into(), patch);
     }
 
+    pub fn set_trains(&self, host: &str, path: &str, on: bool) {
+        let key = (host.to_ascii_lowercase(), path.to_ascii_lowercase());
+        let mut st = self.st();
+        if on {
+            st.trains.insert(key);
+        } else {
+            st.trains.remove(&key);
+        }
+    }
+
     pub fn fail_rest(&self, suffix: &str, status: u16) {
         self.st().rest_status.insert(suffix.into(), status);
     }
@@ -1868,6 +1899,46 @@ fn page_of(items: &Value, query: &str) -> Value {
     json!(all.into_iter().skip((page - 1) * per).take(per).collect::<Vec<_>>())
 }
 
+fn decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(b) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(b);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn project_of(path: &str) -> Option<(String, &str)> {
+    let path = path.split_once('?').map_or(path, |(p, _)| p);
+    let rest = path.strip_prefix("projects/")?;
+    let (project, tail) = rest.split_once('/').unwrap_or((rest, ""));
+    Some((decode(project).to_ascii_lowercase(), tail))
+}
+
+fn branch_of(st: &GlState, host: &str, project: &str, branch: &str) -> Option<MrKey> {
+    st.mrs
+        .iter()
+        .find(|((h, p, iid), mr)| {
+            h == host
+                && p == project
+                && mr["source_branch"].as_str().map_or(format!("fix/{iid}"), String::from) == branch
+        })
+        .map(|(k, _)| k.clone())
+}
+
+fn active_car(mr: &Value) -> bool {
+    mr["train"]["status"].as_str().is_some_and(|s| ["idle", "fresh", "stale", "merging"].contains(&s))
+}
+
 fn rest_path(path: &str) -> Option<(String, u64, &str)> {
     let path = path.split_once('?').map_or(path, |(p, _)| p);
     let rest = path.strip_prefix("projects/")?;
@@ -1886,11 +1957,27 @@ impl crate::gitlab::GitLab for FakeGitLab {
         Box::pin(async move {
             tokio::task::yield_now().await;
             let mut st = self.st();
-            let op = if query.starts_with("query Reconcile") { "reconcile" } else { "unknown" };
+            let op = if query.starts_with("query Reconcile") {
+                "reconcile"
+            } else if query.starts_with("query MergeTrainCar") {
+                "trainCar"
+            } else {
+                "unknown"
+            };
             st.calls
                 .push(json!({"operation": op, "host": to.host, "cli": to.cli, "query": query, "variables": variables}));
             if st.down {
                 anyhow::bail!("{} api graphql failed: glab: not authenticated", to.cli);
+            }
+            if op == "trainCar" {
+                let path = variables["p"].as_str().unwrap_or_default();
+                let iid: u64 = variables["i"].as_str().and_then(|n| n.parse().ok()).unwrap_or_default();
+                let key = mr_key(to.host, path, iid);
+                if let Some(message) = st.read_errors.get(&key) {
+                    return Ok(json!({"errors": [{"message": message}], "data": null}));
+                }
+                let car = st.mrs.get(&key).map_or(Value::Null, |mr| graphql_mr(iid, mr)["mergeTrainCar"].clone());
+                return Ok(json!({"data": {"project": {"mergeRequest": {"mergeTrainCar": car}}}}));
             }
             if op != "reconcile" {
                 return Ok(json!({"errors": [{"message": "the fake does not support this query"}]}));
@@ -1908,7 +1995,7 @@ impl crate::gitlab::GitLab for FakeGitLab {
                     continue;
                 }
                 let known = st.mrs.keys().any(|(h, p, _)| *h == key.0 && *p == key.1);
-                let mr = st.mrs.get(&key).map_or(Value::Null, graphql_mr);
+                let mr = st.mrs.get(&key).map_or(Value::Null, |mr| graphql_mr(iid, mr));
                 data.insert(alias, if known { json!({"mergeRequest": mr}) } else { Value::Null });
             }
             let mut out = json!({"data": data});
@@ -1928,10 +2015,13 @@ impl crate::gitlab::GitLab for FakeGitLab {
             tokio::task::yield_now().await;
             let mut st = self.st();
             let parsed = rest_path(path);
-            let op = match parsed.as_ref().map(|(_, _, sub)| *sub) {
-                Some("") => "mergeRequest",
-                Some("pipelines") => "pipelines",
-                Some("diffs") => "diffs",
+            let project = project_of(path);
+            let op = match (parsed.as_ref().map(|(_, _, sub)| *sub), project.as_ref().map(|(_, t)| *t)) {
+                (Some(""), _) => "mergeRequest",
+                (Some("pipelines"), _) => "pipelines",
+                (Some("diffs"), _) => "diffs",
+                (None, Some("")) => "project",
+                (None, Some(t)) if t.starts_with("repository/branches/") => "branch",
                 _ => "unknown",
             };
             let (bare, query) = path.split_once('?').unwrap_or((path, ""));
@@ -1942,6 +2032,25 @@ impl crate::gitlab::GitLab for FakeGitLab {
             let missing = || crate::gitlab::Rest { status: 404, body: json!({"message": "404 Not found"}) };
             if let Some((_, status)) = st.rest_status.iter().find(|(s, _)| bare.ends_with(s.as_str())) {
                 return Ok(crate::gitlab::Rest { status: *status, body: json!({"message": "fake failure"}) });
+            }
+            if let (Some((project, tail)), "project" | "branch") = (&project, op) {
+                let host = to.host.to_ascii_lowercase();
+                if !st.mrs.keys().any(|(h, p, _)| *h == host && p == project) {
+                    return Ok(missing());
+                }
+                if op == "project" {
+                    let trains = st.trains.contains(&(host, project.clone()));
+                    let body = json!({"id": 1, "path_with_namespace": project, "merge_trains_enabled": trains});
+                    return Ok(crate::gitlab::Rest { status: 200, body });
+                }
+                let branch = decode(tail.trim_start_matches("repository/branches/"));
+                let Some(key) = branch_of(&st, &host, project, &branch) else { return Ok(missing()) };
+                let mr = &st.mrs[&key];
+                if mr["branch_deleted"] == true {
+                    return Ok(missing());
+                }
+                let tip = mr["branch_tip"].as_str().or(mr["sha"].as_str()).unwrap_or_default();
+                return Ok(crate::gitlab::Rest { status: 200, body: json!({"name": branch, "commit": {"id": tip}}) });
             }
             let Some((project, iid, _)) = parsed else { return Ok(missing()) };
             let key = mr_key(to.host, &project, iid);
@@ -1960,6 +2069,139 @@ impl crate::gitlab::GitLab for FakeGitLab {
                 }
             }
             Ok(crate::gitlab::Rest { status: 200, body })
+        })
+    }
+
+    fn send<'a>(
+        &'a self,
+        to: crate::gitlab::Target<'a>,
+        method: &'a str,
+        path: &'a str,
+        body: Value,
+    ) -> BoxFut<'a, anyhow::Result<crate::gitlab::Rest>> {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            let mut st = self.st();
+            let bare = path.split_once('?').map_or(path, |(p, _)| p);
+            let project = project_of(path);
+            let tail = project.as_ref().map(|(_, t)| *t).unwrap_or_default();
+            let op = match (method, rest_path(path).as_ref().map(|(_, _, sub)| *sub)) {
+                ("POST", _) if tail.starts_with("merge_trains/merge_requests/") => "joinTrain",
+                ("DELETE", _) if tail.starts_with("repository/branches/") => "deleteBranch",
+                ("PUT", Some("merge")) => "merge",
+                ("POST", Some("cancel_auto_merge" | "cancel_merge_when_pipeline_succeeds")) => "cancelAutoMerge",
+                _ => "unknown",
+            };
+            st.calls.push(
+                json!({"operation": op, "host": to.host, "cli": to.cli, "method": method, "path": path, "body": body}),
+            );
+            if st.down {
+                anyhow::bail!("{} api failed: glab: not authenticated", to.cli);
+            }
+            let rest = |status: u16, body: Value| Ok(crate::gitlab::Rest { status, body });
+            let missing = || rest(404, json!({"message": "404 Not found"}));
+            if let Some((_, status)) = st.rest_status.iter().find(|(s, _)| bare.ends_with(s.as_str())) {
+                return rest(*status, json!({"message": "fake failure"}));
+            }
+            let host = to.host.to_ascii_lowercase();
+            let Some((project, tail)) = project else { return missing() };
+            if op == "deleteBranch" {
+                let branch = decode(tail.trim_start_matches("repository/branches/"));
+                let Some(key) = branch_of(&st, &host, &project, &branch) else { return missing() };
+                let mr = st.mrs.get_mut(&key).unwrap();
+                if mr["branch_deleted"] == true {
+                    return missing();
+                }
+                mr["branch_deleted"] = json!(true);
+                return rest(204, Value::Null);
+            }
+            let iid: u64 = match op {
+                "joinTrain" => tail.trim_start_matches("merge_trains/merge_requests/").parse().unwrap_or_default(),
+                _ => rest_path(path).map(|(_, iid, _)| iid).unwrap_or_default(),
+            };
+            let key = mr_key(&host, &project, iid);
+            if op == "cancelAutoMerge" {
+                let legacy = path.ends_with("/cancel_merge_when_pipeline_succeeds");
+                let Some(mr) = st.mrs.get_mut(&key) else { return missing() };
+                if mr["merge_when_pipeline_succeeds"] != true && mr["train_when_pipeline_succeeds"] != true {
+                    return match legacy {
+                        true => rest(
+                            201,
+                            json!({"status": "error", "http_status": 406, "message": "Can't cancel the automatic merge"}),
+                        ),
+                        false => rest(409, json!({"message": "409 Conflict"})),
+                    };
+                }
+                if mr["cancel_fails"] == true {
+                    return rest(201, json!({"status": "error", "message": "This merge request cannot be cancelled"}));
+                }
+                mr["merge_when_pipeline_succeeds"] = json!(false);
+                mr["train_when_pipeline_succeeds"] = json!(false);
+                return match legacy {
+                    true => rest(201, json!({"status": "success"})),
+                    false => rest(200, rest_mr(iid, mr)),
+                };
+            }
+            if op == "unknown" {
+                return missing();
+            }
+            st.merges += 1;
+            let merges = st.merges;
+            let trains = st.trains.contains(&(host.clone(), project.clone()));
+            let index = st.mrs.iter().filter(|((h, p, _), m)| *h == host && *p == project && active_car(m)).count();
+            let Some(mr) = st.mrs.get_mut(&key) else { return missing() };
+            if mr["state"] != "opened" || mr["draft"] == true {
+                return rest(405, json!({"message": "405 Method Not Allowed"}));
+            }
+            if body["sha"].as_str() != mr["sha"].as_str() {
+                return rest(409, json!({"message": "SHA does not match HEAD of source branch"}));
+            }
+            let mergeable = mr["detailed_merge_status"] == "mergeable";
+            let auto = body["auto_merge"] == true;
+            let join = |mr: &mut Value| {
+                let train =
+                    gitlab_pipeline(900 + iid, &"e".repeat(40), &format!("refs/merge-requests/{iid}/train"), "running");
+                mr["train"] = json!({"status": "fresh", "index": index});
+                mr["head_pipeline"] = train;
+                mr["detailed_merge_status"] = json!("merge_request_blocked");
+            };
+            if op == "joinTrain" {
+                if !trains {
+                    return rest(403, json!({"message": "403 Forbidden"}));
+                }
+                if active_car(mr) {
+                    return rest(400, json!({"message": "The merge request is already on the merge train"}));
+                }
+                if mergeable {
+                    join(mr);
+                    return rest(201, json!({"id": 50 + iid, "merge_request": rest_mr(iid, mr), "status": "fresh"}));
+                }
+                if auto {
+                    mr["train_when_pipeline_succeeds"] = json!(true);
+                    return rest(202, json!({"message": "scheduled"}));
+                }
+                return rest(400, json!({"message": "The merge request is not mergeable"}));
+            }
+            if trains && auto && mergeable {
+                join(mr);
+                return rest(200, rest_mr(iid, mr));
+            }
+            if !mergeable {
+                if auto && mr["detailed_merge_status"] == "ci_still_running" {
+                    mr["merge_when_pipeline_succeeds"] = json!(true);
+                    return rest(200, rest_mr(iid, mr));
+                }
+                return rest(405, json!({"message": "405 Method Not Allowed"}));
+            }
+            let commit = format!("{merges:040x}");
+            let squash = body["squash"].as_bool().unwrap_or(mr["squash_on_merge"] == true);
+            mr["state"] = json!("merged");
+            mr["detailed_merge_status"] = json!("not_open");
+            mr[if squash { "squash_commit_sha" } else { "merge_commit_sha" }] = json!(commit);
+            if body["should_remove_source_branch"] == true {
+                mr["branch_deleted"] = json!(true);
+            }
+            rest(200, rest_mr(iid, mr))
         })
     }
 }

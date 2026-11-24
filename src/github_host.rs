@@ -279,7 +279,7 @@ impl CodeHost for GithubHost {
                 bail!("{}", not_github(r));
             }
             let (query, vars) = match how {
-                Landing::Queue => (ENQUEUE_PR, json!({"id": id, "head": head})),
+                Landing::Queue { .. } => (ENQUEUE_PR, json!({"id": id, "head": head})),
                 Landing::Merge { method } => (MERGE_PR, json!({"id": id, "head": head, "method": method})),
             };
             let resp = self.0.graphql(query, vars).await?;
@@ -287,7 +287,7 @@ impl CodeHost for GithubHost {
                 return Ok(Landed::Refused(e));
             }
             Ok(match how {
-                Landing::Queue => Landed::Queued {
+                Landing::Queue { .. } => Landed::Queued {
                     position: resp["data"]["enqueuePullRequest"]["mergeQueueEntry"]["position"].as_u64(),
                 },
                 Landing::Merge { .. } => Landed::Merged {

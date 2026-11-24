@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::board::{BOARD, Card};
-use crate::codehost::{Branch, ChangeRef, CodeHost};
+use crate::codehost::{Branch, ChangeRef, CodeHost, Forge};
 use crate::merge::MergeArgs;
 use crate::reconcile::{CardPr, CardStage};
 use crate::store::{Link, MergeWait, WaitStatus};
@@ -169,10 +169,11 @@ impl Wf {
             return Ok(Some(Job::Merge(rec)));
         }
         let note = format!(
-            "the board's answer \"ok\" on card {} accepted {} at head {}; t3cm keeps waiting for GitHub to merge it",
+            "the board's answer \"ok\" on card {} accepted {} at head {}; t3cm keeps waiting for {} to merge it",
             card.id,
             rec.url(&*self.host),
-            short(&rec.head)
+            short(&rec.head),
+            rec.change().forge.name()
         );
         self.handled(&rec.worker, ticket, &note)?;
         Ok(Some(Job::Done(json!({"card": card.id, "accepted": rec.head, "delivery": "t3cm"}))))
@@ -246,15 +247,16 @@ impl Wf {
                 let mut rec = rec.clone();
                 rec.approval = out["approval"].as_str().map(String::from);
                 self.answered_put(&rec)?;
+                let forge = rec.change().forge.name();
                 let what = match status.as_str() {
                     "queued" => format!("it is in the merge queue at position {}", out["position"]),
                     _ => format!(
-                        "GitHub does not let it merge yet (merge state {})",
+                        "{forge} does not let it merge yet (merge state {})",
                         out["mergeState"].as_str().unwrap_or("UNKNOWN")
                     ),
                 };
                 let note = format!(
-                    "t3cm holds the approval for {} at head {}: {what}. It merges once GitHub allows, and an admin merge on GitHub counts too",
+                    "t3cm holds the approval for {} at head {}: {what}. It merges once {forge} allows, and an admin merge on {forge} counts too",
                     rec.url(&*self.host),
                     short(&rec.head)
                 );
@@ -406,11 +408,17 @@ impl Wf {
     }
 
     async fn delete_branch(&self, repo: &str, pr: u64) -> String {
-        match self.host.delete_branch(&ChangeRef::of_key(repo, pr)).await {
-            Branch::Unread(e) => format!("left the branch, as it could not read it on GitHub ({e})"),
-            Branch::NotMerged(b) => format!("left branch {b}, as GitHub does not show the PR merged yet"),
+        let change = ChangeRef::of_key(repo, pr);
+        let forge = change.forge.name();
+        let what = match change.forge {
+            Forge::Github => "the PR",
+            Forge::Gitlab { .. } => "the merge request",
+        };
+        match self.host.delete_branch(&change).await {
+            Branch::Unread(e) => format!("left the branch, as it could not read it on {forge} ({e})"),
+            Branch::NotMerged(b) => format!("left branch {b}, as {forge} does not show {what} merged yet"),
             Branch::Fork(b) => format!("left branch {b}, which is on a fork"),
-            Branch::Gone(b) => format!("found branch {b} already deleted on GitHub"),
+            Branch::Gone(b) => format!("found branch {b} already deleted on {forge}"),
             Branch::TipMoved { branch, tip } => {
                 format!("left branch {branch}, as its tip {} is not the merged head", short(&tip))
             }

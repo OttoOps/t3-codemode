@@ -138,7 +138,7 @@ pub enum Viewed {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Landing<'a> {
-    Queue,
+    Queue { method: &'a str },
     Merge { method: &'a str },
 }
 
@@ -146,6 +146,7 @@ pub enum Landing<'a> {
 pub enum Landed {
     Queued { position: Option<u64> },
     Merged { commit: Option<String> },
+    Waiting(String),
     Refused(String),
 }
 

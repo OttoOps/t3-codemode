@@ -1098,13 +1098,19 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
 
     async fn advance(&self, t: &Tracked, o: &Change, w: MergeWait, read_at: &str, pass: &mut Pass) -> Result<()> {
         let method = w.method.clone().or_else(|| o.method.clone()).unwrap_or_else(|| "MERGE".into());
-        let how = if o.queue { Landing::Queue } else { Landing::Merge { method: &method } };
+        let how = if o.queue { Landing::Queue { method: &method } } else { Landing::Merge { method: &method } };
         let resp = self.host.merge(&t.change(), o.id.as_deref().unwrap_or_default(), &w.head, how).await;
         let _g = self.lock.lock().await;
-        let position = match &resp {
+        let queued = match &resp {
             Err(e) => return self.failed(t, w, &format!("{e:#}"), None, pass),
             Ok(Landed::Refused(e)) => return self.failed(t, w, e, None, pass),
-            Ok(Landed::Queued { position }) => *position,
+            Ok(Landed::Waiting(e)) => {
+                let mut next = w.clone();
+                next.last_error = Some(e.clone());
+                self.store.merge_wait_swap(&next)?;
+                return Ok(());
+            }
+            Ok(Landed::Queued { position }) => Some(*position),
             Ok(Landed::Merged { .. }) => None,
         };
         let mut sent = w.clone();
@@ -1114,8 +1120,8 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         if !self.store.merge_wait_swap(&sent)? && !self.sentinel(Sentinel::AdvanceIgnoresSwapResult) {
             return Ok(());
         }
-        self.reach.hit(if o.queue { ReachPoint::AdvanceEnqueued } else { ReachPoint::AdvanceMerged });
-        if o.queue
+        self.reach.hit(if queued.is_some() { ReachPoint::AdvanceEnqueued } else { ReachPoint::AdvanceMerged });
+        if queued.is_some()
             && let Some(mut seen) = self.store.pr_seen_get(&t.repo, t.number)?
         {
             seen.queued = true;
@@ -1123,15 +1129,15 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
             self.store.pr_seen_put(&seen)?;
             self.changed();
         }
-        let text = match o.queue {
-            true => format!(
+        let text = match queued {
+            Some(position) => format!(
                 "{} queued at its approved head {} (position {}) once it was {}",
                 t.label(),
                 short(&w.head),
                 json!(position),
                 o.merge_state
             ),
-            false => {
+            None => {
                 format!("{} merged at its approved head {} once it was {}", t.label(), short(&w.head), o.merge_state)
             }
         };

@@ -61,7 +61,7 @@ impl Event {
             "ready" => Kind::Ready,
             other => bail!("wf.pr: event must be opened, updated or ready, got {other:?}"),
         };
-        let change = change_of(&a.repo, a.pr, forges)?;
+        let change = change_of("wf.pr", &a.repo, a.pr, forges)?;
         let head = a.head.trim().to_ascii_lowercase();
         if !(7..=40).contains(&head.len()) || !head.chars().all(|c| c.is_ascii_hexdigit()) {
             bail!("wf.pr: head must be the head commit SHA, 7 to 40 hex characters, got {:?}", a.head);
@@ -116,18 +116,18 @@ impl Event {
     }
 }
 
-fn change_of(repo: &str, pr: u64, forges: &Forges) -> Result<ChangeRef> {
+pub(crate) fn change_of(tool: &str, repo: &str, pr: u64, forges: &Forges) -> Result<ChangeRef> {
     let raw = repo.trim();
     if raw.contains("://")
         && let Some(r) = change_refs(raw, forges).into_iter().next()
     {
         if pr != 0 && pr != r.number {
-            bail!("wf.pr: pr {pr} does not match {raw}, which names #{}", r.number);
+            bail!("{tool}: pr {pr} does not match {raw}, which names #{}", r.number);
         }
         return Ok(r);
     }
     if pr == 0 {
-        bail!("wf.pr: pr must be a pull request or merge request number");
+        bail!("{tool}: pr must be a pull request or merge request number");
     }
     let bare = ["https://", "http://"].iter().find_map(|p| raw.strip_prefix(p)).unwrap_or(raw).trim_end_matches('/');
     let parts: Vec<&str> = bare.split('/').collect();
@@ -136,13 +136,13 @@ fn change_of(repo: &str, pr: u64, forges: &Forges) -> Result<ChangeRef> {
         [host, path @ ..] if path.len() >= 2 && path.iter().all(|p| gl_name(p)) => {
             if gitlab_cli(forges, host).is_none() {
                 bail!(
-                    "wf.pr: {host} is not listed under forges in t3cm's config.json, so t3cm cannot read merge requests there"
+                    "{tool}: {host} is not listed under forges in t3cm's config.json, so t3cm cannot read merge requests there"
                 );
             }
             Ok(ChangeRef::gitlab(host, &path.join("/"), pr))
         }
         _ => bail!(
-            "wf.pr: repo must be \"owner/name\", \"<host>/<group>/<project>\" for a GitLab host listed under forges, or a merge request URL, got {repo:?}"
+            "{tool}: repo must be \"owner/name\", \"<host>/<group>/<project>\" for a GitLab host listed under forges, or a merge request URL, got {repo:?}"
         ),
     }
 }
@@ -510,12 +510,8 @@ fn action_line(e: &Event, head: &str, options: &[String], blocker: Option<&str>)
             }
         })
         .unwrap_or_default();
-    let relay = match e.change.forge {
-        Forge::Github => "",
-        Forge::Gitlab { .. } => " (t3cm sends your answer to the ticket, which merges it on GitLab)",
-    };
     format!(
-        "**ACTION NEEDED:** merge #{} at head {}{relay}{block}: reply {}, or review it first, here: {}",
+        "**ACTION NEEDED:** merge #{} at head {}{block}: reply {}, or review it first, here: {}",
         e.number,
         short(head),
         reply,

@@ -25,6 +25,8 @@ pub trait GitLab: Send + Sync {
     fn graphql<'a>(&'a self, to: Target<'a>, query: &'a str, variables: Value) -> BoxFut<'a, Result<Value>>;
 
     fn get<'a>(&'a self, to: Target<'a>, path: &'a str) -> BoxFut<'a, Result<Rest>>;
+
+    fn send<'a>(&'a self, to: Target<'a>, method: &'a str, path: &'a str, body: Value) -> BoxFut<'a, Result<Rest>>;
 }
 
 pub fn project_id(path: &str) -> String {
@@ -78,6 +80,20 @@ impl GitLab for GlabCli {
             rest_response(to.cli, &out.stdout, &out.stderr)
         })
     }
+
+    fn send<'a>(&'a self, to: Target<'a>, method: &'a str, path: &'a str, body: Value) -> BoxFut<'a, Result<Rest>> {
+        Box::pin(async move {
+            let out = match body {
+                Value::Null => GlabCli::run(to, &["--include", "-X", method, path], None).await?,
+                body => {
+                    let args =
+                        ["--include", "-X", method, "-H", "Content-Type: application/json", "--input", "-", path];
+                    GlabCli::run(to, &args, Some(serde_json::to_vec(&body)?)).await?
+                }
+            };
+            rest_response(to.cli, &out.stdout, &out.stderr)
+        })
+    }
 }
 
 pub fn graphql_response(cli: &str, ok: bool, stdout: &[u8], stderr: &[u8]) -> Result<Value> {
@@ -122,6 +138,38 @@ mod tests {
         let err = rest_response("glab", b"", b"glab: not authenticated").unwrap_err();
         assert!(format!("{err:#}").contains("not authenticated"));
         assert_eq!(project_id("group/sub/project"), "group%2Fsub%2Fproject");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sends_writes_with_a_json_body_and_deletes_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log");
+        let cli = dir.path().join("glab");
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> {log}\ncat >> {log}\necho >> {log}\nprintf 'HTTP/2.0 200 OK\\r\\n\\r\\n{{\"state\": \"merged\"}}'\n",
+            log = log.display()
+        );
+        crate::fake::write_executable(&cli, &script);
+        let to = Target { host: "gitlab.acme.example", cli: cli.to_str().unwrap() };
+
+        let put =
+            GlabCli.send(to, "PUT", "projects/a%2Fb/merge_requests/7/merge", json!({"sha": "abc"})).await.unwrap();
+        let delete =
+            GlabCli.send(to, "DELETE", "projects/a%2Fb/repository/branches/fix%2F7", Value::Null).await.unwrap();
+
+        assert_eq!(put, Rest { status: 200, body: json!({"state": "merged"}) });
+        assert_eq!(delete.status, 200);
+        let lines: Vec<String> = std::fs::read_to_string(&log).unwrap().lines().map(String::from).collect();
+        assert_eq!(
+            lines,
+            [
+                "api --hostname gitlab.acme.example --include -X PUT -H Content-Type: application/json --input - projects/a%2Fb/merge_requests/7/merge",
+                "{\"sha\":\"abc\"}",
+                "api --hostname gitlab.acme.example --include -X DELETE projects/a%2Fb/repository/branches/fix%2F7",
+                "",
+            ]
+        );
     }
 
     #[test]

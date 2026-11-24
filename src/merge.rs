@@ -4,10 +4,11 @@ use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::board::{gh_name, random_id};
-use crate::codehost::{Change, ChangeRef, Landed, Landing, State, Viewed};
+use crate::board::random_id;
+use crate::codehost::{Change, Forge, Landed, Landing, State, Viewed};
 use crate::store::{MergeWait, WaitStatus};
 use crate::wf::Wf;
+use crate::wf_pr::change_of;
 
 const METHODS: &[&str] = &["MERGE", "SQUASH", "REBASE"];
 const REFUSED: &[&str] = &["BEHIND", "DIRTY"];
@@ -87,6 +88,7 @@ pub fn checks(c: &Change) -> Option<&'static str> {
 #[serde(deny_unknown_fields)]
 pub(crate) struct MergeArgs {
     pub(crate) repo: String,
+    #[serde(default)]
     pub(crate) pr: u64,
     pub(crate) head: String,
     pub(crate) method: Option<String>,
@@ -114,15 +116,7 @@ impl Outcome {
 
 impl Wf {
     pub(crate) async fn merge(&self, caller: Option<&str>, a: MergeArgs) -> Result<Value> {
-        let (owner, name) = a
-            .repo
-            .trim()
-            .split_once('/')
-            .filter(|(o, n)| gh_name(o) && gh_name(n))
-            .ok_or_else(|| anyhow!("wf.merge: repo must be \"owner/name\", got {:?}", a.repo))?;
-        if a.pr == 0 {
-            bail!("wf.merge: pr must be a pull request number");
-        }
+        let r = change_of("wf.merge", &a.repo, a.pr, &self.config().forges)?;
         let head = a.head.trim().to_ascii_lowercase();
         if head.len() != 40 || !head.chars().all(|c| c.is_ascii_hexdigit()) {
             bail!("wf.merge: head must be the full 40-character head commit SHA, got {:?}", a.head);
@@ -131,9 +125,12 @@ impl Wf {
             Some(m) if !METHODS.contains(&m.as_str()) => bail!("wf.merge: method must be merge, squash or rebase"),
             m => m,
         };
-        let out = Outcome { repo: format!("{owner}/{name}").to_ascii_lowercase(), pr: a.pr, head: head.clone() };
-
-        let r = ChangeRef::github(&format!("{owner}/{name}"), a.pr);
+        let out = Outcome { repo: r.key(), pr: r.number, head: head.clone() };
+        let forge = r.forge.name();
+        let kind = match r.forge {
+            Forge::Github => "pull request",
+            Forge::Gitlab { .. } => "merge request",
+        };
         let mut viewed = Viewed::NotFound;
         for attempt in 0..UNKNOWN_READS {
             if attempt > 0 {
@@ -147,7 +144,7 @@ impl Wf {
         }
         let pr = match viewed {
             Viewed::Refused(e) => return Ok(out.refused(e)),
-            Viewed::NotFound => return Ok(out.refused(format!("{}#{} is not a pull request", out.repo, out.pr))),
+            Viewed::NotFound => return Ok(out.refused(format!("{}#{} is not a {kind}", out.repo, out.pr))),
             Viewed::Found(d) => d.change,
         };
         let now = pr.head.clone();
@@ -168,18 +165,19 @@ impl Wf {
                 return Ok(out.with("merged", json!({"commit": pr.commit})));
             }
             State::Open => {}
-            State::Closed => return Ok(out.refused("the pull request is closed")),
+            State::Closed => return Ok(out.refused(format!("the {kind} is closed"))),
         }
         if pr.draft {
-            return Ok(out.refused("the pull request is a draft"));
+            return Ok(out.refused(format!("the {kind} is a draft")));
         }
         if now != head {
-            return Ok(out.refused(format!("head moved: the pull request is at {now}")));
+            return Ok(out.refused(format!("head moved: the {kind} is at {now}")));
         }
-        let id = pr.id.as_deref().ok_or_else(|| anyhow!("GitHub returned no pull request id"))?;
+        let id = pr.id.as_deref().ok_or_else(|| anyhow!("{forge} returned no id for {}#{}", out.repo, out.pr))?;
         let state = pr.merge_state.as_str();
         let ready = ready(&pr);
         let failing = |f: &str| out.refused(format!("a check failed at head {}: {f}", &head[..7]));
+        let can_wait = !REFUSED.contains(&state) && check_state(&pr) != CheckState::Unread;
         let record = |status: WaitStatus| -> Result<String> {
             let approval = random_id();
             let label = match caller {
@@ -216,8 +214,13 @@ impl Wf {
                 let approval = record(WaitStatus::Waiting)?;
                 return Ok(out.with("waiting", json!({"mergeState": state, "approval": approval})));
             }
-            return match self.host.merge(&r, id, &head, Landing::Queue).await? {
+            let method = method.clone().or_else(|| pr.method.clone()).unwrap_or_else(|| "MERGE".into());
+            return match self.host.merge(&r, id, &head, Landing::Queue { method: &method }).await? {
                 Landed::Refused(e) => Ok(out.refused(e)),
+                Landed::Waiting(e) => {
+                    let approval = record(WaitStatus::Waiting)?;
+                    Ok(out.with("waiting", json!({"mergeState": state, "approval": approval, "reason": e})))
+                }
                 Landed::Queued { position } => {
                     let approval = record(WaitStatus::Sent)?;
                     Ok(out.with("queued", json!({"position": position, "approval": approval})))
@@ -232,7 +235,7 @@ impl Wf {
         match &ready {
             Ready::Yes => {}
             Ready::Failing(f) => return Ok(failing(f)),
-            Ready::Not(_) if !REFUSED.contains(&state) && check_state(&pr) != CheckState::Unread => {
+            Ready::Not(_) if can_wait => {
                 let approval = record(WaitStatus::Waiting)?;
                 return Ok(out.with("waiting", json!({"mergeState": state, "approval": approval})));
             }
@@ -241,6 +244,11 @@ impl Wf {
         let method = method.clone().or_else(|| pr.method.clone()).unwrap_or_else(|| "MERGE".into());
         match self.host.merge(&r, id, &head, Landing::Merge { method: &method }).await? {
             Landed::Refused(e) => Ok(out.refused(e)),
+            Landed::Waiting(e) if can_wait => {
+                let approval = record(WaitStatus::Waiting)?;
+                Ok(out.with("waiting", json!({"mergeState": state, "approval": approval, "reason": e})))
+            }
+            Landed::Waiting(e) => Ok(out.refused(e)),
             Landed::Merged { commit } => {
                 merged(commit.as_deref().unwrap_or_default())?;
                 Ok(out.with("merged", json!({"commit": commit, "method": method.to_lowercase()})))

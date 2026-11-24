@@ -7,16 +7,17 @@ use crate::codehost::{
     Branch, Change, ChangeRef, CodeHost, Detail, Forge, Landed, Landing, Read, Rollup, State, Viewed,
 };
 use crate::github::errors;
-use crate::gitlab::{GitLab, Target, project_id};
+use crate::gitlab::{GitLab, Rest, Target, project_id};
 use crate::t3::BoxFut;
 
 const BATCH: usize = 10;
-const MR_FIELDS: &str = "state draft diffHeadSha detailedMergeStatus mergedAt squashOnMerge mergeCommitSha \
+const MR_FIELDS: &str = "id state draft diffHeadSha detailedMergeStatus mergedAt squashOnMerge mergeCommitSha \
 headPipeline { status ref } mergeTrainCar { status index }";
 const QUEUED: &[&str] = &["idle", "fresh", "stale", "merging"];
 const PENDING: &[&str] =
     &["created", "waiting_for_resource", "preparing", "pending", "running", "scheduled", "waiting_for_callback"];
-const LATER: &str = "is not supported for GitLab merge requests yet";
+const CAR: &str = "query MergeTrainCar($p: ID!, $i: String!) { project(fullPath: $p) { mergeRequest(iid: $i) { \
+mergeTrainCar { status index } } } }";
 const PER_PAGE: usize = 100;
 const PIPELINE_PAGES: usize = 5;
 const DIFF_PAGES: usize = 1;
@@ -99,9 +100,33 @@ pub fn changed_files(diffs: &[Value]) -> Vec<String> {
     out
 }
 
+fn gid(mr: &Value) -> Value {
+    mr["id"].as_u64().map_or(Value::Null, |n| json!(format!("gid://gitlab/MergeRequest/{n}")))
+}
+
+fn message(body: &Value) -> String {
+    match &body["message"] {
+        Value::String(m) => m.clone(),
+        Value::Null => body["error"].as_str().map(String::from).unwrap_or_else(|| "no message".into()),
+        other => other.to_string(),
+    }
+}
+
+pub fn encode(segment: &str) -> String {
+    let mut out = String::new();
+    for b in segment.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 fn graphql_shape(mr: &Value) -> Value {
     json!({
-        "state": mr["state"], "draft": mr["draft"], "diffHeadSha": mr["sha"],
+        "id": gid(mr), "squashOnMerge": mr["squash_on_merge"], "state": mr["state"], "draft": mr["draft"], "diffHeadSha": mr["sha"],
         "detailedMergeStatus": mr["detailed_merge_status"], "mergedAt": mr["merged_at"],
         "mergeCommitSha": mr["merge_commit_sha"], "mergeTrainCar": null,
     })
@@ -190,7 +215,7 @@ impl GitlabHost {
             _ => None,
         };
         Ok(Change {
-            id: None,
+            id: mr["id"].as_str().map(String::from),
             state,
             draft: mr["draft"] == true,
             head,
@@ -203,9 +228,120 @@ impl GitlabHost {
             commit: commit.map(|c| c.to_ascii_lowercase()),
             ended,
             removal: None,
-            method: None,
+            method: Some(if mr["squashOnMerge"] == true { "SQUASH" } else { "MERGE" }.into()),
             closing_issue: None,
         })
+    }
+
+    fn target(&self, r: &ChangeRef) -> std::result::Result<(String, String), String> {
+        let Forge::Gitlab { host } = &r.forge else {
+            return Err(format!("{}#{} is not on GitLab", r.repo, r.number));
+        };
+        let cli = (self.cli)(host).ok_or_else(|| format!("{host} is not listed under forges in config.json"))?;
+        Ok((host.clone(), cli))
+    }
+
+    async fn trains(&self, to: Target<'_>, r: &ChangeRef) -> std::result::Result<bool, String> {
+        let path = format!("projects/{}", project_id(&r.repo));
+        match self.lab.get(to, &path).await {
+            Ok(rest) if rest.status == 200 => Ok(rest.body["merge_trains_enabled"] == true),
+            Ok(rest) => Err(format!("GitLab answered HTTP {} for {path}", rest.status)),
+            Err(e) => Err(format!("{e:#}")),
+        }
+    }
+
+    async fn car(&self, to: Target<'_>, r: &ChangeRef) -> Option<(String, Option<u64>)> {
+        let vars = json!({"p": r.repo, "i": r.number.to_string()});
+        let resp = self.lab.graphql(to, CAR, vars).await.ok()?;
+        if resp["errors"].as_array().is_some_and(|e| !e.is_empty()) {
+            return None;
+        }
+        let car = resp["data"]["project"]["mergeRequest"]["mergeTrainCar"].as_object()?;
+        Some((text(&car["status"]), car["index"].as_u64().map(|i| i + 1)))
+    }
+
+    async fn cancel(&self, to: Target<'_>, r: &ChangeRef, why: &str) -> Landed {
+        let base = format!("projects/{}/merge_requests/{}", project_id(&r.repo), r.number);
+        let mut sent = self.lab.send(to, "POST", &format!("{base}/cancel_auto_merge"), json!({})).await;
+        if matches!(&sent, Ok(rest) if rest.status == 404) {
+            sent = self.lab.send(to, "POST", &format!("{base}/cancel_merge_when_pipeline_succeeds"), json!({})).await;
+        }
+        match sent {
+            Ok(rest)
+                if matches!(rest.status, 406 | 409)
+                    || rest.body["http_status"] == 406
+                    || ((200..300).contains(&rest.status) && rest.body["status"] != "error") =>
+            {
+                Landed::Waiting(format!("{why}; t3cm took back GitLab's auto-merge and holds the approval itself"))
+            }
+            Ok(rest) => Landed::Waiting(format!(
+                "{why}, and GitLab will merge it on its own: t3cm could not cancel the auto-merge (HTTP {}: {})",
+                rest.status,
+                message(&rest.body)
+            )),
+            Err(e) => Landed::Waiting(format!(
+                "{why}, and GitLab will merge it on its own: t3cm could not cancel the auto-merge ({e:#})"
+            )),
+        }
+    }
+
+    async fn landed(&self, to: Target<'_>, r: &ChangeRef, head: &str, rest: Rest) -> Landed {
+        let msg = message(&rest.body);
+        let short = head.get(..7).unwrap_or(head);
+        match rest.status {
+            200 | 201 if text(&rest.body["state"]) == "merged" => Landed::Merged {
+                commit: ["merge_commit_sha", "squash_commit_sha"]
+                    .iter()
+                    .find_map(|k| rest.body[*k].as_str().filter(|c| !c.is_empty()))
+                    .map(|c| c.to_ascii_lowercase()),
+            },
+            200 | 201 => match self.car(to, r).await {
+                Some((status, position)) if QUEUED.contains(&status.as_str()) => Landed::Queued { position },
+                _ if rest.status == 201 => Landed::Queued { position: None },
+                _ => self.cancel(to, r, "GitLab set the merge request to merge once its pipeline passes").await,
+            },
+            202 => self.cancel(to, r, "GitLab scheduled it to join the merge train once its pipeline passes").await,
+            405 => Landed::Waiting(format!("GitLab cannot merge it yet ({msg})")),
+            409 => Landed::Refused(format!("head moved: GitLab no longer has the merge request at {short} ({msg})")),
+            422 => Landed::Refused(format!("GitLab could not merge it ({msg})")),
+            401 | 403 => Landed::Refused(format!(
+                "t3cm's GitLab login has no permission to merge it (HTTP {}: {msg})",
+                rest.status
+            )),
+            400 => Landed::Refused(format!("GitLab refused the merge, and may require the head sha (HTTP 400: {msg})")),
+            404 => Landed::Refused(format!("GitLab shows no merge request !{} in {}", r.number, r.repo)),
+            s => Landed::Refused(format!("GitLab answered HTTP {s}: {msg}")),
+        }
+    }
+
+    async fn deleted(&self, to: Target<'_>, r: &ChangeRef) -> Branch {
+        let mr = match self.rest(to, r, "").await {
+            Ok(mr) => mr,
+            Err(e) => return Branch::Unread(e),
+        };
+        let branch = mr["source_branch"].as_str().unwrap_or("of the merge request").to_string();
+        if text(&mr["state"]) != "merged" {
+            return Branch::NotMerged(branch);
+        }
+        if mr["source_project_id"] != mr["target_project_id"] {
+            return Branch::Fork(branch);
+        }
+        let path = format!("projects/{}/repository/branches/{}", project_id(&r.repo), encode(&branch));
+        let tip = match self.lab.get(to, &path).await {
+            Ok(rest) if rest.status == 404 => return Branch::Gone(branch),
+            Ok(rest) if rest.status == 200 => text(&rest.body["commit"]["id"]),
+            Ok(rest) => return Branch::Unread(format!("GitLab answered HTTP {} for {path}", rest.status)),
+            Err(e) => return Branch::Unread(format!("{e:#}")),
+        };
+        if tip != text(&mr["sha"]) {
+            return Branch::TipMoved { branch, tip };
+        }
+        match self.lab.send(to, "DELETE", &path, Value::Null).await {
+            Ok(rest) if (200..300).contains(&rest.status) => Branch::Deleted(branch),
+            Ok(rest) if rest.status == 404 => Branch::Gone(branch),
+            Ok(rest) => Branch::Failed { why: format!("HTTP {}: {}", rest.status, message(&rest.body)), branch },
+            Err(e) => Branch::Failed { branch, why: format!("{e:#}") },
+        }
     }
 
     async fn read_one(&self, to: Target<'_>, r: &ChangeRef, resp: &Value, i: usize) -> Read {
@@ -303,7 +439,14 @@ impl CodeHost for GitlabHost {
                 rest if rest.status == 200 => rest.body,
                 rest => return Err(anyhow!("GitLab answered HTTP {} for {path}", rest.status)),
             };
-            let change = self.change(to, r, &graphql_shape(&mr), Some(&mr)).await.map_err(|e| anyhow!(e))?;
+            let mut change = self.change(to, r, &graphql_shape(&mr), Some(&mr)).await.map_err(|e| anyhow!(e))?;
+            if change.state == State::Open && self.trains(to, r).await.map_err(|e| anyhow!(e))? {
+                change.queue = true;
+                if let Some((status, position)) = self.car(to, r).await {
+                    change.queued = QUEUED.contains(&status.as_str());
+                    change.position = position.filter(|_| change.queued);
+                }
+            }
             let (diffs, more) = self.pages(to, r, "/diffs", DIFF_PAGES).await.map_err(|e| anyhow!(e))?;
             let after = self.rest(to, r, "").await.map_err(|e| anyhow!(e))?;
             if text(&after["sha"]) != change.head {
@@ -321,16 +464,41 @@ impl CodeHost for GitlabHost {
 
     fn merge<'a>(
         &'a self,
-        _r: &'a ChangeRef,
+        r: &'a ChangeRef,
         _id: &'a str,
-        _head: &'a str,
-        _how: Landing<'a>,
+        head: &'a str,
+        how: Landing<'a>,
     ) -> BoxFut<'a, Result<Landed>> {
-        Box::pin(async move { Ok(Landed::Refused(format!("merging {LATER}"))) })
+        Box::pin(async move {
+            let (host, cli) = match self.target(r) {
+                Ok(t) => t,
+                Err(e) => return Ok(Landed::Refused(e)),
+            };
+            let to = Target { host: &host, cli: &cli };
+            let project = project_id(&r.repo);
+            let trains = self.trains(to, r).await.map_err(|e| anyhow!(e))?;
+            let (verb, path, mut body) = if trains {
+                let path = format!("projects/{project}/merge_trains/merge_requests/{}", r.number);
+                ("POST", path, json!({"sha": head, "auto_merge": true}))
+            } else {
+                let path = format!("projects/{project}/merge_requests/{}/merge", r.number);
+                ("PUT", path, json!({"sha": head, "auto_merge": true, "should_remove_source_branch": true}))
+            };
+            let (Landing::Queue { method } | Landing::Merge { method }) = how;
+            body["squash"] = json!(method.eq_ignore_ascii_case("SQUASH"));
+            let rest = self.lab.send(to, verb, &path, body).await?;
+            Ok(self.landed(to, r, head, rest).await)
+        })
     }
 
-    fn delete_branch<'a>(&'a self, _r: &'a ChangeRef) -> BoxFut<'a, Branch> {
-        Box::pin(async move { Branch::Unread(format!("deleting the source branch {LATER}")) })
+    fn delete_branch<'a>(&'a self, r: &'a ChangeRef) -> BoxFut<'a, Branch> {
+        Box::pin(async move {
+            let (host, cli) = match self.target(r) {
+                Ok(t) => t,
+                Err(e) => return Branch::Unread(e),
+            };
+            self.deleted(Target { host: &host, cli: &cli }, r).await
+        })
     }
 
     fn url(&self, r: &ChangeRef) -> String {
