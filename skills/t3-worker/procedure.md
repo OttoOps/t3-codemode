@@ -46,11 +46,16 @@ orchestrator: built, review started, checks green, a skipped slot), `event`
   watched, call `watch_pull_request` on it again. Then check the PR's state
   and act on any wake you missed (step 4): `gh pr view <number> --json
   state,headRefOid,statusCheckRollup` on GitHub, or on GitLab
-  `glab mr view <iid> --output json` (its `state` and `sha`) and, from
+  `glab mr view <iid> --output json`: its `state`, `sha`,
+  `detailed_merge_status` (`conflict` is a conflict) and the MR's pipeline,
+  which is its `head_pipeline` unless that pipeline's `ref` is a merge
+  train's (`refs/merge-requests/<iid>/train`). Then read the newest
+  non-train pipeline from
   `glab api --hostname <host> projects/<enc path>/merge_requests/<iid>/pipelines`
-  (`<enc path>` is the full path URL-encoded), the newest
-  pipeline at that `sha` whose `ref` is not
-  `refs/merge-requests/<iid>/train`. On an untracked forge,
+  (`<enc path>` is the full path URL-encoded), whose `sha` is that head or
+  whose `ref` is `refs/merge-requests/<iid>/merge`. Read the MR's notes too,
+  as the bot-review step below says, for comments you have not answered. On
+  an untracked forge,
   check the MR/PR state with the repo's documented workflow instead of
   `watch_pull_request`, `gh pr view` and `glab`. Then carry on from that
   step.
@@ -222,7 +227,7 @@ does not.
 3. `link_pull_request` with the PR or MR URL.
 4. `watch_pull_request` on it. When T3 refuses the watch for a GitLab MR,
    carry on: the link watcher's nudge runs your resume step, which reads
-   the pipeline.
+   the pipeline, conflicts and new comments.
 5. Report it:
    `await wf.pr({ event: "opened", repo: "<repo>", pr: <number>, head: "<sha>", publishing: "<Publishing line>", checks: "pending" })`,
    with the `Publishing:` line from Publishing, step 3, and
@@ -252,7 +257,9 @@ through `gh`, `glab`, `wf.merge`, or T3's merge button or PR action.
   reviewer): a round is one bot review of one head. Count the rounds this
   PR has had (`gh api repos/<owner>/<repo>/pulls/<number>/reviews`, the
   bot's reviews, one per distinct `commit_id`; on GitLab, the bot's review
-  notes in `glab mr view <iid> --comments`, one per head it reviewed).
+  notes in `glab api --hostname <host>
+  "projects/<enc path>/merge_requests/<iid>/notes?per_page=100&page=<n>"`,
+  read until a page holds fewer than 100, one per head it reviewed).
   - Fix only the Critical and Major findings that still hold against the
     current code, all of them in one push. When you dispute one, reply
     once with why, leave the code, and send it as the `review` gate below

@@ -586,7 +586,8 @@ class GitlabForgeTests(unittest.TestCase):
         ready = self.flat(self.ticket, "### Ready to merge")
         for token in ("**Tracked GitLab:**", "`detailed_merge_status` `mergeable`", "`refs/merge-requests/<iid>/train`",
                       "projects/<enc path>/merge_requests/<iid>/pipelines",
-                      "projects/<enc path>/repository/commits/<sha>/statuses",
+                      "projects/<enc path>/repository/commits/<sha>/statuses?per_page=100",
+                      "`ref` is `refs/merge-requests/<iid>/merge`, the ref a merged-results pipeline runs on",
                       "merge_requests/<iid>/diffs?per_page=100", "until a page holds fewer than 100", "`changes_count`", "`old_path` and `new_path`", "--no-renames", "or the GitLab path set above",
                       "in a repo with no CI there is none", "**Untracked forge:**",
                       "`state` `merged` on a tracked GitLab host", "`squash_commit_sha`"):
@@ -610,7 +611,7 @@ class GitlabForgeTests(unittest.TestCase):
         for token in ("(GitHub, or the tracked GitLab host and the MR's full path)",
                       "`projects/<enc path>/merge_trains/merge_requests/<iid>`, where a 404 means none",
                       "`idle`, `fresh` or `stale` is in the queue", "`merge_when_pipeline_succeeds` true is an `autoMergeRequest`",
-                      "`detailed_merge_status` `mergeable` is `CLEAN`"):
+                      "`detailed_merge_status` `mergeable` is `CLEAN`", "`opened` is `OPEN`"):
             self.assertIn(token, watch)
 
     def test_the_untracked_watch_recovers_on_resume_and_resets_its_auth_flag(self):
@@ -629,6 +630,8 @@ class GitlabForgeTests(unittest.TestCase):
         self.assertIn("GitHub or a tracked GitLab host (step 3 item 2)", link_proto)
         self.assertIn("`glab mr view <iid> --output json`", link_proto)
         self.assertIn("projects/<enc path>/merge_requests/<iid>/pipelines", link_proto)
+        self.assertIn("`refs/merge-requests/<iid>/merge`", link_proto)
+        self.assertIn("`detailed_merge_status` (`conflict` is a conflict)", link_proto)
         self.assertNotIn("glab ci list", link_proto)
         open_pr = self.flat(self.worker, "## 3. Open the PR and watch it")
         for token in ("`git config --get remote.origin.url`", "**Tracked GitLab:**", "`t3cm config get forges`", "`<host>/<full path>`",
@@ -638,7 +641,7 @@ class GitlabForgeTests(unittest.TestCase):
                       "When T3 refuses the watch for a GitLab MR"):
             self.assertIn(token, open_pr)
         wake = self.flat(self.worker, "## 4. On a wake")
-        for token in ("`glab ci trace <job id>`", "`glab mr view <iid> --comments`",
+        for token in ("`glab ci trace <job id>`", "merge_requests/<iid>/notes?per_page=100&page=<n>",
                       'wf.pr({ event: "ready", repo: "<repo>"', 'wf.pr({ event: "updated", repo: "<repo>"'):
             self.assertIn(token, wake)
         follow = self.flat(self.worker, "## 5. PR delivery stage failed: follow-up PR")
