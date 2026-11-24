@@ -13,6 +13,7 @@ use crate::board::{
     reply_options,
 };
 use crate::clock::{Clock, iso, local_clock, minutes_since};
+use crate::codehost::CodeHost;
 use crate::config::{CLOSING, Config, LinkParams, UP_KINDS};
 use crate::github::GitHub;
 use crate::issues::{FileIssuesArgs, IssueArgs};
@@ -295,6 +296,7 @@ pub struct Wf {
     pub(crate) lock: tokio::sync::Mutex<()>,
     pub(crate) remotes: Arc<dyn Remotes>,
     pub(crate) github: Arc<dyn GitHub>,
+    pub(crate) host: Arc<dyn CodeHost>,
     pub(crate) live: Mutex<HashMap<String, (u64, Value)>>,
     pub(crate) live_seq: AtomicU64,
     pub(crate) closed_prs: Mutex<HashMap<String, ClosedPrs>>,
@@ -362,6 +364,7 @@ impl Wf {
             config: tokio::sync::watch::Sender::new(config),
             lock: tokio::sync::Mutex::new(()),
             remotes,
+            host: crate::github_host::github_host(github.clone()),
             github,
             live: Mutex::new(HashMap::new()),
             live_seq: AtomicU64::new(0),

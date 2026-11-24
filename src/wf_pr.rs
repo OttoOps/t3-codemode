@@ -5,8 +5,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::board::{BOARD, Card, NewCard, Tracker, checked_options, gh_name, parse_issue_only};
-use crate::github::errors;
-use crate::merge::{CHECKS, CheckState, check_state};
+use crate::codehost::{ChangeRef, CodeHost, Detail, State, Viewed};
+use crate::merge::{CheckState, check_state};
 use crate::reach::ReachPoint;
 use crate::reconcile::{CardPr, CardStage};
 use crate::slots::{Caps, glob_matches};
@@ -14,10 +14,6 @@ use crate::store::{Link, LinkPr, PrBrief};
 use crate::wf::{HANDLED, NO_CALLER, SendArgs, WATCHER, Wf, header};
 use crate::wf_slots::Reported;
 
-const PR_READ: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { \
-pullRequest(number: $number) { state isDraft headRefOid mergeStateStatus reviewDecision body \
-latestOpinionatedReviews(first: 100) { nodes { state author { login } commit { oid } } } \
-files(first: 100) { pageInfo { hasNextPage } nodes { path } } ...Checks } } }";
 const PR_FORMAT: &[(&str, &[&str])] =
     &[("Summary", &["```"]), ("Evidence", &["Before:", "After:"]), ("Merge Danger", &["Door:", "Blast Radius:"])];
 const MAX_OPTIONS: usize = 8;
@@ -47,6 +43,7 @@ struct Event {
     kind: Kind,
     repo: String,
     number: u64,
+    url: String,
     head: String,
     publishing: String,
     no_ci: bool,
@@ -54,7 +51,7 @@ struct Event {
 }
 
 impl Event {
-    fn checked(a: PrArgs) -> Result<Event> {
+    fn checked(a: PrArgs, host: &dyn CodeHost) -> Result<Event> {
         let kind = match a.event.as_str() {
             "opened" => Kind::Opened,
             "updated" => Kind::Updated,
@@ -88,14 +85,16 @@ impl Event {
             bail!("wf.pr: checks applies only to opened");
         }
         let body = a.body.map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
-        Ok(Event { kind, repo, number: a.pr, head, publishing, no_ci, body })
+        let url = host.url(&ChangeRef::github(&repo, a.pr));
+        Ok(Event { kind, repo, number: a.pr, url, head, publishing, no_ci, body })
     }
 
-    fn of_link(p: &LinkPr) -> Event {
+    fn of_link(p: &LinkPr, host: &dyn CodeHost) -> Event {
         Event {
             kind: Kind::Ready,
             repo: p.repo.clone(),
             number: p.number,
+            url: host.url(&ChangeRef::github(&p.repo, p.number)),
             head: p.head.clone(),
             publishing: String::new(),
             no_ci: false,
@@ -103,8 +102,8 @@ impl Event {
         }
     }
 
-    fn url(&self) -> String {
-        format!("https://github.com/{}/pull/{}", self.repo, self.number)
+    fn url(&self) -> &str {
+        &self.url
     }
 
     fn label(&self) -> String {
@@ -481,13 +480,13 @@ fn action_line(e: &Event, head: &str, options: &[String], blocker: Option<&str>)
     )
 }
 
-fn change_requests(pr: &Value, head: &str) -> String {
-    let reviews = pr["latestOpinionatedReviews"]["nodes"].as_array().into_iter().flatten();
-    let named: Vec<String> = reviews
-        .filter(|r| r["state"] == "CHANGES_REQUESTED")
+fn change_requests(pr: &Detail, head: &str) -> String {
+    let named: Vec<String> = pr
+        .change_requests
+        .iter()
         .map(|r| {
-            let who = r["author"]["login"].as_str().unwrap_or("a deleted account");
-            let at = match r["commit"]["oid"].as_str().filter(|c| !c.is_empty()) {
+            let who = r.author.as_deref().unwrap_or("a deleted account");
+            let at = match r.commit.as_deref() {
                 Some(c) if same_head(&c.to_ascii_lowercase(), head) => format!("the current head {}", short(head)),
                 Some(c) => format!("earlier head {}", short(c)),
                 None => "a commit GitHub no longer shows".to_string(),
@@ -513,7 +512,7 @@ impl Wf {
         let me = caller.filter(|c| !c.is_empty()).ok_or_else(|| anyhow!(NO_CALLER))?;
         let args = if args.is_null() { json!({}) } else { args };
         let a: PrArgs = serde_json::from_value(args).map_err(|e| anyhow!("wf.pr: {e}"))?;
-        let e = Event::checked(a)?;
+        let e = Event::checked(a, &*self.host)?;
         let (ln, ticket) = {
             let _g = self.lock.lock().await;
             let (mut ln, ticket) = self.route(me, &e)?;
@@ -712,18 +711,12 @@ impl Wf {
         Ok(r.all(&Caps::Unchecked))
     }
 
-    async fn read_pr(&self, repo: &str, number: u64) -> Result<Value> {
-        let (owner, name) = repo.split_once('/').unwrap_or_default();
-        let query = format!("{PR_READ} {CHECKS}");
-        let r = self.github.graphql(&query, json!({"owner": owner, "name": name, "number": number})).await?;
-        if let Some(e) = errors(&r) {
-            bail!("{e}");
+    async fn read_pr(&self, repo: &str, number: u64) -> Result<Detail> {
+        match self.host.view(&ChangeRef::github(repo, number)).await? {
+            Viewed::Found(d) => Ok(*d),
+            Viewed::NotFound => bail!("{repo}#{number} is not a pull request"),
+            Viewed::Refused(e) => bail!("{e}"),
         }
-        let pr = r["data"]["repository"]["pullRequest"].clone();
-        if pr.is_null() {
-            bail!("{repo}#{number} is not a pull request");
-        }
-        Ok(pr)
     }
 
     async fn pr_opened(&self, me: &str, rep: &Reported, ln: &Link, _ticket: &Link, e: &Event) -> Result<Value> {
@@ -751,8 +744,7 @@ impl Wf {
             }
         };
         let mut gaps = publishing_gaps(&e.publishing, &brief, &passes);
-        let body = pr["body"].as_str().unwrap_or_default();
-        gaps.extend(description_gaps(body, &brief, &e.repo, &issue_refs(ln, &e.repo)));
+        gaps.extend(description_gaps(&pr.body, &brief, &e.repo, &issue_refs(ln, &e.repo)));
         if gaps.is_empty() && e.no_ci {
             let why = "this repo runs no CI on PRs, so the ticket runs the brief's checks on the PR head";
             let extra = "t3cm checked the description and the Publishing line, and both hold.";
@@ -878,12 +870,12 @@ impl Wf {
                 return self.fallback(me, ln, e, &why, None, false).await;
             }
         };
-        let head = pr["headRefOid"].as_str().unwrap_or_default().to_ascii_lowercase();
-        if pr["state"] != "OPEN" {
-            let state = pr["state"].as_str().unwrap_or("unknown").to_ascii_lowercase();
+        let head = pr.change.head.clone();
+        if pr.change.state != State::Open {
+            let state = pr.change.state.as_str().to_ascii_lowercase();
             return self.refuse_ready(me, ln, e, source, format!("{} is {state}", e.label())).await;
         }
-        if pr["isDraft"] == true {
+        if pr.change.draft {
             let reason = format!("{} is a draft; mark it ready for review, then send ready again", e.label());
             return self.refuse_ready(me, ln, e, source, reason).await;
         }
@@ -894,8 +886,8 @@ impl Wf {
             );
             return self.refuse_ready(me, ln, e, source, reason).await;
         }
-        let state = pr["mergeStateStatus"].as_str().unwrap_or("UNKNOWN");
-        let checks = check_state(&pr);
+        let state = pr.change.merge_state.as_str();
+        let checks = check_state(&pr.change);
         let pending = match (&checks, state) {
             (CheckState::Pending(p), _) => Some(format!("checks still running: {p}")),
             (CheckState::Passed(_), "UNKNOWN") => Some("GitHub is still computing the merge state".into()),
@@ -976,12 +968,12 @@ impl Wf {
             return self.refuse_ready(me, ln, e, source, reason).await;
         }
         let blocker = matches!(state, "BLOCKED" | "BEHIND").then(|| {
-            let review = pr["reviewDecision"].as_str().map(|r| format!(", review decision {r}")).unwrap_or_default();
+            let review =
+                pr.change.review_decision.as_ref().map(|r| format!(", review decision {r}")).unwrap_or_default();
             format!("merge state {state}{review}{}", change_requests(&pr, &head))
         });
-        let nodes = pr["files"]["nodes"].as_array().cloned().unwrap_or_default();
-        let files: Vec<String> = nodes.iter().filter_map(|f| f["path"].as_str().map(String::from)).collect();
-        if pr["files"]["pageInfo"]["hasNextPage"] == true {
+        let files = pr.files.clone();
+        if pr.more_files {
             self.reach.hit(ReachPoint::PrFilesPaginatedFallback);
             return self
                 .fallback(me, ln, e, "the PR changes more than 100 files, past what t3cm reads", None, true)
@@ -1145,15 +1137,15 @@ impl Wf {
                 .read_pr(&repo, number)
                 .await
                 .map_err(|err| format!("t3cm could not read {repo}#{number} on GitHub ({err:#})"))?;
-            if pr["state"] == "CLOSED" {
+            if pr.change.state == State::Closed {
                 continue;
             }
-            if pr["files"]["pageInfo"]["hasNextPage"] == true {
+            if pr.more_files {
                 return Err(format!("{repo}#{number} changes more than 100 files, past what t3cm reads"));
             }
-            for f in pr["files"]["nodes"].as_array().into_iter().flatten().filter_map(|f| f["path"].as_str()) {
-                if !all.iter().any(|x| x == f) {
-                    all.push(f.to_string());
+            for f in pr.files {
+                if !all.contains(&f) {
+                    all.push(f);
                 }
             }
         }
@@ -1178,7 +1170,8 @@ impl Wf {
             wl.gate_since = None;
             self.store.link_save(&wl)?;
             let body = format!(
-                "The head of https://github.com/{repo}/pull/{number} moved to {} outside this thread, so t3cm dropped its merge card. Send wf.pr updated for the new head, and ready once its checks pass.",
+                "The head of {} moved to {} outside this thread, so t3cm dropped its merge card. Send wf.pr updated for the new head, and ready once its checks pass.",
+                self.host.url(&ChangeRef::github(repo, number)),
                 short(head)
             );
             self.queue_worker_reply(&wl.child, &body)?;
@@ -1197,7 +1190,7 @@ impl Wf {
     }
 
     pub(crate) async fn retry_ready(&self, worker: &Link, p: &LinkPr) -> Result<(String, bool)> {
-        let e = Event::of_link(p);
+        let e = Event::of_link(p, &*self.host);
         let (ln, ticket) = {
             let _g = self.lock.lock().await;
             self.route(&worker.child, &e)?

@@ -4,10 +4,10 @@ use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::board::{BOARD, Card, NewCard, gh_name, parse_github_issue_only};
+use crate::board::{BOARD, Card, NewCard, gh_name};
 use crate::clock::{local_clock, parse_ts};
-use crate::github::errors;
-use crate::merge::{CHECKS, ENQUEUE_PR, MERGE_PR, Ready, checks, ready};
+use crate::codehost::{Change, ChangeRef, CodeHost, Landed, Landing, Read, State};
+use crate::merge::{Ready, checks, ready};
 use crate::reach::ReachPoint;
 use crate::sentinels::Sentinel;
 use crate::store::{MergeWait, PrSeen, WaitStatus, Wake};
@@ -20,10 +20,6 @@ const BATCH: usize = 100;
 const PAGE_LOAD_GAP_MINS: f64 = 0.5;
 const MAX_FAILURES: u32 = 3;
 const EXIT_WINDOW_MINS: f64 = 30.0;
-const PR_FIELDS: &str = "fragment F on PullRequest { id state isDraft headRefOid mergeStateStatus reviewDecision \
-isMergeQueueEnabled isInMergeQueue mergeQueueEntry { position } mergeCommit { oid } mergedAt closedAt \
-timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) { nodes { ... on RemovedFromMergeQueueEvent { \
-reason createdAt } } } closingIssuesReferences(first: 10) { nodes { number repository { nameWithOwner } } } ...Checks }";
 const HELD: &str = "has a failing check at its approved head";
 const NO_REASON: &str = "no reason recorded";
 const NO_TICKET: &str =
@@ -78,13 +74,6 @@ fn at_host_start(before: &str) -> bool {
             .chars()
             .last()
             .is_none_or(|c| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | '@')))
-}
-
-fn closing_issue(repo: &Value) -> Option<String> {
-    repo["pullRequest"]["closingIssuesReferences"]["nodes"].as_array()?.iter().find_map(|n| {
-        let repo = n["repository"]["nameWithOwner"].as_str()?;
-        parse_github_issue_only(&format!("{repo}#{}", n["number"].as_u64()?)).map(|i| i.slug())
-    })
 }
 
 fn approved_head(body: &str) -> Option<String> {
@@ -142,50 +131,6 @@ fn later(event: &str, since: &str) -> bool {
     }
 }
 
-struct Obs {
-    state: String,
-    head: String,
-    queued: bool,
-    draft: bool,
-    merge_state: String,
-    review_decision: Option<String>,
-    checks: Option<&'static str>,
-    ready: Ready,
-    queue: bool,
-    id: String,
-    commit: String,
-    ended: Option<String>,
-    removal: Option<(String, String)>,
-    method: Option<String>,
-}
-
-impl Obs {
-    fn read(repo: &Value) -> Obs {
-        let pr = &repo["pullRequest"];
-        let s = |k: &str| pr[k].as_str().unwrap_or_default().to_string();
-        let removal = &pr["timelineItems"]["nodes"][0];
-        let merged = pr["state"] == "MERGED";
-        Obs {
-            state: s("state"),
-            head: s("headRefOid").to_ascii_lowercase(),
-            queued: pr["isInMergeQueue"] == true,
-            draft: pr["isDraft"] == true,
-            merge_state: pr["mergeStateStatus"].as_str().unwrap_or("UNKNOWN").into(),
-            review_decision: pr["reviewDecision"].as_str().map(String::from),
-            checks: checks(pr),
-            ready: ready(pr),
-            queue: pr["isMergeQueueEnabled"] == true,
-            id: s("id"),
-            commit: pr["mergeCommit"]["oid"].as_str().unwrap_or_default().into(),
-            ended: pr[if merged { "mergedAt" } else { "closedAt" }].as_str().map(String::from),
-            removal: removal["createdAt"]
-                .as_str()
-                .map(|at| (removal["reason"].as_str().unwrap_or_default().to_string(), at.to_string())),
-            method: repo["viewerDefaultMergeMethod"].as_str().map(String::from),
-        }
-    }
-}
-
 #[derive(Default)]
 struct Tracked {
     repo: String,
@@ -202,8 +147,12 @@ impl Tracked {
         format!("{}#{}", self.repo, self.number)
     }
 
-    fn url(&self) -> String {
-        format!("https://github.com/{}/pull/{}", self.repo, self.number)
+    fn change(&self) -> ChangeRef {
+        ChangeRef::github(&self.repo, self.number)
+    }
+
+    fn url(&self, host: &dyn CodeHost) -> String {
+        host.url(&self.change())
     }
 
     fn add(&mut self, ticket: Option<&str>, since: &str) {
@@ -250,24 +199,6 @@ struct OpenOutcome {
 fn add<'a>(map: &'a mut BTreeMap<(String, u64), Tracked>, repo: &str, n: u64) -> &'a mut Tracked {
     let repo = repo.to_ascii_lowercase();
     map.entry((repo.clone(), n)).or_insert_with(|| Tracked { repo, number: n, ..Tracked::default() })
-}
-
-fn batch_query(chunk: &[&Tracked]) -> (String, Value) {
-    let mut params = Vec::new();
-    let mut fields = Vec::new();
-    let mut vars = serde_json::Map::new();
-    for (i, t) in chunk.iter().enumerate() {
-        let (owner, name) = t.repo.split_once('/').unwrap_or_default();
-        params.push(format!("$o{i}: String!, $r{i}: String!, $n{i}: Int!"));
-        fields.push(format!(
-            "p{i}: repository(owner: $o{i}, name: $r{i}) {{ viewerDefaultMergeMethod pullRequest(number: $n{i}) {{ ...F }} }}"
-        ));
-        vars.insert(format!("o{i}"), json!(owner));
-        vars.insert(format!("r{i}"), json!(name));
-        vars.insert(format!("n{i}"), json!(t.number));
-    }
-    let query = format!("query Reconcile({}) {{ {} }} {PR_FIELDS} {CHECKS}", params.join(", "), fields.join(" "));
-    (query, Value::Object(vars))
 }
 
 impl Wf {
@@ -333,32 +264,17 @@ impl Wf {
         let mut unread: Vec<(String, u64)> = Vec::new();
         let list: Vec<&Tracked> = tracked.values().collect();
         for chunk in list.chunks(BATCH) {
-            let (query, vars) = batch_query(chunk);
+            let refs: Vec<ChangeRef> = chunk.iter().map(|t| t.change()).collect();
             let read_at = self.now();
-            let resp = self.github.graphql(&query, vars).await?;
-            if !resp["data"].is_object() {
-                bail!("GitHub reconcile query failed: {}", errors(&resp).unwrap_or_else(|| "no data".into()));
+            let reads = self.host.read(&refs).await?;
+            if reads.len() != chunk.len() {
+                bail!("the code host returned {} reads for {} pull requests", reads.len(), chunk.len());
             }
-            for (i, t) in chunk.iter().enumerate() {
-                let alias = format!("p{i}");
-                let repo = &resp["data"][&alias];
-                let errs: Vec<&Value> = resp["errors"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter(|e| e["path"][0] == alias.as_str())
-                    .collect();
-                let why = errs.iter().filter_map(|e| e["message"].as_str()).collect::<Vec<_>>().join("; ");
-                let found = repo["pullRequest"].is_object();
-                let done = if found && errs.is_empty() {
-                    self.fix(t, repo, &read_at, &floor, &mut pass).await
-                } else if !found && errs.iter().any(|e| e["type"] == "NOT_FOUND") {
-                    self.missing(t, &why, &mut pass).await
-                } else {
-                    Err(anyhow!(
-                        "GitHub returned an incomplete read: {}",
-                        if why.is_empty() { "no error given" } else { &why }
-                    ))
+            for (t, read) in chunk.iter().zip(reads) {
+                let done = match read {
+                    Read::Found(o) => self.fix(t, *o, &read_at, &floor, &mut pass).await,
+                    Read::NotFound(why) => self.missing(t, &why, &mut pass).await,
+                    Read::Failed(why) => Err(anyhow!("{why}")),
                 };
                 if let Err(e) = done {
                     unread.push((t.repo.clone(), t.number));
@@ -497,8 +413,8 @@ impl Wf {
         Ok(map)
     }
 
-    async fn name_workers(&self, t: &Tracked, repo: &Value) -> Result<()> {
-        let Some(issue) = (!t.unnamed.is_empty()).then(|| closing_issue(repo)).flatten() else { return Ok(()) };
+    async fn name_workers(&self, t: &Tracked, o: &Change) -> Result<()> {
+        let Some(issue) = o.closing_issue.clone().filter(|_| !t.unnamed.is_empty()) else { return Ok(()) };
         let mut named = false;
         {
             let _g = self.lock.lock().await;
@@ -578,9 +494,8 @@ impl Wf {
         Ok(out)
     }
 
-    async fn fix(&self, t: &Tracked, repo: &Value, read_at: &str, floor: &str, pass: &mut Pass) -> Result<()> {
-        self.name_workers(t, repo).await?;
-        let o = Obs::read(repo);
+    async fn fix(&self, t: &Tracked, o: Change, read_at: &str, floor: &str, pass: &mut Pass) -> Result<()> {
+        self.name_workers(t, &o).await?;
         let (advance, merged) = {
             let _g = self.lock.lock().await;
             let cards: Vec<Card> = self.cards()?.into_iter().filter(|c| t.cards.contains(&c.seq)).collect();
@@ -598,7 +513,7 @@ impl Wf {
                 .filter(|s| !s.is_empty())
                 .min()
                 .unwrap_or(t.since.as_str());
-            let mut left = if o.state != "OPEN" || o.queued {
+            let mut left = if o.state != State::Open || o.queued {
                 None
             } else if prev.as_ref().is_some_and(|p| p.queued) {
                 Some(self.now())
@@ -614,13 +529,13 @@ impl Wf {
                 _ => since,
             };
             let mut merged = None;
-            let advance = match o.state.as_str() {
-                "MERGED" | "CLOSED" => {
+            let advance = match o.state {
+                State::Merged | State::Closed => {
                     merged = self.finished(t, &o, &cards, wait.as_ref(), &live_tickets, since, pass)?;
                     None
                 }
-                "OPEN" => {
-                    if prev.as_ref().is_some_and(|p| p.state == "CLOSED") {
+                State::Open => {
+                    if prev.as_ref().is_some_and(|p| p.state == State::Closed.as_str()) {
                         self.reach.hit(ReachPoint::PrReopenedReconciled);
                     }
                     let outcome = self.open(t, &o, &cards, wait, &live_tickets, after, left.as_deref(), pass)?;
@@ -629,10 +544,9 @@ impl Wf {
                     }
                     outcome.advance
                 }
-                _ => None,
             };
             let queued_at = match &prev {
-                _ if o.state == "OPEN" && o.queued => Some(read_at.to_string()),
+                _ if o.state == State::Open && o.queued => Some(read_at.to_string()),
                 Some(p) => p.queued_at.clone(),
                 None => None,
             };
@@ -646,7 +560,7 @@ impl Wf {
             let seen = PrSeen {
                 repo: t.repo.clone(),
                 pr: t.number,
-                state: o.state.clone(),
+                state: o.state.as_str().into(),
                 head: o.head.clone(),
                 queued: o.queued,
                 since: since.to_string(),
@@ -657,7 +571,7 @@ impl Wf {
                 draft: o.draft,
                 merge_state: Some(o.merge_state.clone()),
                 review_decision: o.review_decision.clone(),
-                checks: o.checks.map(String::from),
+                checks: checks(&o).map(String::from),
             };
             let shown = |p: &PrSeen| (p.state.clone(), p.queued, readiness(p));
             let moved = prev.as_ref().map(shown) != Some(shown(&seen));
@@ -668,7 +582,7 @@ impl Wf {
             (advance, merged)
         };
         if let Some(rec) = merged {
-            pass.woken.extend(self.after_merge(&rec, &o.commit).await?);
+            pass.woken.extend(self.after_merge(&rec, o.commit()).await?);
         }
         match advance {
             Some(w) => self.advance(t, &o, w, read_at, pass).await,
@@ -694,18 +608,18 @@ impl Wf {
     fn finished(
         &self,
         t: &Tracked,
-        o: &Obs,
+        o: &Change,
         cards: &[Card],
         wait: Option<&MergeWait>,
         live_tickets: &[(String, String)],
         since: &str,
         pass: &mut Pass,
     ) -> Result<Option<crate::merge_answer::Answered>> {
-        let merged = o.state == "MERGED";
+        let merged = o.state == State::Merged;
         let end = o.ended.clone().unwrap_or_else(|| self.now());
         let when = local_clock(&end);
         let note = if merged {
-            format!("merged on GitHub at {}, {when}", short(&o.commit))
+            format!("merged on GitHub at {}, {when}", short(o.commit()))
         } else {
             format!("closed on GitHub without merging, {when}")
         };
@@ -719,7 +633,7 @@ impl Wf {
                 None
             }
         };
-        let event = match (merged, o.commit.as_str()) {
+        let event = match (merged, o.commit()) {
             (true, "") => format!("merged:{end}"),
             (true, commit) => format!("merged:{commit}"),
             (false, _) => format!("closed:{end}"),
@@ -728,12 +642,12 @@ impl Wf {
             format!(
                 "{} merged on GitHub at {}, {when} (merge commit {}). Run your post-merge steps. {}",
                 t.label(),
-                short(&o.commit),
-                o.commit,
-                t.url()
+                short(o.commit()),
+                o.commit(),
+                t.url(&*self.host)
             )
         } else {
-            format!("{} was closed on GitHub without merging, {when}. {}", t.label(), t.url())
+            format!("{} was closed on GitHub without merging, {when}. {}", t.label(), t.url(&*self.host))
         };
         let targets: Vec<&str> = live_tickets.iter().filter(|(_, s)| later(&end, s)).map(|(x, _)| x.as_str()).collect();
         if !later(&end, since) {
@@ -793,7 +707,7 @@ impl Wf {
     fn open(
         &self,
         t: &Tracked,
-        o: &Obs,
+        o: &Change,
         cards: &[Card],
         mut wait: Option<MergeWait>,
         live_tickets: &[(String, String)],
@@ -813,7 +727,8 @@ impl Wf {
         };
         let note = format!("head moved to {} after this hold", short(&o.head));
         self.resolve_cards(|c| c.kind == "report" && this_pr(c) && c.text.contains(HELD) && behind(c), &note)?;
-        if o.queued || o.ready == Ready::Yes {
+        let now = ready(o);
+        if o.queued || now == Ready::Yes {
             let note = if o.queued { "it is in the merge queue" } else { "it is ready to merge" };
             let stale = |c: &Card| c.text.contains(HELD) || (o.queued && c.text.contains(NO_REASON));
             self.resolve_cards(|c| c.kind == "report" && this_pr(c) && stale(c), note)?;
@@ -896,14 +811,14 @@ impl Wf {
                 }
                 None
             }
-            (WaitStatus::Waiting, false) if !o.draft && o.ready != Ready::Yes => {
-                if let Ready::Failing(why) = &o.ready {
+            (WaitStatus::Waiting, false) if !o.draft && now != Ready::Yes => {
+                if let Ready::Failing(why) = &now {
                     self.held(t, o, &w, why, pass)?;
                 }
                 None
             }
             (WaitStatus::Waiting, false) if !o.draft => {
-                if !w.pull_request_id.is_empty() && w.pull_request_id == o.id {
+                if !w.pull_request_id.is_empty() && o.id.as_deref() == Some(w.pull_request_id.as_str()) {
                     Some(w)
                 } else {
                     self.reach.hit(ReachPoint::ReassignedIdRejected);
@@ -912,7 +827,8 @@ impl Wf {
                         reply: "reply \"merge\" to approve it again, or \"hold\" to leave it",
                         context: format!(
                             "The approval was for GitHub node \"{}\". That number now resolves to \"{}\".",
-                            w.pull_request_id, o.id
+                            w.pull_request_id,
+                            o.id.as_deref().unwrap_or_default()
                         ),
                     };
                     self.raise(t, w.thread.as_deref(), "report", &ask, &o.head, None, Some(&w.approval), pass)?;
@@ -936,7 +852,7 @@ impl Wf {
         Ok(OpenOutcome { advance, clear_left })
     }
 
-    fn held(&self, t: &Tracked, o: &Obs, w: &MergeWait, why: &str, pass: &mut Pass) -> Result<()> {
+    fn held(&self, t: &Tracked, o: &Change, w: &MergeWait, why: &str, pass: &mut Pass) -> Result<()> {
         let event = format!("checks:{}", w.approval);
         let ticket = w.thread.as_deref();
         if self.store.pr_event_seen(&t.repo, t.number, &event, ticket.unwrap_or(BOARD))? {
@@ -960,7 +876,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
     fn dropped(
         &self,
         t: &Tracked,
-        o: &Obs,
+        o: &Change,
         wait: Option<&MergeWait>,
         live_tickets: &[(String, String)],
         after: &str,
@@ -1007,7 +923,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
     fn exited(
         &self,
         t: &Tracked,
-        o: &Obs,
+        o: &Change,
         left: &str,
         live_tickets: &[(String, String)],
         after: &str,
@@ -1043,7 +959,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
     fn report_exit(
         &self,
         t: &Tracked,
-        o: &Obs,
+        o: &Change,
         wait: Option<&MergeWait>,
         live_tickets: &[(String, String)],
         at: &str,
@@ -1075,7 +991,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
     fn moved(
         &self,
         t: &Tracked,
-        o: &Obs,
+        o: &Change,
         ticket: Option<&str>,
         base: &str,
         old: &[i64],
@@ -1114,23 +1030,17 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         Ok(())
     }
 
-    async fn advance(&self, t: &Tracked, o: &Obs, w: MergeWait, read_at: &str, pass: &mut Pass) -> Result<()> {
-        let (query, vars) = match o.queue {
-            true => (ENQUEUE_PR, json!({"id": o.id, "head": w.head})),
-            false => {
-                let method = w.method.clone().or_else(|| o.method.clone()).unwrap_or_else(|| "MERGE".into());
-                (MERGE_PR, json!({"id": o.id, "head": w.head, "method": method}))
-            }
-        };
-        let resp = self.github.graphql(query, vars).await;
+    async fn advance(&self, t: &Tracked, o: &Change, w: MergeWait, read_at: &str, pass: &mut Pass) -> Result<()> {
+        let method = w.method.clone().or_else(|| o.method.clone()).unwrap_or_else(|| "MERGE".into());
+        let how = if o.queue { Landing::Queue } else { Landing::Merge { method: &method } };
+        let resp = self.host.merge(&t.change(), o.id.as_deref().unwrap_or_default(), &w.head, how).await;
         let _g = self.lock.lock().await;
-        let failure = match &resp {
-            Err(e) => Some(format!("{e:#}")),
-            Ok(r) => errors(r),
+        let position = match &resp {
+            Err(e) => return self.failed(t, w, &format!("{e:#}"), None, pass),
+            Ok(Landed::Refused(e)) => return self.failed(t, w, e, None, pass),
+            Ok(Landed::Queued { position }) => *position,
+            Ok(Landed::Merged { .. }) => None,
         };
-        if let Some(e) = failure {
-            return self.failed(t, w, &e, None, pass);
-        }
         let mut sent = w.clone();
         sent.status = WaitStatus::Sent;
         sent.failures = 0;
@@ -1147,13 +1057,12 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
             self.store.pr_seen_put(&seen)?;
             self.changed();
         }
-        let r = resp.unwrap_or_default();
         let text = match o.queue {
             true => format!(
                 "{} queued at its approved head {} (position {}) once it was {}",
                 t.label(),
                 short(&w.head),
-                r["data"]["enqueuePullRequest"]["mergeQueueEntry"]["position"],
+                json!(position),
                 o.merge_state
             ),
             false => {
@@ -1211,7 +1120,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         let link = ticket.map(|x| self.store.link_get(x)).transpose()?.flatten().filter(|l| !l.closed);
         let act = if link.is_some() { ask.reply } else { NO_TICKET };
         let tail = if ask.context.is_empty() { String::new() } else { format!("\n\n{}", ask.context) };
-        let body = format!("**ACTION NEEDED:** {}: {act}, here: {}{tail}", ask.what, t.url());
+        let body = format!("**ACTION NEEDED:** {}: {act}, here: {}{tail}", ask.what, t.url(&*self.host));
         let mark = |to: &str| match event {
             Some(e) => self.store.pr_event_mark(&t.repo, t.number, e, to, &self.now()).map(|_| ()),
             None => Ok(()),

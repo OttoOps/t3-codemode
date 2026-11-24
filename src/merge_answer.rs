@@ -3,16 +3,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::board::{BOARD, Card};
-use crate::github::errors;
+use crate::codehost::{Branch, ChangeRef, CodeHost};
 use crate::merge::MergeArgs;
 use crate::reconcile::{CardPr, CardStage};
 use crate::store::{Link, MergeWait, WaitStatus};
 use crate::wf::{WATCHER, Wf, capped, header};
 use crate::wf_pr::{chain_label, same_head};
 
-const PR_BRANCH: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { \
-pullRequest(number: $number) { state headRefName headRefOid isCrossRepository headRef { id target { oid } } } } }";
-const DELETE_REF: &str = "mutation($ref: ID!) { deleteRef(input: { refId: $ref }) { clientMutationId } }";
 const DONE: &str = "merged-in-code";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -34,15 +31,24 @@ pub(crate) struct Answered {
 }
 
 impl Answered {
-    fn url(&self) -> String {
-        format!("https://github.com/{}/pull/{}", self.repo, self.pr)
+    fn url(&self, host: &dyn CodeHost) -> String {
+        host.url(&ChangeRef::github(&self.repo, self.pr))
     }
 
-    fn merged(&self, commit: &str) -> String {
+    fn merged(&self, host: &dyn CodeHost, commit: &str) -> String {
         match self.answer.as_str() {
-            "" => format!("{} merged on GitHub at {}, outside t3cm (merge commit {commit})", self.url(), short(commit)),
+            "" => format!(
+                "{} merged on GitHub at {}, outside t3cm (merge commit {commit})",
+                self.url(host),
+                short(commit)
+            ),
             a => {
-                format!("{} merged at {} on the user's {} (merge commit {commit})", self.url(), short(commit), json!(a))
+                format!(
+                    "{} merged at {} on the user's {} (merge commit {commit})",
+                    self.url(host),
+                    short(commit),
+                    json!(a)
+                )
             }
         }
     }
@@ -160,7 +166,7 @@ impl Wf {
         let note = format!(
             "the board's answer \"ok\" on card {} accepted {} at head {}; t3cm keeps waiting for GitHub to merge it",
             card.id,
-            rec.url(),
+            rec.url(&*self.host),
             short(&rec.head)
         );
         self.handled(&rec.worker, ticket, &note)?;
@@ -207,7 +213,7 @@ impl Wf {
             "the board's answer {} on card {} went to t3cm, which merges {} at head {} in code",
             json!(option),
             card.id,
-            rec.url(),
+            rec.url(&*self.host),
             short(&rec.head)
         );
         self.handled(&rec.worker, ticket, &note)?;
@@ -244,7 +250,7 @@ impl Wf {
                 };
                 let note = format!(
                     "t3cm holds the approval for {} at head {}: {what}. It merges once GitHub allows, and an admin merge on GitHub counts too",
-                    rec.url(),
+                    rec.url(&*self.host),
                     short(&rec.head)
                 );
                 self.handled(&rec.worker, &rec.ticket, &note)?;
@@ -347,7 +353,7 @@ impl Wf {
             ),
             None => format!("found {}'s link closed, so it told no worker", rec.worker_label),
         };
-        let what = rec.merged(commit);
+        let what = rec.merged(&*self.host, commit);
         let ticket_open = self.store.link_get(ticket)?.is_some_and(|t| !t.closed);
         if done(ticket, ":ticket")? {
         } else if rec.after.is_empty() || !ticket_open {
@@ -395,36 +401,16 @@ impl Wf {
     }
 
     async fn delete_branch(&self, repo: &str, pr: u64) -> String {
-        let (owner, name) = repo.split_once('/').unwrap_or_default();
-        let unread = |e: String| format!("left the branch, as it could not read it on GitHub ({e})");
-        let read = match self.github.graphql(PR_BRANCH, json!({"owner": owner, "name": name, "number": pr})).await {
-            Ok(r) => r,
-            Err(e) => return unread(format!("{e:#}")),
-        };
-        if let Some(e) = errors(&read) {
-            return unread(e);
-        }
-        let p = &read["data"]["repository"]["pullRequest"];
-        let branch = p["headRefName"].as_str().unwrap_or("of the PR");
-        if p["state"] != "MERGED" {
-            return format!("left branch {branch}, as GitHub does not show the PR merged yet");
-        }
-        if p["isCrossRepository"] == true {
-            return format!("left branch {branch}, which is on a fork");
-        }
-        let Some(id) = p["headRef"]["id"].as_str() else {
-            return format!("found branch {branch} already deleted on GitHub");
-        };
-        let tip = p["headRef"]["target"]["oid"].as_str().unwrap_or_default();
-        if !tip.eq_ignore_ascii_case(p["headRefOid"].as_str().unwrap_or_default()) {
-            return format!("left branch {branch}, as its tip {} is not the merged head", short(tip));
-        }
-        match self.github.graphql(DELETE_REF, json!({"ref": id})).await {
-            Ok(r) => match errors(&r) {
-                None => format!("deleted branch {branch}"),
-                Some(e) => format!("could not delete branch {branch} ({e})"),
-            },
-            Err(e) => format!("could not delete branch {branch} ({e:#})"),
+        match self.host.delete_branch(&ChangeRef::github(repo, pr)).await {
+            Branch::Unread(e) => format!("left the branch, as it could not read it on GitHub ({e})"),
+            Branch::NotMerged(b) => format!("left branch {b}, as GitHub does not show the PR merged yet"),
+            Branch::Fork(b) => format!("left branch {b}, which is on a fork"),
+            Branch::Gone(b) => format!("found branch {b} already deleted on GitHub"),
+            Branch::TipMoved { branch, tip } => {
+                format!("left branch {branch}, as its tip {} is not the merged head", short(&tip))
+            }
+            Branch::Deleted(b) => format!("deleted branch {b}"),
+            Branch::Failed { branch, why } => format!("could not delete branch {branch} ({why})"),
         }
     }
 }
