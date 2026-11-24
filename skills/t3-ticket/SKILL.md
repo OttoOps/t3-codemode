@@ -534,10 +534,13 @@ a merge card t3cm opened arrives only when t3cm could not merge on it
   the newest non-train pipeline in
   `projects/<enc path>/merge_requests/<iid>/pipelines` whose `sha` is that
   head or whose `ref` is `refs/merge-requests/<iid>/merge`, the ref a
-  merged-results pipeline runs on. Every page of
+  merged-results pipeline runs on. A merged-results pipeline counts only
+  when the head is one of the `parent_ids` of its commit
+  (`projects/<enc path>/repository/commits/<pipeline sha>`). Every page of
   `projects/<enc path>/repository/commits/<sha>/statuses?per_page=100`,
-  read until a page holds fewer than 100, holds no status that is pending
-  or failed. The changed files are the `old_path` and
+  read until a page holds fewer than 100, holds only `success` statuses:
+  a pending or running one is waited out, and a `failed` or `canceled` one
+  goes back to the worker. The changed files are the `old_path` and
   `new_path` of each entry in
   `projects/<enc path>/merge_requests/<iid>/diffs?per_page=100`, paged with
   `&page=<n>` until a page holds fewer than 100. When the entries cannot
