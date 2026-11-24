@@ -31,6 +31,14 @@ requests merged on open tickets, where the next ticket launch goes, as
 [Launch routing](#launch-routing) describes, and the
 [filter bar](#filtering-the-page) with search. Below 1180 px the line wraps.
 
+Dispatch, New Issues and Activity & Settled fill the window as fixed panes
+when it is wider than 1120 px and at least 600 px tall, or at least 641 px
+wide and 700 px tall. The page then never scrolls, and each pane scrolls its
+own list under the pointer. Needs you takes at most 40% of the height, or
+30% once the columns stack at 1120 px and below, where PRs in progress and
+Recently merged sit side by side. A smaller window scrolls the view as one
+page, so every list keeps enough height to read.
+
 **Dispatch** is the first view, with three sections:
 
 - **Needs you.** Gates, blockers, reports and the watcher's escalations each
