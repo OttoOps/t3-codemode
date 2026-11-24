@@ -393,8 +393,8 @@ impl OpWeights {
 pub fn seed_bytes(seed: u64) -> [u8; SEED_BYTES] {
     let mut rng = Rng::new(seed);
     let mut buf = [0u8; SEED_BYTES];
-    for chunk in buf.chunks_exact_mut(8) {
-        chunk.copy_from_slice(&rng.next().to_le_bytes());
+    for chunk in buf.as_chunks_mut::<8>().0 {
+        *chunk = rng.next().to_le_bytes();
     }
     buf
 }
