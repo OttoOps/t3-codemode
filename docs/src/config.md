@@ -497,8 +497,11 @@ issues. Viewing the graph never enables auto-launching or the Up next queue.
 
 Add a `flow` block when you want to override which repositories are covered, or
 to enable the Up next queue and automatic ticket launches as
-[The flow](board.md#the-flow) describes. Existing `flow` blocks keep working
-unchanged.
+[The flow](board.md#the-flow) describes. You can set every `flow` key from the
+board's [Settings](board.md#settings) under **Flow**, from the
+`setup-t3-workflow` interview, or with `t3cm config` without editing JSON by
+hand, and changes apply on reload with no restart. Existing `flow` blocks keep
+working unchanged.
 
 ```json
 {

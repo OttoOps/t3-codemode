@@ -244,6 +244,21 @@ fn optional_keys_read_as_their_defaults() {
     assert_eq!(c.get("pools.p.members.0.model"), Value::Null);
     let fc = Cfg::with(r#"{"flow": {"repos": ["acme/widgets"], "maxTickets": 2}}"#);
     assert_eq!(fc.get("flow.serializeFileConflicts"), json!(false));
+    assert_eq!(fc.get("flow.includeRepos"), json!([]));
+    assert_eq!(fc.get("flow.excludeRepos"), json!([]));
+    assert_eq!(fc.get("flow.optIn"), Value::Null);
+    assert_eq!(fc.get("flow.optIn.label"), Value::Null);
+    assert_eq!(fc.get("flow.optIn.milestone"), Value::Null);
+    assert_eq!(c.get("flow"), Value::Null);
+    assert_eq!(c.get("flow.launch"), json!("off"));
+    assert_eq!(c.get("flow.maxTickets"), Value::Null);
+    assert_eq!(c.get("flow.repos"), Value::Null);
+    assert_eq!(c.get("flow.includeRepos"), json!([]));
+    assert_eq!(c.get("flow.excludeRepos"), json!([]));
+    assert_eq!(c.get("flow.optIn"), Value::Null);
+    assert_eq!(c.get("flow.optIn.label"), Value::Null);
+    assert_eq!(c.get("flow.optIn.milestone"), Value::Null);
+    assert_eq!(c.get("flow.serializeFileConflicts"), json!(false));
 }
 
 #[test]
@@ -302,6 +317,15 @@ fn an_invalid_edit_names_its_field() {
             "trackers.hosts.\"https://jira.example.com\"",
         ),
         (set("trackers.hosts.\"jira.example.com\"", json!("")), "trackers.hosts.\"jira.example.com\""),
+        (set("flow.launch", json!("ask")), "flow.maxTickets"),
+        (set("flow.maxTickets", json!(0)), "flow.maxTickets"),
+        (set("flow.repos", json!([])), "flow.repos"),
+        (set("flow.repos", json!(["bad"])), "flow.repos.0"),
+        (set("flow.includeRepos", json!(["bad"])), "flow.includeRepos.0"),
+        (set("flow.excludeRepos", json!(["bad"])), "flow.excludeRepos.0"),
+        (set("flow.optIn", json!({})), "flow.optIn"),
+        (set("flow.optIn.label", json!(" ")), "flow.optIn.label"),
+        (set("flow.optIn.milestone", json!("")), "flow.optIn.milestone"),
         (unset("pools.\"gpt-6.1\""), "board.pool"),
         (unset("pools.\"gpt-6.1\".model"), "pools.\"gpt-6.1\".model"),
         (unset("board.nope"), "board.nope"),

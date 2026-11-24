@@ -68,7 +68,7 @@ fn update_installs_the_rule_and_records_it_in_a_config_that_predates_it() {
     let shown = text(&out);
     assert!(shown.contains("wrote the filed-issue rule to"), "{shown}");
     assert!(shown.contains("recorded setup steps in"), "{shown}");
-    assert!(shown.contains("run setup-t3-workflow: new slot remote"), "{shown}");
+    assert!(shown.contains("run setup-t3-workflow: new slots remote, flow"), "{shown}");
     assert_eq!(std::fs::read_to_string(claude_rule(home.path())).unwrap(), rule_text());
     let mut want: Vec<&str> = SLOT_STEPS.to_vec();
     want.push("rule:filed-issues");
@@ -82,7 +82,8 @@ fn update_installs_the_rule_and_records_it_in_a_config_that_predates_it() {
     let st: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(st["current"], true);
     assert_eq!(st["steps"]["missing"][0]["id"], "board:remote", "{st}");
-    assert_eq!(st["steps"]["missing"].as_array().map(Vec::len), Some(1), "{st}");
+    assert_eq!(st["steps"]["missing"][1]["id"], "board:flow", "{st}");
+    assert_eq!(st["steps"]["missing"].as_array().map(Vec::len), Some(2), "{st}");
     assert_eq!(st["steps"]["configState"], "recorded");
     assert_eq!(st["steps"]["rule"][0]["status"], "current");
     assert_eq!(st["steps"]["rule"][1]["status"], "no agent");

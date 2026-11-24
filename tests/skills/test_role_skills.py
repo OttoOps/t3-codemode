@@ -384,9 +384,9 @@ class RemoteBoardSetupTests(unittest.TestCase):
 
     def test_setup_asks_about_the_remote_board_last_and_records_it(self):
         text = " ".join(self.setup_skill.split())
-        self.assertIn("model ticket, model worker, remote board.", text)
-        self.assertIn("--asked review,passes,credentials,delivery,models,remote", text)
-        self.assertIn("records only `--asked remote`", text)
+        self.assertIn("model ticket, model worker, flow, remote board.", text)
+        self.assertIn("--asked review,passes,credentials,delivery,models,flow,remote", text)
+        self.assertIn("records only `--asked flow` and `--asked remote`", text)
 
     def test_the_remote_interview_offers_off_tailscale_and_a_proxy(self):
         text = self.remote()
@@ -438,6 +438,60 @@ class RemoteBoardSetupTests(unittest.TestCase):
         self.assertIn("https://ottoops.com/t3-codemode/board.html#reverse-proxy-examples", text)
         heads = {anchor(h) for h in re.findall(r"^#+ (.+)$", self.board, re.M)}
         self.assertTrue({"remote-access", "reverse-proxy-examples"} <= heads)
+
+
+class FlowSetupTests(unittest.TestCase):
+    setup_skill = (SKILLS / "setup-t3-workflow" / "SKILL.md").read_text()
+    interview = (SKILLS / "setup-t3-workflow" / "references" / "interview.md").read_text()
+    steps = json.loads((SKILLS / "setup-t3-workflow" / "steps.json").read_text())["steps"]
+    config_doc = (ROOT / "docs" / "src" / "config.md").read_text()
+    board_doc = (ROOT / "docs" / "src" / "board.md").read_text()
+
+    def flow(self):
+        return " ".join(section(self.interview, "## Flow").split())
+
+    def test_the_flow_step_is_an_interview_step_newer_than_0_10_0(self):
+        step = next(s for s in self.steps if s["id"] == "board:flow")
+        self.assertEqual((step["kind"], step["slot"]), ("interview", "flow"))
+        self.assertNotIn("legacy", step)
+        self.assertGreater(tuple(int(n) for n in step["since"].split(".")), (0, 10, 0))
+
+    def test_setup_includes_flow_in_description_and_completion(self):
+        text = " ".join(self.setup_skill.split())
+        self.assertIn("project flow", text)
+        self.assertIn("any flow change has saved and reloaded", text)
+
+    def test_the_flow_interview_covers_every_flow_key_one_at_a_time(self):
+        text = self.flow()
+        for token in (
+            "t3cm config get flow",
+            "t3cm config set flow.<key> <value>",
+            "`flow.launch`",
+            "`flow.maxTickets`",
+            "`flow.repos`",
+            "`flow.includeRepos`",
+            "`flow.excludeRepos`",
+            "`flow.optIn.label`",
+            "`flow.optIn.milestone`",
+            "`flow.serializeFileConflicts`",
+            "t3cm config set flow",
+            "t3cm config unset flow",
+            "t3cm config unset flow.optIn",
+            "Reloaded the running service",
+            "warn: not reloaded",
+            "kept the config it was running",
+            "--asked flow",
+        ):
+            self.assertIn(token, text, token)
+
+    def test_the_flow_interview_links_the_book(self):
+        text = self.flow()
+        self.assertIn("https://ottoops.com/t3-codemode/config.html#flow", text)
+        self.assertIn("https://ottoops.com/t3-codemode/board.html#the-flow", text)
+        config_heads = {anchor(h) for h in re.findall(r"^#+ (.+)$", self.config_doc, re.M)}
+        board_heads = {anchor(h) for h in re.findall(r"^#+ (.+)$", self.board_doc, re.M)}
+        self.assertIn("flow", config_heads)
+        self.assertIn("the-flow", board_heads)
 
 
 class NonGithubTrackerTests(unittest.TestCase):

@@ -1,6 +1,6 @@
 ---
 name: setup-t3-workflow
-description: Set up or change the T3 workflow's slots - the reviewer that checks a PR before it opens, the worker's passes, credential renewal, delivery (merge, tag-deploy, or multi-step pipelines in .t3-workflow.json), the ticket and worker models, and remote board access - by detecting what is installed and interviewing the user one slot at a time, then writing the config. Use when the user asks to set up the T3 workflow, change the reviewer, use a different model for workers or tickets, add a cleanup or voice pass, renew a credential, deploy with tags, or configure multi-stage delivery or .t3-workflow.json, open the board from a phone or another device, and when a role reports no T3 workflow config yet. Safe to run again to change one slot.
+description: Set up or change the T3 workflow's slots - the reviewer that checks a PR before it opens, the worker's passes, credential renewal, delivery (merge, tag-deploy, or multi-step pipelines in .t3-workflow.json), the ticket and worker models, project flow, and remote board access - by detecting what is installed and interviewing the user one slot at a time, then writing the config. Use when the user asks to set up the T3 workflow, change the reviewer, use a different model for workers or tickets, add a cleanup or voice pass, renew a credential, deploy with tags, or configure multi-stage delivery or .t3-workflow.json, configure project flow or auto-launching issues, open the board from a phone or another device, and when a role reports no T3 workflow config yet. Safe to run again to change one slot.
 ---
 
 The T3 workflow's roles name capabilities, not skills. Each **slot** holds
@@ -67,7 +67,7 @@ carry into the write each setting the user wants to keep.
 ## 2. Interview
 
 Ask about one slot per question, in this order: review, passes, credentials,
-delivery, model ticket, model worker, remote board. Use the session's question tool when
+delivery, model ticket, model worker, flow, remote board. Use the session's question tool when
 it has one; otherwise ask in chat. Wait for each answer before the next
 question. When the user asked to change one slot ("change the reviewer"),
 ask about that slot alone. When the config exists and `steps.missing` names
@@ -86,9 +86,11 @@ slot:
 - **Keep current**: a slot the user keeps stays out of the JSON, and goes
   in `--asked` (step 3).
 
-The remote board is the one slot you carry out during the interview: its
-section runs t3cm's board commands, restarts the service and checks the
-result, and the step 3 write records only `--asked remote`.
+Flow and remote board live in t3cm's own `config.json` and are carried out
+during the interview: `flow` writes and reloads through `t3cm config` with no
+restart, `remote board` runs t3cm's board commands, restarts the service and
+checks the result, and the step 3 write records only `--asked flow` and
+`--asked remote`.
 
 ## 3. Write
 
@@ -102,7 +104,7 @@ JSON
 ```
 
 Pass `--asked <slot>` for each slot you asked about, the kept ones too, such
-as `--asked review,passes,credentials,delivery,models,remote` after a full
+as `--asked review,passes,credentials,delivery,models,flow,remote` after a full
 interview, and write `{}` when every slot was kept. The write records those
 slots as done setup steps, so a later release names only the slots it adds.
 
@@ -181,6 +183,7 @@ serves the board. Act on `t3cm` from step 1:
 
 Setup is done when the config holds every answer and records every slot
 asked about, the user has seen the summary, the filed-issue rule is current for
-each installed agent, a remote board the user turned on or off has passed its
-check, and `t3cm` is running and connected (or the user has the command to
-start or install it).
+each installed agent, any flow change has saved and reloaded (or the user has
+the restart command when the service did not reload), a remote board the user
+turned on or off has passed its check, and `t3cm` is running and connected (or
+the user has the command to start or install it).

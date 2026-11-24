@@ -157,6 +157,120 @@ board launches use the t3cm config's `board.pool`, not this slot.
 while T3 did not answer), or `"models": {"ticket": {"pool": "<name>"}}` for a
 pool; `worker` the same way.
 
+## Flow
+
+**What it is.** Project flow controls which GitHub repositories the board's
+dependency graph and Up next queue cover, which open issues enter the queue,
+how many flow tickets run at once, how ready issues launch, and whether
+file-conflict edges serialize launches. It lives in t3cm's own `config.json`
+under `flow`, not the workflow slot config, so this section writes it through
+`t3cm config` (which validates and reloads the running service with no
+restart) and step 3 records only `--asked flow`. Reference:
+[Flow config](https://ottoops.com/t3-codemode/config.html#flow) and
+[The flow](https://ottoops.com/t3-codemode/board.html#the-flow).
+
+**The current setting.** Run `t3cm config get flow` to display the effective
+values (`null` when no `flow` block is set). Pass `--port <port>` to
+`t3cm config` commands when the service runs on a non-default port
+(`T3CM_PORT`). Effective values materialize defaults such as `launch`, so use
+them for display only; keep omitted keys omitted when writing changes below.
+
+Ask one question at a time in this order, showing the current value on each
+key and waiting for each answer. When the user asked to change one key (such
+as `maxTickets` or `excludeRepos`), ask about that key alone.
+
+1. **Launch mode (`flow.launch`).** Offer:
+   - **off / graph only** (default when `flow` is unset): the Graph tab
+     auto-discovers active T3 projects' GitHub repos, and nothing queues or
+     launches on its own. If the user wants no repo overrides either, skip the
+     remaining flow questions and unset `flow` (or keep it unset).
+   - **ask** (recommended when enabling the queue): raise a launch card on the
+     board (`launch` / `skip`) when a ticket slot opens.
+   - **auto**: launch the next ready issue automatically when a slot opens.
+   - **queue only (`off` with a cap)**: show the Up next queue on the board
+     without raising launch cards or launching automatically.
+2. **Max open tickets (`flow.maxTickets`).** Ask when the user chose `ask`,
+   `auto`, or queue-only `off`. Default: `2` (must be at least `1`; required
+   when `launch` is `ask` or `auto`). Omit for graph-only repository overrides.
+3. **Repository discovery (`flow.repos`).** Default: **auto-discover from
+   active T3 projects** (omit `repos`). Offer an explicit list of `owner/name`
+   repositories to replace auto-discovery (at least one entry; no two entries
+   may share a short repository name).
+4. **Include repositories (`flow.includeRepos`).** Default: none (`[]`). Extra
+   `owner/name` repositories added on top of discovered or explicit repos.
+5. **Exclude repositories (`flow.excludeRepos`).** Default: none (`[]`).
+   `owner/name` repositories removed from the covered list; takes precedence
+   over discovery, `repos`, and `includeRepos`.
+6. **Opt-in label (`flow.optIn.label`).** Ask when `maxTickets` is set (or the
+   user asks to change opt-in). Default: none (every open issue in covered
+   repos enters the queue). When set, only open issues with this GitHub label
+   enter `queue`, `blocked`, or `skipped`; other open issues still appear in
+   the dependency graph.
+7. **Opt-in milestone (`flow.optIn.milestone`).** Ask when `maxTickets` is set
+   (or the user asks to change opt-in). Default: none (any milestone). Matched
+   ignoring case; when both `optIn.label` and `optIn.milestone` are set, an
+   issue must match both.
+8. **Serialize file conflicts (`flow.serializeFileConflicts`).** Ask when
+   `maxTickets` is set (or the user asks to change it). Default: `false`
+   (`fileConflict` edges stay advisory). When `true`, holds an issue out of
+   `queue` while a conflicting ticket is running and avoids launching
+   conflicting ready issues at the same time.
+
+**Apply.** Keep omitted keys omitted rather than copying materialized defaults
+from `t3cm config get flow`:
+
+- **Full interview (all keys answered) or creating `flow` from `null`:**
+  assemble one JSON object containing only the keys the user chose (omit
+  `repos` for auto-discovery, omit empty `includeRepos`/`excludeRepos`, omit
+  `optIn` when both `label` and `milestone` are unset, omit `maxTickets` for
+  graph-only overrides, omit `launch` when leaving it at its default, omit
+  `serializeFileConflicts` when `false`) and write it in one command:
+
+  ```bash
+  t3cm config set flow '<json>'
+  ```
+
+- **Updating an existing `flow` block without replacing unrelated keys:** use
+  per-key `t3cm config set flow.<key> <value>` and `t3cm config unset
+  flow.<key>` in a valid order so stored keys stay untouched and omitted keys
+  stay omitted:
+  - Enable the queue: `t3cm config set flow.maxTickets <n>`, then check
+    `t3cm config get flow.launch` and run `t3cm config set flow.launch
+    <ask|auto|off>` whenever it differs from the chosen mode (or `t3cm config
+    unset flow.launch` for the default `ask`).
+  - Turn the queue off while keeping repo overrides:
+    `t3cm config set flow.launch off`, then `t3cm config unset flow.maxTickets`,
+    then `t3cm config unset flow.launch`.
+  - Clear one opt-in filter when the other stays set:
+    `t3cm config unset flow.optIn.label` (or `flow.optIn.milestone`).
+  - Clear the last or only opt-in filter: `t3cm config unset flow.optIn` (an
+    empty `optIn: {}` fails validation).
+  - Return to auto-discovered repos: `t3cm config unset flow.repos`.
+- **Turn all of flow back to defaults** (no queue and no repo overrides):
+
+  ```bash
+  t3cm config unset flow
+  ```
+
+Check the command output:
+
+- **Exit 0 with `Reloaded the running service`:** the change is saved and live
+  with no restart. Run `t3cm config get flow` to confirm the effective setting
+  and show it to the user.
+- **Exit 0 with `warn: not reloaded`:** the file is saved on disk, not live in
+  a running service. Tell the user the change is saved but not yet live, give
+  them the printed restart command (or config-path/port warning), and confirm
+  the saved values with `t3cm config get flow`.
+- **Non-zero exit with `kept the config it was running`:** the file was saved
+  on disk, but the running service rejected the reload and kept its previous
+  config. Show the user that error, clarify that the change is saved on disk
+  but not live, and fix the issue before treating it as live.
+- **Non-zero exit with `is unchanged`:** nothing was written. Fix the reported
+  field error and run the command again.
+
+**Records** nothing in the workflow config: the step 3 write passes
+`--asked flow`.
+
 ## Remote board
 
 **What it is.** Whether the board opens from another device, such as a

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::config::{BoardRemoteConfig, Config, with_defaults};
+use crate::config::{BoardRemoteConfig, Config, FlowConfig, Launch, with_defaults};
 use crate::pools::PoolConfig;
 use crate::{field, json_patch, steps};
 
@@ -149,7 +149,7 @@ impl Document {
             let merged = with_defaults(new.clone());
             // Deserialized without validation, so a reference a later edit resolves keeps serde's defaults.
             let in_effect = serde_json::from_value::<Config>(merged.clone()).map_or(merged, |c| effective(&c));
-            let current = with_inherited(in_effect);
+            let current = with_inherited_nested(with_inherited(in_effect));
             match edit {
                 Edit::Set { path, value } => set(&mut new, Some(&current), path, 0, value)?,
                 Edit::Unset { path } => {
@@ -232,6 +232,9 @@ pub fn effective(config: &Config) -> Value {
     if let Some(remote) = &config.board.remote {
         out["board"]["remote"] = remote_value(remote);
     }
+    if let Some(flow) = &config.flow {
+        out["flow"] = flow_value(flow);
+    }
     for (name, pool) in &config.pools {
         let shown = &mut out["pools"][name];
         shown["mixed"] = json!(pool.mixed);
@@ -254,6 +257,24 @@ fn remote_value(remote: &BoardRemoteConfig) -> Value {
         "allowUsers": remote.allow_users,
         "requirePairing": remote.require_pairing,
         "settingsUsers": remote.settings_users,
+    })
+}
+
+fn flow_value(flow: &FlowConfig) -> Value {
+    let opt_in = flow.opt_in.as_ref().map(|o| {
+        json!({
+            "label": o.label,
+            "milestone": o.milestone,
+        })
+    });
+    json!({
+        "repos": flow.repos,
+        "includeRepos": flow.include_repos,
+        "excludeRepos": flow.exclude_repos,
+        "optIn": opt_in,
+        "maxTickets": flow.max_tickets,
+        "launch": flow.launch,
+        "serializeFileConflicts": flow.serialize_file_conflicts,
     })
 }
 
@@ -282,12 +303,19 @@ pub fn changed_keys(old: &Value, new: &Value) -> Vec<String> {
 
 pub fn lookup(effective: &Value, path: &[String]) -> Option<Value> {
     let find = |all: &Value| path.iter().try_fold(all, |at, key| child(at, key)).cloned();
-    find(effective).or_else(|| find(&with_inherited(effective.clone())))
+    if let Some(found) = find(effective) {
+        return Some(found);
+    }
+    let inherited = with_inherited(effective.clone());
+    find(&inherited).or_else(|| find(&with_inherited_nested(inherited)))
 }
 
 fn with_inherited(mut all: Value) -> Value {
     if let Some(remote) = all.pointer_mut("/board/remote").filter(|v| v.is_null()) {
         *remote = remote_value(&BoardRemoteConfig::default());
+    }
+    if let Some(flow) = all.pointer_mut("/flow").filter(|v| v.is_null()) {
+        *flow = flow_value(&FlowConfig { launch: Launch::Off, ..FlowConfig::default() });
     }
     let wake = all.get("wake").cloned().unwrap_or_default();
     let roles = all.get_mut("roles").and_then(Value::as_object_mut);
@@ -299,6 +327,16 @@ fn with_inherited(mut all: Value) -> Value {
                 *own = wake.clone();
             }
         }
+    }
+    all
+}
+
+fn with_inherited_nested(mut all: Value) -> Value {
+    if let Some(opt_in) = all.pointer_mut("/flow/optIn").filter(|v| v.is_null()) {
+        *opt_in = json!({
+            "label": Value::Null,
+            "milestone": Value::Null,
+        });
     }
     all
 }

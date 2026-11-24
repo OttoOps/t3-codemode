@@ -8231,6 +8231,7 @@ const CONF_SECTIONS = [
   ["launches", "Launches"],
   ["pools", "Pools"],
   ["board", "Board"],
+  ["flow", "Flow"],
   ["links", "Workflow links"],
   ["runtime", "Runtime"],
   ["upstreams", "Upstreams and deny list"],
@@ -8253,7 +8254,7 @@ const OPT_TYPED = "\u0001typed";
 const NOT_NUMBER = "Enter a number. Clear the field and type it again.";
 const CONF_DECIMAL = (1.5).toLocaleString()[1];
 const NUMBER_PART = /^[+-]?\p{Nd}*(?:\.\p{Nd}*)?(?:[eE][+-]?\p{Nd}*)?$/u;
-const CONF_OBJECTS = [["link"], ["board"], ["board", "remote"]];
+const CONF_OBJECTS = [["link"], ["board"], ["board", "remote"], ["flow"], ["flow", "optIn"]];
 const TOO_LARGE = "A number here is too large for the browser to keep exactly. Use t3cm config edit for it.";
 
 const conf = {
@@ -8277,6 +8278,7 @@ const conf = {
   panels: new Map(),
   fields: new Map(),
   liveEls: [],
+  flowNote: null,
   live: null,
   liveAt: "",
   liveError: "",
@@ -8385,6 +8387,9 @@ function confEdited(path) {
   conf.saveError = "";
   conf.said = "";
   if (path[0] === "pools") for (const f of conf.fields.get("pools") || []) if (f.choices) f.choices();
+  if (path[0] === "flow" && path[1] !== "launch") {
+    for (const f of conf.fields.get("flow") || []) if (f.key === "flow.launch" && f.sync) f.sync();
+  }
   paintSettings();
 }
 
@@ -8410,7 +8415,13 @@ function confUnset(path) {
   if (hasOwn(parent, path[path.length - 1])) {
     delete parent[path[path.length - 1]];
     const last = path[0] === "pools" ? 1 : path.length - 1;
-    for (let n = Math.min(last, path.length - 1); n > 0; n--) {
+    let start = Math.min(last, path.length - 1);
+    if (path[0] === "flow" && path[1] === "optIn" && path.length === 3 && isObj(parent)
+      && Object.keys(parent).every((k) => (k === "label" || k === "milestone") && parent[k] === null)) {
+      delete getAt(conf.draft, ["flow"]).optIn;
+      start = 1;
+    }
+    for (let n = start; n > 0; n--) {
       const at = path.slice(0, n);
       const v = getAt(conf.draft, at);
       if (!isObj(v) || Object.keys(v).length || getAt(conf.base, at) !== undefined) break;
@@ -8462,7 +8473,7 @@ function confField(sec, path, o, make) {
 
 function confNumber(sec, path, o) {
   return confField(sec, path, o, ({ id, described }) => {
-    const ctl = h("input", { type: "number", id, min: o.min, max: o.max, step: o.step || 1, "aria-describedby": described, autocomplete: "off" });
+    const ctl = h("input", { type: "number", id, min: o.min, max: o.max, step: o.step || 1, placeholder: o.placeholder, "aria-describedby": described, autocomplete: "off" });
     let refused = null;
     let wasBad = false;
     const sync = () => {
@@ -8541,11 +8552,13 @@ function confSelect(sec, path, o) {
     const ctl = h("select", { id, "aria-describedby": described });
     let current;
     const encode = (v) => v === null ? OPT_NULL : v === undefined ? "" : String(v);
+    const presetOf = () => typeof o.preset === "function" ? o.preset() : o.preset;
     const sync = () => {
-      const now = confShown(path, o.preset);
+      const presetVal = presetOf();
+      const now = confShown(path, presetVal);
       current = copyJson(now);
       const inBuilt = getAt(conf.data.defaults, path);
-      const preset = inBuilt === undefined ? o.preset : inBuilt;
+      const preset = inBuilt === undefined ? presetVal : inBuilt;
       const items = o.options.map(([value, label]) =>
         ({ value: encode(value), label: label + (value === preset ? " (default)" : "") }));
       const cur = encode(now);
@@ -8554,7 +8567,7 @@ function confSelect(sec, path, o) {
     };
     ctl.addEventListener("change", () => {
       const picked = o.options.find(([value]) => encode(value) === ctl.value);
-      confCommit(path, picked ? picked[0] : current, o.preset);
+      confCommit(path, picked ? picked[0] : current, presetOf());
     });
     sync();
     return { ctl, sync };
@@ -8576,7 +8589,7 @@ function confToggle(sec, path, o) {
 
 function confLines(sec, path, o) {
   return confField(sec, path, o, ({ id, described }) => {
-    const ctl = h("textarea", { id, rows: "4", "aria-describedby": described, autocomplete: "off", spellcheck: "false" });
+    const ctl = h("textarea", { id, rows: "4", placeholder: o.placeholder, "aria-describedby": described, autocomplete: "off", spellcheck: "false" });
     const entries = () => {
       const v = confShown(path, o.preset);
       return Array.isArray(v) ? v : [];
@@ -8615,7 +8628,9 @@ function confLines(sec, path, o) {
         const typed = lines.slice(head, lines.length - tail).map((text) => ({ text, value: text.trim(), typed: true }));
         rows = [...rows.slice(0, head), ...typed, ...rows.slice(rows.length - tail)];
       }
-      confCommit(path, copyJson(rows.filter((r) => !r.typed || r.value !== "").map((r) => r.value)), o.preset);
+      const list = copyJson(rows.filter((r) => !r.typed || r.value !== "").map((r) => r.value));
+      if (o.emptyUnset && !list.length) confUnset(path);
+      else confCommit(path, list, o.preset);
     });
     ctl.addEventListener("change", sync);
     sync();
@@ -8802,6 +8817,100 @@ function confBoard() {
           help: "One per line, each also allowed above. Empty allows only this host's login. Applies in Tailscale mode.",
         }))),
   ];
+}
+
+function confDiscoveredRepos() {
+  const d = modelsState.data;
+  if (!d || d.projectsError || !Array.isArray(d.projects)) return null;
+  const seen = new Set();
+  const out = [];
+  for (const p of d.projects) {
+    const r = p && p.remote;
+    if (!r || !r.host || r.host.toLowerCase() !== "github.com" || !r.path) continue;
+    const key = r.path.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r.path);
+  }
+  return out.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+}
+
+function paintFlowReposNote() {
+  const el = conf.flowNote;
+  if (!el || !el.isConnected) return;
+  const explicit = getAt(conf.draft, ["flow", "repos"]);
+  if (Array.isArray(explicit) && explicit.length) {
+    setText(el, "Using the explicit repository list below instead of T3 project discovery.");
+    return;
+  }
+  const repos = confDiscoveredRepos();
+  if (repos === null) {
+    setText(el, "By default, Flow discovers GitHub repositories from active T3 projects.");
+  } else if (repos.length) {
+    setText(el, "Auto-discovering from active T3 projects: " + repos.join(", ") + ".");
+  } else {
+    setText(el, "Auto-discovering from active T3 projects (no GitHub remotes found yet).");
+  }
+}
+
+function confFlow() {
+  const sec = "flow";
+  const at = (...keys) => ["flow", ...keys];
+  const note = h("p", { class: "meta" });
+  conf.flowNote = note;
+  const kids = [
+    confSlot(sec, [["flow"]]),
+    h("p", { class: "meta" }, "The Graph tab reads open issues from active T3 projects with no flow block. Set Max open tickets to enable the Up next queue and automatic launches. Changes apply on save with no restart."),
+    h("div", { class: "conf-grid" },
+      confSelect(sec, at("launch"), {
+        label: "Launch mode",
+        preset: () => typeof getAt(conf.draft, at("maxTickets")) === "number" ? "ask" : "off",
+        options: [
+          ["ask", "Ask (raise launch card)"],
+          ["auto", "Auto (launch automatically)"],
+          ["off", "Off (no launches)"],
+        ],
+        help: "Ask and Auto need Max open tickets of at least 1. Defaults to Ask when Max open tickets is set, otherwise Off.",
+      }),
+      confNumber(sec, at("maxTickets"), {
+        label: "Max open tickets", unit: "tickets", min: 1, placeholder: "Off",
+        help: "Enables the Up next queue and caps open flow tickets at once (1 or more). Leave blank to keep the queue off.",
+      }),
+      confToggle(sec, at("serializeFileConflicts"), {
+        label: "Serialize file conflicts", preset: false,
+        help: "Hold issues whose touched files overlap an open running ticket, and avoid launching conflicting ready issues at once.",
+      })),
+    h("div", { class: "conf-group" },
+      h("h4", {}, "Repositories"),
+      note,
+      h("div", { class: "conf-grid" },
+        confLines(sec, at("repos"), {
+          label: "Explicit repositories", preset: [], emptyUnset: true, placeholder: "Discover from T3 projects",
+          help: "One owner/name per line. Leave empty to discover from active T3 projects. Setting this list replaces auto-discovery, and two entries can't share a short name.",
+        }),
+        confLines(sec, at("includeRepos"), {
+          label: "Include repositories", preset: [], placeholder: "owner/repo",
+          help: "One owner/name per line. Added on top of discovered or explicit repositories.",
+        }),
+        confLines(sec, at("excludeRepos"), {
+          label: "Exclude repositories", preset: [], placeholder: "owner/repo",
+          help: "One owner/name per line. Removed from covered repositories; wins over discovery, explicit and include lists.",
+        }))),
+    h("div", { class: "conf-group" },
+      h("h4", {}, "Queue filter (opt-in)"),
+      h("p", { class: "meta" }, "Optional filter for which open issues enter the Up next queue. Leave both blank to include every open issue in covered repositories. Filtered-out issues still appear in the dependency graph."),
+      confSlot(sec, [at("optIn")]),
+      h("div", { class: "conf-grid" },
+        confText(sec, at("optIn", "label"), {
+          label: "Opt-in label", placeholder: "All open issues",
+          help: "Only open issues with this GitHub label enter the queue, blocked, or skipped lists.",
+        }),
+        confText(sec, at("optIn", "milestone"), {
+          label: "Opt-in milestone", placeholder: "Any milestone",
+          help: "Only open issues in this milestone (ignoring case) enter the queue. With both set, an issue must match both.",
+        }))),
+  ];
+  return kids;
 }
 
 function confRolesInEffect() {
@@ -9182,6 +9291,7 @@ const CONF_BUILD = {
   launches: confLaunches,
   pools: confPools,
   board: confBoard,
+  flow: confFlow,
   links: confLinks,
   runtime: confRuntime,
   upstreams: confUpstreams,
@@ -9195,6 +9305,7 @@ function buildSection(sec) {
   const kept = active && panel.body.contains(active) ? active.dataset.conf : undefined;
   const top = box.scrollTop;
   conf.fields.set(sec, []);
+  if (sec === "flow") conf.flowNote = null;
   const kids = conf.draft
     ? CONF_BUILD[sec]().flat().filter(Boolean)
     : [h("p", { class: "meta" }, conf.data ? "This file can't be edited here." : "Loading settings...")];
@@ -9202,6 +9313,7 @@ function buildSection(sec) {
   box.scrollTop = top;
   if (kept !== undefined) confFocusKey(sec, kept);
   if (sec === "pools") paintPoolStates();
+  if (sec === "flow") paintFlowReposNote();
 }
 
 function buildSettings() {
@@ -9357,6 +9469,7 @@ function paintSettings() {
   paintFields();
   paintNotes();
   paintPoolStates();
+  paintFlowReposNote();
   const fileBad = conf.bad.has("");
   const locked = (sec) => conf.asking || conf.busy || (fileBad && sec !== "json");
   for (const [sec, { body }] of conf.panels) setAttr(body, "inert", locked(sec));
@@ -9456,6 +9569,7 @@ async function saveSettings() {
     }
   }
   const sent = copyJson(conf.draft);
+  const flowChanged = !sameJson(getAt(conf.base, ["flow"]), getAt(sent, ["flow"]));
   conf.seq++;
   conf.busy = true;
   conf.warnings = [];
@@ -9476,6 +9590,7 @@ async function saveSettings() {
     if (conf.warnings.length) confAlert(conf.warnings.join(" "));
     refreshSettings();
     refreshPoolStates();
+    if (flowChanged && state && flowNeeded(state)) loadFlow();
   } catch (err) {
     if (err.status === 409) {
       conf.stale = { changed: [] };
@@ -9578,6 +9693,7 @@ function settingsModelsChanged() {
   if (!SETTINGS || !$("settings-dlg").open) return;
   for (const f of conf.fields.get("pools") || []) if (f.choices) f.choices();
   paintPoolStates();
+  paintFlowReposNote();
 }
 
 function settingsAskSaving() {
