@@ -3043,4 +3043,21 @@ async fn widened_alphabet_ops_exercise_new_workflow_transitions() {
     ];
     let (_, gone_reach, _) = run_sequential_ops(&gone_ops, None, true, "widened-alphabet-gone").await;
     assert!(gone_reach.get(ReachPoint::TicketThreadGone) >= 1, "expected thread-gone:\n{gone_reach}");
+
+    // Focused sweep check: an unjoined openChild reservation is reported and removed on the first sweep.
+    let (h, _) = setup_chaos(true);
+    h.wf(TICKETS[0], "join", json!({"parent": BOARD, "label": "widgets#41", "role": "ticket"})).await;
+    h.wf(
+        TICKETS[0],
+        "openChild",
+        json!({"role": "worker", "label": "#41 PR 4/4", "issue": "acme/widgets#41", "part": "4/4",
+               "pr": {"format": "pr"}}),
+    )
+    .await;
+    let first = h.wf(TICKETS[0], "sweep", json!({})).await;
+    assert_eq!(first["dropped"], json!(["#41 PR 4/4"]));
+    assert_eq!(first["parentOpen"], json!(true));
+    assert!(h.app.store.pending_all().unwrap().is_empty());
+    let second = h.wf(TICKETS[0], "sweep", json!({})).await;
+    assert_eq!(second["dropped"], json!([]));
 }

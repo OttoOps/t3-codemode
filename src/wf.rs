@@ -944,7 +944,7 @@ impl Wf {
         if wake
             && !policy.relay
             && relays(&a.kind, ln.gate.as_deref())
-            && self.store.link_get(&ln.parent)?.is_some_and(|t| !t.closed && t.parent == BOARD)
+            && self.store.link_get(&ln.parent).ok().flatten().is_some_and(|t| !t.closed && t.parent == BOARD)
         {
             self.reach.hit(ReachPoint::RelayOffFallback);
         }
