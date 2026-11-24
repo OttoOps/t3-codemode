@@ -328,6 +328,15 @@ as a follow-up issue filed from a review, gets a fresh worker: send the
 orchestrator an `event` naming the issue, and the orchestrator launches
 one for it.
 
+When filing a follow-up GitHub issue (such as out-of-scope or review
+follow-up work), include the canonical `## Flow` block (`Parent`,
+`Blocked by`, `Track`, `Priority`, `Touches`) in its body and report it
+with `wf.issue` passing `parent` (such as the epic), `blockedBy` (such as
+the current issue when the follow-up depends on it), `track` and
+`priority`, or use `wf.fileIssues` for multiple dependent follow-ups,
+before sending the orchestrator the `event` naming the issue (see
+[report-filed-issues.md](../t3-workflow/rules/report-filed-issues.md)).
+
 When the user has this thread take on another issue anyway, first make the
 thread name it:
 

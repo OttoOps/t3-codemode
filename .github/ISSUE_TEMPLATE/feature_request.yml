@@ -38,3 +38,32 @@ body:
     attributes:
       label: Related issues
       description: Link any existing discussion or issue.
+  - type: markdown
+    attributes:
+      value: |
+        ### Flow metadata (optional)
+        These optional fields match the canonical `## Flow` block (`Parent`, `Blocked by`, `Track`, `Priority`, `Touches`) that `t3cm` parses into the dependency graph and can sync to native GitHub links from the board. Leave any field blank if it does not apply.
+  - type: input
+    id: flow_parent
+    attributes:
+      label: Parent / Epic
+      description: Parent epic issue for `## Flow` (`Parent:`), such as `#254` or `owner/repo#254`.
+      placeholder: "#254"
+  - type: input
+    id: flow_blocked_by
+    attributes:
+      label: Blocked by
+      description: Issues that must land first for `## Flow` (`Blocked by:`), comma-separated.
+      placeholder: "#255, owner/repo#12"
+  - type: input
+    id: flow_track
+    attributes:
+      label: Track
+      description: Flow swimlane slug for `## Flow` (`Track:`).
+      placeholder: "flow-dag"
+  - type: input
+    id: flow_touches
+    attributes:
+      label: Affected files
+      description: Repo-relative paths this work touches for `## Flow` (`Touches:`), comma-separated.
+      placeholder: "src/web.rs, src/board.html"

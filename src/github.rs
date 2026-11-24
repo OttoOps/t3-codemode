@@ -241,12 +241,20 @@ fn is_already_blocked_error(msg: &str) -> bool {
         || lower.contains("relationship already")
 }
 
-fn is_already_sub_issue_error(msg: &str) -> bool {
+pub fn is_parent_conflict_message(msg: &str) -> bool {
     let lower = msg.to_ascii_lowercase();
+    lower.contains("already has a parent")
+        || lower.contains("only have one parent")
+        || lower.contains("different parent")
+        || lower.contains("parent conflict")
+}
+
+fn is_already_sub_issue_error(msg: &str) -> bool {
     // Do NOT treat "already has a parent" (different parent conflict) as idempotent success.
-    if lower.contains("already has a parent") || lower.contains("only have one parent") {
+    if is_parent_conflict_message(msg) {
         return false;
     }
+    let lower = msg.to_ascii_lowercase();
     lower.contains("already a sub-issue")
         || lower.contains("already a sub issue")
         || lower.contains("duplicate sub-issue")

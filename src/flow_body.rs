@@ -422,8 +422,28 @@ fn is_dep_heading(title: &str) -> bool {
 }
 
 fn is_placeholder(s: &str) -> bool {
-    let lower = s.trim().trim_matches(|c| matches!(c, '`' | '"' | '\'' | '(' | ')')).trim().to_ascii_lowercase();
-    matches!(lower.as_str(), "" | "none" | "-" | "--" | "—" | "–" | "n/a" | "na" | "nothing")
+    let lower =
+        s.trim().trim_matches(|c| matches!(c, '`' | '"' | '\'' | '(' | ')' | '_' | '*')).trim().to_ascii_lowercase();
+    matches!(lower.as_str(), "" | "none" | "-" | "--" | "—" | "–" | "n/a" | "na" | "nothing" | "no response")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlowFormSection {
+    Parent,
+    BlockedBy,
+    Track,
+    Touches,
+}
+
+fn flow_form_heading(title: &str) -> Option<FlowFormSection> {
+    let norm = title.trim().trim_end_matches(':').to_ascii_lowercase();
+    match norm.as_str() {
+        "parent / epic" | "parent/epic" | "parent" => Some(FlowFormSection::Parent),
+        "blocked by" | "blocked-by" => Some(FlowFormSection::BlockedBy),
+        "track" => Some(FlowFormSection::Track),
+        "affected files" | "touches" => Some(FlowFormSection::Touches),
+        _ => None,
+    }
 }
 
 fn strip_bullet_and_quote(line: &str) -> (usize, &str) {
@@ -1586,6 +1606,7 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
     let mut in_comment = false;
     let mut flow_level: Option<usize> = None;
     let mut flow_list_key: Option<FlowListKey> = None;
+    let mut flow_form_section: Option<FlowFormSection> = None;
     let mut pending_prose_role: Option<RefRole> = None;
     let mut in_dep_section = false;
 
@@ -1647,14 +1668,72 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
             {
                 flow_level = None;
             }
+            if level <= 3 {
+                flow_form_section = None;
+            }
             if (level == 2 || level == 3) && heading.eq_ignore_ascii_case("flow") {
                 flow_level = Some(level);
                 in_dep_section = false;
                 continue;
             }
+            if level == 3
+                && flow_level.is_none()
+                && let Some(form_sec) = flow_form_heading(heading)
+            {
+                flow_form_section = Some(form_sec);
+                in_dep_section = form_sec == FlowFormSection::BlockedBy;
+                continue;
+            }
             in_dep_section = is_dep_heading(heading);
             let clean_heading = strip_inline_code(heading);
             scan_prose_segment(default_repo, &clean_heading, false, &mut parsed);
+            continue;
+        }
+
+        if let Some(form_sec) = flow_form_section {
+            let (_, stripped) = strip_bullet_and_quote(&line);
+            if is_placeholder(stripped) {
+                continue;
+            }
+            match form_sec {
+                FlowFormSection::Parent => {
+                    if let Some(task_rest) = parse_tasklist_item(stripped) {
+                        if let Some(item_ref) = extract_leading_issue_ref(default_repo, task_rest) {
+                            push_unique_ref(&mut parsed.parents, item_ref);
+                        } else {
+                            for r in parse_ref_list(default_repo, task_rest, true) {
+                                push_unique_ref(&mut parsed.parents, r);
+                            }
+                        }
+                    } else {
+                        for r in parse_ref_list(default_repo, stripped, true) {
+                            push_unique_ref(&mut parsed.parents, r);
+                        }
+                    }
+                }
+                FlowFormSection::BlockedBy => {
+                    if let Some(task_rest) = parse_tasklist_item(stripped) {
+                        if let Some(item_ref) = extract_leading_issue_ref(default_repo, task_rest) {
+                            push_unique_ref(&mut parsed.blockers, item_ref);
+                        } else {
+                            for r in parse_ref_list(default_repo, task_rest, true) {
+                                push_unique_ref(&mut parsed.blockers, r);
+                            }
+                        }
+                    } else {
+                        for r in parse_ref_list(default_repo, stripped, true) {
+                            push_unique_ref(&mut parsed.blockers, r);
+                        }
+                    }
+                }
+                FlowFormSection::Track => {
+                    let t = strip_wrappers(stripped).trim();
+                    if !t.is_empty() && !is_placeholder(t) && parsed.track.is_none() {
+                        parsed.track = Some(t.to_string());
+                    }
+                }
+                FlowFormSection::Touches => parse_touches_items(stripped, &mut parsed.touches),
+            }
             continue;
         }
 
@@ -2509,5 +2588,68 @@ After: #48, Phase 1: Auth setup
             resolve_symbolic("Phase 1", RefRole::Blocker, REPO, 12, Some("acme/widgets#10"), &reporting_only),
             ResolveOutcome::Resolved(REPO.into(), 11)
         );
+    }
+
+    #[test]
+    fn parses_github_issue_form_flow_fields_and_ignores_no_response() {
+        let filled = "\
+### Problem or use case
+
+Sync parsed links to GitHub.
+
+### Parent / Epic
+
+#254
+
+### Blocked by
+
+#255, acme/tools#12
+
+### Track
+
+flow-dag
+
+### Affected files
+
+`src/web.rs`, src/board.html
+";
+        let parsed = parse_body(REPO, filled);
+        assert_eq!(parsed.parents, vec![BodyRef::Issue { repo: REPO.into(), number: 254 }]);
+        assert_eq!(
+            parsed.blockers,
+            vec![
+                BodyRef::Issue { repo: REPO.into(), number: 255 },
+                BodyRef::Issue { repo: "acme/tools".into(), number: 12 },
+            ]
+        );
+        assert_eq!(parsed.track.as_deref(), Some("flow-dag"));
+        assert_eq!(parsed.touches, vec!["src/web.rs", "src/board.html"]);
+
+        let blank = "\
+### Problem or use case
+
+Just a normal bug report.
+
+### Parent / Epic
+
+_No response_
+
+### Blocked by
+
+_No response_
+
+### Track
+
+_No response_
+
+### Affected files
+
+_No response_
+";
+        let empty = parse_body(REPO, blank);
+        assert!(empty.parents.is_empty(), "{empty:?}");
+        assert!(empty.blockers.is_empty(), "{empty:?}");
+        assert!(empty.track.is_none(), "{empty:?}");
+        assert!(empty.touches.is_empty(), "{empty:?}");
     }
 }

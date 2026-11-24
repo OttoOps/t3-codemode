@@ -7,8 +7,11 @@ use serde_json::{Value, json};
 
 use crate::board::{BOARD, Issue, LaunchArgs, gh_name, parse_github_issue_only};
 use crate::clock::local_clock;
+use crate::flow::{BLOCKED_BY, PARENT, SOURCE_BODY};
 use crate::flow_body;
-use crate::github::{self, EnsureLabelOutcome, GraphQlError, IssueNode, LabelNode, LabelSpec, LinkOutcome, RepoNode};
+use crate::github::{
+    self, EnsureLabelOutcome, GraphQlError, IssueNode, IssueNodeRef, LabelNode, LabelSpec, LinkOutcome, RepoNode,
+};
 use crate::store::NewIssue;
 use crate::wf::{NO_CALLER, Wf};
 
@@ -81,6 +84,66 @@ pub struct LinkReport {
     pub status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip)]
+    pub(crate) op: Option<&'static str>,
+    #[serde(skip)]
+    pub(crate) permission: bool,
+}
+
+impl LinkReport {
+    fn ok(reference: String, status: &'static str) -> Self {
+        Self { reference, status, error: None, op: None, permission: false }
+    }
+
+    fn err(reference: String, op: &'static str, err: &GraphQlError) -> Self {
+        Self { reference, status: "error", error: Some(err.message.clone()), op: Some(op), permission: err.permission }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncLinkResult {
+    pub from: String,
+    pub to: String,
+    pub kind: &'static str,
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub permission: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub conflict: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub existing_parent: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncLinkError {
+    pub from: String,
+    pub to: String,
+    pub kind: &'static str,
+    pub op: &'static str,
+    pub message: String,
+    pub permission: bool,
+    pub conflict: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub existing_parent: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncLinksResponse {
+    pub ok: bool,
+    pub total: usize,
+    pub synced: usize,
+    pub already_linked: usize,
+    pub failed: usize,
+    pub results: Vec<SyncLinkResult>,
+    pub errors: Vec<SyncLinkError>,
+    pub flow: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -844,7 +907,7 @@ impl Wf {
                 issue_node.parent.as_ref().is_some_and(|p| p.number == *p_num && p.repo.eq_ignore_ascii_case(p_repo));
             if already {
                 let canon = issue_node.parent.as_ref().map_or_else(|| target.clone(), |p| ref_slug(&p.repo, p.number));
-                parent_report = Some(LinkReport { reference: canon, status: "alreadyLinked", error: None });
+                parent_report = Some(LinkReport::ok(canon, "alreadyLinked"));
             } else {
                 match self.resolve_issue_cached(caches, p_repo, *p_num).await {
                     Err(e) => {
@@ -854,17 +917,16 @@ impl Wf {
                             message: e.message.clone(),
                             permission: e.permission,
                         });
-                        parent_report = Some(LinkReport { reference: target, status: "error", error: Some(e.message) });
+                        parent_report = Some(LinkReport::err(target, "readIssue", &e));
                     }
                     Ok(parent_node) => {
                         let canon = ref_slug(&parent_node.repo, parent_node.number);
                         match github::add_sub_issue(&*self.github, &parent_node.id, &issue_node.id, false).await {
                             Ok(LinkOutcome::Linked) => {
-                                parent_report = Some(LinkReport { reference: canon, status: "linked", error: None });
+                                parent_report = Some(LinkReport::ok(canon, "linked"));
                             }
                             Ok(LinkOutcome::AlreadyLinked) => {
-                                parent_report =
-                                    Some(LinkReport { reference: canon, status: "alreadyLinked", error: None });
+                                parent_report = Some(LinkReport::ok(canon, "alreadyLinked"));
                             }
                             Err(e) => {
                                 errors.push(WiringError {
@@ -873,8 +935,7 @@ impl Wf {
                                     message: e.message.clone(),
                                     permission: e.permission,
                                 });
-                                parent_report =
-                                    Some(LinkReport { reference: canon, status: "error", error: Some(e.message) });
+                                parent_report = Some(LinkReport::err(canon, "addSubIssue", &e));
                             }
                         }
                     }
@@ -888,11 +949,7 @@ impl Wf {
             if let Some(existing) =
                 issue_node.blocked_by.iter().find(|b| b.number == *b_num && b.repo.eq_ignore_ascii_case(b_repo))
             {
-                blocked_reports.push(LinkReport {
-                    reference: ref_slug(&existing.repo, existing.number),
-                    status: "alreadyLinked",
-                    error: None,
-                });
+                blocked_reports.push(LinkReport::ok(ref_slug(&existing.repo, existing.number), "alreadyLinked"));
                 continue;
             }
             match self.resolve_issue_cached(caches, b_repo, *b_num).await {
@@ -903,16 +960,16 @@ impl Wf {
                         message: e.message.clone(),
                         permission: e.permission,
                     });
-                    blocked_reports.push(LinkReport { reference: target, status: "error", error: Some(e.message) });
+                    blocked_reports.push(LinkReport::err(target, "readIssue", &e));
                 }
                 Ok(blocker_node) => {
                     let canon = ref_slug(&blocker_node.repo, blocker_node.number);
                     match github::add_blocked_by(&*self.github, &issue_node.id, &blocker_node.id).await {
                         Ok(LinkOutcome::Linked) => {
-                            blocked_reports.push(LinkReport { reference: canon, status: "linked", error: None });
+                            blocked_reports.push(LinkReport::ok(canon, "linked"));
                         }
                         Ok(LinkOutcome::AlreadyLinked) => {
-                            blocked_reports.push(LinkReport { reference: canon, status: "alreadyLinked", error: None });
+                            blocked_reports.push(LinkReport::ok(canon, "alreadyLinked"));
                         }
                         Err(e) => {
                             errors.push(WiringError {
@@ -921,11 +978,7 @@ impl Wf {
                                 message: e.message.clone(),
                                 permission: e.permission,
                             });
-                            blocked_reports.push(LinkReport {
-                                reference: canon,
-                                status: "error",
-                                error: Some(e.message),
-                            });
+                            blocked_reports.push(LinkReport::err(canon, "addBlockedBy", &e));
                         }
                     }
                 }
@@ -1037,20 +1090,9 @@ impl Wf {
             Ok(issue_node) => self.wire_issue_node(&issue_node, plan, &mut caches).await,
             Err(e) => {
                 let target = ref_slug(repo, number);
-                let blocked_by = plan
-                    .blocked_by
-                    .iter()
-                    .map(|(r, n)| LinkReport {
-                        reference: ref_slug(r, *n),
-                        status: "error",
-                        error: Some(e.message.clone()),
-                    })
-                    .collect();
-                let parent = plan.parent.as_ref().map(|(r, n)| LinkReport {
-                    reference: ref_slug(r, *n),
-                    status: "error",
-                    error: Some(e.message.clone()),
-                });
+                let blocked_by =
+                    plan.blocked_by.iter().map(|(r, n)| LinkReport::err(ref_slug(r, *n), "readIssue", &e)).collect();
+                let parent = plan.parent.as_ref().map(|(r, n)| LinkReport::err(ref_slug(r, *n), "readIssue", &e));
                 let labels = plan
                     .labels
                     .iter()
@@ -1065,6 +1107,351 @@ impl Wf {
                 }
             }
         }
+    }
+
+    pub async fn sync_flow_links(&self) -> Result<SyncLinksResponse> {
+        let initial = self.flow_view(true).await?;
+        let body_edges: Vec<(String, String, &'static str)> = initial
+            .graph
+            .as_ref()
+            .map(|g| {
+                g.edges
+                    .iter()
+                    .filter(|e| e.source == SOURCE_BODY && (e.kind == BLOCKED_BY || e.kind == PARENT))
+                    .map(|e| (e.from.clone(), e.to.clone(), e.kind))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if body_edges.is_empty() {
+            return Ok(SyncLinksResponse {
+                ok: true,
+                total: 0,
+                synced: 0,
+                already_linked: 0,
+                failed: 0,
+                results: Vec::new(),
+                errors: Vec::new(),
+                flow: Some(serde_json::to_value(initial)?),
+                refresh_error: None,
+            });
+        }
+
+        struct FromGroup {
+            from_id: String,
+            repo: String,
+            number: u64,
+            parents: Vec<(usize, String, u64, String)>,
+            blockers: Vec<(usize, String, u64, String)>,
+        }
+
+        let mut slots: Vec<Option<SyncLinkResult>> = vec![None; body_edges.len()];
+        let mut error_slots: Vec<Option<SyncLinkError>> = vec![None; body_edges.len()];
+        let mut groups: Vec<FromGroup> = Vec::new();
+        let mut group_idx: HashMap<(String, u64), usize> = HashMap::new();
+
+        let parse_edge_endpoint = |raw: &str| -> Option<(String, u64)> {
+            let issue = parse_github_issue_only(raw)?;
+            let (owner, repo, number) = issue.github_parts()?;
+            (number > 0 && number <= MAX_GRAPHQL_ISSUE_NUMBER).then(|| (format!("{owner}/{repo}"), number))
+        };
+
+        let record_err = |slots: &mut [Option<SyncLinkResult>],
+                          error_slots: &mut [Option<SyncLinkError>],
+                          idx: usize,
+                          from: String,
+                          to: String,
+                          kind: &'static str,
+                          op: &'static str,
+                          message: String,
+                          permission: bool,
+                          conflict: bool,
+                          existing_parent: Option<String>| {
+            slots[idx] = Some(SyncLinkResult {
+                from: from.clone(),
+                to: to.clone(),
+                kind,
+                status: "error",
+                error: Some(message.clone()),
+                permission,
+                conflict,
+                existing_parent: existing_parent.clone(),
+            });
+            error_slots[idx] =
+                Some(SyncLinkError { from, to, kind, op, message, permission, conflict, existing_parent });
+        };
+
+        for (idx, (from_id, to_id, kind)) in body_edges.iter().enumerate() {
+            let default_op = if *kind == PARENT { "addSubIssue" } else { "addBlockedBy" };
+            let Some((from_repo, from_num)) = parse_edge_endpoint(from_id) else {
+                record_err(
+                    &mut slots,
+                    &mut error_slots,
+                    idx,
+                    from_id.clone(),
+                    to_id.clone(),
+                    kind,
+                    default_op,
+                    format!("invalid source issue {from_id:?}"),
+                    false,
+                    false,
+                    None,
+                );
+                continue;
+            };
+            let Some((to_repo, to_num)) = parse_edge_endpoint(to_id) else {
+                record_err(
+                    &mut slots,
+                    &mut error_slots,
+                    idx,
+                    from_id.clone(),
+                    to_id.clone(),
+                    kind,
+                    default_op,
+                    format!("invalid target issue {to_id:?}"),
+                    false,
+                    false,
+                    None,
+                );
+                continue;
+            };
+            if from_num == to_num && from_repo.eq_ignore_ascii_case(&to_repo) {
+                let msg = if *kind == PARENT {
+                    "issue cannot be its own parent".to_string()
+                } else {
+                    "issue cannot be blocked by itself".to_string()
+                };
+                record_err(
+                    &mut slots,
+                    &mut error_slots,
+                    idx,
+                    from_id.clone(),
+                    to_id.clone(),
+                    kind,
+                    default_op,
+                    msg,
+                    false,
+                    false,
+                    None,
+                );
+                continue;
+            }
+            let key = node_cache_key(&from_repo, from_num);
+            let gi = match group_idx.get(&key) {
+                Some(&gi) => gi,
+                None => {
+                    let gi = groups.len();
+                    group_idx.insert(key, gi);
+                    groups.push(FromGroup {
+                        from_id: from_id.clone(),
+                        repo: from_repo,
+                        number: from_num,
+                        parents: Vec::new(),
+                        blockers: Vec::new(),
+                    });
+                    gi
+                }
+            };
+            if *kind == PARENT {
+                groups[gi].parents.push((idx, to_repo, to_num, to_id.clone()));
+            } else {
+                groups[gi].blockers.push((idx, to_repo, to_num, to_id.clone()));
+            }
+        }
+
+        let mut caches = WireCaches::new();
+        for group in groups {
+            let mut from_node = match self.resolve_issue_cached(&mut caches, &group.repo, group.number).await {
+                Ok(n) => n,
+                Err(e) => {
+                    for (idx, _, _, to_id) in group.parents {
+                        record_err(
+                            &mut slots,
+                            &mut error_slots,
+                            idx,
+                            group.from_id.clone(),
+                            to_id,
+                            PARENT,
+                            "readIssue",
+                            e.message.clone(),
+                            e.permission,
+                            false,
+                            None,
+                        );
+                    }
+                    for (idx, _, _, to_id) in group.blockers {
+                        record_err(
+                            &mut slots,
+                            &mut error_slots,
+                            idx,
+                            group.from_id.clone(),
+                            to_id,
+                            BLOCKED_BY,
+                            "readIssue",
+                            e.message.clone(),
+                            e.permission,
+                            false,
+                            None,
+                        );
+                    }
+                    continue;
+                }
+            };
+
+            let from_canon = ref_slug(&from_node.repo, from_node.number);
+            let plan = WiringPlan {
+                blocked_by: group.blockers.iter().map(|(_, r, n, _)| (r.clone(), *n)).collect(),
+                parent: group.parents.first().map(|(_, r, n, _)| (r.clone(), *n)),
+                labels: Vec::new(),
+            };
+            let report = self.wire_issue_node(&from_node, &plan, &mut caches).await;
+
+            if let (Some((idx, p_repo, p_num, _)), Some(lr)) = (group.parents.first(), report.parent) {
+                if lr.status == "error" {
+                    let msg = lr.error.unwrap_or_else(|| "GitHub returned an error".to_string());
+                    let existing = from_node.parent.as_ref().map(|p| ref_slug(&p.repo, p.number));
+                    let conflict = !lr.permission && (github::is_parent_conflict_message(&msg) || existing.is_some());
+                    record_err(
+                        &mut slots,
+                        &mut error_slots,
+                        *idx,
+                        from_canon.clone(),
+                        lr.reference,
+                        PARENT,
+                        lr.op.unwrap_or("addSubIssue"),
+                        msg,
+                        lr.permission,
+                        conflict,
+                        conflict.then_some(existing).flatten(),
+                    );
+                } else {
+                    if lr.status == "linked"
+                        && let Some(p_node) = caches.nodes.get(&node_cache_key(p_repo, *p_num)).cloned()
+                    {
+                        from_node.parent =
+                            Some(IssueNodeRef { id: p_node.id, repo: p_node.repo, number: p_node.number });
+                    }
+                    slots[*idx] = Some(SyncLinkResult {
+                        from: from_canon.clone(),
+                        to: lr.reference,
+                        kind: PARENT,
+                        status: lr.status,
+                        error: None,
+                        permission: false,
+                        conflict: false,
+                        existing_parent: None,
+                    });
+                }
+            }
+
+            for ((idx, b_repo, b_num, _), lr) in group.blockers.iter().zip(report.blocked_by) {
+                if lr.status == "error" {
+                    let msg = lr.error.unwrap_or_else(|| "GitHub returned an error".to_string());
+                    record_err(
+                        &mut slots,
+                        &mut error_slots,
+                        *idx,
+                        from_canon.clone(),
+                        lr.reference,
+                        BLOCKED_BY,
+                        lr.op.unwrap_or("addBlockedBy"),
+                        msg,
+                        lr.permission,
+                        false,
+                        None,
+                    );
+                } else {
+                    if lr.status == "linked"
+                        && let Some(b_node) = caches.nodes.get(&node_cache_key(b_repo, *b_num)).cloned()
+                    {
+                        from_node.blocked_by.push(IssueNodeRef {
+                            id: b_node.id,
+                            repo: b_node.repo,
+                            number: b_node.number,
+                        });
+                    }
+                    slots[*idx] = Some(SyncLinkResult {
+                        from: from_canon.clone(),
+                        to: lr.reference,
+                        kind: BLOCKED_BY,
+                        status: lr.status,
+                        error: None,
+                        permission: false,
+                        conflict: false,
+                        existing_parent: None,
+                    });
+                }
+            }
+
+            for (idx, p_repo, p_num, _) in group.parents.iter().skip(1) {
+                let extra_plan =
+                    WiringPlan { blocked_by: Vec::new(), parent: Some((p_repo.clone(), *p_num)), labels: Vec::new() };
+                let extra_report = self.wire_issue_node(&from_node, &extra_plan, &mut caches).await;
+                if let Some(lr) = extra_report.parent {
+                    if lr.status == "error" {
+                        let msg = lr.error.unwrap_or_else(|| "GitHub returned an error".to_string());
+                        let existing = from_node.parent.as_ref().map(|p| ref_slug(&p.repo, p.number));
+                        let conflict =
+                            !lr.permission && (github::is_parent_conflict_message(&msg) || existing.is_some());
+                        record_err(
+                            &mut slots,
+                            &mut error_slots,
+                            *idx,
+                            from_canon.clone(),
+                            lr.reference,
+                            PARENT,
+                            lr.op.unwrap_or("addSubIssue"),
+                            msg,
+                            lr.permission,
+                            conflict,
+                            conflict.then_some(existing).flatten(),
+                        );
+                    } else {
+                        if lr.status == "linked"
+                            && let Some(p_node) = caches.nodes.get(&node_cache_key(p_repo, *p_num)).cloned()
+                        {
+                            from_node.parent =
+                                Some(IssueNodeRef { id: p_node.id, repo: p_node.repo, number: p_node.number });
+                        }
+                        slots[*idx] = Some(SyncLinkResult {
+                            from: from_canon.clone(),
+                            to: lr.reference,
+                            kind: PARENT,
+                            status: lr.status,
+                            error: None,
+                            permission: false,
+                            conflict: false,
+                            existing_parent: None,
+                        });
+                    }
+                }
+            }
+
+            caches.nodes.insert(node_cache_key(&from_node.repo, from_node.number), from_node.clone());
+            caches.nodes.insert(node_cache_key(&group.repo, group.number), from_node);
+        }
+
+        let results: Vec<SyncLinkResult> = slots.into_iter().flatten().collect();
+        let errors: Vec<SyncLinkError> = error_slots.into_iter().flatten().collect();
+        let synced = results.iter().filter(|r| r.status == "linked").count();
+        let already_linked = results.iter().filter(|r| r.status == "alreadyLinked").count();
+        let failed = results.iter().filter(|r| r.status == "error").count();
+        let (flow, refresh_error) = match self.flow_view(true).await {
+            Ok(fresh) => (Some(serde_json::to_value(fresh)?), None),
+            Err(e) => (None, Some(format!("{e:#}"))),
+        };
+
+        Ok(SyncLinksResponse {
+            ok: errors.is_empty(),
+            total: results.len(),
+            synced,
+            already_linked,
+            failed,
+            results,
+            errors,
+            flow,
+            refresh_error,
+        })
     }
 
     pub async fn report_issue(&self, me: &str, a: IssueArgs) -> Result<Value> {

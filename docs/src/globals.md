@@ -149,7 +149,8 @@ parent and a child, and the service keeps every link and message in its store.
   and `priority: <priority>` labels idempotently, creating missing labels when
   the repo lacks them. Existing links and labels succeed as `alreadyLinked` or
   `alreadyApplied`. GitHub and permission errors land in `wiring.errors` and in
-  `message`.
+  `message`. You can also sync body-parsed links to GitHub from the board's
+  [Graph tab](board.md#the-graph-tab) through `POST /api/flow/sync-links`.
 - `wf.fileIssues({ repo?, parent?, track?, priority?, labels?, queue?, report?, sync?, issues })`
   creates a batch of GitHub issues forming a dependency DAG in one call. See
   [wf.fileIssues](#wffileissues).
@@ -492,7 +493,8 @@ order. Each entry in `issues` requires `title` and accepts optional fields:
 `repo`, `parent`, `track`, `priority`, `labels`, and `queue` act as defaults
 for items that omit them, except that a top-level `parent` matching an item's
 own local `id` does not attach that item to itself. When `queue` is `true` and
-`flow.optIn.label` is configured, the service adds that opt-in label. Entries
+`flow.optIn.label` is configured, the service adds that opt-in label unless
+`sync` is `false`. Entries
 in `blockedBy` and `parent` can name another item's local `id` or an external
 GitHub issue as `#N`, `owner/repo#N`, or a URL.
 

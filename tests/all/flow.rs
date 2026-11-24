@@ -2868,3 +2868,526 @@ async fn failed_sibling_read_and_out_of_range_issue_numbers_keep_dependents_safe
     assert!(q2["blocked"][1].get("unresolved").is_none());
     assert_eq!(q2["blocked"][2]["unresolved"], json!(["Dup auth"]));
 }
+
+#[tokio::test]
+async fn board_sync_links_materializes_body_edges_idempotently_and_refreshes_graph() {
+    let h = flowing(4);
+    issue(&h, REPO, 10, &[], 1);
+    issue(&h, REPO, 1, &[FLOW], 2);
+    issue(&h, TOOLS, 7, &[], 3);
+    issue(&h, REPO, 2, &[FLOW], 4);
+    issue(&h, REPO, 3, &[FLOW], 5);
+
+    h.github.set_body(
+        REPO,
+        2,
+        "## Goal\nSync links.\n\n## Flow\n- Parent: #10\n- Blocked by: #1, acme/tools#7\n- Track: flow-dag\n",
+    );
+    // Issue #3 filed via GitHub Issue Form headings (`### Parent / Epic`, `### Blocked by`).
+    h.github.set_body(
+        REPO,
+        3,
+        "### Problem or use case\nFollow-up.\n\n### Parent / Epic\n\n#10\n\n### Blocked by\n\n#2\n\n### Track\n\n_No response_\n",
+    );
+
+    let s = crate::board::start(h).await;
+
+    // Before sync, all 5 edges are source: "body".
+    let before = s.get("/api/flow").await;
+    let body_before: Vec<&Value> =
+        before["graph"]["edges"].as_array().unwrap().iter().filter(|e| e["source"] == "body").collect();
+    assert_eq!(body_before.len(), 5, "{body_before:?}");
+
+    // Route enforces CSRF, same-origin loopback Origin, and request body validation.
+    let no_csrf = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Origin", &s.base)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf.status(), 403);
+
+    let bad_origin = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Origin", "http://evil.example")
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_origin.status(), 403);
+
+    let bad_json = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .body("not-json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_json.status(), 400);
+
+    let unknown_field = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({"extra": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown_field.status(), 400);
+
+    // Valid POST syncs all 5 body edges and returns refreshed graph with source: "github".
+    let resp = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let synced: Value = resp.json().await.unwrap();
+    assert_eq!(synced["ok"], true, "{synced}");
+    assert_eq!(synced["total"], 5, "{synced}");
+    assert_eq!(synced["synced"], 5, "{synced}");
+    assert_eq!(synced["alreadyLinked"], 0, "{synced}");
+    assert_eq!(synced["failed"], 0, "{synced}");
+    assert_eq!(synced["errors"], json!([]), "{synced}");
+    assert!(synced.get("refreshError").is_none(), "{synced}");
+
+    // Sub-issue mutations send GraphQL-Features: sub_issues header.
+    let sub_calls: Vec<Value> = s.h.github.calls().into_iter().filter(|c| c["operation"] == "addSubIssue").collect();
+    assert_eq!(sub_calls.len(), 2, "{sub_calls:?}");
+    for c in &sub_calls {
+        assert_eq!(c["headers"]["GraphQL-Features"], "sub_issues", "{c}");
+    }
+
+    // Refreshed graph in response and fresh GET /api/flow both report every edge as source: "github".
+    let refreshed_edges = synced["flow"]["graph"]["edges"].as_array().unwrap();
+    assert_eq!(refreshed_edges.len(), 5, "{refreshed_edges:?}");
+    assert!(refreshed_edges.iter().all(|e| e["source"] == "github"), "{refreshed_edges:?}");
+    let after = s.get("/api/flow").await;
+    assert!(after["graph"]["edges"].as_array().unwrap().iter().all(|e| e["source"] == "github"), "{after}");
+
+    // Second POST (with empty body) is completely idempotent and sends zero mutations.
+    let calls_before = s.h.github.calls().len();
+    let again_resp = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again_resp.status(), 200);
+    let again: Value = again_resp.json().await.unwrap();
+    assert_eq!(again["ok"], true, "{again}");
+    assert_eq!(again["total"], 0, "{again}");
+    assert_eq!(again["synced"], 0, "{again}");
+    assert_eq!(again["failed"], 0, "{again}");
+    let mut_ops: Vec<String> =
+        s.h.github
+            .calls()
+            .into_iter()
+            .skip(calls_before)
+            .filter(|c| matches!(c["operation"].as_str(), Some("addBlockedBy" | "addSubIssue")))
+            .map(|c| c["operation"].as_str().unwrap().to_string())
+            .collect();
+    assert!(mut_ops.is_empty(), "idempotent repeat must send no mutations: {mut_ops:?}");
+}
+
+#[tokio::test]
+async fn board_sync_links_reports_permission_errors_parent_conflicts_and_self_loops_per_link() {
+    let h = flowing(4);
+    issue(&h, REPO, 1, &[], 1);
+    issue(&h, REPO, 10, &[], 2);
+    issue(&h, REPO, 20, &[], 3);
+    issue(&h, REPO, 2, &[FLOW], 4);
+    issue(&h, REPO, 3, &[FLOW], 5);
+    issue(&h, REPO, 4, &[FLOW], 6);
+
+    // #2 already has native parent #10; body adds blocker #1 (should succeed) and conflicting parent #20.
+    h.github.set_parent(REPO, 2, (REPO, 10));
+    h.github.set_body(REPO, 2, "## Flow\n- Parent: #20\n- Blocked by: #1\n");
+    // #3 has NO native parent, but TWO body parents (#10 and #20): #10 links, #20 conflicts with #10.
+    h.github.set_body(REPO, 3, "## Flow\n- Parent: #10, #20\n");
+    // #4 has a self-loop blocker (must error without calling addBlockedBy on itself).
+    h.github.set_body(REPO, 4, "Depends on #4\n");
+
+    let s = crate::board::start(h).await;
+    let r: Value = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(r["total"], 5, "{r}");
+    assert_eq!(r["synced"], 2, "#2->#1 blocker and #3->#10 parent succeed: {r}");
+    assert_eq!(r["failed"], 3, "#2->#20 conflict, #3->#20 conflict, #4->#4 self-loop: {r}");
+    let errs = r["errors"].as_array().unwrap();
+    assert_eq!(errs.len(), 3, "{errs:?}");
+
+    let c2 = errs.iter().find(|e| e["from"] == "acme/widgets#2" && e["to"] == "acme/widgets#20").unwrap();
+    assert_eq!(c2["kind"], "parent");
+    assert_eq!(c2["permission"], false);
+    assert_eq!(c2["conflict"], true);
+    assert_eq!(c2["existingParent"], "acme/widgets#10");
+
+    let c3 = errs.iter().find(|e| e["from"] == "acme/widgets#3" && e["to"] == "acme/widgets#20").unwrap();
+    assert_eq!(c3["kind"], "parent");
+    assert_eq!(c3["permission"], false);
+    assert_eq!(c3["conflict"], true);
+    assert_eq!(c3["existingParent"], "acme/widgets#10");
+
+    let self_err = errs.iter().find(|e| e["from"] == "acme/widgets#4" && e["to"] == "acme/widgets#4").unwrap();
+    assert_eq!(self_err["kind"], "blockedBy");
+    assert_eq!(self_err["permission"], false);
+    assert_eq!(self_err["conflict"], false);
+    assert!(self_err["message"].as_str().unwrap().contains("blocked by itself"), "{self_err}");
+
+    // Refreshed graph shows #2->#1 and #3->#10 upgraded to native "github".
+    let edges = r["flow"]["graph"]["edges"].as_array().unwrap();
+    assert!(
+        edges.contains(
+            &json!({"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy", "source": "github"})
+        )
+    );
+    assert!(
+        edges.contains(
+            &json!({"from": "acme/widgets#3", "to": "acme/widgets#10", "kind": "parent", "source": "github"})
+        )
+    );
+    assert!(s.h.github.issue(REPO, 4).unwrap()["blockers"].as_array().unwrap().is_empty());
+
+    // Now test FORBIDDEN permission error on addBlockedBy while addSubIssue still works.
+    issue(&s.h, REPO, 5, &[FLOW], 7);
+    s.h.github.set_body(REPO, 5, "## Flow\n- Parent: #10\n- Blocked by: #1\n");
+    s.h.github.fail_operation_with_type("addBlockedBy", "FORBIDDEN", "Resource not accessible by integration");
+    let perm_res: Value = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let perm_err = perm_res["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["from"] == "acme/widgets#5" && e["to"] == "acme/widgets#1")
+        .unwrap();
+    assert_eq!(perm_err["permission"], true, "{perm_err}");
+    assert_eq!(perm_err["conflict"], false, "{perm_err}");
+    assert_eq!(perm_err["op"], "addBlockedBy");
+    assert!(
+        perm_res["flow"]["graph"]["edges"].as_array().unwrap().contains(
+            &json!({"from": "acme/widgets#5", "to": "acme/widgets#10", "kind": "parent", "source": "github"})
+        ),
+        "parent edge on #5 still synced despite blockedBy FORBIDDEN: {perm_res}"
+    );
+
+    // When GitHub is completely unreachable on initial read, endpoint returns 502.
+    s.h.github.set_down(true);
+    let down = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(down.status(), 502);
+}
+
+#[tokio::test]
+async fn board_sync_links_enforces_remote_auth_and_csrf() {
+    let cfg = Config::from_value(json!({
+        "board": {"remote": {"mode": "tailscale", "origin": "https://box.acme.ts.net:47732"}},
+        "flow": {"repos": [REPO], "optIn": {"label": FLOW}, "maxTickets": 2}
+    }))
+    .unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.tailscale.set_host_login("alice@acme.example");
+    h.github.add_repo(REPO);
+    issue(&h, REPO, 1, &[], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    h.github.set_body(REPO, 2, "Depends on #1\n");
+    let s = crate::board::start(h).await;
+
+    // Missing Tailscale header -> 401.
+    let unauth = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("Origin", "https://box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth.status(), 401);
+
+    // Disallowed user -> 403.
+    let denied = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("Origin", "https://box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "bob@acme.example")
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+
+    // Allowed user without CSRF -> 403.
+    let no_csrf = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("Origin", "https://box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf.status(), 403);
+
+    // Allowed user with CSRF -> 200 and upgrades edge to native GitHub.
+    let ok = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Host", "box.acme.ts.net:47732")
+        .header("Origin", "https://box.acme.ts.net:47732")
+        .header("X-Forwarded-Proto", "https")
+        .header("Tailscale-User-Login", "alice@acme.example")
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+    let body: Value = ok.json().await.unwrap();
+    assert_eq!(body["ok"], true, "{body}");
+    assert_eq!(body["synced"], 1, "{body}");
+    assert_eq!(body["flow"]["graph"]["edges"][0]["source"], "github");
+}
+
+#[tokio::test]
+async fn graph_tab_sync_button_syncs_body_links_updates_edges_and_shows_errors() {
+    let h = flowing(4);
+    issue(&h, REPO, 10, &[], 1);
+    issue(&h, REPO, 1, &[FLOW], 2);
+    issue(&h, REPO, 2, &[FLOW], 3);
+    h.github.set_body(REPO, 2, "## Flow\n- Parent: #10\n- Blocked by: #1\n");
+
+    let s = crate::board::start(h).await;
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let st = s.get("/api/state").await;
+    let before_view = s.get("/api/flow").await;
+
+    // Run real sync on the server to get an authentic synced payload for the browser script.
+    let synced_res: Value = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Build a partial-failure payload (1 synced, 1 permission error, 1 parent conflict, 1 body edge left).
+    let partial_view = {
+        let mut v = before_view.clone();
+        v["graph"]["edges"] = json!([
+            {"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy", "source": "github"},
+            {"from": "acme/widgets#2", "to": "acme/widgets#10", "kind": "parent", "source": "body"},
+        ]);
+        v
+    };
+    let partial_res = json!({
+        "ok": false,
+        "total": 3,
+        "synced": 1,
+        "alreadyLinked": 0,
+        "failed": 2,
+        "results": [],
+        "errors": [
+            {
+                "from": "acme/widgets#2",
+                "to": "acme/widgets#10",
+                "kind": "parent",
+                "op": "addSubIssue",
+                "message": "Sub-issue already has a parent",
+                "permission": false,
+                "conflict": true,
+                "existingParent": "acme/widgets#1"
+            },
+            {
+                "from": "acme/widgets#2",
+                "to": "acme/widgets#1",
+                "kind": "blockedBy",
+                "op": "addBlockedBy",
+                "message": "Resource not accessible by integration",
+                "permission": true,
+                "conflict": false
+            }
+        ],
+        "flow": partial_view,
+    });
+
+    let r = panel(
+        &html,
+        &st,
+        &before_view,
+        &format!(
+            r##"{GRAPH}
+const syncedRes = {synced_res};
+const partialRes = {partial_res};
+let mode = "ok";
+const syncReqs = [];
+fetchReply = (url, opts) => {{
+  if (url === "/api/flow") return reply(200, view);
+  if (url === "/api/flow/sync-links") {{
+    syncReqs.push({{ method: opts && opts.method, csrf: opts && opts.headers && opts.headers["X-T3CM-CSRF"] }});
+    if (mode === "ok") return reply(200, syncedRes);
+    if (mode === "partial") return reply(200, partialRes);
+    return reply(502, {{ error: "gh down" }});
+  }}
+  return new Promise(() => {{}});
+}};
+emitState(base);
+await tick();
+selectTab("graph");
+const before = {{
+  btnHidden: q("#graph-sync").hidden,
+  btnText: q("#graph-sync").textContent,
+  resHidden: q("#graph-sync-res").hidden,
+  edges: document.querySelectorAll(".ge").map((p) => [p.getAttribute("class"), p.getAttribute("data-source")]),
+}};
+// Open inspector on #2 so we verify drawer drops the "body" badge after sync.
+btn("acme/widgets#2").dispatch("click");
+const drawerBefore = deps();
+
+q("#graph-sync").dispatch("click");
+await tick();
+const syncCall = syncReqs[0];
+const afterOk = {{
+  method: syncCall && syncCall.method,
+  csrf: syncCall && syncCall.csrf,
+  btnHidden: q("#graph-sync").hidden,
+  resHidden: q("#graph-sync-res").hidden,
+  resOk: q("#graph-sync-res").classList.contains("ok"),
+  resMsg: q("#graph-sync-res .gsync-msg") ? q("#graph-sync-res .gsync-msg").textContent : null,
+  edges: document.querySelectorAll(".ge").map((p) => [p.getAttribute("class"), p.getAttribute("data-source")]),
+  drawerAfter: deps(),
+}};
+q("#graph-sync-close").dispatch("click");
+const dismissedHidden = q("#graph-sync-res").hidden;
+
+// Reload body-edges view and trigger partial failure response.
+paintFlow(view);
+mode = "partial";
+q("#graph-sync").dispatch("click");
+await tick();
+const afterPartial = {{
+  btnHidden: q("#graph-sync").hidden,
+  btnText: q("#graph-sync").textContent,
+  resErr: q("#graph-sync-res").classList.contains("err"),
+  resMsg: q("#graph-sync-res .gsync-msg") ? q("#graph-sync-res .gsync-msg").textContent : null,
+  items: document.querySelectorAll("#graph-sync-res li").map((li) => [
+    li.dataset.kind, li.dataset.permission, li.dataset.conflict, li.textContent
+  ]),
+  edges: document.querySelectorAll(".ge").map((p) => [p.getAttribute("class"), p.getAttribute("data-source")]),
+}};
+
+// Trigger HTTP 502 error.
+mode = "fail";
+q("#graph-sync").dispatch("click");
+await tick();
+const afterFail = {{
+  btnDisabled: q("#graph-sync").getAttribute("aria-disabled"),
+  resErr: q("#graph-sync-res").classList.contains("err"),
+  resMsg: q("#graph-sync-res .gsync-msg") ? q("#graph-sync-res .gsync-msg").textContent : null,
+}};
+return {{ before, drawerBefore, afterOk, dismissedHidden, afterPartial, afterFail }};
+"##
+        ),
+    );
+
+    assert_eq!(r["before"]["btnHidden"], false, "{r}");
+    assert_eq!(r["before"]["btnText"], "Sync 2 parsed links to GitHub", "{r}");
+    assert_eq!(r["before"]["resHidden"], true, "{r}");
+    assert!(r["before"]["edges"].as_array().unwrap().iter().all(|e| e[1] == "body"), "edges start as body: {r}");
+    assert!(
+        r["drawerBefore"].as_array().unwrap().iter().any(|d| d.as_str().unwrap().contains("body")),
+        "drawer shows body badge before sync: {r}"
+    );
+
+    assert_eq!(r["afterOk"]["method"], "POST", "{r}");
+    assert!(r["afterOk"]["csrf"].as_str().is_some_and(|c| !c.is_empty()), "{r}");
+    assert_eq!(r["afterOk"]["btnHidden"], true, "button hides once 0 body edges remain: {r}");
+    assert_eq!(r["afterOk"]["resHidden"], false, "{r}");
+    assert_eq!(r["afterOk"]["resOk"], true, "{r}");
+    assert_eq!(r["afterOk"]["resMsg"], "Synced 2 parsed links to GitHub.", "{r}");
+    assert!(
+        r["afterOk"]["edges"].as_array().unwrap().iter().all(|e| e[1] == "github"),
+        "edges refresh to native github: {r}"
+    );
+    assert!(
+        r["afterOk"]["drawerAfter"].as_array().unwrap().iter().all(|d| !d.as_str().unwrap().contains("body")),
+        "drawer drops body badge after sync: {r}"
+    );
+    assert_eq!(r["dismissedHidden"], true, "{r}");
+
+    assert_eq!(r["afterPartial"]["btnHidden"], false, "{r}");
+    assert_eq!(
+        r["afterPartial"]["btnText"], "Sync 1 parsed link to GitHub",
+        "singular label for 1 remaining edge: {r}"
+    );
+    assert_eq!(r["afterPartial"]["resErr"], true, "{r}");
+    assert_eq!(r["afterPartial"]["resMsg"], "Sync finished (synced 1, 2 failed of 3).", "{r}");
+    let items = r["afterPartial"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(items[0][0], "parent");
+    assert_eq!(items[0][1], "false");
+    assert_eq!(items[0][2], "true");
+    assert!(items[0][3].as_str().unwrap().contains("parent conflict, existing parent widgets#1"), "{items:?}");
+    assert_eq!(items[1][0], "blockedBy");
+    assert_eq!(items[1][1], "true");
+    assert_eq!(items[1][2], "false");
+    assert!(items[1][3].as_str().unwrap().contains("(permission)"), "{items:?}");
+
+    assert_eq!(r["afterFail"]["btnDisabled"], Value::Null, "{r}");
+    assert_eq!(r["afterFail"]["resErr"], true, "{r}");
+    assert_eq!(r["afterFail"]["resMsg"], "Could not sync parsed links: gh down", "{r}");
+}

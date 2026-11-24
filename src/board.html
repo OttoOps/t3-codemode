@@ -1113,6 +1113,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   border-bottom: 1px solid var(--border); background: var(--surface-2); font-size: 12px; line-height: 16px; color: var(--fg-2);
 }
 .gsub .gnote { flex: 1 1 100%; color: var(--fg-2); }
+.gsync { margin-left: auto; height: 24px; padding: 0 10px; font-size: 12px; line-height: 16px; }
 .gwarn {
   flex: none; padding: 8px 16px; border-bottom: 1px solid var(--fail);
   background: var(--fail-soft); color: var(--fail); font-size: 12px; line-height: 16px;
@@ -1120,6 +1121,17 @@ kbd { font-family: var(--mono); font-size: 12px; }
 }
 .gwarn-h { font-weight: 600; }
 .gwarn ul { display: grid; gap: 2px; list-style: disc; padding-left: 16px; }
+.gsync-res {
+  flex: none; padding: 8px 16px; font-size: 12px; line-height: 16px;
+  display: grid; gap: 4px;
+}
+.gsync-res.ok { border-bottom: 1px solid var(--border); background: var(--surface-2); color: var(--fg); }
+.gsync-res.ok .gsync-msg { color: var(--done); font-weight: 600; }
+.gsync-res.err { border-bottom: 1px solid var(--fail); background: var(--fail-soft); color: var(--fail); }
+.gsync-res.err .gsync-msg { font-weight: 600; }
+.gsync-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.gsync-head .btn { height: 22px; font-size: 12px; line-height: 16px; }
+.gsync-res ul { display: grid; gap: 2px; list-style: disc; padding-left: 16px; }
 .gkey { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .gkey svg { width: 22px; height: 8px; flex: none; }
 .gkey .k-up { stroke: var(--fail); }
@@ -1379,9 +1391,11 @@ kbd { font-family: var(--mono); font-size: 12px; }
           <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-down" d="M1 4h20" stroke-width="2.5"/></svg>it unlocks</span>
           <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-par" d="M1 4h20" stroke-width="1.5"/></svg>parent</span>
           <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-body" d="M1 4h20" stroke-width="1.5"/></svg>from body</span>
+          <button class="btn gsync" type="button" id="graph-sync" hidden></button>
           <span class="gnote" id="graph-note"></span>
         </div>
         <div class="gwarn" id="graph-warn" role="status" hidden></div>
+        <div class="gsync-res" id="graph-sync-res" role="status" hidden></div>
         <div class="scroll gscroll" id="gscroll" role="group" aria-label="Dependency graph" aria-describedby="graph-note"></div>
         <p class="empty" id="graph-empty" hidden>No open tickets or issues to draw.</p>
       </div>
@@ -4336,7 +4350,8 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const GEO = { W: 168, H: 62, GAP: 32, ROW: 10, PAD: 10, HEAD: 28, LANE_GAP: 8 };
 const TRACK_RANK = { label: 0, epic: 1, milestone: 2, repo: 2, component: 3, independent: 4, none: 5 };
 const graph = { mode: "tickets", nodes: new Map(), byThread: new Map(), edges: [], order: [], sig: null, held: false,
-  pointer: false, hot: null, hover: null, focus: null, lead: null, active: null, btns: new Map(), paths: [], marks: null, lay: null };
+  pointer: false, hot: null, hover: null, focus: null, lead: null, active: null, btns: new Map(), paths: [], marks: null, lay: null,
+  syncing: false, syncCount: 0 };
 
 function svgEl(tag, attrs, ...kids) {
   const el = document.createElementNS(SVG_NS, tag);
@@ -4578,6 +4593,130 @@ function graphNote(mode, lay) {
   return flow.failed ? "Could not refresh the dependency graph, so this is the last one read. " + said : said;
 }
 
+function bodyEdges(edges) {
+  return (edges || []).filter((e) => e && e.source === "body" && (e.kind === "blockedBy" || e.kind === "parent"));
+}
+
+function paintGraphSync(edges) {
+  const b = $("graph-sync");
+  const n = bodyEdges(edges).length;
+  if (graph.syncing) {
+    b.hidden = false;
+    const c = graph.syncCount || n;
+    setText(b, "Syncing " + c + " parsed " + (c === 1 ? "link" : "links") + "...");
+    setAttr(b, "aria-disabled", "true");
+    return;
+  }
+  b.hidden = n === 0;
+  setAttr(b, "aria-disabled", null);
+  setText(b, n ? "Sync " + n + " parsed " + (n === 1 ? "link" : "links") + " to GitHub" : "");
+}
+
+function graphEdgeLabel(id) {
+  const n = graphNode(id);
+  return (n && n.label) || id;
+}
+
+function graphSyncErrorText(e) {
+  const from = graphEdgeLabel(e.from);
+  const to = graphEdgeLabel(e.to);
+  const rel = e.kind === "parent" ? "parent " + to : "blocked by " + to;
+  const tags = [];
+  if (e.permission) tags.push("permission");
+  if (e.conflict) tags.push(e.existingParent ? "parent conflict, existing parent " + graphEdgeLabel(e.existingParent) : "parent conflict");
+  const prefix = from + " -> " + rel + (tags.length ? " (" + tags.join("; ") + ")" : "");
+  return prefix + ": " + e.message;
+}
+
+function paintGraphSyncResult(res, errMsg) {
+  const el = $("graph-sync-res");
+  if (!res && !errMsg) {
+    el.hidden = true;
+    el.classList.remove("ok", "err");
+    el.replaceChildren();
+    return;
+  }
+  const closeBtn = h("button", { class: "btn quiet", type: "button", id: "graph-sync-close" }, "Close");
+  closeBtn.addEventListener("click", () => {
+    paintGraphSyncResult(null, null);
+    const sb = $("graph-sync");
+    if (sb && !sb.hidden && sb.getAttribute("aria-disabled") !== "true") sb.focus();
+    else if ($("tab-graph")) $("tab-graph").focus();
+  });
+  if (errMsg) {
+    el.classList.remove("ok");
+    el.classList.add("err");
+    el.hidden = false;
+    const msg = "Could not sync parsed links: " + errMsg;
+    el.replaceChildren(h("div", { class: "gsync-head" }, h("span", { class: "gsync-msg" }, msg), closeBtn));
+    announce(msg, true);
+    return;
+  }
+  const errs = res.errors || [];
+  const hasErr = !res.ok || !!res.refreshError;
+  el.classList.toggle("ok", !hasErr);
+  el.classList.toggle("err", hasErr);
+  el.hidden = false;
+  const synced = res.synced || 0, already = res.alreadyLinked || 0, failed = res.failed || 0, total = res.total || 0;
+  let summary;
+  if (!hasErr) {
+    if (synced && already) summary = "Synced " + synced + " parsed " + (synced === 1 ? "link" : "links") + " to GitHub (" + already + " already linked).";
+    else if (synced) summary = "Synced " + synced + " parsed " + (synced === 1 ? "link" : "links") + " to GitHub.";
+    else if (already) summary = "All " + already + " parsed " + (already === 1 ? "link was" : "links were") + " already linked on GitHub.";
+    else summary = "No parsed links needed syncing.";
+  } else if (res.refreshError && !failed) {
+    summary = "Synced " + synced + " parsed " + (synced === 1 ? "link" : "links") + ", but refreshing the graph failed.";
+  } else {
+    const parts = [];
+    if (synced) parts.push("synced " + synced);
+    if (already) parts.push(already + " already linked");
+    if (failed) parts.push(failed + " failed");
+    summary = total
+      ? "Sync finished (" + parts.join(", ") + " of " + total + ")."
+      : "Sync finished with errors.";
+  }
+  const kids = [h("div", { class: "gsync-head" }, h("span", { class: "gsync-msg" }, summary), closeBtn)];
+  const items = errs.map((e) => h("li", {
+    "data-kind": e.kind || "",
+    "data-permission": e.permission ? "true" : "false",
+    "data-conflict": e.conflict ? "true" : "false",
+  }, graphSyncErrorText(e)));
+  if (res.refreshError) items.push(h("li", { "data-kind": "refresh" }, "Graph refresh failed: " + res.refreshError));
+  if (items.length) kids.push(h("ul", {}, ...items));
+  el.replaceChildren(...kids);
+  announce(summary, hasErr);
+}
+
+async function syncGraphLinks() {
+  const b = $("graph-sync");
+  if (graph.syncing || b.hidden || b.getAttribute("aria-disabled") === "true") return;
+  graph.syncing = true;
+  graph.syncCount = bodyEdges(graph.edges).length;
+  paintGraphSync(graph.edges);
+  paintGraphSyncResult(null, null);
+  try {
+    const res = await post("/api/flow/sync-links", {});
+    graph.syncing = false;
+    graph.syncCount = 0;
+    if (res && res.flow) {
+      flow.failed = false;
+      flow.shown = null;
+      graph.held = false;
+      graph.sig = null;
+      paintFlow(res.flow);
+      if (state) { paintGraph(); if (dr.open) paintDrawer(); }
+    } else {
+      paintGraphSync(graph.edges);
+    }
+    paintGraphSyncResult(res, null);
+  } catch (e) {
+    graph.syncing = false;
+    graph.syncCount = 0;
+    paintGraphSync(graph.edges);
+    paintGraphSyncResult(null, e.message);
+  }
+}
+
 function paintGraph() {
   if (!state) return;
   const d = graphData(state);
@@ -4595,6 +4734,7 @@ function paintGraph() {
   lay.wide = Math.max(lay.width, $("gscroll").clientWidth || 0);
   setText($("graph-note"), graphNote(d.mode, lay));
   paintGraphWarn(d.mode === "flow" ? d.warnings : []);
+  paintGraphSync(d.mode === "flow" ? d.edges : []);
   for (const k of $("graph-key").querySelectorAll(".gkey")) k.hidden = d.mode !== "flow";
   $("graph-empty").hidden = d.nodes.length > 0;
   $("gscroll").hidden = !d.nodes.length;
@@ -4788,6 +4928,9 @@ function graphRelease() {
 
 function initGraph() {
   const box = $("gscroll");
+  const syncBtn = $("graph-sync");
+  if (syncBtn) syncBtn.addEventListener("click", syncGraphLinks);
+  paintGraphSyncResult(null, null);
   const nodeOf = (e) => e.target && e.target.closest ? e.target.closest(".gnode") : null;
   box.addEventListener("click", (e) => { const b = nodeOf(e); if (b) graphOpen(b); });
   box.addEventListener("pointerover", (e) => { const b = nodeOf(e); const id = b ? b.dataset.id : null; if (id !== graph.hover) graphHover(id); });
