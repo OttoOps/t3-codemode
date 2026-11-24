@@ -1054,19 +1054,19 @@ async fn run_sequential_ops(
                         sync_gh(&h, &gh);
                     }
                 }
-                Op::GhReadError { pr } => {
+                Op::GhReadError { pr, fail } => {
                     let Some(pr_num) = resolve_pr(pr) else {
-                        trace.push(format!("#{step} noop (gh read_err {pr:?})"));
+                        trace.push(format!("#{step} noop (gh read_err {pr:?} fail={fail})"));
                         return;
                     };
                     let changed = {
                         let m = gh.get_mut(&pr_num).unwrap();
-                        if m.exists && m.state == "OPEN" && !m.read_err {
-                            m.read_err = true;
-                            trace.push(format!("#{step} gh read_err #{pr_num}"));
+                        if m.exists && m.state == "OPEN" && m.read_err != fail {
+                            m.read_err = fail;
+                            trace.push(format!("#{step} gh read_err #{pr_num} fail={fail}"));
                             true
                         } else {
-                            trace.push(format!("#{step} noop (gh read_err #{pr_num})"));
+                            trace.push(format!("#{step} noop (gh read_err #{pr_num} fail={fail})"));
                             false
                         }
                     };
@@ -2180,7 +2180,7 @@ fn op_serialization_round_trips_and_decodes_edge_cases() {
         Op::GhPush { pr: PrSym(0) },
         Op::GhStatus { pr: PrSym(1), checks: GhChecks::Pending, merge_state: GhMergeState::Unknown, draft: true },
         Op::GhFinish { pr: PrSym(2), state: GhEndState::Merged, predates: true },
-        Op::GhReadError { pr: PrSym(0) },
+        Op::GhReadError { pr: PrSym(0), fail: true },
         Op::GhRemovePr { pr: PrSym(1) },
         Op::GhClearReadErrors,
         Op::Reconcile,
@@ -2227,8 +2227,13 @@ fn op_serialization_round_trips_and_decodes_edge_cases() {
 
     let mut only_reconcile = zero_weights;
     only_reconcile.set(OpKind::Reconcile, 1);
-    let rec_ops = decode_ops(&mut Unstructured::new(&bytes), &only_reconcile);
+    let mut single_byte = Unstructured::new(&[0xab]);
+    assert_eq!(decode_ops(&mut single_byte, &only_reconcile), vec![Op::Reconcile]);
+    assert!(single_byte.is_empty(), "singleton profile must advance Unstructured input");
+    let mut full_stream = Unstructured::new(&bytes);
+    let rec_ops = decode_ops(&mut full_stream, &only_reconcile);
     assert_eq!(rec_ops, vec![Op::Reconcile; 20]);
+    assert_eq!(full_stream.len(), bytes.len() - 20);
 
     // Decoded ops must never emit an op kind whose weight is zero.
     for seed in 0..32 {
@@ -2304,7 +2309,7 @@ async fn op_prefix_and_subsequence_replay_holds_invariants() {
         Op::GhPush { pr: PrSym(99) },
         Op::GhStatus { pr: PrSym(7), checks: GhChecks::Failing, merge_state: GhMergeState::Dirty, draft: true },
         Op::GhFinish { pr: PrSym(8), state: GhEndState::Closed, predates: false },
-        Op::GhReadError { pr: PrSym(9) },
+        Op::GhReadError { pr: PrSym(9), fail: true },
         Op::GhRemovePr { pr: PrSym(10) },
         Op::GhClearReadErrors,
         Op::Adopt { to: TSym(0), from: TSym(0) },
@@ -2335,6 +2340,25 @@ async fn op_prefix_and_subsequence_replay_holds_invariants() {
         noop_count >= 25,
         "expected out-of-range and closed targets to record no-ops, got {noop_count}:\n{}",
         trace.join("\n")
+    );
+
+    // Partial per-PR read-error recovery leaves other failing PRs broken until cleared.
+    let partial_err = vec![
+        Op::PrReady { worker: WSym(0), short_sha: false },
+        Op::PrReady { worker: WSym(1), short_sha: false },
+        Op::GhReadError { pr: PrSym(0), fail: true },
+        Op::GhReadError { pr: PrSym(1), fail: true },
+        Op::GhReadError { pr: PrSym(0), fail: false },
+        Op::Reconcile,
+        Op::GhReadError { pr: PrSym(1), fail: false },
+        Op::Reconcile,
+    ];
+    let (err_trace, _) = run_sequential_ops(&partial_err, None, true, "partial-read-err").await;
+    assert!(
+        err_trace.iter().any(|l| l.contains("reconcile -> ok=false"))
+            && err_trace.iter().any(|l| l.contains("reconcile -> ok=true")),
+        "expected partial per-PR read-error recovery to fail then succeed:\n{}",
+        err_trace.join("\n")
     );
 
     // Every prefix and single-op deletion of a Swarm-decoded program replays cleanly.
