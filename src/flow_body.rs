@@ -1772,25 +1772,24 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
                         if let Some(task_rest) = parse_tasklist_item(&line) {
                             let task_clean = strip_inline_code(task_rest);
                             let has_cue = contains_prose_directive_cue(&task_clean)
-                                || (task_clean.trim().is_empty()
-                                    && contains_prose_directive_cue(&task_rest.replace('`', "")));
-                            if !has_cue {
+                                || contains_prose_directive_cue(&task_rest.replace('`', ""));
+                            if has_cue {
+                                pending_prose_role = scan_prose_segment(default_repo, &task_clean, true, &mut parsed);
+                            } else {
                                 for r in parse_ref_list(default_repo, task_rest, true) {
                                     push_unique_ref(dest, r);
                                 }
-                                continue;
                             }
-                        } else {
-                            let (_, clean_stripped) = strip_bullet_and_quote(&clean);
-                            let has_cue = contains_prose_directive_cue(clean_stripped)
-                                || (clean_stripped.trim().is_empty()
-                                    && contains_prose_directive_cue(&raw_stripped.replace('`', "")));
-                            if !has_cue {
-                                for r in parse_ref_list(default_repo, raw_stripped, true) {
-                                    push_unique_ref(dest, r);
-                                }
-                                continue;
+                            continue;
+                        }
+                        let (_, clean_stripped) = strip_bullet_and_quote(&clean);
+                        let has_cue = contains_prose_directive_cue(clean_stripped)
+                            || contains_prose_directive_cue(&raw_stripped.replace('`', ""));
+                        if !has_cue {
+                            for r in parse_ref_list(default_repo, raw_stripped, true) {
+                                push_unique_ref(dest, r);
                             }
+                            continue;
                         }
                     }
                 }
@@ -2718,6 +2717,8 @@ _No response_
 ### Blocked by
 
 - [ ] Part of #10
+- [ ] Tracked here (part of #18)
+- [ ] Not after `#19`
 - [ ] #11, #12
 - [ ] `#16`
 Setup auth
@@ -2725,6 +2726,7 @@ Clean up after migration
 Part of #13
 Phase 1 of #14
 Not blocked by #15
+Not after `#20`
 Part of:
 - #17
 ";
@@ -2733,6 +2735,7 @@ Part of:
             mixed_parsed.parents,
             vec![
                 BodyRef::Issue { repo: REPO.into(), number: 10 },
+                BodyRef::Issue { repo: REPO.into(), number: 18 },
                 BodyRef::Issue { repo: REPO.into(), number: 13 },
                 BodyRef::Issue { repo: REPO.into(), number: 14 },
                 BodyRef::Issue { repo: REPO.into(), number: 17 },
