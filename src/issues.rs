@@ -1367,8 +1367,24 @@ impl Wf {
                 }
             }
 
-            // Secondary parent candidates conflict with the node's existing or primary parent and are never written.
+            // Secondary parent candidates conflict with the node's existing or primary parent and are never written,
+            // unless GitHub already acquired that candidate as the native parent before we read the issue.
             for (idx, p_repo, p_num, _) in group.parents.iter().skip(1) {
+                if let Some(p) =
+                    from_node.parent.as_ref().filter(|p| p.number == *p_num && p.repo.eq_ignore_ascii_case(p_repo))
+                {
+                    slots[*idx] = Some(SyncLinkResult {
+                        from: from_canon.clone(),
+                        to: ref_slug(&p.repo, p.number),
+                        kind: PARENT,
+                        status: "alreadyLinked",
+                        error: None,
+                        permission: false,
+                        conflict: false,
+                        existing_parent: None,
+                    });
+                    continue;
+                }
                 let target = ref_slug(p_repo, *p_num);
                 let existing = from_node.parent.as_ref().map(|p| ref_slug(&p.repo, p.number));
                 let msg = match (&existing, &primary_target) {
