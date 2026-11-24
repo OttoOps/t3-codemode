@@ -381,31 +381,26 @@ fn diff<T: std::fmt::Debug + PartialEq>(what: &str, got: &T, want: &T) -> Option
     (got != want).then(|| format!("{what} diverged from the shadow model\n  sut:   {got:?}\n  model: {want:?}"))
 }
 
-fn github_events(sent: &[Value]) -> Vec<(String, u64)> {
-    let mut out = Vec::new();
-    for s in sent {
-        let to = s["threadId"].as_str().unwrap_or_default();
-        let mut lines = s["message"].as_str().unwrap_or_default().lines();
-        while let Some(line) = lines.next() {
-            if !line.starts_with("[t3cm event from=github ") {
-                continue;
-            }
-            let body = lines.next().unwrap_or_default();
-            let n = body
+fn github_events(lines: Vec<WakeLine>) -> Vec<(String, u64)> {
+    lines
+        .into_iter()
+        .filter(|w| w.kind == "event" && w.from == "github")
+        .map(|w| {
+            let n = w
+                .subject
                 .strip_prefix(&format!("{REPO}#"))
                 .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
                 .and_then(|d| d.parse().ok())
-                .unwrap_or_else(|| panic!("github event wake without a PR subject: {body:?}"));
-            out.push((to.to_string(), n));
-        }
-    }
-    out
+                .unwrap_or_else(|| panic!("github event wake without a PR subject: {:?}", w.subject));
+            (w.to, n)
+        })
+        .collect()
 }
 
 fn assert_forbidden(h: &H, model: &mut Model, sent_before: usize, ctx: &dyn Fn() -> String) {
     let snap = h.snapshot();
     let sent = &h.sent()[sent_before..];
-    for (to, kind, from) in delivered_headers(sent) {
+    for (to, kind, from) in h.delivered(sent) {
         assert!(
             snap.links.get(&to).is_none_or(|l| !l.closed),
             "forbidden wake: {kind} from {from} reached closed link {to}\n{}",
@@ -413,7 +408,7 @@ fn assert_forbidden(h: &H, model: &mut Model, sent_before: usize, ctx: &dyn Fn()
         );
     }
     let forbidden = model.forbidden_github();
-    for w in github_events(sent) {
+    for w in github_events(h.wake_lines(sent)) {
         assert!(
             !forbidden.contains(&w),
             "forbidden wake: GitHub told {} about #{} after it let go of it\n{}",
@@ -464,7 +459,7 @@ impl Oracle {
     fn check(&mut self, h: &H, model: &mut Model, sent_before: usize, trace: &[String], seed: u64) {
         let ctx = || format!("seed={seed}\ntrace:\n{}", trace.join("\n"));
         let snap = h.snapshot();
-        let observed = wakes_of(&delivered_headers(&h.sent()[sent_before..]));
+        let observed = wakes_of(&h.delivered(&h.sent()[sent_before..]));
         assert_forbidden(h, model, sent_before, &ctx);
         assert_eq!(
             attempts(h),
@@ -606,7 +601,7 @@ fn resolve_raced(
     let ctx = || format!("seed={seed}\ntrace:\n{}", trace.join("\n"));
     let snap = h.snapshot();
     let got = shadow::project(&snap);
-    let observed = wakes_of(&delivered_headers(&h.sent()[sent_before..]));
+    let observed = wakes_of(&h.delivered(&h.sent()[sent_before..]));
     for (to, kind, from) in observed.keys() {
         assert!(
             snap.links.get(to).is_none_or(|l| !l.closed),
@@ -1665,15 +1660,17 @@ async fn single_seed_replay_is_deterministic() {
 fn oracle_parses_wake_headers_and_github_subjects() {
     let sent = vec![
         json!({"threadId": "mcp:t1", "message": "[t3cm event from=\"#41 PR 1/3\" msg=m1]\nPR 1/3 opened\n\n[t3cm event from=github msg=m2]\nacme/widgets#8 merged on GitHub at 1234567\n\nNotes since your last wake:\n- [t3cm note] ignored"}),
-        json!({"threadId": "mcp:w1", "message": "[t3cm reply from=t3cm msg=m3]\nA check failed\n[t3cm note]\n[t3cm event from=github]"}),
+        json!({"threadId": "mcp:w1", "message": "[t3cm reply from=t3cm msg=m3]\nA check failed\n[t3cm note]\n[t3cm event from=github]\n[t3cm event from=github msg=m9]\n[t3cm reply from=t3cm msg=m3]"}),
     ];
+    let records = [("mcp:t1", "event", "m1"), ("mcp:t1", "event", "m2"), ("mcp:w1", "reply", "m3")];
+    let known = |to: &str, kind: &str, handle: &str| records.contains(&(to, kind, handle));
     assert_eq!(
-        delivered_headers(&sent),
+        delivered_headers(&sent, &known),
         vec![
             ("mcp:t1".into(), "event".into(), "#41 PR 1/3".into()),
             ("mcp:t1".into(), "event".into(), "github".into()),
             ("mcp:w1".into(), "reply".into(), "t3cm".into()),
         ]
     );
-    assert_eq!(github_events(&sent), vec![("mcp:t1".to_string(), 8)]);
+    assert_eq!(github_events(wake_lines(&sent, &known)), vec![("mcp:t1".to_string(), 8)]);
 }
