@@ -493,10 +493,10 @@ The board's [dependency graph](board.md#the-queue--graph-view) works with no `fl
 block. `GET /api/flow` and [`wf.flow({ graph: true })`](globals.md#wfflow)
 discover the GitHub repositories attached to active T3 projects from each
 project's `repositoryIdentity` or git `origin` remote and read their open
-issues. Viewing the graph never enables auto-launching or the Up next queue.
+issues. Viewing the graph never enables auto-launching or the flow queue.
 
 Add a `flow` block when you want to override which repositories are covered, or
-to enable the Up next queue and automatic ticket launches as
+to enable the flow queue and automatic ticket launches as
 [The flow](board.md#the-flow) describes. You can set every `flow` key from the
 board's [Settings](board.md#settings) under **Flow**, from the
 `setup-t3-workflow` interview, or with `t3cm config` without editing JSON by
@@ -529,7 +529,7 @@ and add `includeRepos` or `excludeRepos`:
 ```
 
 A `flow` block without `maxTickets` customizes graph repositories only and
-leaves the Up next queue and launching off.
+leaves the flow queue and launching off.
 
 | Key | Default | Does |
 |---|---|---|

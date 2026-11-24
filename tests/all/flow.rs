@@ -1025,7 +1025,7 @@ fn panel(html: &str, st: &Value, view: &Value, body: &str) -> Value {
 }
 
 #[tokio::test]
-async fn the_up_next_panel_lists_the_queue_and_folds_blocked_and_skipped_issues() {
+async fn the_flow_queue_shows_ready_blocked_and_skipped_columns_that_fold() {
     let h = flowing(1);
     board_queue(&h).await;
     let (html, st, view) = panel_page(h).await;
@@ -1046,6 +1046,7 @@ const shown = {
 };
 q("#flow-blocked-btn").dispatch("click");
 const unfolded = { open: q("#flow-blocked-btn").getAttribute("aria-expanded"), list: q("#flow-b").hidden };
+q("#flow-blocked-btn").dispatch("click");
 emitState(base);
 await tick();
 const again = flowFetches();
@@ -1075,8 +1076,8 @@ return { shown, unfolded, fetched: [again, flowFetches()], kept };
         "{r}"
     );
     assert_eq!(s["empty"], true, "{r}");
-    assert_eq!(s["blocked"]["open"], "false", "{r}");
-    assert_eq!(s["blocked"]["list"], true, "{r}");
+    assert_eq!(s["blocked"]["open"], "true", "{r}");
+    assert_eq!(s["blocked"]["list"], false, "{r}");
     assert_eq!(s["blocked"]["n"], "2", "{r}");
     let blocked: Vec<&str> =
         s["blocked"]["rows"].as_array().unwrap().iter().map(|x| x["why"].as_str().unwrap()).collect();
@@ -1086,10 +1087,10 @@ return { shown, unfolded, fetched: [again, flowFetches()], kept };
         "{r}"
     );
     assert_eq!(s["skipped"]["n"], "1", "{r}");
-    assert_eq!(s["skipped"]["list"], true, "{r}");
+    assert_eq!(s["skipped"]["list"], false, "{r}");
     assert_eq!(s["skipped"]["rows"][0]["label"], "widgets#1", "{r}");
     assert_eq!(s["skipped"]["rows"][0]["why"], "priority: high", "{r}");
-    assert_eq!(r["unfolded"], json!({"open": "true", "list": false}), "{r}");
+    assert_eq!(r["unfolded"], json!({"open": "false", "list": true}), "a column header folds its list: {r}");
     assert_eq!(r["fetched"], json!([1, 2]), "{r}");
     assert_eq!(
         r["kept"],
@@ -1125,7 +1126,7 @@ return { off, failed, gone: { hidden: q("#p-flow").hidden, err: q("#flow-err").h
     assert_eq!(r["off"], json!({"hidden": true, "fetched": 0}), "{r}");
     assert_eq!(
         r["failed"],
-        json!({"hidden": false, "err": false, "text": "Could not read the up-next queue: wf.flow: GitHub said no"}),
+        json!({"hidden": false, "err": false, "text": "Could not read the flow queue: wf.flow: GitHub said no"}),
         "{r}"
     );
     assert_eq!(r["gone"], json!({"hidden": true, "err": true}), "{r}");
@@ -1339,10 +1340,10 @@ return {{ first, same: JSON.stringify(again) === JSON.stringify(first.at), hover
     let h = &r["hover"]["marks"];
     assert_eq!(
         (&h["acme/widgets#2"], &h["acme/widgets#1"], &h["acme/widgets#3"], &h["acme/widgets#4"], &h["acme/widgets#5"]),
-        (&json!("hot"), &json!("up"), &json!("up"), &json!("down"), &json!("dim")),
-        "{r}"
+        (&json!("hot"), &json!("up"), &json!("dim"), &json!("down"), &json!("dim")),
+        "a closed blocker no longer traces as blocking: {r}"
     );
-    assert_eq!(r["hover"]["edges"], json!(["ge up", "ge up", "ge down", "ge par dim"]), "{r}");
+    assert_eq!(r["hover"]["edges"], json!(["ge up", "ge dim", "ge down", "ge par dim"]), "{r}");
     assert_eq!(r["left"], 0, "leaving the graph clears the trace: {r}");
     assert_eq!(
         (&r["focused"], &r["stays"]),
@@ -1354,6 +1355,71 @@ return {{ first, same: JSON.stringify(again) === JSON.stringify(first.at), hover
     assert_eq!(rd["n"], "2/7", "{r}");
     assert_eq!((&rd["marks"]["acme/widgets#1"], &rd["marks"]["acme/tools#7"]), (&json!(""), &json!("")), "{r}");
     assert_eq!(rd["marks"]["acme/widgets#2"], "out", "{r}");
+}
+
+#[tokio::test]
+async fn queue_rows_take_j_k_and_enter_and_a_clicked_node_pins_its_trace() {
+    let (html, st, view) = graph_page().await;
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        &format!(
+            r##"{GRAPH}
+fetchReply = (url) => url === "/api/flow" ? reply(200, view) : new Promise(() => {{}});
+const press = (el, key) => {{ const ev = el.dispatch("keydown", {{ key }}); for (const f of document.listeners.keydown) f(ev); }};
+emitState(base);
+await tick();
+selectTab("graph");
+const qrows = () => ["flow-q", "flow-b", "flow-s"].flatMap((id) => [...document.getElementById(id).children]);
+const all = qrows();
+const keys = all.map((r) => [r.parentNode.id, r.dataset.key, r.classList.contains("queue-row")]);
+const list = all[0].parentNode;
+focusList(list);
+const start = document.activeElement.dataset.key;
+press(document.activeElement, "j");
+const moved = document.activeElement.dataset.key;
+paintFlow({{ ...view, free: 0 }});
+const kept = document.activeElement.dataset.key;
+const from = document.activeElement;
+press(from, "Enter");
+const opened = {{ open: q("#drawer").classList.contains("open"), id: dp("id").textContent, marked: document.activeElement === dp("title"),
+  shaded: qrows().filter((r) => r.hasAttribute("data-inspected")).map((r) => r.dataset.key) }};
+press(document.activeElement, "Escape");
+const back = document.activeElement.dataset.key;
+const two = [...list.children];
+two[1].hidden = true;
+focusItem(list, two[0]);
+press(two[0], "j");
+const skipsHidden = document.activeElement !== two[1] && two[1].getAttribute("tabindex") === "-1";
+two[1].hidden = false;
+btn("acme/widgets#2").dispatch("click");
+press(document.activeElement, "Escape");
+q("#gscroll").dispatch("pointerleave");
+const pinned = {{ hot: marks()["acme/widgets#2"], up: marks()["acme/widgets#1"], clear: q("#graph-clear").hidden ? null : q("#graph-clear").textContent }};
+btn("acme/widgets#2").dispatch("focusin");
+q("#graph-clear").dispatch("click");
+const cleared = {{ marks: Object.values(marks()).filter(Boolean).length, clear: q("#graph-clear").hidden }};
+return {{ keys, start, moved, kept, opened, back, skipsHidden, pinned, cleared }};
+"##
+        ),
+    );
+    let keys = r["keys"].as_array().unwrap();
+    assert!(keys.len() >= 2, "{r}");
+    assert!(keys.iter().all(|k| k[2] == json!(true)), "every flow row is a queue row: {r}");
+    assert_ne!(r["start"], r["moved"], "j moves down the queue: {r}");
+    assert_eq!(r["kept"], r["moved"], "a repaint keeps focus on the same row: {r}");
+    assert_eq!(r["opened"]["open"], true, "{r}");
+    assert_eq!(r["opened"]["marked"], true, "{r}");
+    assert_eq!(r["opened"]["shaded"], json!([r["moved"]]), "the row is shaded in place: {r}");
+    assert_eq!(r["back"], r["moved"], "Esc returns focus to the queue row: {r}");
+    assert_eq!(r["skipsHidden"], true, "j skips a row the filter hides: {r}");
+    assert_eq!(
+        r["pinned"],
+        json!({"hot": "hot", "up": "up", "clear": "Clear trace of widgets#2"}),
+        "a clicked node keeps its trace after the pointer leaves: {r}"
+    );
+    assert_eq!(r["cleared"], json!({"marks": 0, "clear": true}), "{r}");
 }
 
 #[tokio::test]
