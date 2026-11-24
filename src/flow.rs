@@ -1512,26 +1512,51 @@ impl Wf {
         // For repos with any symbolic sibling reference, fetch unlabelled open siblings (when
         // `all_open` is false) and closed siblings so identity resolution stays stable after a
         // blocker closes instead of dropping to unresolved or rebinding to another issue.
+        // Also fetch open siblings when a closed active ticket carries a tasklist pointing at a
+        // read in `reads.reads`, so an open unlabelled epic outranks the closed ticket consistently
+        // in both `wf.flow()` and `wf.flow({ graph: true })`.
         let mut symbolic_pool: Vec<Read> = Vec::new();
-        let mut need_repos: Vec<String> = Vec::new();
+        let mut need_symbolic_repos: Vec<String> = Vec::new();
         for r in reads.reads.iter().chain(extra.iter()) {
-            if r.body_parsed.has_symbolic() && !need_repos.iter().any(|x| x.eq_ignore_ascii_case(&r.issue.repo)) {
-                need_repos.push(r.issue.repo.clone());
+            if r.body_parsed.has_symbolic()
+                && !need_symbolic_repos.iter().any(|x| x.eq_ignore_ascii_case(&r.issue.repo))
+            {
+                need_symbolic_repos.push(r.issue.repo.clone());
             }
         }
-        for repo in need_repos {
-            if !all_open {
-                match self.read_repo(&repo, None).await {
-                    Ok((full, rs)) => {
-                        self.record_github_repo_alias(&repo, &full);
-                        symbolic_pool.extend(rs);
-                    }
-                    Err(RepoReadError::Transport(e)) => return Err(e),
-                    Err(RepoReadError::Graphql(e)) => {
-                        tracing::warn!("flow: could not read open siblings in {repo} for body resolution: {e:#}");
+        let mut need_open_repos: Vec<String> = if all_open { Vec::new() } else { need_symbolic_repos.clone() };
+        if !all_open {
+            let read_keys: HashSet<String> =
+                reads.reads.iter().map(|r| node_key(&r.issue.repo, r.issue.number)).collect();
+            let has_closed_ticket_tasklist_for_read = extra.iter().any(|r| {
+                r.state == Some("closed")
+                    && r.body_parsed.sub_issues.iter().any(|sref| {
+                        let BodyRef::Issue { repo, number } = sref else { return false };
+                        let canon = canonicalize_repo(&reads.aliases, repo);
+                        read_keys.contains(&node_key(&canon, *number))
+                    })
+            });
+            if has_closed_ticket_tasklist_for_read {
+                for repo in reads.covered.tracked_set() {
+                    if !need_open_repos.iter().any(|x| x.eq_ignore_ascii_case(&repo)) {
+                        need_open_repos.push(repo);
                     }
                 }
             }
+        }
+        for repo in need_open_repos {
+            match self.read_repo(&repo, None).await {
+                Ok((full, rs)) => {
+                    self.record_github_repo_alias(&repo, &full);
+                    symbolic_pool.extend(rs);
+                }
+                Err(RepoReadError::Transport(e)) => return Err(e),
+                Err(RepoReadError::Graphql(e)) => {
+                    tracing::warn!("flow: could not read open siblings in {repo} for body resolution: {e:#}");
+                }
+            }
+        }
+        for repo in need_symbolic_repos {
             match self.read_closed_repo(&repo).await {
                 Ok((full, rs)) => {
                     self.record_github_repo_alias(&repo, &full);
@@ -1553,11 +1578,11 @@ impl Wf {
 
         // Collect parent links implied by tasklist sub-issues ("- [ ] #N") so sibling phase resolution
         // knows epic membership even when only the parent epic lists its children.
-        // Open epics always outrank closed epics, and a closed epic's tasklist never claims an open issue.
+        // Open epics always outrank closed epics so a closed epic never overrides an open epic,
+        // while a closed epic still provides context when it is the sole parent.
         let mut inferred_parents: BTreeMap<String, (u8, String, u64, String)> = BTreeMap::new();
         for r in reads.reads.iter().chain(extra.iter()).chain(symbolic_pool.iter()) {
-            let parent_closed = r.state == Some("closed");
-            let rank = u8::from(parent_closed);
+            let rank = u8::from(r.state == Some("closed"));
             let p_repo = r.issue.repo.clone();
             let p_num = r.issue.number;
             let p_key = node_key(&p_repo, p_num);
@@ -1565,9 +1590,6 @@ impl Wf {
                 if let BodyRef::Issue { repo, number } = sref {
                     let canon = canonicalize_repo(&aliases, repo);
                     let ck = node_key(&canon, *number);
-                    if parent_closed && known.get(&ck).is_none_or(|(_, st)| *st != Some("closed")) {
-                        continue;
-                    }
                     inferred_parents
                         .entry(ck)
                         .and_modify(|cur| {
@@ -1606,7 +1628,7 @@ impl Wf {
                         own_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
                         resolved[idx].parents.push((canon, number));
                     }
-                    BodyRef::Symbolic(raw) => {
+                    BodyRef::Symbolic(raw) | BodyRef::OptionalSymbolic(raw) => {
                         match flow_body::resolve_symbolic(
                             &raw,
                             RefRole::Parent,
@@ -1653,7 +1675,7 @@ impl Wf {
                         let canon = canonicalize_repo(&aliases, &repo);
                         resolved[idx].subs.push((canon, number));
                     }
-                    BodyRef::Symbolic(raw) | BodyRef::Malformed(raw) => {
+                    BodyRef::Symbolic(raw) | BodyRef::OptionalSymbolic(raw) | BodyRef::Malformed(raw) => {
                         record_unresolved_ref(
                             &mut r.warnings,
                             &mut r.unresolved_blockers,
@@ -1738,6 +1760,32 @@ impl Wf {
                                     None,
                                 );
                             }
+                        }
+                    }
+                    BodyRef::OptionalSymbolic(raw) => {
+                        match flow_body::resolve_symbolic_optional(
+                            &raw,
+                            &me_repo,
+                            me_num,
+                            me_parent.as_deref(),
+                            &candidates,
+                        ) {
+                            ResolveOutcome::Resolved(repo, number) => {
+                                let canon = canonicalize_repo(&aliases, &repo);
+                                resolved[idx].blockers.push((canon, number));
+                            }
+                            ResolveOutcome::Ambiguous(matches) => {
+                                let msg =
+                                    format!("Ambiguous blocker reference \"{raw}\" (matches {})", matches.join(", "));
+                                record_unresolved_ref(
+                                    &mut r.warnings,
+                                    &mut r.unresolved_blockers,
+                                    RefRole::Blocker,
+                                    raw,
+                                    Some(msg),
+                                );
+                            }
+                            ResolveOutcome::NotFound => {}
                         }
                     }
                     BodyRef::Malformed(raw) => {
@@ -1941,6 +1989,37 @@ impl Wf {
                 warn_kind_rank(a.kind).cmp(&warn_kind_rank(b.kind)).then_with(|| a.message.cmp(&b.message))
             });
             r.issue.key = compute_skip_key(&r.labels, &r.blockers, r.more_blockers, &r.unresolved_blockers);
+        }
+
+        // Also seed `sub_parent_fill` from open unlabelled epics in `symbolic_pool` so an open
+        // epic always outranks a closed active ticket consistently in both `wf.flow()` and graph.
+        for r in &symbolic_pool {
+            if r.state == Some("closed") {
+                continue;
+            }
+            let me_ref = IssueRef {
+                repo: r.issue.repo.clone(),
+                number: r.issue.number,
+                label: r.issue.label.clone(),
+                url: r.issue.url.clone(),
+                title: Some(r.issue.title.clone()),
+            };
+            for sref in &r.body_parsed.sub_issues {
+                if let BodyRef::Issue { repo, number } = sref {
+                    let canon = canonicalize_repo(&aliases, repo);
+                    let k = node_key(&canon, *number);
+                    sub_parent_fill
+                        .entry(k)
+                        .and_modify(|cur| {
+                            if (0u8, me_ref.repo.to_ascii_lowercase(), me_ref.number)
+                                < (cur.0, cur.1.repo.to_ascii_lowercase(), cur.1.number)
+                            {
+                                *cur = (0u8, me_ref.clone());
+                            }
+                        })
+                        .or_insert_with(|| (0u8, me_ref.clone()));
+                }
+            }
         }
 
         // Propagate parent ref onto child reads that only had a parent via an epic's tasklist.
