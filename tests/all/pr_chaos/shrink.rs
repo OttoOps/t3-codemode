@@ -50,13 +50,18 @@ impl FailureClass {
     }
 }
 
-/// First-line human summary of a failure message, sanitized for `#` header comments.
-pub fn failure_summary(msg: &str) -> String {
+/// Cleaned first diagnostic line with trace tails and debug dumps stripped, without truncation.
+fn clean_failure_line(msg: &str) -> String {
     let head = strip_trace_tail(msg);
     let raw = head.lines().find(|l| !l.trim().is_empty()).unwrap_or("unknown failure").trim();
     let line = raw.strip_prefix("assertion `left == right` failed: ").unwrap_or(raw);
     let clean = strip_debug_payload(line);
-    let collapsed: String = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+    clean.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// First-line human summary of a failure message, sanitized and capped for `#` header comments.
+pub fn failure_summary(msg: &str) -> String {
+    let collapsed = clean_failure_line(msg);
     if collapsed.chars().count() > 180 {
         let mut s: String = collapsed.chars().take(177).collect();
         s.push_str("...");
@@ -156,8 +161,8 @@ fn strip_debug_payload(line: &str) -> &str {
 /// Normalize variable tokens (entity indices, PR/card/message ids, tick deltas) so
 /// shrinking and pool-index lowering stay locked on the same underlying bug class.
 pub fn normalize_failure_signature(msg: &str) -> String {
-    let summary = failure_summary(msg);
-    let tokens: Vec<String> = summary.split_whitespace().map(normalize_token).collect();
+    let cleaned = clean_failure_line(msg);
+    let tokens: Vec<String> = cleaned.split_whitespace().map(normalize_token).collect();
     tokens.join(" ")
 }
 
