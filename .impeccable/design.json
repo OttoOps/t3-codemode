@@ -1,0 +1,461 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-24T17:00:00Z",
+  "title": "Design System: t3 board",
+  "extensions": {
+    "colorMeta": {
+      "station-slate": {
+        "role": "neutral",
+        "displayName": "Station Slate",
+        "canonical": "#0c1017",
+        "tonalRamp": ["#06080c", "#0c1017", "#101621", "#161e2b", "#233044", "#4c6282", "#a3b3c9", "#eef2f7"]
+      },
+      "railway-navy": {
+        "role": "neutral",
+        "displayName": "Railway Navy",
+        "canonical": "#131c2b",
+        "tonalRamp": ["#0a0f18", "#111926", "#131c2b", "#182232", "#24334a", "#3a5378", "#7e95b5", "#dce5f2"]
+      },
+      "telemetry-slate": {
+        "role": "neutral",
+        "displayName": "Telemetry Slate",
+        "canonical": "#101621",
+        "tonalRamp": ["#080b11", "#0c1017", "#101621", "#161e2b", "#233044", "#465872", "#98a8bf", "#e4ebf4"]
+      },
+      "panel-slate": {
+        "role": "neutral",
+        "displayName": "Panel Slate",
+        "canonical": "#121822",
+        "tonalRamp": ["#090c12", "#0e131b", "#121822", "#161e2b", "#1b2434", "#36465f", "#8a9bb5", "#e8eef6"]
+      },
+      "panel-elevated": {
+        "role": "neutral",
+        "displayName": "Panel Elevated",
+        "canonical": "#161e2b",
+        "tonalRamp": ["#0b0f16", "#101621", "#161e2b", "#1b2434", "#26344a", "#475c7a", "#96a8c2", "#edf2f8"]
+      },
+      "panel-hover": {
+        "role": "neutral",
+        "displayName": "Panel Hover",
+        "canonical": "#1b2434",
+        "tonalRamp": ["#0d121a", "#141b27", "#1b2434", "#233044", "#31435e", "#556c8d", "#a1b2cb", "#eff3f9"]
+      },
+      "code-slate": {
+        "role": "neutral",
+        "displayName": "Code Slate",
+        "canonical": "#1c2738",
+        "tonalRamp": ["#0e141d", "#151d2a", "#1c2738", "#25344b", "#364b6b", "#5c759a", "#a6bad6", "#dbe6f5"]
+      },
+      "hairline-border": {
+        "role": "neutral",
+        "displayName": "Hairline Border",
+        "canonical": "#233044",
+        "tonalRamp": ["#101621", "#182130", "#233044", "#2f4059", "#465d7f", "#7088ab", "#b2c2d9", "#e9eff7"]
+      },
+      "control-border": {
+        "role": "neutral",
+        "displayName": "Control Border",
+        "canonical": "#4c6282",
+        "tonalRamp": ["#161e2b", "#243247", "#364966", "#4c6282", "#6982a6", "#94aac8", "#c5d3e6", "#eef3f9"]
+      },
+      "structural-rule": {
+        "role": "neutral",
+        "displayName": "Structural Rule",
+        "canonical": "#3a5378",
+        "tonalRamp": ["#131c2b", "#1e2c42", "#2b3f5d", "#3a5378", "#54729e", "#7e9ac2", "#b7cae3", "#e8eff8"]
+      },
+      "track-rail": {
+        "role": "neutral",
+        "displayName": "Track Rail",
+        "canonical": "#2c3b52",
+        "tonalRamp": ["#121822", "#1c2738", "#2c3b52", "#3e5270", "#5b7396", "#879dbd", "#bdcbe0", "#edf2f7"]
+      },
+      "pure-white": {
+        "role": "neutral",
+        "displayName": "Pure White",
+        "canonical": "#ffffff",
+        "tonalRamp": ["#465366", "#7a8799", "#a8b4c4", "#cfd7e2", "#e4e9ef", "#f1f4f8", "#f7f9fb", "#ffffff"]
+      },
+      "ink-primary": {
+        "role": "neutral",
+        "displayName": "Ink Primary",
+        "canonical": "#eef2f7",
+        "tonalRamp": ["#14181f", "#2c3645", "#4c5c73", "#74869e", "#9fb0c7", "#c7d3e3", "#eef2f7", "#ffffff"]
+      },
+      "ink-secondary": {
+        "role": "neutral",
+        "displayName": "Ink Secondary",
+        "canonical": "#a3b3c9",
+        "tonalRamp": ["#19212e", "#2d3b4f", "#485b75", "#697e9c", "#899db8", "#a3b3c9", "#ccd7e6", "#eef2f7"]
+      },
+      "ink-muted": {
+        "role": "neutral",
+        "displayName": "Ink Muted",
+        "canonical": "#8395ae",
+        "tonalRamp": ["#161d28", "#283447", "#41526b", "#60738f", "#8395ae", "#a4b3c8", "#cad4e2", "#edf1f6"]
+      },
+      "ink-header": {
+        "role": "neutral",
+        "displayName": "Header Ink",
+        "canonical": "#f4f7fb",
+        "tonalRamp": ["#182232", "#314159", "#556885", "#8093b0", "#abb9cf", "#d4deec", "#f4f7fb", "#ffffff"]
+      },
+      "ink-header-muted": {
+        "role": "neutral",
+        "displayName": "Header Ink Muted",
+        "canonical": "#9eb0c9",
+        "tonalRamp": ["#182232", "#2c3b52", "#475c7a", "#687f9f", "#879cb9", "#9eb0c9", "#c8d5e7", "#eef3f9"]
+      },
+      "signal-ochre": {
+        "role": "primary",
+        "displayName": "Signal Ochre",
+        "canonical": "#e29524",
+        "tonalRamp": ["#1d170c", "#3e2c11", "#5e4419", "#945204", "#d98218", "#e29524", "#f5bd63", "#fff8eb"]
+      },
+      "ochre-ink": {
+        "role": "primary",
+        "displayName": "Ochre Ink",
+        "canonical": "#170f00",
+        "tonalRamp": ["#0c0800", "#170f00", "#2f1f04", "#54380a", "#855a14", "#bd8322", "#e8b354", "#fff4dc"]
+      },
+      "ochre-text": {
+        "role": "primary",
+        "displayName": "Ochre Text",
+        "canonical": "#f5bd63",
+        "tonalRamp": ["#261905", "#4c320b", "#784e10", "#ad7016", "#d99223", "#eba336", "#f5bd63", "#fff4df"]
+      },
+      "ochre-surface": {
+        "role": "primary",
+        "displayName": "Ochre Surface",
+        "canonical": "#1d170c",
+        "tonalRamp": ["#120e07", "#1d170c", "#332612", "#523d1b", "#7c5c28", "#b2873e", "#dfc086", "#fff8eb"]
+      },
+      "ochre-border": {
+        "role": "primary",
+        "displayName": "Ochre Border",
+        "canonical": "#5e4419",
+        "tonalRamp": ["#1d170c", "#382910", "#5e4419", "#876224", "#b58532", "#d9a954", "#ebd09c", "#fff8eb"]
+      },
+      "signal-emerald": {
+        "role": "secondary",
+        "displayName": "Signal Emerald",
+        "canonical": "#2da46e",
+        "tonalRamp": ["#0f1d16", "#163426", "#224f3a", "#1c8253", "#2da46e", "#52c48e", "#6ee0a8", "#eef8f2"]
+      },
+      "emerald-text": {
+        "role": "secondary",
+        "displayName": "Emerald Text",
+        "canonical": "#6ee0a8",
+        "tonalRamp": ["#0c2117", "#153d2b", "#1e6142", "#288a5d", "#3db57e", "#6ee0a8", "#a8f0cc", "#eef8f2"]
+      },
+      "emerald-surface": {
+        "role": "secondary",
+        "displayName": "Emerald Surface",
+        "canonical": "#0f1d16",
+        "tonalRamp": ["#08110d", "#0f1d16", "#183326", "#244f3b", "#377357", "#5ca180", "#9fd1b8", "#eef8f2"]
+      },
+      "emerald-border": {
+        "role": "secondary",
+        "displayName": "Emerald Border",
+        "canonical": "#224f3a",
+        "tonalRamp": ["#0f1d16", "#183628", "#224f3a", "#2f6e50", "#43946d", "#6bbe96", "#a8dfc4", "#eef8f2"]
+      },
+      "signal-blue": {
+        "role": "secondary",
+        "displayName": "Signal Blue",
+        "canonical": "#46a0e6",
+        "tonalRamp": ["#0f1e2e", "#17324d", "#244a6e", "#1a6cb0", "#46a0e6", "#7cc4fa", "#b3ddfc", "#edf5fc"]
+      },
+      "blue-text": {
+        "role": "secondary",
+        "displayName": "Blue Text",
+        "canonical": "#7cc4fa",
+        "tonalRamp": ["#0e1f30", "#193957", "#245685", "#3279ba", "#4da2ea", "#7cc4fa", "#b6dffd", "#edf5fc"]
+      },
+      "blue-surface": {
+        "role": "secondary",
+        "displayName": "Blue Surface",
+        "canonical": "#0f1e2e",
+        "tonalRamp": ["#09121c", "#0f1e2e", "#183049", "#244a6e", "#386b9c", "#6297c9", "#a5c9e8", "#edf5fc"]
+      },
+      "blue-border": {
+        "role": "secondary",
+        "displayName": "Blue Border",
+        "canonical": "#244a6e",
+        "tonalRamp": ["#0f1e2e", "#18324c", "#244a6e", "#336799", "#4a89c4", "#79b0e2", "#b3d5f2", "#edf5fc"]
+      },
+      "signal-vermilion": {
+        "role": "secondary",
+        "displayName": "Signal Vermilion",
+        "canonical": "#e5534b",
+        "tonalRamp": ["#241214", "#451b1c", "#6b2929", "#a6221a", "#c93830", "#e5534b", "#ff948d", "#fdf1f0"]
+      },
+      "vermilion-fill": {
+        "role": "secondary",
+        "displayName": "Vermilion Fill",
+        "canonical": "#c93830",
+        "tonalRamp": ["#260b0a", "#4a1513", "#78201c", "#a32b25", "#c93830", "#e05a52", "#f59b95", "#fdf1f0"]
+      },
+      "vermilion-text": {
+        "role": "secondary",
+        "displayName": "Vermilion Text",
+        "canonical": "#ff948d",
+        "tonalRamp": ["#33100e", "#5e1e1a", "#8f2f29", "#c2433b", "#eb665e", "#ff948d", "#ffc2be", "#fdf1f0"]
+      },
+      "vermilion-surface": {
+        "role": "secondary",
+        "displayName": "Vermilion Surface",
+        "canonical": "#241214",
+        "tonalRamp": ["#160b0c", "#241214", "#3d1d20", "#612c30", "#8c4247", "#bd6d72", "#e6aba7", "#fdf1f0"]
+      },
+      "vermilion-border": {
+        "role": "secondary",
+        "displayName": "Vermilion Border",
+        "canonical": "#6b2929",
+        "tonalRamp": ["#241214", "#441c1d", "#6b2929", "#943a3a", "#bd5555", "#db8181", "#f0b9b9", "#fdf1f0"]
+      },
+      "daylight-ground": {
+        "role": "neutral",
+        "displayName": "Daylight Ground",
+        "canonical": "#f4f6f4",
+        "tonalRamp": ["#3c453e", "#606c62", "#88958a", "#b0bcb2", "#ced7cf", "#e3e8e4", "#f4f6f4", "#ffffff"]
+      },
+      "daylight-navy": {
+        "role": "neutral",
+        "displayName": "Daylight Railway Navy",
+        "canonical": "#182232",
+        "tonalRamp": ["#0d131d", "#111926", "#182232", "#26354d", "#3d5375", "#657ea3", "#a2b5cf", "#e6edf6"]
+      },
+      "daylight-border": {
+        "role": "neutral",
+        "displayName": "Daylight Border",
+        "canonical": "#d5dce5",
+        "tonalRamp": ["#2d3847", "#4d5c70", "#738399", "#9aa9bd", "#bcc7d6", "#d5dce5", "#eaeff4", "#f7f9fb"]
+      },
+      "daylight-ink": {
+        "role": "neutral",
+        "displayName": "Daylight Ink",
+        "canonical": "#14181f",
+        "tonalRamp": ["#0a0c10", "#14181f", "#272f3d", "#414e63", "#64748c", "#92a0b5", "#c8d0dc", "#f1f4f8"]
+      },
+      "daylight-ink-secondary": {
+        "role": "neutral",
+        "displayName": "Daylight Ink Secondary",
+        "canonical": "#465366",
+        "tonalRamp": ["#161b22", "#2a3340", "#465366", "#64748a", "#8897ad", "#b1bdce", "#d9e0ea", "#f4f7fa"]
+      },
+      "daylight-ochre": {
+        "role": "primary",
+        "displayName": "Daylight Signal Ochre",
+        "canonical": "#d98218",
+        "tonalRamp": ["#2b1904", "#543208", "#7d490a", "#945204", "#c47311", "#d98218", "#f0b462", "#fff8eb"]
+      },
+      "daylight-emerald": {
+        "role": "secondary",
+        "displayName": "Daylight Signal Emerald",
+        "canonical": "#1c8253",
+        "tonalRamp": ["#0a291b", "#11472e", "#156942", "#1c8253", "#32a36f", "#64c497", "#9fd1b8", "#eef8f2"]
+      },
+      "daylight-blue": {
+        "role": "secondary",
+        "displayName": "Daylight Signal Blue",
+        "canonical": "#1a6cb0",
+        "tonalRamp": ["#09243d", "#0c3d66", "#0f568f", "#1a6cb0", "#3a89cc", "#6eb0e6", "#a5c9e8", "#edf5fc"]
+      },
+      "daylight-vermilion": {
+        "role": "secondary",
+        "displayName": "Daylight Signal Vermilion",
+        "canonical": "#cc3329",
+        "tonalRamp": ["#330c0a", "#611712", "#8c2019", "#a6221a", "#c42c22", "#cc3329", "#e67c75", "#fdf1f0"]
+      }
+    },
+    "typographyMeta": {
+      "fontStrategy": "Zero external runtime font requests; relies exclusively on OS neo-grotesque sans and technical monospace stacks so strict local CSP headers never block typography or trigger FOUT.",
+      "tabularNumeralsClass": ".num",
+      "stacks": {
+        "sans": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+        "mono": "ui-monospace, \"SF Mono\", \"Cascadia Mono\", Menlo, Consolas, monospace"
+      },
+      "roles": {
+        "headline": {
+          "usage": "Command bar brand title, panel headers, drawer headers",
+          "fontWeight": 800,
+          "fontSize": "17px",
+          "lineHeight": "22px",
+          "letterSpacing": "-0.015em"
+        },
+        "title": {
+          "usage": "Decision gate headlines, active issue titles, PR ledger rows",
+          "fontWeight": 700,
+          "fontSize": "15.5px",
+          "lineHeight": "1.35",
+          "letterSpacing": "0em"
+        },
+        "body": {
+          "usage": "Default UI prose, issue sub-summaries, drawer detail blocks",
+          "fontWeight": 400,
+          "fontSize": "14px",
+          "lineHeight": "1.45",
+          "letterSpacing": "0em"
+        },
+        "label": {
+          "usage": "Buttons, navigation tabs, telemetry items, form labels",
+          "fontWeight": 600,
+          "fontSize": "13px",
+          "lineHeight": "1.3",
+          "letterSpacing": "0em"
+        },
+        "code": {
+          "usage": "Issue and PR ref badges, uppercase status pills, Perlschnur station codes, raw payloads",
+          "fontWeight": 700,
+          "fontSize": "12px",
+          "lineHeight": "1.4",
+          "letterSpacing": "0.02em"
+        }
+      }
+    },
+    "shadows": {
+      "groundedPolicy": "Zero box-shadows on grounded panels, cards, and rows; hierarchy comes from tonal steps and 1px/2px borders.",
+      "popoverDark": "0 12px 32px rgba(0, 0, 0, 0.45)",
+      "popoverLight": "0 12px 28px rgba(15, 23, 42, 0.14)",
+      "backdropDrawer": "rgba(6, 9, 14, 0.45)",
+      "backdropDialog": "rgba(6, 9, 14, 0.55)"
+    },
+    "motion": {
+      "easing": {
+        "easeOut": "cubic-bezier(0.16, 1, 0.3, 1)",
+        "linear": "linear"
+      },
+      "durations": {
+        "undoTick": "100ms",
+        "controlHover": "140ms",
+        "navAndStation": "150ms",
+        "backdropFade": "180ms",
+        "drawerSlide": "200ms",
+        "toastAutoHide": "3200ms",
+        "undoCountdownWindow": "5000ms"
+      },
+      "reducedMotion": "@media (prefers-reduced-motion: reduce) forces transition: none !important and animation: none !important across all elements and pseudo-elements."
+    },
+    "breakpoints": {
+      "workspaceMaxWidth": "1640px",
+      "telemetryWrap": "1180px",
+      "singleColumn": "1120px",
+      "tabletCompact": "820px",
+      "mobilePhone": "640px",
+      "mobileTargetWidth": "390px"
+    }
+  },
+  "components": [
+    {
+      "id": "button-primary",
+      "name": "Primary Button",
+      "description": "Ochre primary commitment CTA reserved for Launch and primary gate approval actions.",
+      "css": ".ds-btn-primary {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 6px;\n  height: 32px;\n  padding: 0 13px;\n  border: 1px solid #e29524;\n  border-radius: 4px;\n  background: #e29524;\n  color: #170f00;\n  font: 700 13px/1.3 system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif;\n  white-space: nowrap;\n  cursor: pointer;\n  transition: background 140ms cubic-bezier(0.16, 1, 0.3, 1), border-color 140ms cubic-bezier(0.16, 1, 0.3, 1);\n}\n.ds-btn-primary:hover {\n  background: #eba336;\n  border-color: #eba336;\n}\n.ds-btn-primary:focus-visible {\n  outline: 2px solid #46a0e6;\n  outline-offset: 2px;\n}\n.ds-btn-primary:disabled {\n  opacity: 0.48;\n  cursor: default;\n}\n.ds-btn-ico {\n  width: 15px;\n  height: 15px;\n  flex: none;\n}",
+      "html": "<button class=\"ds-btn-primary\" type=\"button\">\n  <svg class=\"ds-btn-ico\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" aria-hidden=\"true\"><path d=\"M8 3v10M3 8h10\"/></svg>\n  <span>Launch</span>\n</button>"
+    },
+    {
+      "id": "button-secondary",
+      "name": "Secondary Button",
+      "description": "Grounded dark-slate button for standard workspace actions such as Ask, external links, and undo.",
+      "css": ".ds-btn-secondary {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 6px;\n  height: 32px;\n  padding: 0 13px;\n  border: 1px solid #4c6282;\n  border-radius: 4px;\n  background: #121822;\n  color: #eef2f7;\n  font: 600 13px/1.3 system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif;\n  white-space: nowrap;\n  cursor: pointer;\n  transition: background 140ms cubic-bezier(0.16, 1, 0.3, 1), border-color 140ms cubic-bezier(0.16, 1, 0.3, 1);\n}\n.ds-btn-secondary:hover {\n  background: #1b2434;\n  border-color: #8395ae;\n}\n.ds-btn-secondary:focus-visible {\n  outline: 2px solid #46a0e6;\n  outline-offset: 2px;\n}\n.ds-btn-ico {\n  width: 15px;\n  height: 15px;\n  flex: none;\n}",
+      "html": "<button class=\"ds-btn-secondary\" type=\"button\">\n  <svg class=\"ds-btn-ico\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M2.5 3.5h11v7.5h-6l-3 2.5V11h-2z\"/></svg>\n  <span>Ask</span>\n</button>"
+    },
+    {
+      "id": "button-danger",
+      "name": "Danger Button",
+      "description": "High-contrast vermilion action button reserved for blocker escalation resolutions and destructive operations.",
+      "css": ".ds-btn-danger {\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  gap: 6px;\n  height: 32px;\n  padding: 0 13px;\n  border: 1px solid #c93830;\n  border-radius: 4px;\n  background: #c93830;\n  color: #ffffff;\n  font: 700 13px/1.3 system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif;\n  white-space: nowrap;\n  cursor: pointer;\n  transition: background 140ms cubic-bezier(0.16, 1, 0.3, 1), border-color 140ms cubic-bezier(0.16, 1, 0.3, 1);\n}\n.ds-btn-danger:hover {\n  background: #b52f28;\n  border-color: #b52f28;\n}\n.ds-btn-danger:focus-visible {\n  outline: 2px solid #46a0e6;\n  outline-offset: 2px;\n}\n.ds-btn-ico {\n  width: 15px;\n  height: 15px;\n  flex: none;\n}",
+      "html": "<button class=\"ds-btn-danger\" type=\"button\">\n  <svg class=\"ds-btn-ico\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M8 2 14.5 13.5H1.5z\"/><path d=\"M8 6.2v3.3M8 11.4v.2\"/></svg>\n  <span>Widen oracle</span>\n</button>"
+    },
+    {
+      "id": "status-pill",
+      "name": "Status Pill",
+      "description": "Triple-encoded uppercase monospace pill pairing semantic hue, inline geometric icon, and explicit state label.",
+      "css": ".ds-pill-row {\n  display: inline-flex;\n  flex-wrap: wrap;\n  gap: 8px;\n}\n.ds-pill {\n  display: inline-flex;\n  align-items: center;\n  gap: 5px;\n  padding: 2px 8px;\n  border-radius: 3px;\n  border: 1px solid transparent;\n  font: 700 11px/1.4 ui-monospace, \"SF Mono\", \"Cascadia Mono\", Menlo, Consolas, monospace;\n  letter-spacing: 0.02em;\n  text-transform: uppercase;\n  white-space: nowrap;\n  transition: filter 140ms cubic-bezier(0.16, 1, 0.3, 1);\n}\n.ds-pill:hover {\n  filter: brightness(1.12);\n}\n.ds-pill:focus-visible {\n  outline: 2px solid #46a0e6;\n  outline-offset: 2px;\n}\n.ds-pill-ico {\n  width: 13px;\n  height: 13px;\n  flex: none;\n}\n.ds-pill-gate { background: #1d170c; color: #f5bd63; border-color: #5e4419; }\n.ds-pill-ready { background: #0f1d16; color: #6ee0a8; border-color: #224f3a; }\n.ds-pill-review { background: #0f1e2e; color: #7cc4fa; border-color: #244a6e; }\n.ds-pill-blocked { background: #241214; color: #ff948d; border-color: #6b2929; }",
+      "html": "<div class=\"ds-pill-row\">\n  <span class=\"ds-pill ds-pill-gate\" tabindex=\"0\">\n    <svg class=\"ds-pill-ico\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M8 1.8 14.2 8 8 14.2 1.8 8z\"/></svg>\n    Merge gate\n  </span>\n  <span class=\"ds-pill ds-pill-ready\" tabindex=\"0\">\n    <svg class=\"ds-pill-ico\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M3 8.5 6.4 12 13 4.5\"/></svg>\n    Ready\n  </span>\n  <span class=\"ds-pill ds-pill-review\" tabindex=\"0\">\n    <svg class=\"ds-pill-ico\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"8\" cy=\"8\" r=\"5.8\"/><path d=\"M8 4.8V8l2.2 1.5\"/></svg>\n    In review\n  </span>\n  <span class=\"ds-pill ds-pill-blocked\" tabindex=\"0\">\n    <svg class=\"ds-pill-ico\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M8 2 14.5 13.5H1.5z\"/><path d=\"M8 6.2v3.3M8 11.4v.2\"/></svg>\n    CI failing\n  </span>\n</div>"
+    },
+    {
+      "id": "input-search",
+      "name": "Search Input",
+      "description": "Compact 30px telemetry search input with magnifier icon, ochre caret, slash-key hint, and clear trigger.",
+      "css": ".ds-search {\n  position: relative;\n  width: 220px;\n  max-width: 100%;\n}\n.ds-search-ico {\n  position: absolute;\n  left: 10px;\n  top: 50%;\n  transform: translateY(-50%);\n  width: 15px;\n  height: 15px;\n  color: #8395ae;\n  pointer-events: none;\n}\n.ds-search-input {\n  width: 100%;\n  height: 30px;\n  padding: 0 28px 0 32px;\n  border: 1px solid #4c6282;\n  border-radius: 4px;\n  background: #121822;\n  color: #eef2f7;\n  caret-color: #e29524;\n  font: 400 12.5px/1.4 system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif;\n  transition: border-color 140ms cubic-bezier(0.16, 1, 0.3, 1), background 140ms cubic-bezier(0.16, 1, 0.3, 1);\n}\n.ds-search-input::placeholder {\n  color: #8395ae;\n}\n.ds-search-input:hover {\n  border-color: #8395ae;\n}\n.ds-search-input:focus-visible {\n  outline: 2px solid #46a0e6;\n  outline-offset: 2px;\n}\n.ds-search-clear {\n  position: absolute;\n  right: 4px;\n  top: 50%;\n  transform: translateY(-50%);\n  width: 22px;\n  height: 22px;\n  border: 0;\n  border-radius: 3px;\n  background: transparent;\n  color: #8395ae;\n  display: grid;\n  place-items: center;\n  cursor: pointer;\n}\n.ds-search-clear:hover {\n  color: #eef2f7;\n  background: #1b2434;\n}\n.ds-search-clear:focus-visible {\n  outline: 2px solid #46a0e6;\n  outline-offset: 1px;\n}",
+      "html": "<div class=\"ds-search\">\n  <svg class=\"ds-search-ico\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" aria-hidden=\"true\"><circle cx=\"7\" cy=\"7\" r=\"4.5\"/><path d=\"M10.5 10.5 14 14\"/></svg>\n  <input class=\"ds-search-input\" type=\"search\" placeholder=\"Filter issues, PRs... (/)\" aria-label=\"Filter board\">\n  <button class=\"ds-search-clear\" type=\"button\" aria-label=\"Clear search\">\n    <svg width=\"13\" height=\"13\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" aria-hidden=\"true\"><path d=\"M4 4l8 8M12 4l-8 8\"/></svg>\n  </button>\n</div>"
+    },
+    {
+      "id": "pr-route-track",
+      "name": "Swiss Railway PR Route Track",
+      "description": "Connected horizontal Perlschnur station line visualizing multi-PR progress with clickable PR inspection stops.",
+      "css": ".ds-route-wrap {\n  padding: 10px 12px 9px;\n  border-radius: 4px;\n  background: #161e2b;\n  border: 1px solid #233044;\n  display: grid;\n  gap: 8px;\n  font-family: system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif;\n}\n.ds-route-head {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 10px;\n  font-size: 12px;\n  color: #a3b3c9;\n}\n.ds-route-title {\n  display: inline-flex;\n  align-items: center;\n  gap: 6px;\n}\n.ds-route-ico {\n  width: 13px;\n  height: 13px;\n  flex: none;\n  color: #8395ae;\n}\n.ds-route-head strong {\n  color: #eef2f7;\n  font-weight: 700;\n}\n.ds-route-pct {\n  font-family: ui-monospace, \"SF Mono\", \"Cascadia Mono\", Menlo, Consolas, monospace;\n  font-variant-numeric: tabular-nums;\n}\n.ds-route-track {\n  display: flex;\n  align-items: flex-start;\n  width: 100%;\n  padding: 4px 0 2px;\n}\n.ds-station {\n  position: relative;\n  flex: 1 1 0;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  align-items: center;\n  gap: 5px;\n  padding: 2px 2px 4px;\n  border: 0;\n  border-radius: 3px;\n  background: transparent;\n  color: inherit;\n  cursor: pointer;\n  transition: background 140ms cubic-bezier(0.16, 1, 0.3, 1);\n}\n.ds-station:not(:first-child)::before,\n.ds-station:not(:last-child)::after {\n  content: \"\";\n  position: absolute;\n  top: 9px;\n  height: 2px;\n  z-index: 1;\n  background: #2c3b52;\n}\n.ds-station:not(:first-child)::before { left: 0; right: 50%; }\n.ds-station:not(:last-child)::after { left: 50%; right: 0; }\n.ds-station[data-seg-l=\"merged\"]::before { background: #2da46e; }\n.ds-station[data-seg-r=\"merged\"]::after { background: #2da46e; }\n.ds-station:hover { background: #1b2434; }\n.ds-station:focus-visible { outline: 2px solid #46a0e6; outline-offset: 2px; }\n.ds-station.ds-is-remaining { cursor: default; }\n.ds-station.ds-is-remaining:hover { background: transparent; }\n.ds-st-dot {\n  width: 14px;\n  height: 14px;\n  border-radius: 50%;\n  position: relative;\n  z-index: 2;\n  border: 2px solid #4c6282;\n  background: #161e2b;\n  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1);\n}\n.ds-station:not(.ds-is-remaining):hover .ds-st-dot { transform: scale(1.16); }\n.ds-st-dot-merged { background: #2da46e; border-color: #2da46e; }\n.ds-st-dot-gate { width: 16px; height: 16px; margin: -1px 0; border-width: 3.5px; border-color: #e29524; }\n.ds-st-dot-remaining { border-style: dashed; border-color: #8395ae; }\n.ds-st-code {\n  font: 700 11px/1.3 ui-monospace, \"SF Mono\", \"Cascadia Mono\", Menlo, Consolas, monospace;\n  color: #a3b3c9;\n}\n.ds-station.ds-is-gate .ds-st-code { color: #f5bd63; }\n.ds-st-state { font-size: 10.5px; color: #8395ae; }\n.ds-station.ds-is-gate .ds-st-state { color: #d7b785; font-weight: 600; }",
+      "html": "<div class=\"ds-route-wrap\">\n  <div class=\"ds-route-head\">\n    <span class=\"ds-route-title\"><svg class=\"ds-route-ico\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"4.5\" cy=\"3.5\" r=\"1.8\"/><circle cx=\"4.5\" cy=\"12.5\" r=\"1.8\"/><circle cx=\"11.5\" cy=\"12.5\" r=\"1.8\"/><path d=\"M4.5 5.3v5.4M11.5 10.7V7.4c0-1.2-.8-2-2-2H6.5\"/></svg><span><strong>Step 4 of 10</strong> - 3 merged - select a stop to inspect PR</span></span>\n    <span class=\"ds-route-pct\">30% landed</span>\n  </div>\n  <div class=\"ds-route-track\" role=\"group\" aria-label=\"Pull request progress for t3-codemode#254\">\n    <button type=\"button\" class=\"ds-station\" data-seg-r=\"merged\">\n      <span class=\"ds-st-dot ds-st-dot-merged\"></span>\n      <span class=\"ds-st-code\">#265</span>\n      <span class=\"ds-st-state\">merged</span>\n    </button>\n    <button type=\"button\" class=\"ds-station\" data-seg-l=\"merged\" data-seg-r=\"merged\">\n      <span class=\"ds-st-dot ds-st-dot-merged\"></span>\n      <span class=\"ds-st-code\">#272</span>\n      <span class=\"ds-st-state\">merged</span>\n    </button>\n    <button type=\"button\" class=\"ds-station\" data-seg-l=\"merged\">\n      <span class=\"ds-st-dot ds-st-dot-merged\"></span>\n      <span class=\"ds-st-code\">#278</span>\n      <span class=\"ds-st-state\">merged</span>\n    </button>\n    <button type=\"button\" class=\"ds-station ds-is-gate\">\n      <span class=\"ds-st-dot ds-st-dot-gate\"></span>\n      <span class=\"ds-st-code\">#283</span>\n      <span class=\"ds-st-state\">merge gate</span>\n    </button>\n    <span class=\"ds-station ds-is-remaining\">\n      <span class=\"ds-st-dot ds-st-dot-remaining\"></span>\n      <span class=\"ds-st-code\">5..10</span>\n      <span class=\"ds-st-state\">6 left</span>\n    </span>\n  </div>\n</div>"
+    },
+    {
+      "id": "decision-gate-card",
+      "name": "Decision Gate Card",
+      "description": "Full four-sided ochre interrupt card with diamond badge, human headline, one-click approval CTA, quiet secondary actions, and 5-second undo bar track.",
+      "css": ".ds-gate {\n  display: grid;\n  gap: 10px;\n  padding: 14px 18px;\n  border-radius: 4px;\n  background: #1d170c;\n  border: 1px solid #5e4419;\n  font-family: system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif;\n}\n.ds-gate-top {\n  display: flex;\n  align-items: flex-start;\n  justify-content: space-between;\n  gap: 18px;\n  flex-wrap: wrap;\n}\n.ds-gate-lead {\n  display: flex;\n  align-items: flex-start;\n  gap: 12px;\n  min-width: 0;\n  flex: 1 1 360px;\n}\n.ds-gate-icon {\n  width: 28px;\n  height: 28px;\n  border-radius: 4px;\n  flex: none;\n  display: grid;\n  place-items: center;\n  background: #e29524;\n  color: #170f00;\n}\n.ds-gate-copy { display: grid; gap: 4px; min-width: 0; }\n.ds-gate-title { font-size: 15.5px; line-height: 1.35; font-weight: 700; color: #eef2f7; }\n.ds-gate-meta {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 4px 14px;\n  align-items: baseline;\n  font-size: 13px;\n  color: #d7b785;\n}\n.ds-gate-kind {\n  font: 700 11px/1.3 ui-monospace, \"SF Mono\", \"Cascadia Mono\", Menlo, Consolas, monospace;\n  text-transform: uppercase;\n  letter-spacing: 0.04em;\n  color: #f5bd63;\n}\n.ds-gate-link {\n  display: inline-flex;\n  align-items: center;\n  gap: 4px;\n  color: #7cc4fa;\n  text-decoration: none;\n}\n.ds-gate-link:hover, .ds-gate-link:focus-visible { text-decoration: underline; outline-color: #46a0e6; }\n.ds-gate-acts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }\n.ds-gate-cta {\n  height: 32px;\n  padding: 0 13px;\n  border: 1px solid #e29524;\n  border-radius: 4px;\n  background: #e29524;\n  color: #170f00;\n  font: 700 13px/1.3 inherit;\n  cursor: pointer;\n  transition: background 140ms cubic-bezier(0.16, 1, 0.3, 1);\n}\n.ds-gate-cta:hover { background: #eba336; border-color: #eba336; }\n.ds-gate-cta:focus-visible { outline: 2px solid #46a0e6; outline-offset: 2px; }\n.ds-gate-quiet {\n  height: 28px;\n  padding: 0 9px;\n  border: 1px solid transparent;\n  border-radius: 4px;\n  background: transparent;\n  color: #a3b3c9;\n  font: 600 12px/1.3 inherit;\n  cursor: pointer;\n}\n.ds-gate-quiet:hover { color: #eef2f7; background: #1b2434; }\n.ds-gate-quiet:focus-visible { outline: 2px solid #46a0e6; outline-offset: 2px; }\n.ds-undo-track { height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }\n.ds-undo-fill { height: 100%; width: 64%; background: #e29524; transition: width 100ms linear; }",
+      "html": "<article class=\"ds-gate\">\n  <div class=\"ds-gate-top\">\n    <div class=\"ds-gate-lead\">\n      <span class=\"ds-gate-icon\" aria-hidden=\"true\">\n        <svg width=\"15\" height=\"15\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linejoin=\"round\"><path d=\"M8 1.8 14.2 8 8 14.2 1.8 8z\"/></svg>\n      </span>\n      <div class=\"ds-gate-copy\">\n        <span class=\"ds-gate-title\">Merge PR #283: feat: sync parsed links to GitHub from board</span>\n        <div class=\"ds-gate-meta\">\n          <span class=\"ds-gate-kind\">Waiting on you</span>\n          <span><strong>t3-codemode#254</strong> - automatic dependency DAG</span>\n          <a class=\"ds-gate-link\" href=\"#pr-283\">Review PR #283 <svg width=\"13\" height=\"13\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M9.5 2.5h4v4M13.5 2.5 7 9M11.5 9.5v4H2.5v-9h4\"/></svg></a>\n        </div>\n      </div>\n    </div>\n    <div class=\"ds-gate-acts\">\n      <button class=\"ds-gate-cta\" type=\"button\">Merge PR #283</button>\n      <button class=\"ds-gate-quiet\" type=\"button\">Reply</button>\n      <button class=\"ds-gate-quiet\" type=\"button\">Details</button>\n      <button class=\"ds-gate-quiet\" type=\"button\">Dismiss</button>\n    </div>\n  </div>\n  <div class=\"ds-undo-track\" aria-hidden=\"true\"><div class=\"ds-undo-fill\"></div></div>\n</article>"
+    },
+    {
+      "id": "nav-tab",
+      "name": "Command Bar Nav Tab",
+      "description": "Railway Navy sticky header navigation tablist with 3px ochre active indicator and canonical tabular count badges.",
+      "css": ".ds-nav-bar {\n  display: flex;\n  align-items: center;\n  gap: 16px;\n  min-height: 56px;\n  padding: 0 20px;\n  background: #131c2b;\n  border-bottom: 1px solid #24334a;\n  font-family: system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif;\n}\n.ds-brand-mark {\n  width: 26px;\n  height: 26px;\n  border-radius: 3px;\n  background: rgba(255, 255, 255, 0.08);\n  border: 1px solid rgba(255, 255, 255, 0.22);\n  color: #f4f7fb;\n  display: grid;\n  place-items: center;\n}\n.ds-nav-list { display: flex; align-items: stretch; gap: 2px; align-self: stretch; }\n.ds-nav-tab {\n  display: inline-flex;\n  align-items: center;\n  gap: 8px;\n  padding: 0 14px;\n  border: 0;\n  border-top: 3px solid transparent;\n  border-bottom: 3px solid transparent;\n  background: transparent;\n  color: #9eb0c9;\n  font-size: 13.5px;\n  font-weight: 600;\n  cursor: pointer;\n  transition: color 150ms cubic-bezier(0.16, 1, 0.3, 1), border-color 150ms cubic-bezier(0.16, 1, 0.3, 1), background 150ms cubic-bezier(0.16, 1, 0.3, 1);\n}\n.ds-nav-tab:hover {\n  color: #f4f7fb;\n  background: rgba(255, 255, 255, 0.05);\n}\n.ds-nav-tab:focus-visible {\n  outline: 2px solid #46a0e6;\n  outline-offset: -2px;\n}\n.ds-nav-tab[aria-selected=\"true\"] {\n  color: #f4f7fb;\n  border-bottom-color: #e29524;\n}\n.ds-nav-count {\n  font-size: 11px;\n  line-height: 16px;\n  font-weight: 700;\n  font-variant-numeric: tabular-nums;\n  padding: 1px 7px;\n  border-radius: 3px;\n  background: rgba(255, 255, 255, 0.11);\n  color: #dce5f2;\n}\n.ds-nav-count-warn {\n  background: #e29524;\n  color: #170f00;\n}",
+      "html": "<div class=\"ds-nav-bar\">\n  <span class=\"ds-brand-mark\" aria-hidden=\"true\">\n    <svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.9\" stroke-linecap=\"round\"><path d=\"M2 5h12M2 11h12M5 2v12\"/><path d=\"M11 5v6\" stroke=\"#e29524\" stroke-width=\"2.2\"/></svg>\n  </span>\n  <nav class=\"ds-nav-list\" role=\"tablist\" aria-label=\"Board views\">\n    <button class=\"ds-nav-tab\" role=\"tab\" type=\"button\" aria-selected=\"true\">\n      <span>Dispatch</span>\n      <span class=\"ds-nav-count ds-nav-count-warn\">1 waiting</span>\n    </button>\n    <button class=\"ds-nav-tab\" role=\"tab\" type=\"button\" aria-selected=\"false\">\n      <span>New Issues</span>\n      <span class=\"ds-nav-count\">14</span>\n    </button>\n  </nav>\n</div>"
+    }
+  ],
+  "narrative": {
+    "northStar": "Nocturnal Swiss Railway Dispatch",
+    "overview": "t3 board is the live operational control surface for autonomous ticket and pull request workflows in T3 Code (t3cm). Rather than burying live engineering state inside multi-column kanban boxes or generic chat feeds, the interface draws from nocturnal Swiss railway departure boards: high-contrast typography, rigid horizontal alignments, unambiguous signal colors, and instant scannability built for 3-to-15-second operational glances between coding sessions.\n\nEvery architectural surface follows a strict hierarchy of urgency. Waiting human decisions lead the canvas with full-border tinted frames and one-click resolution controls, then collapse into a quiet single-line all-clear strip when zero gates remain. Beneath the interrupt zone, human-readable active issues pair with connected horizontal Perlschnur station route lines on the left while an aligned PR readiness ledger tracks open, merge-gated, and recently landed pull requests on the right.\n\nThe system defaults to Nocturnal Station Slate for sustained low-glare readability alongside terminal and editor environments, paired with an Architectural Swiss Daylight light toggle that preserves the dark Railway Navy command bar as a constant navigational anchor. Built with zero external runtime dependencies - system sans and tabular monospace typography, inline drawn SVGs, and vanilla CSS custom properties - the interface runs cleanly under strict local CSP constraints across desktop monitors and 390px remote mobile check-ins.",
+    "keyCharacteristics": [
+      "Interrupt-first spatial hierarchy: waiting decision gates command the top of the workspace when present and collapse to a compact emerald confirmation bar when clear.",
+      "Human titles over opaque identifiers: issue numbers and PR badges anchor monospace metadata while real human-readable titles and multi-PR progress chains take primary visual weight.",
+      "Connected Swiss Perlschnur route tracks: every multi-PR ticket visualizes merged, active, gated, failing, and remaining pull requests as an interactive horizontal station line.",
+      "Zero-dependency architectural precision: crisp 3px and 4px corners, 2px structural panel header rules, flat tonal elevation, system neo-grotesque and tabular monospace type, and unified 16x16 inline SVG iconography.",
+      "Dual-theme operational parity: Nocturnal Station Slate default paired with an Architectural Swiss Daylight light mode and a comfortable/compact row density switch."
+    ],
+    "rules": [
+      {
+        "name": "The Ochre Interrupt Rule",
+        "section": "Colors",
+        "body": "Reserve Signal Ochre (#e29524 in dark mode, #d98218 in daylight mode) strictly for human-action interrupts and active operational focal points: waiting decision gate cards, primary approval and Launch buttons, active navigation tab underlines, warning count badges, and merge-gated station rings. Never spend ochre on decorative chrome, passive labels, or completed states."
+      },
+      {
+        "name": "The Full-Border Framing Rule",
+        "section": "Colors",
+        "body": "Frame waiting gate cards, blocker alerts, and the all-clear confirmation bar with complete four-sided 1px tinted borders (#5e4419 ochre, #6b2929 vermilion, #224f3a emerald) over deeply tinted surfaces. Never use thick one-sided left accent stripes, which break Swiss grid alignment and introduce visual noise."
+      },
+      {
+        "name": "The Triple-Encoded Status Rule",
+        "section": "Colors",
+        "body": "Express every operational state through three simultaneous cues: semantic hue, distinct geometric shape or icon (diamond for merge gates, warning triangle for blockers, check for ready/merged, play triangle for building workers, clock for review, and solid/ringed/dashed Perlschnur nodes), and explicit uppercase monospace wording. Never rely on color alone."
+      },
+      {
+        "name": "The Human-Title-First Rule",
+        "section": "Typography",
+        "body": "Always lead issue rows, PR ledger entries, decision headlines, and inspector headers with the cleaned human-readable title in bold 14.5px-17px sans-serif rather than raw thread handles or bare issue numbers. Monospace reference badges (#254, PR #283) serve as fixed-width scanning anchors beside the title, never as substitutes for it."
+      },
+      {
+        "name": "The Tabular-Telemetry Rule",
+        "section": "Typography",
+        "body": "Apply font-variant-numeric: tabular-nums (.num) to every live metric, slot fraction, progress percentage, timestamp, tab counter, and 5-second undo countdown so dynamic updates never jitter neighboring columns or shift layout widths."
+      }
+    ],
+    "dos": [
+      "Do lead with the Needs-you interrupt zone when any gate or blocker waits, and collapse it into the single-line emerald all-clear bar when the queue is empty.",
+      "Do pair every semantic color with a distinct icon or station geometry and an explicit text label so states stay legible under color-vision deficiency and across both themes.",
+      "Do run interactive gate resolutions through the DOM-stable 5-second Undo countdown bar so operators can catch accidental clicks before a reply dispatches to a live agent thread.",
+      "Do keep secondary surfaces - Launch/Ask composers, pool routing telemetry, detail inspection, and keyboard shortcuts - inside slide-over drawers, popovers, or dialogs rather than crowding the Dispatch canvas.",
+      "Do use tabular numerals (.num) for all timestamps, PR step ratios, utilization shares, and counters, and system fonts only so strict local CSP headers never block rendering.",
+      "Do honor prefers-reduced-motion: reduce by disabling CSS transitions and animations, and restore focus to the triggering element when closing drawers or dialogs."
+    ],
+    "donts": [
+      "Don't add thick one-sided left border bars to decision cards, issue rows, or alert strips - always use full four-sided 1px borders and tonal surfaces.",
+      "Don't use Signal Ochre for decorative highlights, passive tags, or completed items; preserve it exclusively for waiting decisions, active CTAs, and active tab focus.",
+      "Don't apply drop shadows to grounded cards, panels, or table rows; reserve --shadow-pop strictly for floating popovers, slide-over drawers, modal dialogs, and toasts.",
+      "Don't import remote web fonts, external icon libraries, or third-party CSS frameworks that break self-contained single-file serving and production CSP rules.",
+      "Don't duplicate counts or status chips across the top bar, telemetry strip, and panel headers - state each live metric once in its canonical location.",
+      "Don't trap mobile operators with desktop-only hover actions or cramped hit targets - reveal triage buttons permanently below 820px and expand primary controls to 36px-38px below 640px."
+    ]
+  }
+}
