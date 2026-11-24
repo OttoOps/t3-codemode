@@ -799,12 +799,13 @@ impl Wf {
         for c in cards.iter().filter(|c| c.kind == "gate") {
             let Some(ticket) = c.ticket.as_deref() else { continue };
             let ready_at = c.pr.as_ref().filter(|p| p.ready).and_then(|p| p.head.as_deref());
-            if let Some(base) = ready_at.filter(|b| {
+            let approved_ready = ready_at.is_some_and(|b| {
                 !crate::wf_pr::same_head(&o.head, b)
-                    && !wait
+                    && wait
                         .as_ref()
                         .is_some_and(|w| w.thread.as_deref() == Some(ticket) && crate::wf_pr::same_head(&w.head, b))
-            }) {
+            });
+            if let Some(base) = ready_at.filter(|b| !crate::wf_pr::same_head(&o.head, b) && !approved_ready) {
                 let note = format!(
                     "head moved to {} before the merge was approved at {}; the worker sends ready for it",
                     short(&o.head),
@@ -820,7 +821,9 @@ impl Wf {
                 pass.actions.push(format!("{} merge card dropped: head moved to {}", t.label(), short(&o.head)));
                 continue;
             }
-            if !self.store.link_get(ticket)?.is_some_and(|l| !l.closed && l.gate.as_deref() == Some("merge")) {
+            if !approved_ready
+                && !self.store.link_get(ticket)?.is_some_and(|l| !l.closed && l.gate.as_deref() == Some("merge"))
+            {
                 continue;
             }
             let Some(base) = c.pr.as_ref().and_then(|p| p.head.clone()) else {
