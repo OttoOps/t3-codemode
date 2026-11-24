@@ -261,7 +261,10 @@ writes. Then, with tracker `github-issues`:
    phases in order through symbolic local `id`s, and `track`, `priority` and
    `touches` filled in; `wf.fileIssues` writes the canonical `## Flow` block
    with real `#N` references and wires native GitHub sub-issue and blocked-by
-   links.
+   links. Replace each proposed sub-issue identifier in the split with the
+   created `#N` issue number before step 2 posts the split and before step 3
+   launches workers, and use that number for the PR's sub-issue reference, its
+   `issue` identity, and its branch name.
 2. Post the split as an issue comment through the Publishing section
    (`gh issue comment <n> -R <repo> --body-file <file>`).
 3. When the issue has no assignee: `gh issue edit <n> -R <repo>
