@@ -96,7 +96,7 @@ pub(crate) struct IssueFileInput<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum TargetPath {
+pub(crate) enum TargetPath {
     File(String),
     Dir(String),
 }
@@ -137,7 +137,7 @@ pub(crate) fn parse_open_pr(repo: &str, v: &Value) -> Option<OpenPr> {
     let mut files = Vec::new();
     for f in v["files"]["nodes"].as_array().into_iter().flatten() {
         if let Some(raw) = f["path"].as_str()
-            && let Some((norm, _)) = normalize_repo_path(raw)
+            && let Some(norm) = clean_exact_repo_path(raw)
             && !files.iter().any(|x| x == &norm)
         {
             files.push(norm);
@@ -180,7 +180,8 @@ pub(crate) fn parse_branch_issue(branch: &str) -> Option<u64> {
         {
             continue;
         }
-        let rest = if tail.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("issue-")) { &tail[6..] } else { tail };
+        let rest =
+            if tail.len() >= 6 && tail.as_bytes()[..6].eq_ignore_ascii_case(b"issue-") { &tail[6..] } else { tail };
         if rest.is_empty() || rest.starts_with('0') {
             continue;
         }
@@ -342,26 +343,27 @@ fn parse_single_issue_token(default_repo: &str, raw: &str) -> Option<(String, u6
 }
 
 fn match_pr_ref_keyword(s: &str) -> Option<usize> {
-    const KWS: &[&str] = &[
-        "references",
-        "resolves",
-        "resolved",
-        "resolve",
-        "closes",
-        "closed",
-        "close",
-        "fixes",
-        "fixed",
-        "fix",
-        "refs",
-        "ref",
+    const KWS: &[&[u8]] = &[
+        b"references",
+        b"resolves",
+        b"resolved",
+        b"resolve",
+        b"closes",
+        b"closed",
+        b"close",
+        b"fixes",
+        b"fixed",
+        b"fix",
+        b"refs",
+        b"ref",
     ];
+    let bytes = s.as_bytes();
     for kw in KWS {
-        if s.len() >= kw.len() && s[..kw.len()].eq_ignore_ascii_case(kw) {
-            let after = &s[kw.len()..];
-            if after.starts_with([' ', '\t', ':']) {
-                return Some(kw.len());
-            }
+        if bytes.len() >= kw.len()
+            && bytes[..kw.len()].eq_ignore_ascii_case(kw)
+            && bytes.get(kw.len()).is_some_and(|b| matches!(b, b' ' | b'\t' | b':'))
+        {
+            return Some(kw.len());
         }
     }
     None
@@ -411,9 +413,10 @@ pub(crate) fn extract_pr_body_issue_refs(default_repo: &str, body: &str) -> Vec<
                     break;
                 }
                 let rest = &clean[pos..];
-                if rest.len() >= 4
-                    && rest[..3].eq_ignore_ascii_case("and")
-                    && rest.as_bytes().get(3).is_some_and(|b| matches!(b, b' ' | b'\t'))
+                let rest_bytes = rest.as_bytes();
+                if rest_bytes.len() >= 4
+                    && rest_bytes[..3].eq_ignore_ascii_case(b"and")
+                    && matches!(rest_bytes[3], b' ' | b'\t')
                 {
                     pos += 3;
                     continue;
@@ -488,7 +491,26 @@ fn strip_line_suffix(s: &str) -> &str {
     s
 }
 
-/// Normalize a candidate repo-relative path. Returns `(normalized, ended_with_slash)`.
+/// Clean an exact repo-relative path from GitHub or Git (`-z`), preserving spaces and non-ASCII characters.
+pub(crate) fn clean_exact_repo_path(raw: &str) -> Option<String> {
+    if raw.is_empty() || raw.contains('\0') {
+        return None;
+    }
+    let owned = raw.replace('\\', "/");
+    let trimmed = owned.strip_prefix("./").unwrap_or(&owned).trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.starts_with('/') {
+        return None;
+    }
+    if trimmed.bytes().any(|b| b.is_ascii_control()) {
+        return None;
+    }
+    if trimmed.split('/').any(|p| p.is_empty() || p == "." || p == "..") {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Normalize a candidate repo-relative path from issue prose. Returns `(normalized, ended_with_slash)`.
 pub(crate) fn normalize_repo_path(raw: &str) -> Option<(String, bool)> {
     let mut s = raw.trim();
     loop {
@@ -697,6 +719,34 @@ async fn git_stdout(dir: &Path, args: &[&str]) -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+async fn git_stdout_stdin(dir: &Path, args: &[&str], input: &str) -> Option<String> {
+    let mut child = tokio::process::Command::from(crate::platform::git())
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take()?;
+    let bytes = input.as_bytes().to_vec();
+    let run = async move {
+        let write = async move {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(&bytes).await;
+            let _ = stdin.shutdown().await;
+        };
+        let (_, out) = tokio::join!(write, child.wait_with_output());
+        out
+    };
+    let out = tokio::time::timeout(GIT_TIMEOUT, run).await.ok()?.ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 async fn git_ok(dir: &Path, args: &[&str]) -> bool {
     git_output(dir, args).await.is_some_and(|o| o.status.success())
 }
@@ -740,7 +790,11 @@ async fn resolve_default_branch(dir: &Path, gh_default: Option<&str>) -> (Option
     (gh_default.map(String::from), None)
 }
 
-pub(crate) async fn inspect_local_repo(root: &Path, gh_default: Option<&str>) -> Option<LocalRepoInfo> {
+pub(crate) async fn inspect_local_repo(
+    root: &Path,
+    gh_default: Option<&str>,
+    with_tree: bool,
+) -> Option<LocalRepoInfo> {
     if !root.is_dir() {
         return None;
     }
@@ -754,7 +808,7 @@ pub(crate) async fn inspect_local_repo(root: &Path, gh_default: Option<&str>) ->
         .unwrap_or_default();
     let mut tree_files = HashSet::new();
     let mut tree_dirs = HashSet::new();
-    if let Some(ls) = git_stdout(root, &["ls-files", "-z"]).await {
+    if with_tree && let Some(ls) = git_stdout(root, &["ls-files", "-z"]).await {
         for entry in ls.split('\0') {
             if entry.is_empty() {
                 continue;
@@ -773,6 +827,23 @@ pub(crate) async fn inspect_local_repo(root: &Path, gh_default: Option<&str>) ->
     Some(LocalRepoInfo { root: root.to_path_buf(), default_branch, default_oid, worktrees, tree_files, tree_dirs })
 }
 
+pub(crate) async fn refresh_local_repo_worktrees(prev: &LocalRepoInfo, gh_default: Option<&str>) -> LocalRepoInfo {
+    let preferred = gh_default.or(prev.default_branch.as_deref());
+    let (default_branch, default_oid) = resolve_default_branch(&prev.root, preferred).await;
+    let worktrees = git_stdout(&prev.root, &["worktree", "list", "--porcelain"])
+        .await
+        .map(|s| parse_worktree_porcelain(&s))
+        .unwrap_or_else(|| prev.worktrees.clone());
+    LocalRepoInfo {
+        root: prev.root.clone(),
+        default_branch,
+        default_oid,
+        worktrees,
+        tree_files: prev.tree_files.clone(),
+        tree_dirs: prev.tree_dirs.clone(),
+    }
+}
+
 async fn resolve_branch_oid(root: &Path, branch: &str, fallback_oid: Option<&str>) -> Option<String> {
     if safe_git_ref(branch) {
         for cand in [format!("refs/heads/{branch}"), format!("refs/remotes/origin/{branch}")] {
@@ -787,15 +858,128 @@ async fn resolve_branch_oid(root: &Path, branch: &str, fallback_oid: Option<&str
     None
 }
 
-async fn is_ahead_of_default(root: &Path, head_oid: &str, default_oid: &str) -> bool {
-    if head_oid == default_oid || !safe_git_ref(head_oid) || !safe_git_ref(default_oid) {
-        return false;
+#[derive(Default)]
+struct AncestryGraph {
+    in_graph: HashSet<String>,
+    ahead: HashSet<String>,
+    strict_ancestors: HashMap<String, HashSet<String>>,
+}
+
+impl AncestryGraph {
+    fn is_ahead(&self, oid: &str) -> bool {
+        self.ahead.contains(&oid.to_ascii_lowercase())
     }
-    let Some(mb) = git_stdout(root, &["merge-base", head_oid, default_oid]).await else {
-        return false;
+
+    fn in_graph(&self, oid: &str) -> bool {
+        self.in_graph.contains(&oid.to_ascii_lowercase())
+    }
+
+    fn is_strict_ancestor(&self, ancestor_oid: &str, descendant_oid: &str) -> bool {
+        self.strict_ancestors
+            .get(&descendant_oid.to_ascii_lowercase())
+            .is_some_and(|ancs| ancs.contains(&ancestor_oid.to_ascii_lowercase()))
+    }
+}
+
+async fn compute_candidate_ancestry(root: &Path, default_oid: &str, candidate_oids: &[&str]) -> AncestryGraph {
+    if !safe_git_ref(default_oid) {
+        return AncestryGraph::default();
+    }
+    let default_low = default_oid.to_ascii_lowercase();
+    let mut unique_oids: Vec<String> = Vec::new();
+    let mut seen_oids: HashSet<String> = HashSet::new();
+    for oid in candidate_oids {
+        if !safe_git_ref(oid) {
+            continue;
+        }
+        let low = oid.to_ascii_lowercase();
+        if low != default_low && seen_oids.insert(low.clone()) {
+            unique_oids.push(low);
+        }
+    }
+    if unique_oids.is_empty() {
+        return AncestryGraph::default();
+    }
+    let mut stdin_buf = format!("^{default_low}\n");
+    for oid in &unique_oids {
+        stdin_buf.push_str(oid);
+        stdin_buf.push('\n');
+    }
+    let Some(stdout) = git_stdout_stdin(root, &["rev-list", "--parents", "--stdin"], &stdin_buf).await else {
+        return AncestryGraph::default();
     };
-    let mb = mb.trim();
-    !mb.is_empty() && !mb.eq_ignore_ascii_case(head_oid)
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut oids: Vec<String> = Vec::new();
+    let mut id_of: HashMap<String, usize> = HashMap::new();
+    for line in stdout.lines() {
+        let toks: Vec<String> = line.split_ascii_whitespace().map(str::to_ascii_lowercase).collect();
+        let Some(first) = toks.first() else { continue };
+        if id_of.contains_key(first) {
+            continue;
+        }
+        let idx = oids.len();
+        id_of.insert(first.clone(), idx);
+        oids.push(first.clone());
+        rows.push(toks);
+    }
+    let n = oids.len();
+    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut touches_default: Vec<bool> = vec![false; n];
+    for (u, toks) in rows.iter().enumerate() {
+        for parent in toks.iter().skip(1) {
+            if let Some(&v) = id_of.get(parent) {
+                edges[u].push(v);
+            } else {
+                touches_default[u] = true;
+            }
+        }
+    }
+    let mut is_cand = vec![false; n];
+    let mut cand_nodes = Vec::new();
+    for oid in &unique_oids {
+        if let Some(&u) = id_of.get(oid)
+            && !is_cand[u]
+        {
+            is_cand[u] = true;
+            cand_nodes.push(u);
+        }
+    }
+    let mut ahead = HashSet::new();
+    let mut strict_ancestors: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut visited = vec![false; n];
+    let mut touched = Vec::new();
+    let mut stack = Vec::new();
+    for u in cand_nodes {
+        visited[u] = true;
+        touched.push(u);
+        stack.push(u);
+        let mut has_base = touches_default[u];
+        let mut ancs = HashSet::new();
+        while let Some(cur) = stack.pop() {
+            for &nxt in &edges[cur] {
+                if !visited[nxt] {
+                    visited[nxt] = true;
+                    touched.push(nxt);
+                    has_base |= touches_default[nxt];
+                    if is_cand[nxt] {
+                        ancs.insert(oids[nxt].clone());
+                    }
+                    stack.push(nxt);
+                }
+            }
+        }
+        for idx in touched.drain(..) {
+            visited[idx] = false;
+        }
+        if has_base {
+            ahead.insert(oids[u].clone());
+        }
+        if !ancs.is_empty() {
+            strict_ancestors.insert(oids[u].clone(), ancs);
+        }
+    }
+    let in_graph = oids.into_iter().collect();
+    AncestryGraph { in_graph, ahead, strict_ancestors }
 }
 
 async fn is_strict_ancestor(root: &Path, ancestor_oid: &str, descendant_oid: &str) -> bool {
@@ -809,9 +993,9 @@ async fn is_strict_ancestor(root: &Path, ancestor_oid: &str, descendant_oid: &st
 async fn worktree_modified_files(wt: &Path, base_oid: Option<&str>) -> Vec<String> {
     let mut files = Vec::new();
     let mut seen = HashSet::new();
-    let mut add_lines = |raw: &str| {
-        for line in raw.lines() {
-            if let Some((norm, _)) = normalize_repo_path(line)
+    let mut add_nul = |raw: &str| {
+        for entry in raw.split('\0') {
+            if let Some(norm) = clean_exact_repo_path(entry)
                 && seen.insert(norm.clone())
             {
                 files.push(norm);
@@ -820,15 +1004,15 @@ async fn worktree_modified_files(wt: &Path, base_oid: Option<&str>) -> Vec<Strin
     };
     if let Some(base) = base_oid.filter(|b| safe_git_ref(b)) {
         let range = format!("{base}...HEAD");
-        if let Some(diff) = git_stdout(wt, &["diff", "--name-only", &range]).await {
-            add_lines(&diff);
+        if let Some(diff) = git_stdout(wt, &["diff", "--name-only", "-z", &range]).await {
+            add_nul(&diff);
         }
     }
-    if let Some(diff) = git_stdout(wt, &["diff", "--name-only", "HEAD"]).await {
-        add_lines(&diff);
+    if let Some(diff) = git_stdout(wt, &["diff", "--name-only", "-z", "HEAD"]).await {
+        add_nul(&diff);
     }
-    if let Some(untracked) = git_stdout(wt, &["ls-files", "--others", "--exclude-standard"]).await {
-        add_lines(&untracked);
+    if let Some(untracked) = git_stdout(wt, &["ls-files", "--others", "--exclude-standard", "-z"]).await {
+        add_nul(&untracked);
     }
     files
 }
@@ -899,11 +1083,163 @@ pub(crate) struct SourceControlInput<'a> {
     pub(crate) active_parts: &'a [ActivePartLink],
     pub(crate) active_branches: &'a [ActiveBranchLink],
     pub(crate) open_issues: &'a [IssueFileInput<'a>],
+    pub(crate) include_file_conflicts: bool,
 }
 
 pub(crate) struct SourceControlAnalysis {
     pub(crate) pr_stacks: Vec<PrStackEdge>,
     pub(crate) file_conflicts: Vec<FileConflictEdge>,
+    pub(crate) static_issue_paths: BTreeMap<String, BTreeSet<TargetPath>>,
+    pub(crate) analyzed_issues: HashSet<String>,
+}
+
+pub(crate) struct LiveConflictInput<'a> {
+    pub(crate) repo: &'a str,
+    pub(crate) candidate: u64,
+    pub(crate) running: &'a [u64],
+    pub(crate) aliases: &'a HashMap<String, String>,
+    pub(crate) parent_of: &'a BTreeMap<String, Vec<String>>,
+    pub(crate) closed_issues: &'a HashSet<String>,
+    pub(crate) repo_prs: Option<&'a RepoPrs>,
+    pub(crate) local: Option<&'a LocalRepoInfo>,
+    pub(crate) active_branches: &'a [ActiveBranchLink],
+    pub(crate) static_paths: &'a BTreeMap<String, BTreeSet<TargetPath>>,
+}
+
+struct CandidateResolveCtx<'a> {
+    aliases: &'a HashMap<String, String>,
+    parent_of: &'a BTreeMap<String, Vec<String>>,
+    closed_issues: &'a HashSet<String>,
+    active_branches: &'a [ActiveBranchLink],
+}
+
+pub(crate) fn extract_static_issue_paths(
+    touches: &[String],
+    body: &str,
+    local: Option<&LocalRepoInfo>,
+) -> BTreeSet<TargetPath> {
+    let verified_local = local.filter(|l| !l.tree_files.is_empty());
+    let mut paths = BTreeSet::new();
+
+    // Add Touches: paths (verified against local tree when present, else syntactically valid repo paths).
+    for raw in touches {
+        let Some((norm, is_dir)) = normalize_repo_path(raw) else { continue };
+        if !looks_like_repo_path(&norm, is_dir) {
+            continue;
+        }
+        if let Some(l) = verified_local {
+            if !is_dir && l.tree_files.contains(&norm) {
+                paths.insert(TargetPath::File(norm));
+            } else if l.tree_dirs.contains(&norm) {
+                paths.insert(TargetPath::Dir(norm));
+            }
+        } else if is_dir {
+            paths.insert(TargetPath::Dir(norm));
+        } else {
+            paths.insert(TargetPath::File(norm));
+        }
+    }
+
+    // Add body-extracted repo-relative paths verified against the local repository tree.
+    if let Some(l) = verified_local {
+        for (norm, is_dir) in extract_body_file_paths(body) {
+            if !is_dir && l.tree_files.contains(&norm) {
+                paths.insert(TargetPath::File(norm));
+            } else if l.tree_dirs.contains(&norm) {
+                paths.insert(TargetPath::Dir(norm));
+            }
+        }
+    }
+    paths
+}
+
+async fn collect_repo_candidates(
+    repo_display: &str,
+    default_branch: &str,
+    repo_prs: Option<&RepoPrs>,
+    local: Option<&LocalRepoInfo>,
+    ctx: &CandidateResolveCtx<'_>,
+) -> Vec<BranchCandidate> {
+    let mut candidates: Vec<BranchCandidate> = Vec::new();
+    let mut wt_used: Vec<bool> = vec![false; local.map_or(0, |l| l.worktrees.len())];
+
+    for pr in repo_prs.map(|rp| rp.prs.as_slice()).unwrap_or(&[]) {
+        let mut wt_path = None;
+        let mut wt_oid = None;
+        if let Some(l) = local
+            && !pr.is_cross_repository
+            && !pr.head_ref_name.is_empty()
+        {
+            for (wi, wt) in l.worktrees.iter().enumerate() {
+                if wt.branch.as_deref() == Some(pr.head_ref_name.as_str()) {
+                    wt_used[wi] = true;
+                    wt_path = Some(wt.path.clone());
+                    wt_oid = wt.head_oid.clone();
+                    break;
+                }
+            }
+        }
+        let local_oid = if let Some(l) = local {
+            match wt_oid {
+                Some(oid) => Some(oid),
+                None => {
+                    let fallback = (!pr.head_ref_oid.is_empty()).then_some(pr.head_ref_oid.as_str());
+                    if pr.is_cross_repository {
+                        match fallback {
+                            Some(o) => resolve_commit_oid(&l.root, o).await,
+                            None => None,
+                        }
+                    } else {
+                        resolve_branch_oid(&l.root, &pr.head_ref_name, fallback).await
+                    }
+                }
+            }
+        } else {
+            None
+        };
+        let issues = resolve_pr_issues(pr, ctx.aliases, ctx.active_branches, ctx.parent_of);
+        candidates.push(BranchCandidate {
+            branch: pr.head_ref_name.clone(),
+            base_ref_name: Some(pr.base_ref_name.clone()),
+            pr_number: Some(pr.number),
+            is_cross_repository: pr.is_cross_repository,
+            local_oid,
+            worktree_path: wt_path,
+            pr_files: pr.files.clone(),
+            issues,
+        });
+    }
+
+    if let Some(l) = local {
+        for (wi, wt) in l.worktrees.iter().enumerate() {
+            if wt_used[wi] {
+                continue;
+            }
+            let Some(branch) = wt.branch.as_deref() else { continue };
+            if branch == default_branch {
+                continue;
+            }
+            let issues = resolve_worktree_issues(repo_display, wt, ctx.aliases, ctx.active_branches, ctx.parent_of);
+            if !issues.is_empty() && issues.iter().all(|(r, n)| ctx.closed_issues.contains(&issue_key(r, *n))) {
+                continue;
+            }
+            let local_oid = match wt.head_oid.clone() {
+                Some(o) => Some(o),
+                None => resolve_branch_oid(&l.root, branch, None).await,
+            };
+            candidates.push(BranchCandidate {
+                branch: branch.to_string(),
+                base_ref_name: None,
+                pr_number: None,
+                is_cross_repository: false,
+                local_oid,
+                worktree_path: Some(wt.path.clone()),
+                pr_files: Vec::new(),
+                issues,
+            });
+        }
+    }
+    candidates
 }
 
 fn push_resolved_issue(out: &mut Vec<(String, u64)>, aliases: &HashMap<String, String>, repo: String, number: u64) {
@@ -1108,6 +1444,12 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
     let mut direct_edges: BTreeMap<(String, String), PrStackEdge> = BTreeMap::new();
     let mut ancestry_edges: BTreeMap<(String, String), PrStackEdge> = BTreeMap::new();
     let mut issue_extra_files: BTreeMap<String, BTreeSet<TargetPath>> = BTreeMap::new();
+    let resolve_ctx = CandidateResolveCtx {
+        aliases: input.aliases,
+        parent_of: input.parent_of,
+        closed_issues: input.closed_issues,
+        active_branches: input.active_branches,
+    };
 
     for repo_key in &repo_keys {
         let repo_prs = input.open_prs.get(repo_key);
@@ -1123,86 +1465,7 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
             .or_else(|| local.and_then(|l| l.default_branch.clone()))
             .unwrap_or_else(|| "main".to_string());
 
-        let mut candidates: Vec<BranchCandidate> = Vec::new();
-        let mut wt_used: Vec<bool> = vec![false; local.map_or(0, |l| l.worktrees.len())];
-
-        for pr in repo_prs.map(|rp| rp.prs.as_slice()).unwrap_or(&[]) {
-            let mut wt_path = None;
-            let mut wt_oid = None;
-            if let Some(l) = local
-                && !pr.is_cross_repository
-                && !pr.head_ref_name.is_empty()
-            {
-                for (wi, wt) in l.worktrees.iter().enumerate() {
-                    if wt.branch.as_deref() == Some(pr.head_ref_name.as_str()) {
-                        wt_used[wi] = true;
-                        wt_path = Some(wt.path.clone());
-                        wt_oid = wt.head_oid.clone();
-                        break;
-                    }
-                }
-            }
-            let local_oid = if let Some(l) = local {
-                match wt_oid {
-                    Some(oid) => Some(oid),
-                    None => {
-                        let fallback = (!pr.head_ref_oid.is_empty()).then_some(pr.head_ref_oid.as_str());
-                        if pr.is_cross_repository {
-                            match fallback {
-                                Some(o) => resolve_commit_oid(&l.root, o).await,
-                                None => None,
-                            }
-                        } else {
-                            resolve_branch_oid(&l.root, &pr.head_ref_name, fallback).await
-                        }
-                    }
-                }
-            } else {
-                None
-            };
-            let issues = resolve_pr_issues(pr, input.aliases, input.active_branches, input.parent_of);
-            candidates.push(BranchCandidate {
-                branch: pr.head_ref_name.clone(),
-                base_ref_name: Some(pr.base_ref_name.clone()),
-                pr_number: Some(pr.number),
-                is_cross_repository: pr.is_cross_repository,
-                local_oid,
-                worktree_path: wt_path,
-                pr_files: pr.files.clone(),
-                issues,
-            });
-        }
-
-        if let Some(l) = local {
-            for (wi, wt) in l.worktrees.iter().enumerate() {
-                if wt_used[wi] {
-                    continue;
-                }
-                let Some(branch) = wt.branch.as_deref() else { continue };
-                if branch == default_branch {
-                    continue;
-                }
-                let issues =
-                    resolve_worktree_issues(&repo_display, wt, input.aliases, input.active_branches, input.parent_of);
-                if !issues.is_empty() && issues.iter().all(|(r, n)| input.closed_issues.contains(&issue_key(r, *n))) {
-                    continue;
-                }
-                let local_oid = match wt.head_oid.clone() {
-                    Some(o) => Some(o),
-                    None => resolve_branch_oid(&l.root, branch, None).await,
-                };
-                candidates.push(BranchCandidate {
-                    branch: branch.to_string(),
-                    base_ref_name: None,
-                    pr_number: None,
-                    is_cross_repository: false,
-                    local_oid,
-                    worktree_path: Some(wt.path.clone()),
-                    pr_files: Vec::new(),
-                    issues,
-                });
-            }
-        }
+        let candidates = collect_repo_candidates(&repo_display, &default_branch, repo_prs, local, &resolve_ctx).await;
 
         // Track stack base OID for each worktree candidate so worktree file diff compares against its stack base.
         let mut stack_base_oid: Vec<Option<String>> = vec![None; candidates.len()];
@@ -1251,32 +1514,28 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
             }
         }
 
-        // 2. Local git branch ancestry (`git merge-base`).
+        // 2. Local git branch ancestry via a single batched `git rev-list --parents --stdin` traversal.
         if let Some(l) = local
             && let Some(default_oid) = l.default_oid.as_deref()
         {
-            let mut ahead = vec![false; candidates.len()];
-            for (idx, c) in candidates.iter().enumerate() {
-                if let Some(oid) = c.local_oid.as_deref() {
-                    ahead[idx] = is_ahead_of_default(&l.root, oid, default_oid).await;
-                }
-            }
+            let cand_oids: Vec<&str> = candidates.iter().filter_map(|c| c.local_oid.as_deref()).collect();
+            let ancestry = compute_candidate_ancestry(&l.root, default_oid, &cand_oids).await;
             for a_idx in 0..candidates.len() {
-                if !ahead[a_idx] {
+                let Some(oid_a) = candidates[a_idx].local_oid.as_deref() else { continue };
+                if !ancestry.is_ahead(oid_a) {
                     continue;
                 }
-                let Some(oid_a) = candidates[a_idx].local_oid.as_deref() else { continue };
                 for b_idx in 0..candidates.len() {
                     if a_idx == b_idx {
                         continue;
                     }
                     let Some(oid_b) = candidates[b_idx].local_oid.as_deref() else { continue };
-                    if !is_strict_ancestor(&l.root, oid_a, oid_b).await {
+                    if !ancestry.is_strict_ancestor(oid_a, oid_b) {
                         continue;
                     }
                     // Prefer the closest ancestor as base_oid for worktree diff
                     if let Some(prev_oid) = stack_base_oid[b_idx].as_deref() {
-                        if is_strict_ancestor(&l.root, prev_oid, oid_a).await {
+                        if ancestry.is_strict_ancestor(prev_oid, oid_a) || !ancestry.in_graph(prev_oid) {
                             stack_base_oid[b_idx] = Some(oid_a.to_string());
                         }
                     } else {
@@ -1314,27 +1573,29 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
         }
 
         // 3. Collect modified files from open PRs and active local worktrees for each linked issue in this repo.
-        let default_oid = local.and_then(|l| l.default_oid.as_deref());
-        for (idx, c) in candidates.iter().enumerate() {
-            let mut c_files: Vec<String> = c.pr_files.clone();
-            if let Some(wt) = c.worktree_path.as_deref() {
-                let base = stack_base_oid[idx].as_deref().or(default_oid);
-                for f in worktree_modified_files(wt, base).await {
-                    if !c_files.iter().any(|x| x == &f) {
-                        c_files.push(f);
+        if input.include_file_conflicts {
+            let default_oid = local.and_then(|l| l.default_oid.as_deref());
+            for (idx, c) in candidates.iter().enumerate() {
+                let mut c_files: Vec<String> = c.pr_files.clone();
+                if let Some(wt) = c.worktree_path.as_deref() {
+                    let base = stack_base_oid[idx].as_deref().or(default_oid);
+                    for f in worktree_modified_files(wt, base).await {
+                        if !c_files.iter().any(|x| x == &f) {
+                            c_files.push(f);
+                        }
                     }
                 }
-            }
-            if c_files.is_empty() {
-                continue;
-            }
-            for (r, n) in &c.issues {
-                if !r.eq_ignore_ascii_case(&repo_display) && !r.eq_ignore_ascii_case(repo_key) {
+                if c_files.is_empty() {
                     continue;
                 }
-                let entry = issue_extra_files.entry(issue_key(r, *n)).or_default();
-                for f in &c_files {
-                    entry.insert(TargetPath::File(f.clone()));
+                for (r, n) in &c.issues {
+                    if !r.eq_ignore_ascii_case(&repo_display) && !r.eq_ignore_ascii_case(repo_key) {
+                        continue;
+                    }
+                    let entry = issue_extra_files.entry(issue_key(r, *n)).or_default();
+                    for f in &c_files {
+                        entry.insert(TargetPath::File(f.clone()));
+                    }
                 }
             }
         }
@@ -1390,68 +1651,50 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
     }
 
     // 5. File-conflict edges across open issues in each repo.
-    type RepoIssuePaths = ((String, u64), String, BTreeSet<TargetPath>);
-    let mut by_repo: BTreeMap<String, Vec<RepoIssuePaths>> = BTreeMap::new();
-    let mut seen_open: HashSet<String> = HashSet::new();
-    for item in input.open_issues {
-        let canon = canonicalize_repo(input.aliases, item.repo);
-        let rkey = canon.to_ascii_lowercase();
-        let ikey = issue_key(&canon, item.number);
-        if !seen_open.insert(ikey.clone()) {
-            continue;
-        }
-        let local = input.local_repos.get(&rkey).filter(|l| !l.tree_files.is_empty());
-        let mut paths = issue_extra_files.remove(&ikey).unwrap_or_default();
-
-        // Add Touches: paths (verified against local tree when present, else syntactically valid repo paths).
-        for raw in item.touches {
-            let Some((norm, is_dir)) = normalize_repo_path(raw) else { continue };
-            if !looks_like_repo_path(&norm, is_dir) {
+    let mut file_conflicts = Vec::new();
+    let mut static_issue_paths: BTreeMap<String, BTreeSet<TargetPath>> = BTreeMap::new();
+    let mut analyzed_issues: HashSet<String> = HashSet::new();
+    if input.include_file_conflicts {
+        type RepoIssuePaths = ((String, u64), String, BTreeSet<TargetPath>);
+        let mut by_repo: BTreeMap<String, Vec<RepoIssuePaths>> = BTreeMap::new();
+        for item in input.open_issues {
+            let canon = canonicalize_repo(input.aliases, item.repo);
+            let rkey = canon.to_ascii_lowercase();
+            let ikey = issue_key(&canon, item.number);
+            if !analyzed_issues.insert(ikey.clone()) {
                 continue;
             }
-            if let Some(l) = local {
-                if !is_dir && l.tree_files.contains(&norm) {
-                    paths.insert(TargetPath::File(norm));
-                } else if l.tree_dirs.contains(&norm) {
-                    paths.insert(TargetPath::Dir(norm));
-                }
-            } else if is_dir {
-                paths.insert(TargetPath::Dir(norm));
-            } else {
-                paths.insert(TargetPath::File(norm));
+            let local = input.local_repos.get(&rkey);
+            let static_paths = extract_static_issue_paths(item.touches, item.body, local);
+            let mut paths = issue_extra_files.remove(&ikey).unwrap_or_default();
+            if !static_paths.is_empty() {
+                paths.extend(static_paths.iter().cloned());
+                static_issue_paths.insert(ikey.clone(), static_paths);
+            }
+            if !paths.is_empty() {
+                by_repo.entry(rkey).or_default().push(((canon, item.number), ikey, paths));
             }
         }
 
-        // Add body-extracted repo-relative paths verified against the local repository tree.
-        if let Some(l) = local {
-            for (norm, is_dir) in extract_body_file_paths(item.body) {
-                if !is_dir && l.tree_files.contains(&norm) {
-                    paths.insert(TargetPath::File(norm));
-                } else if l.tree_dirs.contains(&norm) {
-                    paths.insert(TargetPath::Dir(norm));
-                }
-            }
-        }
-
-        if !paths.is_empty() {
-            by_repo.entry(rkey).or_default().push(((canon, item.number), ikey, paths));
-        }
-    }
-
-    let mut file_conflicts = Vec::new();
-    for (_, mut items) in by_repo {
-        items.sort_by(|a, b| a.0.0.to_ascii_lowercase().cmp(&b.0.0.to_ascii_lowercase()).then(a.0.1.cmp(&b.0.1)));
-        for i in 0..items.len() {
-            for j in (i + 1)..items.len() {
-                let (ref issue_a, ref key_a, ref paths_a) = items[i];
-                let (ref issue_b, ref key_b, ref paths_b) = items[j];
-                if is_ancestor_issue(key_a, key_b, input.parent_of) || is_ancestor_issue(key_b, key_a, input.parent_of)
-                {
-                    continue;
-                }
-                let shared = overlap_paths(paths_a, paths_b);
-                if !shared.is_empty() {
-                    file_conflicts.push(FileConflictEdge { from: issue_a.clone(), to: issue_b.clone(), files: shared });
+        for (_, mut items) in by_repo {
+            items.sort_by(|a, b| a.0.0.to_ascii_lowercase().cmp(&b.0.0.to_ascii_lowercase()).then(a.0.1.cmp(&b.0.1)));
+            for i in 0..items.len() {
+                for j in (i + 1)..items.len() {
+                    let (ref issue_a, ref key_a, ref paths_a) = items[i];
+                    let (ref issue_b, ref key_b, ref paths_b) = items[j];
+                    if is_ancestor_issue(key_a, key_b, input.parent_of)
+                        || is_ancestor_issue(key_b, key_a, input.parent_of)
+                    {
+                        continue;
+                    }
+                    let shared = overlap_paths(paths_a, paths_b);
+                    if !shared.is_empty() {
+                        file_conflicts.push(FileConflictEdge {
+                            from: issue_a.clone(),
+                            to: issue_b.clone(),
+                            files: shared,
+                        });
+                    }
                 }
             }
         }
@@ -1477,7 +1720,143 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
             .then(a.to.1.cmp(&b.to.1))
     });
 
-    SourceControlAnalysis { pr_stacks, file_conflicts }
+    SourceControlAnalysis { pr_stacks, file_conflicts, static_issue_paths, analyzed_issues }
+}
+
+pub(crate) async fn live_repo_conflicts_with_running(input: LiveConflictInput<'_>) -> Vec<(String, u64, Vec<String>)> {
+    let canon_repo = canonicalize_repo(input.aliases, input.repo);
+    let repo_key = canon_repo.to_ascii_lowercase();
+    let cand_key = issue_key(&canon_repo, input.candidate);
+    let running_nums: BTreeSet<u64> = input
+        .running
+        .iter()
+        .copied()
+        .filter(|&n| {
+            if n == input.candidate {
+                return false;
+            }
+            let rk = issue_key(&canon_repo, n);
+            !is_ancestor_issue(&cand_key, &rk, input.parent_of) && !is_ancestor_issue(&rk, &cand_key, input.parent_of)
+        })
+        .collect();
+    if running_nums.is_empty() {
+        return Vec::new();
+    }
+    let relevant: HashSet<String> =
+        std::iter::once(cand_key.clone()).chain(running_nums.iter().map(|&n| issue_key(&canon_repo, n))).collect();
+
+    let default_branch = input
+        .repo_prs
+        .and_then(|rp| rp.default_branch.clone())
+        .or_else(|| input.local.and_then(|l| l.default_branch.clone()))
+        .unwrap_or_else(|| "main".to_string());
+    let ctx = CandidateResolveCtx {
+        aliases: input.aliases,
+        parent_of: input.parent_of,
+        closed_issues: input.closed_issues,
+        active_branches: input.active_branches,
+    };
+    let candidates = collect_repo_candidates(&canon_repo, &default_branch, input.repo_prs, input.local, &ctx).await;
+
+    let mut stack_base_oid: Vec<Option<String>> = vec![None; candidates.len()];
+    for (b_idx, cand_b) in candidates.iter().enumerate() {
+        let Some(base_ref) = cand_b.base_ref_name.as_deref() else { continue };
+        if base_ref.is_empty() || base_ref == default_branch {
+            continue;
+        }
+        for (a_idx, cand_a) in candidates.iter().enumerate() {
+            if a_idx == b_idx || cand_a.is_cross_repository || cand_a.pr_number.is_none() {
+                continue;
+            }
+            if cand_a.branch != base_ref || cand_a.branch == default_branch {
+                continue;
+            }
+            if stack_base_oid[b_idx].is_none() {
+                stack_base_oid[b_idx] = cand_a.local_oid.clone();
+            }
+        }
+    }
+    if let Some(l) = input.local
+        && let Some(default_oid) = l.default_oid.as_deref()
+    {
+        let cand_oids: Vec<&str> = candidates.iter().filter_map(|c| c.local_oid.as_deref()).collect();
+        let ancestry = compute_candidate_ancestry(&l.root, default_oid, &cand_oids).await;
+        for (a_idx, cand_a) in candidates.iter().enumerate() {
+            let Some(oid_a) = cand_a.local_oid.as_deref() else { continue };
+            if !ancestry.is_ahead(oid_a) {
+                continue;
+            }
+            for (b_idx, cand_b) in candidates.iter().enumerate() {
+                if a_idx == b_idx {
+                    continue;
+                }
+                let Some(oid_b) = cand_b.local_oid.as_deref() else { continue };
+                if !ancestry.is_strict_ancestor(oid_a, oid_b) {
+                    continue;
+                }
+                if let Some(prev_oid) = stack_base_oid[b_idx].as_deref() {
+                    if ancestry.is_strict_ancestor(prev_oid, oid_a) || !ancestry.in_graph(prev_oid) {
+                        stack_base_oid[b_idx] = Some(oid_a.to_string());
+                    }
+                } else {
+                    stack_base_oid[b_idx] = Some(oid_a.to_string());
+                }
+            }
+        }
+    }
+
+    let mut live_paths: BTreeMap<String, BTreeSet<TargetPath>> = BTreeMap::new();
+    for k in &relevant {
+        if let Some(paths) = input.static_paths.get(k) {
+            live_paths.insert(k.clone(), paths.clone());
+        }
+    }
+    let default_oid = input.local.and_then(|l| l.default_oid.as_deref());
+    for (idx, c) in candidates.iter().enumerate() {
+        let matched: Vec<String> = c
+            .issues
+            .iter()
+            .filter(|(r, _)| r.eq_ignore_ascii_case(&canon_repo) || r.eq_ignore_ascii_case(&repo_key))
+            .map(|(r, n)| issue_key(r, *n))
+            .filter(|k| relevant.contains(k))
+            .collect();
+        if matched.is_empty() {
+            continue;
+        }
+        let mut c_files = c.pr_files.clone();
+        if let Some(wt) = c.worktree_path.as_deref() {
+            let base = stack_base_oid[idx].as_deref().or(default_oid);
+            for f in worktree_modified_files(wt, base).await {
+                if !c_files.iter().any(|x| x == &f) {
+                    c_files.push(f);
+                }
+            }
+        }
+        if c_files.is_empty() {
+            continue;
+        }
+        for k in matched {
+            let entry = live_paths.entry(k).or_default();
+            for f in &c_files {
+                entry.insert(TargetPath::File(f.clone()));
+            }
+        }
+    }
+
+    let Some(cand_paths) = live_paths.get(&cand_key) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for rnum in running_nums {
+        let rk = issue_key(&canon_repo, rnum);
+        if let Some(r_paths) = live_paths.get(&rk) {
+            let shared = overlap_paths(cand_paths, r_paths);
+            if !shared.is_empty() {
+                out.push((canon_repo.clone(), rnum, shared));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1491,6 +1870,7 @@ mod tests {
         assert_eq!(parse_branch_issue("chore/19_cleanup"), Some(19));
         assert_eq!(parse_branch_issue("alice/feat/101-login"), Some(101));
         assert_eq!(parse_branch_issue("t3/issue-112-pool-routing"), Some(112));
+        assert_eq!(parse_branch_issue("feat/résumé-12"), None);
         assert_eq!(parse_branch_issue("main"), None);
         assert_eq!(parse_branch_issue("pr/230"), None);
         assert_eq!(parse_branch_issue("pull/99-test"), None);
@@ -1522,6 +1902,109 @@ Closes: #44
                 ("acme/widgets".into(), 44),
             ]
         );
+    }
+
+    #[test]
+    fn pr_body_ref_scanner_handles_multibyte_utf8_without_panicking() {
+        let body = "\
+Résumé of changes.
+Fixes nação and #12
+Refs #14 and naïve
+Élan closes #19
+";
+        let refs = extract_pr_body_issue_refs("acme/widgets", body);
+        assert_eq!(refs, vec![("acme/widgets".into(), 14), ("acme/widgets".into(), 19)]);
+    }
+
+    #[test]
+    fn clean_exact_repo_path_preserves_spaces_and_unicode_and_rejects_traversal() {
+        assert_eq!(clean_exact_repo_path("docs/Release Notes.md"), Some("docs/Release Notes.md".into()));
+        assert_eq!(clean_exact_repo_path("docs/café (v2)/[id].md"), Some("docs/café (v2)/[id].md".into()));
+        assert_eq!(clean_exact_repo_path("./docs/Release Notes.md"), Some("docs/Release Notes.md".into()));
+        assert_eq!(clean_exact_repo_path("docs\\Release Notes.md"), Some("docs/Release Notes.md".into()));
+        assert_eq!(clean_exact_repo_path(""), None);
+        assert_eq!(clean_exact_repo_path("/etc/passwd"), None);
+        assert_eq!(clean_exact_repo_path("../secret.txt"), None);
+        assert_eq!(clean_exact_repo_path("docs/bad\nname.md"), None);
+    }
+
+    #[tokio::test]
+    async fn compute_candidate_ancestry_batches_strict_ancestry_and_ahead_checks() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = td.path();
+        let git = |args: &[&str]| {
+            let out = crate::platform::git()
+                .current_dir(repo)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(repo.join("f.txt"), "0\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "c0"]);
+        let behind = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("f.txt"), "1\n").unwrap();
+        git(&["commit", "-am", "main"]);
+        let main_oid = git(&["rev-parse", "HEAD"]);
+
+        git(&["checkout", "-b", "a"]);
+        std::fs::write(repo.join("f.txt"), "a\n").unwrap();
+        git(&["commit", "-am", "a"]);
+        let a_oid = git(&["rev-parse", "HEAD"]);
+
+        git(&["checkout", "-b", "b"]);
+        std::fs::write(repo.join("f.txt"), "b\n").unwrap();
+        git(&["commit", "-am", "b"]);
+        let b_oid = git(&["rev-parse", "HEAD"]);
+
+        git(&["checkout", "-b", "c"]);
+        std::fs::write(repo.join("f.txt"), "c\n").unwrap();
+        git(&["commit", "-am", "c"]);
+        let c_oid = git(&["rev-parse", "HEAD"]);
+
+        git(&["checkout", "-b", "sibling", "main"]);
+        std::fs::write(repo.join("s.txt"), "s\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "sibling"]);
+        let sib_oid = git(&["rev-parse", "HEAD"]);
+
+        git(&["checkout", "--orphan", "orphan"]);
+        git(&["rm", "-rf", "."]);
+        std::fs::write(repo.join("o.txt"), "o\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "orphan"]);
+        let orphan_oid = git(&["rev-parse", "HEAD"]);
+
+        let graph = compute_candidate_ancestry(
+            repo,
+            &main_oid,
+            &[&behind, &main_oid, &a_oid, &a_oid, &b_oid, &c_oid, &sib_oid, &orphan_oid],
+        )
+        .await;
+
+        assert!(!graph.is_ahead(&behind));
+        assert!(!graph.is_ahead(&main_oid));
+        assert!(!graph.is_ahead(&orphan_oid));
+        assert!(graph.is_ahead(&a_oid));
+        assert!(graph.is_ahead(&b_oid));
+        assert!(graph.is_ahead(&c_oid));
+        assert!(graph.is_ahead(&sib_oid));
+
+        assert!(graph.is_strict_ancestor(&a_oid, &b_oid));
+        assert!(graph.is_strict_ancestor(&a_oid, &c_oid));
+        assert!(graph.is_strict_ancestor(&b_oid, &c_oid));
+        assert!(!graph.is_strict_ancestor(&a_oid, &a_oid));
+        assert!(!graph.is_strict_ancestor(&b_oid, &a_oid));
+        assert!(!graph.is_strict_ancestor(&a_oid, &sib_oid));
+        assert!(!graph.is_strict_ancestor(&sib_oid, &c_oid));
+        assert!(!graph.is_strict_ancestor(&orphan_oid, &c_oid));
     }
 
     #[test]

@@ -93,7 +93,8 @@ pub const CREATE_ISSUE: &str = "mutation CreateIssue($repoId: ID!, $title: Strin
   }
 }";
 
-pub const FLOW_OPEN_PRS: &str = "query FlowOpenPrs($owner: String!, $name: String!, $after: String) {
+pub const FLOW_OPEN_PRS: &str =
+    "query FlowOpenPrs($owner: String!, $name: String!, $after: String, $withPrFiles: Boolean!) {
   repository(owner: $owner, name: $name) {
     nameWithOwner
     defaultBranchRef { name }
@@ -102,7 +103,7 @@ pub const FLOW_OPEN_PRS: &str = "query FlowOpenPrs($owner: String!, $name: Strin
       nodes {
         number title url body baseRefName headRefName headRefOid isCrossRepository
         closingIssuesReferences(first: 20) { nodes { number repository { nameWithOwner } } }
-        files(first: 100) { pageInfo { hasNextPage endCursor } nodes { path } }
+        files(first: 100) @include(if: $withPrFiles) { pageInfo { hasNextPage endCursor } nodes { path } }
       }
     }
   }
