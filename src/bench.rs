@@ -42,6 +42,7 @@ async fn time_exec(app: &Arc<App>, code: &str, n: usize) -> (f64, f64) {
                 session: Some("bench".into()),
                 timeout_ms: None,
                 caller: Some("bench:thread".into()),
+                caller_from_arg: false,
                 reported: Default::default(),
             })
             .await;
