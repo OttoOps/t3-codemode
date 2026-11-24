@@ -1,0 +1,2756 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-density="comfortable">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>t3 board - Dispatch</title>
+<style>
+:root {
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --r-sm: 3px;
+  --r-md: 4px;
+  --r-pill: 999px;
+  --pad-row-y: 16px;
+  --pad-row-x: 20px;
+}
+
+:root[data-density="compact"] {
+  --pad-row-y: 10px;
+  --pad-row-x: 16px;
+}
+
+/* Nocturnal Swiss Railway Dispatch (Dark default) */
+:root, :root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0c1017;
+  --header-bg: #131c2b;
+  --header-border: #24334a;
+  --header-fg: #f4f7fb;
+  --header-muted: #9eb0c9;
+  --strip-bg: #101621;
+  --surface: #121822;
+  --surface-2: #161e2b;
+  --surface-hover: #1b2434;
+  --border: #233044;
+  --border-strong: #4c6282;
+  --rule-top: #3a5378;
+  --fg: #eef2f7;
+  --fg-2: #a3b3c9;
+  --fg-3: #8395ae;
+
+  /* Functional signal palette */
+  --ochre: #e29524;
+  --ochre-hover: #eba336;
+  --ochre-ink: #170f00;
+  --ochre-text: #f5bd63;
+  --ochre-sub: #d7b785;
+  --ochre-bg: #1d170c;
+  --ochre-bd: #5e4419;
+
+  --emerald: #2da46e;
+  --emerald-text: #6ee0a8;
+  --emerald-sub: #9ccdb5;
+  --emerald-bg: #0f1d16;
+  --emerald-bd: #224f3a;
+
+  --blue: #46a0e6;
+  --blue-text: #7cc4fa;
+  --blue-bg: #0f1e2e;
+  --blue-bd: #244a6e;
+
+  --red: #e5534b;
+  --red-fill: #c93830;
+  --red-fill-hover: #b52f28;
+  --red-text: #ff948d;
+  --red-sub: #dca29e;
+  --red-bg: #241214;
+  --red-bd: #6b2929;
+
+  --code-bg: #1c2738;
+  --code-fg: #dbe6f5;
+  --track-line: #2c3b52;
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+/* Architectural Swiss Daylight (Light toggle) */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f6f4;
+  --header-bg: #182232;
+  --header-border: #111926;
+  --header-fg: #ffffff;
+  --header-muted: #b5c4d9;
+  --strip-bg: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f7f9fb;
+  --surface-hover: #eef2f7;
+  --border: #d5dce5;
+  --border-strong: #b4c0cf;
+  --rule-top: #182232;
+  --fg: #14181f;
+  --fg-2: #465366;
+  --fg-3: #5b697d;
+
+  --ochre: #d98218;
+  --ochre-hover: #c47311;
+  --ochre-ink: #170e00;
+  --ochre-text: #945204;
+  --ochre-sub: #6b4b1e;
+  --ochre-bg: #fff8eb;
+  --ochre-bd: #e3bc78;
+
+  --emerald: #1c8253;
+  --emerald-text: #156942;
+  --emerald-sub: #2d5e46;
+  --emerald-bg: #eef8f2;
+  --emerald-bd: #9fd1b8;
+
+  --blue: #1a6cb0;
+  --blue-text: #0f568f;
+  --blue-bg: #edf5fc;
+  --blue-bd: #a5c9e8;
+
+  --red: #cc3329;
+  --red-fill: #c42c22;
+  --red-fill-hover: #ad241b;
+  --red-text: #a6221a;
+  --red-sub: #7a2d28;
+  --red-bg: #fdf1f0;
+  --red-bd: #e6aba7;
+
+  --code-bg: #edf1f6;
+  --code-fg: #182232;
+  --track-line: #cfd7e2;
+  --shadow-pop: 0 12px 28px rgba(15, 23, 42, 0.14);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+[hidden] { display: none !important; }
+
+html {
+  background: var(--bg);
+  color: var(--fg);
+  font: 400 14px/1.45 var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
+}
+body { min-height: 100vh; background: var(--bg); color: var(--fg); }
+
+::selection { background: var(--ochre); color: var(--ochre-ink); }
+input, textarea, select { caret-color: var(--ochre); }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong); border-radius: 8px;
+  border: 2px solid transparent; background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--fg-3); }
+
+a { color: var(--blue-text); text-decoration: none; text-underline-offset: 3px; }
+a:hover, a:focus-visible { text-decoration: underline; }
+button, input, textarea, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: var(--r-sm); }
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+.skip-link {
+  position: absolute; left: -9999px; top: 8px; z-index: 100;
+  background: var(--ochre); color: var(--ochre-ink); font-weight: 700;
+  padding: 8px 14px; border-radius: var(--r-md);
+}
+.skip-link:focus { left: 12px; }
+
+.num { font-variant-numeric: tabular-nums; }
+.mono { font-family: var(--font-mono); }
+.ico { width: 15px; height: 15px; flex: none; display: inline-block; vertical-align: -2px; }
+.ico-sm { width: 13px; height: 13px; flex: none; display: inline-block; vertical-align: -2px; }
+
+/* =========================================================
+   TOP RAILWAY-NAVY COMMAND HEADER
+   ========================================================= */
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  background: var(--header-bg); color: var(--header-fg);
+  border-bottom: 1px solid var(--header-border);
+  padding: 0 24px; min-height: 56px;
+  display: flex; align-items: center; gap: 20px;
+}
+.brand {
+  display: inline-flex; align-items: center; gap: 10px; flex: none;
+  color: var(--header-fg); text-decoration: none;
+}
+.brand:hover { text-decoration: none; }
+.brand-mark {
+  width: 26px; height: 26px; border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.22);
+  color: var(--header-fg);
+  display: grid; place-items: center; flex: none;
+}
+.tab-short { display: none; }
+.brand h1 {
+  font-size: 17px; line-height: 20px; font-weight: 800; letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+
+.main-nav {
+  display: flex; align-items: stretch; gap: 2px; align-self: stretch;
+  min-width: 0; overflow-x: auto; scrollbar-width: none;
+}
+.main-nav::-webkit-scrollbar { display: none; }
+.nav-tab {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 0 14px; border: 0; border-bottom: 3px solid transparent; border-top: 3px solid transparent;
+  background: transparent; color: var(--header-muted); cursor: pointer;
+  font-size: 13.5px; font-weight: 600; white-space: nowrap;
+  transition: color 150ms var(--ease-out), border-color 150ms var(--ease-out), background 150ms var(--ease-out);
+}
+.nav-tab:hover { color: var(--header-fg); background: rgba(255, 255, 255, 0.05); }
+.nav-tab[aria-selected="true"] {
+  color: var(--header-fg); border-bottom-color: var(--ochre);
+}
+.nav-count {
+  font-size: 11px; line-height: 16px; font-weight: 700;
+  padding: 1px 7px; border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.11); color: #dce5f2;
+  font-variant-numeric: tabular-nums;
+}
+.nav-count.warn { background: var(--ochre); color: var(--ochre-ink); }
+
+.top-actions {
+  margin-left: auto; display: flex; align-items: center; gap: 8px; flex: none;
+}
+.hbtn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 32px; padding: 0 12px; border-radius: var(--r-md); cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.2); background: rgba(255, 255, 255, 0.04);
+  color: var(--header-fg); font-size: 13px; font-weight: 600; white-space: nowrap;
+  transition: background 150ms var(--ease-out), border-color 150ms var(--ease-out);
+}
+.hbtn:hover { background: rgba(255, 255, 255, 0.11); border-color: rgba(255, 255, 255, 0.34); }
+.hbtn.icon-only { width: 32px; padding: 0; }
+.hbtn.primary {
+  background: var(--ochre); border-color: var(--ochre); color: var(--ochre-ink); font-weight: 700;
+}
+.hbtn.primary:hover { background: var(--ochre-hover); border-color: var(--ochre-hover); }
+
+/* =========================================================
+   TELEMETRY & SEARCH STRIP
+   ========================================================= */
+.telemetry {
+  background: var(--strip-bg); border-bottom: 1px solid var(--border);
+  padding: 7px 24px; display: flex; flex-wrap: nowrap; align-items: center; gap: 14px;
+  font-size: 12.5px; color: var(--fg-2);
+}
+.t-group { display: flex; align-items: center; gap: 14px; flex-wrap: nowrap; min-width: 0; }
+.t-sep { width: 1px; height: 14px; background: var(--border); flex: none; }
+.t-item {
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; flex: none;
+}
+.t-item b { color: var(--fg); font-weight: 700; }
+.t-btn {
+  border: 1px solid transparent; background: transparent; cursor: pointer;
+  padding: 5px 9px; border-radius: var(--r-md);
+  display: inline-flex; align-items: center; gap: 7px; color: var(--fg-2); white-space: nowrap;
+  transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out), color 140ms var(--ease-out);
+}
+.t-btn:hover, .t-btn[aria-expanded="true"] {
+  background: var(--surface-hover); border-color: var(--border); color: var(--fg);
+}
+.sig-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.sig-dot.ok { background: var(--emerald); }
+.sig-dot.warn { background: var(--ochre); }
+.sig-dot.info { background: var(--blue); }
+.sig-dot.bad { background: var(--red); }
+
+.t-right {
+  margin-left: auto; display: flex; align-items: center; gap: 8px; flex: none; min-width: 0;
+}
+.scenario-select {
+  height: 30px; padding: 0 24px 0 9px; border-radius: var(--r-md);
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--fg);
+  font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.search-box {
+  position: relative; width: 220px; max-width: 100%;
+}
+.search-box .ico {
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  color: var(--fg-3); pointer-events: none;
+}
+.search-box input {
+  width: 100%; height: 30px; padding: 0 28px 0 32px;
+  border: 1px solid var(--border-strong); border-radius: var(--r-md);
+  background: var(--surface); color: var(--fg); font-size: 12.5px;
+}
+.search-box input::placeholder { color: var(--fg-3); }
+.search-clear {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 22px; height: 22px; border: 0; border-radius: var(--r-sm);
+  background: transparent; color: var(--fg-3); cursor: pointer;
+  display: grid; place-items: center;
+}
+.search-clear:hover { color: var(--fg); background: var(--surface-hover); }
+
+/* =========================================================
+   MAIN WORKSPACE CONTAINER
+   ========================================================= */
+.workspace {
+  max-width: 1640px; margin: 0 auto; padding: 20px 24px 40px;
+  display: grid; gap: 20px;
+}
+
+/* =========================================================
+   NEEDS YOU INTERRUPT ZONE (FULL-BORDER, ZERO LEFT BAR)
+   ========================================================= */
+.needs-zone { display: grid; gap: 10px; }
+.all-clear {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+  padding: 10px 16px; border-radius: var(--r-md);
+  background: var(--emerald-bg); border: 1px solid var(--emerald-bd);
+  color: var(--emerald-text); font-size: 13.5px; font-weight: 600;
+}
+.all-clear-left { display: flex; align-items: center; gap: 10px; }
+.all-clear-sub { color: var(--emerald-sub); font-weight: 500; font-size: 12.5px; }
+
+.gate-card {
+  display: grid; gap: 10px; padding: 14px 18px; border-radius: var(--r-md);
+  background: var(--ochre-bg); border: 1px solid var(--ochre-bd);
+}
+.gate-card.kind-blocker {
+  background: var(--red-bg); border-color: var(--red-bd);
+}
+.gate-top {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; flex-wrap: wrap;
+}
+.gate-lead { display: flex; align-items: flex-start; gap: 12px; min-width: 0; flex: 1 1 420px; }
+.gate-icon {
+  width: 28px; height: 28px; border-radius: var(--r-md); flex: none;
+  display: grid; place-items: center; margin-top: 1px;
+  background: var(--ochre); color: var(--ochre-ink);
+}
+.gate-card.kind-blocker .gate-icon { background: var(--red-fill); color: #ffffff; }
+.gate-copy { min-width: 0; display: grid; gap: 4px; }
+.gate-title-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.gate-title {
+  font-size: 15.5px; line-height: 1.35; font-weight: 700; color: var(--fg);
+}
+.gate-kind {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--ochre-text);
+}
+.gate-card.kind-blocker .gate-kind { color: var(--red-text); }
+.gate-meta {
+  font-size: 13px; color: var(--ochre-sub); display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline;
+}
+.gate-card.kind-blocker .gate-meta { color: var(--red-sub); }
+.gate-meta-item { display: inline; }
+a.gate-meta-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.gate-acts {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: none; align-self: center;
+}
+
+.gate-reply-row {
+  display: flex; gap: 8px; align-items: center; padding-left: 40px;
+}
+.gate-reply-row input {
+  flex: 1; height: 34px; padding: 0 12px; border-radius: var(--r-md);
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--fg); font-size: 13.5px;
+}
+.gate-full {
+  margin-left: 40px; padding: 10px 12px; border-radius: var(--r-md);
+  background: var(--surface); border: 1px solid var(--border);
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5; color: var(--fg-2);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+
+/* Live 5-second Undo countdown inside gate card */
+.undo-bar {
+  display: grid; gap: 8px;
+}
+.undo-top {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  font-size: 13.5px; font-weight: 600; color: var(--fg);
+}
+.undo-track {
+  height: 4px; border-radius: 2px; background: rgba(255,255,255,0.12); overflow: hidden;
+}
+:root[data-theme="light"] .undo-track { background: rgba(20,24,31,0.12); }
+.undo-fill {
+  height: 100%; background: var(--ochre); width: 100%;
+  transition: width 100ms linear;
+}
+
+/* =========================================================
+   STANDARD BUTTONS
+   ========================================================= */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 32px; padding: 0 13px; border-radius: var(--r-md); cursor: pointer;
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--fg);
+  font-size: 13px; font-weight: 600; white-space: nowrap;
+  transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out), color 140ms var(--ease-out);
+}
+.btn:hover { background: var(--surface-hover); border-color: var(--fg-3); }
+.btn:disabled { opacity: 0.48; cursor: default; }
+.btn.sm { height: 28px; padding: 0 10px; font-size: 12px; }
+.btn.primary {
+  background: var(--ochre); border-color: var(--ochre); color: var(--ochre-ink); font-weight: 700;
+}
+.btn.primary:hover { background: var(--ochre-hover); border-color: var(--ochre-hover); }
+.btn.danger {
+  background: var(--red-fill); border-color: var(--red-fill); color: #ffffff; font-weight: 700;
+}
+.btn.danger:hover { background: var(--red-fill-hover); border-color: var(--red-fill-hover); }
+.btn.quiet {
+  border-color: transparent; background: transparent; color: var(--fg-2); padding: 0 9px;
+}
+.btn.quiet:hover { color: var(--fg); background: var(--surface-hover); }
+
+/* =========================================================
+   DISPATCH TWO-COLUMN OPERATIONAL PANELS
+   ========================================================= */
+.dispatch-grid {
+  display: grid; grid-template-columns: minmax(0, 1.24fr) minmax(0, 1fr); gap: 24px; align-items: start;
+}
+
+.panel {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  min-width: 0; overflow: hidden;
+}
+.panel-head {
+  padding: 13px var(--pad-row-x); border-bottom: 2px solid var(--rule-top);
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+}
+.panel-head h2 {
+  font-size: 17px; line-height: 22px; font-weight: 800; letter-spacing: -0.015em; color: var(--fg);
+  display: inline-flex; align-items: center; gap: 10px;
+}
+.panel-meta { font-size: 12.5px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.right-stack { display: grid; gap: 20px; align-content: start; min-width: 0; }
+.recent-row {
+  padding: 11px var(--pad-row-x); border-bottom: 1px solid var(--border);
+  display: grid; gap: 4px; cursor: pointer;
+  transition: background 140ms var(--ease-out);
+}
+.recent-row:last-child { border-bottom: 0; }
+.recent-row:hover { background: var(--surface-hover); }
+.recent-top { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.recent-title {
+  flex: 1; min-width: 0; font-size: 13.5px; line-height: 1.35; font-weight: 600; color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.recent-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 12px; color: var(--fg-3);
+}
+.recent-meta { font-size: 12px; color: var(--fg-3); white-space: nowrap; flex: none; }
+
+/* Segmented mini filter inside PRs panel */
+.seg {
+  display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--r-md); overflow: hidden;
+}
+.seg button {
+  border: 0; border-right: 1px solid var(--border-strong); background: transparent;
+  color: var(--fg-2); font-size: 12px; font-weight: 600; padding: 4px 10px; cursor: pointer;
+  transition: background 140ms var(--ease-out), color 140ms var(--ease-out);
+}
+.seg button:last-child { border-right: 0; }
+.seg button:hover { color: var(--fg); background: var(--surface-hover); }
+.seg button[aria-pressed="true"] { background: var(--code-bg); color: var(--fg); }
+
+/* =========================================================
+   ACTIVE ISSUES + SWISS RAILWAY PR ROUTE TRACK
+   ========================================================= */
+.issue-row {
+  padding: var(--pad-row-y) var(--pad-row-x); border-bottom: 1px solid var(--border);
+  display: grid; gap: 10px; cursor: pointer;
+  transition: background 140ms var(--ease-out);
+}
+.issue-row:last-child { border-bottom: 0; }
+.issue-row:hover { background: var(--surface-hover); }
+.issue-row[data-selected="true"] { background: var(--surface-hover); }
+
+.ir-top {
+  display: flex; align-items: flex-start; gap: 10px; min-width: 0;
+}
+.ref-badge {
+  font-family: var(--font-mono); font-size: 12px; font-weight: 700;
+  padding: 2px 7px; border-radius: var(--r-sm); flex: none;
+  background: var(--code-bg); color: var(--code-fg);
+}
+.ir-title-block { min-width: 0; flex: 1; display: grid; gap: 4px; }
+.ir-title {
+  font-size: 15.5px; line-height: 1.35; font-weight: 700; color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.ir-sub {
+  font-size: 13px; line-height: 1.45; color: var(--fg-2); max-width: 72ch;
+}
+.ir-side {
+  display: flex; align-items: center; gap: 8px; flex: none; margin-left: auto;
+}
+.ir-tags {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-3);
+}
+.track-label {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+  padding: 1px 7px; border-radius: var(--r-sm); border: 1px solid var(--border);
+  color: var(--fg-2); background: var(--surface-2);
+}
+
+/* Signature Move: Connected Swiss Perlschnur Station Route Line */
+.route-wrap {
+  padding: 10px 12px 9px; border-radius: var(--r-md);
+  background: var(--surface-2); border: 1px solid var(--border);
+  display: grid; gap: 8px; min-width: 0;
+}
+.route-header {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  font-size: 12px; color: var(--fg-2);
+}
+.route-header strong { color: var(--fg); font-weight: 700; }
+.route-pct { white-space: nowrap; flex: none; }
+.route-track {
+  display: flex; align-items: flex-start; width: 100%; min-width: 0; padding: 4px 0 2px;
+}
+.station {
+  position: relative; flex: 1 1 0; min-width: 0;
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding: 2px 2px 4px; border: 0; background: transparent;
+  cursor: pointer; border-radius: var(--r-sm); color: inherit; text-align: center;
+  transition: background 140ms var(--ease-out);
+}
+.station:not(:first-child)::before,
+.station:not(:last-child)::after {
+  content: ""; position: absolute; top: 9px; height: 2px; z-index: 1;
+  background: var(--track-line); pointer-events: none;
+}
+.station:not(:first-child)::before { left: 0; right: 50%; }
+.station:not(:last-child)::after { left: 50%; right: 0; }
+.station[data-seg-l="merged"]::before { background: var(--emerald); }
+.station[data-seg-r="merged"]::after { background: var(--emerald); }
+.station:hover { background: var(--surface-hover); }
+.station[data-active-node="true"] { background: var(--blue-bg); }
+.station.is-remaining { cursor: default; }
+.station.is-remaining:hover { background: transparent; }
+.st-dot {
+  width: 14px; height: 14px; border-radius: 50%; position: relative; z-index: 2;
+  border: 2px solid var(--border-strong); background: var(--surface-2);
+  display: grid; place-items: center;
+  transition: transform 150ms var(--ease-out);
+}
+.station:not(.is-remaining):hover .st-dot { transform: scale(1.16); }
+.st-dot.merged { background: var(--emerald); border-color: var(--emerald); }
+.st-dot.ready {
+  width: 16px; height: 16px; margin: -1px 0;
+  border-width: 3.5px; border-color: var(--emerald); background: var(--surface-2);
+}
+.st-dot.gate {
+  width: 16px; height: 16px; margin: -1px 0;
+  border-width: 3.5px; border-color: var(--ochre); background: var(--surface-2);
+}
+.st-dot.running, .st-dot.review {
+  width: 16px; height: 16px; margin: -1px 0;
+  border-width: 3.5px; border-color: var(--blue); background: var(--surface-2);
+}
+.st-dot.blocked {
+  width: 16px; height: 16px; margin: -1px 0;
+  border-width: 3.5px; border-color: var(--red); background: var(--surface-2);
+}
+.st-dot.remaining { border-style: dashed; border-color: var(--fg-3); }
+.st-code {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700; color: var(--fg-2);
+  white-space: nowrap;
+}
+.station.is-gate .st-code { color: var(--ochre-text); }
+.station.is-running .st-code, .station.is-review .st-code { color: var(--blue-text); }
+.station.is-ready .st-code { color: var(--emerald-text); }
+.station.is-blocked .st-code { color: var(--red-text); }
+.st-state {
+  font-size: 10.5px; color: var(--fg-3); white-space: nowrap;
+}
+.station.is-gate .st-state { color: var(--ochre-sub); font-weight: 600; }
+.station.is-running .st-state, .station.is-review .st-state { color: var(--blue-text); font-weight: 600; }
+.station.is-ready .st-state { color: var(--emerald-text); font-weight: 600; }
+.station.is-blocked .st-state { color: var(--red-text); font-weight: 600; }
+
+.panel-foot-bar {
+  padding: 10px var(--pad-row-x); background: var(--surface-2); border-top: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  font-size: 12.5px; color: var(--fg-2);
+}
+
+/* =========================================================
+   PRS IN PROGRESS LEDGER
+   ========================================================= */
+.pr-row {
+  padding: var(--pad-row-y) var(--pad-row-x); border-bottom: 1px solid var(--border);
+  display: grid; gap: 6px; cursor: pointer;
+  transition: background 140ms var(--ease-out);
+}
+.pr-row:last-child { border-bottom: 0; }
+.pr-row:hover { background: var(--surface-hover); }
+.pr-row[data-selected="true"] { background: var(--surface-hover); }
+.pr-top {
+  display: flex; align-items: flex-start; gap: 10px; min-width: 0;
+}
+.pr-title {
+  font-size: 14.5px; line-height: 1.35; font-weight: 700; color: var(--fg);
+  flex: 1; min-width: 0; overflow-wrap: anywhere;
+}
+.pr-meta {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; font-size: 12.5px; color: var(--fg-2); min-width: 0;
+}
+.pr-meta-left {
+  display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1;
+  overflow: hidden; white-space: nowrap;
+}
+.pr-parent-clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* Semantic status pills (shape + word + hue) */
+.status-pill {
+  display: inline-flex; align-items: center; gap: 5px; flex: none;
+  padding: 2px 8px; border-radius: var(--r-sm);
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+  letter-spacing: 0.02em; text-transform: uppercase; white-space: nowrap;
+  border: 1px solid transparent;
+}
+.status-pill.ready { background: var(--emerald-bg); color: var(--emerald-text); border-color: var(--emerald-bd); }
+.status-pill.gate { background: var(--ochre-bg); color: var(--ochre-text); border-color: var(--ochre-bd); }
+.status-pill.running { background: var(--blue-bg); color: var(--blue-text); border-color: var(--blue-bd); }
+.status-pill.review { background: var(--blue-bg); color: var(--blue-text); border-color: var(--blue-bd); }
+.status-pill.merged { background: var(--surface-2); color: var(--fg-2); border-color: var(--border); }
+.status-pill.blocked { background: var(--red-bg); color: var(--red-text); border-color: var(--red-bd); }
+
+/* =========================================================
+   NEW ISSUES TRIAGE VIEW
+   ========================================================= */
+.triage-row {
+  padding: 13px var(--pad-row-x); border-bottom: 1px solid var(--border);
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center;
+  cursor: pointer; transition: background 140ms var(--ease-out);
+}
+.triage-row:last-child { border-bottom: 0; }
+.triage-row:hover { background: var(--surface-hover); }
+.triage-main { min-width: 0; display: grid; gap: 4px; }
+.triage-line1 { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.triage-title { font-size: 14.5px; font-weight: 600; color: var(--fg); }
+.triage-line2 { font-size: 12.5px; color: var(--fg-2); display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.triage-acts {
+  display: flex; align-items: center; gap: 6px;
+  opacity: 0.72; transition: opacity 140ms var(--ease-out);
+}
+.triage-row:hover .triage-acts, .triage-row:focus-within .triage-acts { opacity: 1; }
+
+/* =========================================================
+   QUEUE & DEPENDENCY GRAPH VIEW (FULL WIDTH!)
+   ========================================================= */
+.graph-layout { display: grid; gap: 20px; }
+.queue-strip {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px;
+}
+.queue-row {
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; cursor: pointer;
+}
+.queue-row:last-child { border-bottom: 0; }
+.queue-row:hover { background: var(--surface-hover); }
+.graph-legend {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 16px;
+  padding: 10px var(--pad-row-x); border-bottom: 1px solid var(--border);
+  background: var(--surface-2); font-size: 12px; color: var(--fg-2);
+}
+.g-key { display: inline-flex; align-items: center; gap: 6px; }
+.graph-canvas-wrap {
+  overflow: auto; padding: 20px; background: var(--surface); min-height: 460px;
+}
+.dag-lane {
+  margin-bottom: 22px; padding-bottom: 18px; border-bottom: 1px solid var(--border);
+}
+.dag-lane:last-child { margin-bottom: 0; border-bottom: 0; padding-bottom: 0; }
+.dag-lane-head {
+  display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px;
+}
+.dag-lane-head h3 { font-size: 14px; font-weight: 700; color: var(--fg); }
+.dag-lane-head span { font-size: 12px; font-family: var(--font-mono); color: var(--fg-3); }
+.dag-grid {
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch;
+}
+.dag-node {
+  width: 270px; text-align: left; cursor: pointer;
+  padding: 12px 14px; border-radius: var(--r-md);
+  background: var(--surface-2); border: 1px solid var(--border);
+  display: grid; gap: 6px; align-content: start;
+  transition: border-color 140ms var(--ease-out), background 140ms var(--ease-out);
+}
+.dag-node:hover { background: var(--surface-hover); border-color: var(--border-strong); }
+.dag-node.state-active { border-color: var(--ochre); background: var(--ochre-bg); }
+.dag-node.state-closed { opacity: 0.7; }
+.dag-node.hl-selected { border-color: var(--blue); box-shadow: inset 0 0 0 1px var(--blue); }
+.dag-node.hl-blocker { border-color: var(--red); background: var(--red-bg); }
+.dag-node.hl-unlocks { border-color: var(--blue); background: var(--blue-bg); }
+.dag-node.hl-dim { opacity: 0.35; }
+.dag-ntop { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dag-ntitle { font-size: 13px; font-weight: 600; color: var(--fg); line-height: 1.35; }
+.dag-nrels { font-size: 11.5px; color: var(--fg-2); font-family: var(--font-mono); }
+
+/* =========================================================
+   ACTIVITY & SETTLED VIEW
+   ========================================================= */
+.act-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+.feed-item {
+  padding: 12px var(--pad-row-x); border-bottom: 1px solid var(--border); display: grid; gap: 5px;
+}
+.feed-item:last-child { border-bottom: 0; }
+.feed-top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 12.5px; }
+.feed-who { font-weight: 700; color: var(--fg); font-family: var(--font-mono); }
+.feed-time { color: var(--fg-3); font-variant-numeric: tabular-nums; flex: none; }
+.feed-text { font-size: 13.5px; color: var(--fg-2); line-height: 1.45; overflow-wrap: anywhere; max-width: 72ch; }
+.feed-earlier {
+  margin-top: 6px; padding-left: 12px; border-left: 1px solid var(--border-strong);
+  display: grid; gap: 8px;
+}
+.settled-row {
+  padding: 11px var(--pad-row-x); border-bottom: 1px solid var(--border);
+  display: grid; gap: 3px; cursor: pointer;
+}
+.settled-row:last-child { border-bottom: 0; }
+.settled-row:hover { background: var(--surface-hover); }
+
+/* =========================================================
+   SLIDE-OVER DRAWERS (INSPECTOR + LAUNCH/ASK)
+   ========================================================= */
+.backdrop {
+  position: fixed; inset: 0; z-index: 55; background: rgba(6, 9, 14, 0.45);
+  opacity: 0; visibility: hidden; transition: opacity 180ms var(--ease-out), visibility 0s linear 180ms;
+}
+.backdrop.open { opacity: 1; visibility: visible; transition: opacity 180ms var(--ease-out), visibility 0s; }
+
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 60;
+  width: 460px; max-width: 100vw; background: var(--surface);
+  border-left: 1px solid var(--border-strong);
+  display: flex; flex-direction: column;
+  transform: translateX(100%); visibility: hidden;
+  transition: transform 200ms var(--ease-out), visibility 0s linear 200ms;
+  box-shadow: var(--shadow-pop);
+}
+.drawer.open {
+  transform: translateX(0); visibility: visible;
+  transition: transform 200ms var(--ease-out), visibility 0s;
+}
+.dr-head {
+  padding: 16px 20px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  background: var(--surface-2);
+}
+.dr-head h2 { font-size: 17px; line-height: 1.3; font-weight: 800; color: var(--fg); overflow-wrap: anywhere; }
+.dr-sub { font-size: 12.5px; color: var(--fg-2); margin-top: 4px; font-family: var(--font-mono); }
+.dr-body {
+  flex: 1; overflow-y: auto; padding: 18px 20px 28px; display: grid; gap: 20px; align-content: start;
+}
+.dr-sec { display: grid; gap: 10px; }
+.dr-sec h3 {
+  font-size: 13px; font-weight: 700; color: var(--fg-2);
+  padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+.dr-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+.dr-list { display: grid; }
+.dr-item {
+  padding: 10px 0; border-bottom: 1px solid var(--border);
+  display: grid; gap: 4px;
+}
+.dr-item:last-child { border-bottom: 0; }
+.dr-prose {
+  font-size: 13.5px; line-height: 1.5; color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px;
+}
+
+.field { display: grid; gap: 6px; }
+.field label { font-size: 12.5px; font-weight: 700; color: var(--fg); }
+.field textarea, .field input[type="text"] {
+  width: 100%; border: 1px solid var(--border-strong); border-radius: var(--r-md);
+  background: var(--bg); color: var(--fg); padding: 9px 11px; font-size: 13.5px; line-height: 1.45;
+}
+.field textarea { min-height: 92px; resize: vertical; }
+.field-hint { font-size: 12px; color: var(--fg-2); }
+
+/* Routing Popover */
+.pop-anchor { position: relative; }
+.popover {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 50;
+  width: 360px; max-width: calc(100vw - 32px);
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--r-md); padding: 14px 16px;
+  box-shadow: var(--shadow-pop); display: grid; gap: 12px;
+}
+.pop-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.pop-head h3 { font-size: 14px; font-weight: 800; color: var(--fg); }
+.mem-row { display: grid; gap: 5px; padding-top: 8px; border-top: 1px solid var(--border); }
+.mem-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
+.mem-bar { height: 6px; border-radius: 3px; background: var(--surface-2); border: 1px solid var(--border); overflow: hidden; }
+.mem-bar span { display: block; height: 100%; background: var(--emerald); }
+.mem-bar.reserve span { background: var(--ochre); }
+.picks-chart {
+  display: flex; align-items: flex-end; gap: 3px; height: 48px;
+  padding-top: 6px; border-bottom: 1px solid var(--border);
+}
+.picks-bar { flex: 1; background: var(--surface-2); border-radius: 2px 2px 0 0; min-height: 2px; }
+.picks-bar.hit { background: var(--blue); }
+
+/* Shortcuts Dialog */
+dialog {
+  margin: auto; border: 1px solid var(--border-strong); border-radius: var(--r-md);
+  background: var(--surface); color: var(--fg); padding: 20px 22px; width: min(440px, calc(100vw - 24px));
+  box-shadow: var(--shadow-pop);
+}
+dialog::backdrop { background: rgba(6, 9, 14, 0.55); }
+.dlg-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.dlg-head h2 { font-size: 16px; font-weight: 800; }
+.keys-grid { display: grid; grid-template-columns: 90px 1fr; gap: 8px 14px; font-size: 13px; }
+.keys-grid dt { font-family: var(--font-mono); font-weight: 700; color: var(--fg); }
+.keys-grid dd { color: var(--fg-2); }
+
+.empty-state {
+  padding: 28px var(--pad-row-x); color: var(--fg-2); font-size: 13.5px;
+  display: grid; gap: 6px;
+}
+.empty-state strong { color: var(--fg); }
+
+.toast {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 80;
+  background: var(--header-bg); color: var(--header-fg); border: 1px solid var(--header-border);
+  padding: 9px 16px; border-radius: var(--r-md); font-size: 13px; font-weight: 600;
+  box-shadow: var(--shadow-pop); display: flex; align-items: center; gap: 10px;
+}
+
+/* =========================================================
+   RESPONSIVE BREAKPOINTS
+   ========================================================= */
+@media (max-width: 1180px) {
+  .telemetry { flex-wrap: wrap; padding: 8px 18px; }
+  .t-group { flex-wrap: wrap; }
+}
+@media (max-width: 1120px) {
+  .dispatch-grid, .act-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 820px) {
+  .topbar { padding: 8px 14px; flex-wrap: wrap; row-gap: 4px; }
+  .main-nav { order: 3; width: 100%; border-top: 1px solid rgba(255,255,255,0.1); margin: 4px -14px -8px; padding: 0 10px; }
+  .nav-tab { padding: 9px 10px; font-size: 13px; }
+  .telemetry { padding: 8px 14px; gap: 8px; }
+  .t-right { width: 100%; margin-left: 0; flex-wrap: wrap; }
+  .search-box { flex: 1 1 180px; width: auto; }
+  .workspace { padding: 14px; gap: 14px; }
+  .triage-row { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .triage-acts { opacity: 1; }
+  .dag-node { width: 100%; }
+  .hbtn .btn-lbl { display: none; }
+}
+@media (max-width: 640px) {
+  .t-hide-sm, .t-sep { display: none; }
+  .tab-long { display: none; }
+  .tab-short { display: inline; }
+  .main-nav { justify-content: space-between; gap: 0; padding: 0 4px; }
+  .nav-tab { padding: 10px 4px; gap: 4px; font-size: 12px; flex: 1 1 auto; justify-content: center; }
+  .nav-count { padding: 1px 5px; font-size: 10px; }
+  #nav-c-activity { display: none; }
+  #btn-keys { display: none; }
+  .hbtn { height: 38px; }
+  .hbtn.icon-only { width: 38px; }
+  .t-group { gap: 8px 12px; width: 100%; }
+  .scenario-select { flex: 1 1 100%; height: 36px; }
+  .search-box { flex: 1 1 100%; }
+  .search-box input { height: 36px; }
+  .ir-top { flex-wrap: wrap; }
+  .ir-side { order: 2; margin-left: auto; }
+  .ir-title-block { order: 3; flex: 1 1 100%; }
+  .pr-top { flex-wrap: wrap; }
+  .pr-title { order: 3; flex: 1 1 100%; }
+  .pr-top .status-pill { margin-left: auto; }
+  .gate-card { padding: 12px 14px; }
+  .gate-acts { width: 100%; gap: 6px; }
+  .gate-acts .btn.primary, .gate-acts .btn.danger { flex: 1 1 100%; height: 38px; }
+  .gate-acts .btn.quiet { flex: 1 1 0; height: 34px; justify-content: center; }
+  .gate-reply-row, .gate-full { padding-left: 0; margin-left: 0; }
+  .st-code { font-size: 10px; }
+  .st-state { font-size: 9.5px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main-content">Skip to main workspace</a>
+
+<header class="topbar">
+  <a class="brand" href="#dispatch" id="brand-home">
+    <span class="brand-mark" aria-hidden="true">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+        <path d="M2 5h12M2 11h12M5 2v12"/>
+        <path d="M11 5v6" stroke="#e29524" stroke-width="2.2"/>
+      </svg>
+    </span>
+    <h1>t3 board</h1>
+  </a>
+
+  <nav class="main-nav" role="tablist" aria-label="Board views" id="main-nav">
+    <button class="nav-tab" role="tab" type="button" id="tab-dispatch" aria-controls="view-dispatch" data-view="dispatch" aria-selected="true" tabindex="0">
+      <span>Dispatch</span>
+      <span class="nav-count" id="nav-c-dispatch">2</span>
+    </button>
+    <button class="nav-tab" role="tab" type="button" id="tab-issues" aria-controls="view-issues" data-view="issues" aria-selected="false" tabindex="-1">
+      <span><span class="tab-long">New </span>Issues</span>
+      <span class="nav-count" id="nav-c-issues">14</span>
+    </button>
+    <button class="nav-tab" role="tab" type="button" id="tab-graph" aria-controls="view-graph" data-view="graph" aria-selected="false" tabindex="-1">
+      <span><span class="tab-long">Queue &amp; </span>Graph</span>
+      <span class="nav-count" id="nav-c-graph">35</span>
+    </button>
+    <button class="nav-tab" role="tab" type="button" id="tab-activity" aria-controls="view-activity" data-view="activity" aria-selected="false" tabindex="-1">
+      <span><span class="tab-long">Activity &amp; Settled</span><span class="tab-short">Activity</span></span>
+      <span class="nav-count" id="nav-c-activity">30</span>
+    </button>
+  </nav>
+
+  <div class="top-actions">
+    <button class="hbtn" type="button" id="btn-ask" title="Ask your agent (a)">
+      <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5h11v7.5h-6l-3 2.5V11h-2z"/></svg>
+      <span class="btn-lbl">Ask</span>
+    </button>
+    <button class="hbtn primary" type="button" id="btn-launch" title="Launch tickets (l)">
+      <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>
+      <span>Launch</span>
+    </button>
+    <button class="hbtn icon-only" type="button" id="btn-density" title="Toggle density (d)" aria-label="Toggle row density">
+      <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg>
+    </button>
+    <button class="hbtn icon-only" type="button" id="btn-theme" title="Switch light or dark theme (t)" aria-label="Switch theme"></button>
+    <button class="hbtn icon-only" type="button" id="btn-keys" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
+      <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4.5 7h1M7.5 7h1M10.5 7h1M5 9.5h6"/></svg>
+    </button>
+  </div>
+</header>
+
+<section class="telemetry" aria-label="Live operational status and filter">
+  <div class="t-group">
+    <span class="t-item" id="t-conn">
+      <span class="sig-dot ok" id="conn-dot"></span>
+      <b id="conn-mode">Snapshot</b>
+      <span id="conn-time" class="num">09:25 MST</span>
+    </span>
+    <span class="t-sep" aria-hidden="true"></span>
+    <span class="t-item">
+      <button class="t-btn" type="button" id="t-slots-btn" title="Open Queue and Graph">
+        <span class="sig-dot info"></span>
+        <span><b id="t-slots" class="num">2 / 2</b> slots</span>
+      </button>
+    </span>
+    <span class="t-sep" aria-hidden="true"></span>
+    <span class="t-item t-hide-sm">
+      <span class="sig-dot ok"></span>
+      <span><b id="t-merged" class="num">6</b> merged</span>
+    </span>
+    <span class="t-sep" aria-hidden="true"></span>
+    <span class="t-item pop-anchor">
+      <button class="t-btn" type="button" id="t-route-btn" aria-expanded="false" aria-controls="route-pop">
+        <span class="sig-dot ok"></span>
+        <span id="t-route-text">claudeSpare 100%</span>
+        <svg class="ico-sm" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>
+      </button>
+      <div class="popover" id="route-pop" hidden></div>
+    </span>
+  </div>
+
+  <div class="t-right">
+    <label class="sr-only" for="scenario-select">Load scenario</label>
+    <select class="scenario-select" id="scenario-select" title="Switch between captured live board state and simulated decision load">
+      <option value="live">Live snapshot (1 gate)</option>
+      <option value="clear">All clear (0 waiting)</option>
+      <option value="heavy">Demo busy (3 waiting)</option>
+    </select>
+    <div class="search-box">
+      <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
+      <input type="search" id="search-input" placeholder="Filter issues, PRs... (/)" aria-label="Filter board">
+      <button class="search-clear" type="button" id="search-clear" aria-label="Clear search" hidden>
+        <svg class="ico-sm" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+      </button>
+    </div>
+  </div>
+</section>
+
+<main class="workspace" id="main-content" tabindex="-1">
+  <!-- VIEW 1: DISPATCH -->
+  <div id="view-dispatch" class="workspace-view" role="tabpanel" aria-labelledby="tab-dispatch" style="display:grid;gap:20px;">
+    <section class="needs-zone" id="needs-zone" aria-label="Waiting on you"></section>
+
+    <div class="dispatch-grid">
+      <section class="panel" aria-labelledby="h-issues">
+        <div class="panel-head">
+          <h2 id="h-issues">Issues in progress</h2>
+          <span class="panel-meta" id="issues-meta"></span>
+        </div>
+        <div id="issues-list"></div>
+        <div class="panel-foot-bar" id="issues-foot" hidden></div>
+      </section>
+
+      <div class="right-stack">
+        <section class="panel" aria-labelledby="h-prs">
+          <div class="panel-head">
+            <h2 id="h-prs">PRs in progress</h2>
+            <div class="seg" role="group" aria-label="PR filter" id="pr-filter">
+              <button type="button" data-prf="active" aria-pressed="true">Active</button>
+              <button type="button" data-prf="merged" aria-pressed="false">Merged</button>
+              <button type="button" data-prf="all" aria-pressed="false">All</button>
+            </div>
+          </div>
+          <div id="prs-list"></div>
+        </section>
+
+        <section class="panel" id="recent-merged-panel" aria-labelledby="h-recent-merged">
+          <div class="panel-head">
+            <h2 id="h-recent-merged">Recently merged</h2>
+            <span class="panel-meta" id="recent-merged-meta"></span>
+          </div>
+          <div id="recent-merged-list"></div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- VIEW 2: NEW ISSUES -->
+  <div id="view-issues" class="workspace-view" role="tabpanel" aria-labelledby="tab-issues" hidden>
+    <section class="panel" aria-labelledby="h-triage">
+      <div class="panel-head">
+        <h2 id="h-triage">New issues awaiting triage</h2>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span class="panel-meta" id="triage-meta"></span>
+          <button class="btn sm" type="button" id="btn-dismissed-toggle">Show dismissed</button>
+        </div>
+      </div>
+      <div id="triage-list"></div>
+    </section>
+  </div>
+
+  <!-- VIEW 3: QUEUE & GRAPH -->
+  <div id="view-graph" class="workspace-view graph-layout" role="tabpanel" aria-labelledby="tab-graph" hidden>
+    <section class="panel" aria-labelledby="h-queue">
+      <div class="panel-head">
+        <h2 id="h-queue">Flow queue &amp; blocked issues</h2>
+        <span class="panel-meta" id="queue-meta"></span>
+      </div>
+      <div id="queue-list"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="h-dag">
+      <div class="panel-head">
+        <h2 id="h-dag">Dependency map by track</h2>
+        <span class="panel-meta" id="dag-meta">Select any issue to trace blockers and unlocks</span>
+      </div>
+      <div class="graph-legend">
+        <span class="g-key"><span class="sig-dot warn"></span>Active ticket</span>
+        <span class="g-key"><span class="sig-dot bad"></span>Blocks selected</span>
+        <span class="g-key"><span class="sig-dot info"></span>Unlocked by selected</span>
+        <span class="g-key"><span class="sig-dot ok"></span>Closed / completed</span>
+        <button class="btn sm quiet" type="button" id="dag-clear-trace" hidden style="margin-left:auto;">Clear trace</button>
+      </div>
+      <div class="graph-canvas-wrap" id="dag-canvas"></div>
+    </section>
+  </div>
+
+  <!-- VIEW 4: ACTIVITY & SETTLED -->
+  <div id="view-activity" class="workspace-view" role="tabpanel" aria-labelledby="tab-activity" hidden>
+    <div class="act-grid">
+      <section class="panel" aria-labelledby="h-feed">
+        <div class="panel-head">
+          <h2 id="h-feed">Recent activity</h2>
+          <span class="panel-meta" id="feed-meta"></span>
+        </div>
+        <div id="feed-list"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-settled">
+        <div class="panel-head">
+          <h2 id="h-settled">Settled tickets</h2>
+          <span class="panel-meta" id="settled-meta"></span>
+        </div>
+        <div id="settled-list"></div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<!-- SLIDE-OVER BACKDROP & DETAIL INSPECTOR -->
+<div class="backdrop" id="backdrop" aria-hidden="true"></div>
+
+<aside class="drawer" id="inspector" role="dialog" aria-modal="false" aria-labelledby="ins-title" aria-hidden="true">
+  <div class="dr-head">
+    <div style="min-width:0;">
+      <h2 id="ins-title">Details</h2>
+      <div class="dr-sub" id="ins-sub"></div>
+    </div>
+    <button class="btn sm quiet" type="button" id="ins-close" aria-label="Close inspector">
+      <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="dr-body" id="ins-body"></div>
+</aside>
+
+<!-- LAUNCH / ASK SLIDE-OVER DRAWER -->
+<aside class="drawer" id="composer-drawer" role="dialog" aria-modal="false" aria-labelledby="comp-title" aria-hidden="true">
+  <div class="dr-head">
+    <div>
+      <h2 id="comp-title">Launch tickets</h2>
+      <div class="dr-sub" id="comp-sub">Pool claude · claude-opus-5-5 · high</div>
+    </div>
+    <button class="btn sm quiet" type="button" id="comp-close" aria-label="Close composer">
+      <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+    </button>
+  </div>
+  <div class="dr-body">
+    <div class="seg" role="group" aria-label="Composer mode" style="justify-self:start;">
+      <button type="button" id="cm-launch" aria-pressed="true">Launch tickets</button>
+      <button type="button" id="cm-ask" aria-pressed="false">Ask your agent</button>
+    </div>
+
+    <form id="form-launch" class="dr-sec">
+      <div class="field">
+        <label for="launch-input">GitHub, GitLab, or Jira issue references (one per line)</label>
+        <textarea id="launch-input" placeholder="acme/widgets#245&#10;PROJ-123&#10;https://github.com/acme/widgets/issues/257"></textarea>
+        <span class="field-hint">Ctrl+Enter launches. Routes via pool claude (claudeSpare ready, claudeAgent at 40% reserve).</span>
+      </div>
+      <div class="dr-acts">
+        <button class="btn primary" type="submit">Launch tickets</button>
+        <button class="btn quiet" type="button" id="launch-sample">Fill blocked #245</button>
+      </div>
+      <div id="launch-result" class="dr-sec" hidden></div>
+    </form>
+
+    <form id="form-ask" class="dr-sec" hidden>
+      <div class="field">
+        <label for="ask-input">Ask about the board or dispatch ad-hoc work</label>
+        <input type="text" id="ask-input" placeholder="Which PRs are waiting on review, or cut a release of widgets">
+        <span class="field-hint">Runs on ask model claudeSpare · claude-haiku-5-5 in a short-lived scratch thread.</span>
+      </div>
+      <div class="dr-acts">
+        <button class="btn primary" type="submit">Ask agent</button>
+      </div>
+      <div id="ask-history" class="dr-sec"></div>
+    </form>
+  </div>
+</aside>
+
+<!-- KEYBOARD SHORTCUTS DIALOG -->
+<dialog id="keys-dialog" aria-labelledby="keys-h">
+  <div class="dlg-head">
+    <h2 id="keys-h">Keyboard shortcuts</h2>
+    <button class="btn sm quiet" type="button" id="keys-close" aria-label="Close shortcuts">
+      <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+    </button>
+  </div>
+  <dl class="keys-grid">
+    <dt>1 - 4</dt><dd>Switch views (Dispatch, New issues, Graph, Activity)</dd>
+    <dt>/</dt><dd>Focus live filter search</dd>
+    <dt>l</dt><dd>Open Launch tickets drawer</dd>
+    <dt>a</dt><dd>Open Ask your agent drawer</dd>
+    <dt>t</dt><dd>Toggle dark / light theme</dd>
+    <dt>d</dt><dd>Toggle comfortable / compact density</dd>
+    <dt>j / k</dt><dd>Move focus between active issues and PRs</dd>
+    <dt>Enter</dt><dd>Inspect focused item</dd>
+    <dt>Esc</dt><dd>Close drawer, popover, or clear search</dd>
+    <dt>?</dt><dd>Open this shortcuts list</dd>
+  </dl>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<div class="sr-only" id="live-region" aria-live="polite" aria-atomic="true"></div>
+
+<script id="embedded-snapshot" type="application/json">{"capturedAt":"2026-11-24T16:35:02Z","capturedLocal":"09:35 MST","counts":{"cards":1,"tickets":2,"running":0,"settled":90,"newIssues":14},"flowMaxTickets":2,"service":{"version":"0.10.2","t3":{"connected":true,"lastError":null},"watcher":{"lastPass":"09:35 MST","lastPassAt":"2026-11-24T16:35:02Z","alive":true}},"routing":{"pool":"claude","model":"claude-opus-5-5","effort":"high","strategy":"weighted","picks":3,"members":[{"instanceId":"claudeAgent","status":"reserve","share":0.0,"weight":1,"reserve":40.0,"picks":0,"running":0,"lastPickLocal":null,"reasons":{},"skips":{"reserve":3}},{"instanceId":"claudeSpare","status":"ready","share":1.0,"weight":2,"reserve":0.0,"picks":3,"running":0,"lastPickLocal":"07:23 MST","reasons":{"weighted":3},"skips":{}}],"series":{"start":"2026-11-23T16:35:02Z","bucketMinutes":60.0,"buckets":[{"start":"2026-11-23T16:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-23T17:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-23T18:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-23T19:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-23T20:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-23T21:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-23T22:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-23T23:35:02Z","counts":{"claudeAgent":0,"claudeSpare":1}},{"start":"2026-11-24T00:35:02Z","counts":{"claudeAgent":0,"claudeSpare":1}},{"start":"2026-11-24T01:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-24T02:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-24T03:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-24T04:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-24T05:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-24T06:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-24T07:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-24T08:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-24T09:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-24T10:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-24T11:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-24T12:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-24T13:35:02Z","counts":{"claudeAgent":0,"claudeSpare":1}},{"start":"2026-11-24T14:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}},{"start":"2026-11-24T15:35:02Z","counts":{"claudeAgent":0,"claudeSpare":0}}]}},"cards":[{"id":"b3","kind":"gate","label":"widgets#254","ticket":"mcp:launch:00000000000000000000000000000000000000000000000000000000feed0001","link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0001","text":"merge #283 at head b0d3481: reply \"merge\" to merge it, or review it first, here: https://github.com/acme/widgets/pull/283","handle":"m3231","options":["merge"],"at":"2026-11-24T16:25:17Z","atLocal":"09:25 MST","token":"470","repo":"acme/widgets","project":{"id":"mcp:00000000-0000-4000-8000-00000000a001","title":"widgets"}}],"tree":[{"label":"widgets#254","repo":"acme/widgets","project":{"id":"mcp:00000000-0000-4000-8000-00000000a001","title":"widgets"},"issue":"acme/widgets#254","humanTitle":"feat: automatic dependency DAG and flow wiring for project issues","priority":"high","labels":["enhancement","priority: high","workflow-track","track: flow-dag"],"status":"idle","gate":"worker_#256_(#254_4/10)_building_PR_4/10","paused":false,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0001","lastUp":"07:43 MST","upAt":"2026-11-24T14:43:46Z","last":{"handle":"m3189","kind":"note","head":"PR 3/10 #278 merged at 6ace951; worktree removed, #256 progress comment posted. PR 4/10 worker launched: #256 (#254 4/10), branch feat/256-b...","at":"07:43 MST"},"workers":[{"label":"#255 (#254 1/10)","humanTitle":"feat: discover graph repos from T3 projects","issueTitle":"feat: zero-config dependency graph, body dependency parsing, and smart lane grouping","issue":"acme/widgets#255","parentIssue":"acme/widgets#254","part":"1/10","status":"done","done":true,"paused":false,"pr":{"number":265,"url":"https://github.com/acme/widgets/pull/265","state":"merged","repository":"acme/widgets"},"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0002","lastUp":"20:17 MST","upAt":"2026-11-24T03:17:47Z"},{"label":"#255 (#254 2/10)","humanTitle":"feat: parse issue-body dependencies","issueTitle":"feat: zero-config dependency graph, body dependency parsing, and smart lane grouping","issue":"acme/widgets#255","parentIssue":"acme/widgets#254","part":"2/10","status":"done","done":true,"paused":false,"pr":{"number":272,"url":"https://github.com/acme/widgets/pull/272","state":"merged","repository":"acme/widgets"},"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0003","lastUp":"06:39 MST","upAt":"2026-11-24T13:39:16Z"},{"label":"#256 (#254 3/10)","humanTitle":"feat: wire GitHub dependencies in wf.issue","issueTitle":"feat: wire native GitHub dependencies on issue filing and sync parsed links","issue":"acme/widgets#256","parentIssue":"acme/widgets#254","part":"3/10","status":"done","done":true,"paused":false,"pr":{"number":278,"url":"https://github.com/acme/widgets/pull/278","state":"merged","repository":"acme/widgets"},"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0004","lastUp":"07:42 MST","upAt":"2026-11-24T14:42:38Z"},{"label":"#256 (#254 4/10)","humanTitle":"feat: sync parsed links to GitHub from board","issueTitle":"feat: wire native GitHub dependencies on issue filing and sync parsed links","issue":"acme/widgets#256","parentIssue":"acme/widgets#254","part":"4/10","status":"idle","done":false,"paused":false,"pr":{"number":283,"url":"https://github.com/acme/widgets/pull/283","state":"open","repository":"acme/widgets","readiness":{"isDraft":false,"mergeStateStatus":"CLEAN","reviewDecision":"APPROVED","checks":"passing"}},"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0005","lastUp":"09:25 MST","upAt":"2026-11-24T16:25:17Z"}]},{"label":"widgets#244","repo":"acme/widgets","project":{"id":"mcp:00000000-0000-4000-8000-00000000a001","title":"widgets"},"issue":"acme/widgets#244","humanTitle":"test: add shared arbitrary op decoder, swarm weights, and ddmin shrinker","priority":"medium","labels":["enhancement","priority: medium","workflow-track","flow"],"status":"idle","gate":null,"paused":false,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0006","lastUp":"09:29 MST","upAt":"2026-11-24T16:29:12Z","last":{"handle":"m3237","kind":"note","head":"PR 3/5 handed off (#284 closed #282, 53bf65c). PR 4/5 alphabet worker launched on Gemini 4 Neon xhigh: test/244-op-alphabet; scope includes ...","at":"09:29 MST"},"workers":[{"label":"#244 PR 1/4","humanTitle":"test: add in-memory store for chaos soaks","issueTitle":"test: add shared arbitrary op decoder, swarm weights, and ddmin shrinker","issue":"acme/widgets#244","parentIssue":"acme/widgets#239","part":"1/4","status":"done","done":true,"paused":false,"pr":{"number":280,"url":"https://github.com/acme/widgets/pull/280","state":"merged","repository":"acme/widgets"},"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0007","lastUp":"07:54 MST","upAt":"2026-11-24T14:54:12Z"},{"label":"#244 PR 2/4","humanTitle":"test: decode chaos ops with swarm weights","issueTitle":"test: add shared arbitrary op decoder, swarm weights, and ddmin shrinker","issue":"acme/widgets#244","parentIssue":null,"part":"2/4","status":"done","done":true,"paused":false,"pr":{"number":281,"url":"https://github.com/acme/widgets/pull/281","state":"merged","repository":"acme/widgets"},"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0008","lastUp":"08:45 MST","upAt":"2026-11-24T15:45:30Z"},{"label":"#282 (#244 3/5)","humanTitle":"fix: drop moved ready card under non-merge gate","issueTitle":null,"issue":"acme/widgets#282","parentIssue":"acme/widgets#244","part":"3/5","status":"done","done":true,"paused":false,"pr":{"number":284,"url":"https://github.com/acme/widgets/pull/284","state":"merged","repository":"acme/widgets"},"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0009","lastUp":"09:28 MST","upAt":"2026-11-24T16:28:16Z"},{"label":"#244 PR 4/5","humanTitle":"test: widen the chaos op alphabet","issueTitle":"test: add shared arbitrary op decoder, swarm weights, and ddmin shrinker","issue":"acme/widgets#244","parentIssue":null,"part":"4/5","status":"running","done":false,"paused":false,"pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed000a","lastUp":"09:29 MST","upAt":"2026-11-24T16:29:27Z"}]}],"newIssues":[{"id":"n72","repo":"acme/widgets","number":282,"url":"https://github.com/acme/widgets/issues/282","title":"fix: reconcile leaves moved ready card open under non-merge gate","at":"2026-11-24T15:25:37Z","atLocal":"08:25 MST","threadTitle":"#244 PR 2/4: test: decode chaos ops with swarm weights","threadLink":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0008"},{"id":"n71","repo":"acme/widgets","number":268,"url":"https://github.com/acme/widgets/issues/268","title":"fix: reconcile reports a queue drop a retired wait hid","at":"2026-11-24T02:43:05Z","atLocal":"19:43 MST","threadTitle":"#243 PR 1/2: test: add shadow-model oracle to pr chaos","threadLink":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed000b"},{"id":"n70","repo":"acme/widgets","number":267,"url":"https://github.com/acme/widgets/issues/267","title":"fix: answering a moved-approval card leaves gate_pr dangling","at":"2026-11-24T02:43:05Z","atLocal":"19:43 MST","threadTitle":"#243 PR 1/2: test: add shadow-model oracle to pr chaos","threadLink":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed000b"},{"id":"n69","repo":"acme/widgets","number":258,"url":"https://github.com/acme/widgets/issues/258","title":"feat: add Flow settings UI, setup interview, interactive graph editing, and LLM DAG triage","at":"2026-11-23T23:04:15Z","atLocal":"16:04 MST","threadTitle":"Board View Without Flow Config","threadLink":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c001"},{"id":"n68","repo":"acme/widgets","number":257,"url":"https://github.com/acme/widgets/issues/257","title":"feat: infer source-control dependencies from PR stacks, file overlaps, and module graph","at":"2026-11-23T23:04:15Z","atLocal":"16:04 MST","threadTitle":"Board View Without Flow Config","threadLink":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c001"},{"id":"n67","repo":"acme/widgets","number":256,"url":"https://github.com/acme/widgets/issues/256","title":"feat: wire native GitHub dependencies on issue filing and sync parsed links","at":"2026-11-23T23:04:15Z","atLocal":"16:04 MST","threadTitle":"Board View Without Flow Config","threadLink":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c001"},{"id":"n66","repo":"acme/widgets","number":255,"url":"https://github.com/acme/widgets/issues/255","title":"feat: zero-config dependency graph, body dependency parsing, and smart lane grouping","at":"2026-11-23T23:04:15Z","atLocal":"16:04 MST","threadTitle":"Board View Without Flow Config","threadLink":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c001"},{"id":"n64","repo":"acme/widgets","number":246,"url":"https://github.com/acme/widgets/issues/246","title":"ci: add nightly chaos soak, cargo-mutants grading, and optional fuzz target","at":"2026-11-23T21:18:35Z","atLocal":"14:18 MST","threadTitle":"Fuzz Testing Spike for Merge Gate","threadLink":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c002"},{"id":"n63","repo":"acme/widgets","number":245,"url":"https://github.com/acme/widgets/issues/245","title":"test: add gate-able fakes, deterministic race tables, and fault/crash chaos","at":"2026-11-23T21:18:35Z","atLocal":"14:18 MST","threadTitle":"Fuzz Testing Spike for Merge Gate","threadLink":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c002"},{"id":"n57","repo":"acme/widgets","number":236,"url":"https://github.com/acme/widgets/issues/236","title":"fix: wait for CodeRabbit's review of the head","at":"2026-11-23T17:32:06Z","atLocal":"10:32 MST","threadTitle":"widgets#229: https://github.com/acme/widgets/issues/229","threadLink":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed000c"},{"id":"n56","repo":"acme/widgets","number":235,"url":"https://github.com/acme/widgets/issues/235","title":"Launch tickets from non-GitHub trackers (Jira, GitLab)","at":"2026-11-23T17:24:02Z","atLocal":"10:24 MST","threadTitle":"Launch Tickets from Non-GitHub Trackers","threadLink":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c003"},{"id":"n55","repo":"acme/widgets","number":232,"url":"https://github.com/acme/widgets/issues/232","title":"Board: resolved Needs you cards linger as tombstones","at":"2026-11-23T15:34:26Z","atLocal":"08:34 MST","threadTitle":"Needs You Cards Stuck After Resolve","threadLink":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c004"},{"id":"n53","repo":"acme/widgets","number":227,"url":"https://github.com/acme/widgets/issues/227","title":"fix: show pending launching tickets on the Graph tab without flow","at":"2026-11-23T13:38:07Z","atLocal":"06:38 MST","threadTitle":"Review of MCP launch work","threadLink":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c005"},{"id":"n52","repo":"acme/widgets","number":226,"url":"https://github.com/acme/widgets/issues/226","title":"feat: route multi-column graph edges through lane gutters","at":"2026-11-23T13:38:07Z","atLocal":"06:38 MST","threadTitle":"Review of MCP launch work","threadLink":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c005"}],"dismissedIssues":[{"id":"n48","repo":"acme/widgets","number":210,"url":"https://github.com/acme/widgets/issues/210","title":"fix: merge the Models dialog into Settings","atLocal":"21:57 MST"},{"id":"n44","repo":"acme/widgets","number":185,"url":"https://github.com/acme/widgets/issues/185","title":"fix: clear a gate whose card a new approval replaced","atLocal":"21:09 MST"},{"id":"n43","repo":"acme/widgets","number":184,"url":"https://github.com/acme/widgets/issues/184","title":"fix: keep buttons on multiline refusal cards","atLocal":"21:09 MST"},{"id":"n41","repo":"acme/widgets","number":175,"url":"https://github.com/acme/widgets/issues/175","title":"fix: close remote board review follow-ups from #164","atLocal":"17:42 MST"},{"id":"n39","repo":"acme/widgets","number":170,"url":"https://github.com/acme/widgets/issues/170","title":"fix: resume a moved thread after an interrupted move","atLocal":"13:39 MST"},{"id":"n38","repo":"acme/widgets","number":164,"url":"https://github.com/acme/widgets/issues/164","title":"feat: serve the board remotely over HTTPS with Tailscale Serve and pairing auth","atLocal":"07:56 MST"},{"id":"n35","repo":"acme/widgets","number":51,"url":"https://github.com/acme/widgets/issues/51","title":"Sign Windows release builds","atLocal":"21:56 MST"},{"id":"n34","repo":"acme/widgets","number":153,"url":"https://github.com/acme/widgets/issues/153","title":"fix: install and resolve workflow skills for Antigravity","atLocal":"21:27 MST"},{"id":"n32","repo":"acme/widgets","number":147,"url":"https://github.com/acme/widgets/issues/147","title":"Windows recovery commands fail for npm installs of Claude Code","atLocal":"19:51 MST"},{"id":"n31","repo":"acme/widgets","number":140,"url":"https://github.com/acme/widgets/issues/140","title":"Follow-ups from #136: slot resolution, doctor, and MCP setup edge cases","atLocal":"18:53 MST"},{"id":"n29","repo":"acme/widgets","number":125,"url":"https://github.com/acme/widgets/issues/125","title":"Windows: update's skills recovery hint needs the t3cm.exe path","atLocal":"16:09 MST"},{"id":"n27","repo":"acme/widgets","number":128,"url":"https://github.com/acme/widgets/issues/128","title":"Unix link fallback prints ln -s, which fails again","atLocal":"16:09 MST"},{"id":"n26","repo":"acme/widgets","number":123,"url":"https://github.com/acme/widgets/issues/123","title":"Re-enable Windows CI and releases with signed binaries","atLocal":"16:08 MST"},{"id":"n25","repo":"acme/widgets","number":122,"url":"https://github.com/acme/widgets/issues/122","title":"Disable the Windows build in CI until code signing","atLocal":"16:04 MST"}],"feed":[{"ticketLabel":"widgets#244","fromLabel":null,"kind":"note","head":"PR 3/5 handed off (#284 closed #282, 53bf65c). PR 4/5 alphabet worker launched on Gemini 4 Neon xhigh: test/244-op-alphabet; scope includes the FakeSetPrs harness flaw (seeds 500/1080).","at":"09:29 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"note","head":"acme/widgets#284: merged on GitHub at 53bf65c, 09:20 MST","at":"09:27 MST","atLocal":null},{"ticketLabel":"widgets#254","fromLabel":null,"kind":"event","head":"PR 4/10 updated: #283, head b0d3481f5674052fa0881a9a491a4c23569c73b3","at":"09:18 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"event","head":"PR 3/5 opened: #284 https://github.com/acme/widgets/pull/284, head 8bb1938674d1de1cd8abd4779af237d7ed41f5e1 Publishing: Publishing: pr skill + .github/PULL_REQUEST_TEMPLATE.md; passes: pr (appl...","at":"09:11 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"note","head":"Built #282 fix and regression tests; fmt, clippy, cargo test, Tier 1 chaos, 200 concurrent seeds, and 7/7 sentinel_acceptance pass. Starting independent review.","at":"09:02 MST","atLocal":null},{"ticketLabel":"widgets#254","fromLabel":null,"kind":"event","head":"PR 4/10 updated: #283, head 67c249dcf9dbb16824afb25d28e2fbec17cda326","at":"08:51 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"note","head":"PR 2 handed off; result and 5-PR split posted on #244. PR 3/5 (#282 reconcile fix) worker launched on Gemini 4 Neon xhigh: fix/282-moved-ready-card.","at":"08:46 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"note","head":"#281 (PR 2, op decoder + swarm) merged at 97002f7. Split now 5 PRs: #282 reconcile fix added as PR 3.","at":"08:44 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"note","head":"acme/widgets#281: merged on GitHub at 97002f7, 08:43 MST","at":"08:44 MST","atLocal":null},{"ticketLabel":"widgets#254","fromLabel":null,"kind":"event","head":"PR 4/10 opened: #283 https://github.com/acme/widgets/pull/283, head a634e9348faef706a19e116b0d8e8ca9885903f1 Publishing: Publishing: format pr + .github/PULL_REQUEST_TEMPLATE.md; passes: pr (pa...","at":"08:38 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"event","head":"PR 2/4 updated: #281, head 257efd4d6f68f68ad450078c6b689e8a4bf8ead5 Fixed clippy::chunks_exact_to_as_chunks in tests/all/pr_chaos/ops.rs for CI Rust 1.100.","at":"08:29 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"event","head":"PR 2/4 opened: #281 https://github.com/acme/widgets/pull/281, head 581f73356ff633d71471c6b83b1600c29122b42a Publishing: Publishing: pr skill + .github/PULL_REQUEST_TEMPLATE.md (Compatibility, P...","at":"08:26 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"event","head":"Filed #282 (https://github.com/acme/widgets/issues/282) for a reconcile idempotency bug found by Swarm testing in src/reconcile.rs:799-854 (moved ready merge card left open under a non-merge ti...","at":"08:25 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"event","head":"PR 2/4 opened: #281 https://github.com/acme/widgets/pull/281, head 581f73356ff633d71471c6b83b1600c29122b42a Publishing: Publishing: pr skill + .github/PULL_REQUEST_TEMPLATE.md (Compatibility, P...","at":"08:25 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"note","head":"Built PR 2/4 (ops.rs decoder + Swarm profiles + sequential runner refactor); fmt, clippy, cargo test --locked, and sentinel_acceptance (7/7) all pass. Starting independent review.","at":"08:15 MST","atLocal":null},{"ticketLabel":"widgets#254","fromLabel":null,"kind":"note","head":"Built PR 4/10 (board link sync, Issue Form parsing, rules/skills/templates, docs); fmt/clippy/tests green (82 unit + 1107 integration); starting independent review.","at":"08:03 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"note","head":"PR 1/4 handed off (#280 at 2863ccf); result posted on #244. PR 2/4 worker launched on Gemini 4 Neon xhigh: test/244-op-decoder.","at":"07:55 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"note","head":"#280 (PR 1/4, in-memory store) merged at 2863ccf; worker told to hand off.","at":"07:53 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"event","head":"PR #280 (https://github.com/acme/widgets/pull/280, head 562ae57d1b2b4cedce34bb2c58e232ac86756c6c) passed all 22 checks with CodeRabbit approval and was merged into main on GitHub by widget-maintainer as...","at":"07:53 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"note","head":"CodeRabbit approved #280 (no actionable findings, 0 unresolved threads); waiting on remaining CI checks.","at":"07:48 MST","atLocal":null},{"ticketLabel":"widgets#254","fromLabel":null,"kind":"note","head":"PR 3/10 #278 merged at 6ace951; worktree removed, #256 progress comment posted. PR 4/10 worker launched: #256 (#254 4/10), branch feat/256-board-link-sync.","at":"07:43 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"event","head":"PR 1/4 opened: #280 https://github.com/acme/widgets/pull/280, head 562ae57d1b2b4cedce34bb2c58e232ac86756c6c Publishing: pr skill and .github/PULL_REQUEST_TEMPLATE.md (Compatibility, Publication...","at":"07:43 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"event","head":"PR 1/4 opened: #280 https://github.com/acme/widgets/pull/280, head 562ae57d1b2b4cedce34bb2c58e232ac86756c6c Publishing: pr skill and .github/PULL_REQUEST_TEMPLATE.md (Compatibility, Publication...","at":"07:42 MST","atLocal":null},{"ticketLabel":"widgets#254","fromLabel":null,"kind":"note","head":"PR #278 CI checks green on 855e946 (21 passed); waiting for CodeRabbit Round 2 review to finish.","at":"07:38 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"note","head":"Built Store::open_memory() and switched sequential chaos to it (5.82s -> 2.74s; sentinel_acceptance 7/7 in 11.33s); starting independent review.","at":"07:37 MST","atLocal":null},{"ticketLabel":"widgets#254","fromLabel":null,"kind":"event","head":"PR 3/10 updated: #278, head 855e94697793ea79b92cee020b98ee9bae205eba Fixed all 4 Major CodeRabbit findings (top-level-only Flow section replacement, remaining-body dependency preflight, returning part...","at":"07:29 MST","atLocal":null},{"ticketLabel":"widgets#244","fromLabel":null,"kind":"note","head":"Split approved (4 PRs) and posted to #244. PR 1/4 worker launched on Gemini 4 Neon xhigh: test/244-memory-store.","at":"07:26 MST","atLocal":null},{"ticketLabel":null,"fromLabel":null,"kind":"note","head":"widgets#244 launched on claudeSpare (claudeAgent claude-opus-5-5, effort high; weighted: weight 2 of 2; skipped claudeAgent held at its 40% reserve until every other member is out)","at":"07:23 MST","atLocal":null},{"ticketLabel":"widgets#254","fromLabel":null,"kind":"note","head":"PR #278 CI checks green on d2bed8a (21 passed, including linux/arm/macos checks and installs); waiting for CodeRabbit review to finish.","at":"07:21 MST","atLocal":null},{"ticketLabel":"widgets#243","fromLabel":null,"kind":"note","head":"acme/widgets#277: merged on GitHub at 39b2145, 07:20 MST","at":"07:20 MST","atLocal":null}],"settled":[{"label":"widgets#243","repo":"acme/widgets","title":"widgets#243: test: add shadow-model oracle and runtime sentinels for workflow chaos","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed000d","settledAt":"07:23 MST","closedHow":"handoff"},{"label":"widgets#17","repo":"acme/widgets","title":"widgets#17: https://github.com/acme/widgets/issues/17","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed000e","settledAt":"05:43 MST","closedHow":"closed-by-board"},{"label":"widgets#241","repo":"acme/widgets","title":"widgets#241: test: unblind pr_chaos and add reachability assertions","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed000f","settledAt":"18:23 MST","closedHow":"handoff"},{"label":"widgets#242","repo":"acme/widgets","title":"widgets#242: test: add pure property tests for pools::choose and flow::queue_order","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0010","settledAt":"16:50 MST","closedHow":"handoff"},{"label":"widgets#229","repo":"acme/widgets","title":"widgets#229: https://github.com/acme/widgets/issues/229","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed000c","settledAt":"15:38 MST","closedHow":"handoff"},{"label":"widgets#240","repo":"acme/widgets","title":"Fuzz Testing Spike for Merge Gate","pr":{"number":234,"url":"https://github.com/acme/widgets/pull/234","state":"merged","repository":"acme/widgets"},"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c002","settledAt":"15:01 MST","closedHow":"handoff"},{"label":"Launch Tickets from Non-GitHub Trackers","repo":"acme/widgets","title":"Launch Tickets from Non-GitHub Trackers","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c003","settledAt":"15:00 MST","closedHow":"handoff"},{"label":"#232 tombstones","repo":"acme/widgets","title":"Needs You Cards Stuck After Resolve","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c004","settledAt":"08:58 MST","closedHow":"handoff"},{"label":"widgets#139","repo":"acme/widgets","title":"widgets#139: https://github.com/acme/widgets/issues/139","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0011","settledAt":"07:05 MST","closedHow":"handoff"},{"label":"widgets#142","repo":"acme/widgets","title":"widgets#142: https://github.com/acme/widgets/issues/142","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0012","settledAt":"04:22 MST","closedHow":"handoff"},{"label":"widgets#216","repo":"acme/widgets","title":"widgets#216: feat: chart token volume per instance on board","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0013","settledAt":"01:27 MST","closedHow":"handoff"},{"label":"Work Item 213","repo":"acme/widgets","title":"Work Item 213","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c006","settledAt":"23:28 MST","closedHow":"handoff"},{"label":"widgets#215","repo":"acme/widgets","title":"widgets#215: fix: close five board inspector drawer gaps","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0014","settledAt":"23:28 MST","closedHow":"handoff"},{"label":"widgets#213","repo":"acme/widgets","title":"widgets#213: Idle open tickets cannot be closed from the board","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0015","settledAt":"22:42 MST","closedHow":"closed"},{"label":"widgets#112","repo":"acme/widgets","title":"widgets#112: https://github.com/acme/widgets/issues/112","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0016","settledAt":"22:39 MST","closedHow":"handoff"},{"label":"Consolidate Duplicate Launch Settings","repo":"acme/widgets","title":"Consolidate Duplicate Launch Settings","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/00000000-0000-4000-8000-00000000c007","settledAt":"22:37 MST","closedHow":"handoff"},{"label":"widgets#121","repo":"acme/widgets","title":"widgets#121: feat: launch the next ready issue when a slot opens","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0017","settledAt":"21:21 MST","closedHow":"handoff"},{"label":"widgets#103","repo":"acme/widgets","title":"widgets#103: https://github.com/acme/widgets/issues/103","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0018","settledAt":"21:00 MST","closedHow":"handoff"},{"label":"widgets#191","repo":"acme/widgets","title":"widgets#191: https://github.com/acme/widgets/issues/191","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed0019","settledAt":"19:23 MST","closedHow":"handoff"},{"label":"widgets#190","repo":"acme/widgets","title":"widgets#190: https://github.com/acme/widgets/issues/190","pr":null,"link":"https://app.t3.codes/threads/00000000-0000-4000-8000-00000000e001/mcp%3Alaunch%3A00000000000000000000000000000000000000000000000000000000feed001a","settledAt":"18:40 MST","closedHow":"handoff"}],"flow":{"enabled":true,"launch":"ask","maxTickets":2,"free":0,"blocked":[{"repo":"acme/widgets","number":245,"label":"widgets#245","url":"https://github.com/acme/widgets/issues/245","title":"test: add gate-able fakes, deterministic race tables, and fault/crash chaos","priority":"medium","milestone":null,"createdAt":"2026-11-23T21:07:30Z","parent":null,"unblockedBy":[],"blockers":[],"moreBlockers":false,"external":false,"unresolved":["Phase P2 ( )"]},{"repo":"acme/widgets","number":246,"label":"widgets#246","url":"https://github.com/acme/widgets/issues/246","title":"ci: add nightly chaos soak, cargo-mutants grading, and optional fuzz target","priority":"low","milestone":null,"createdAt":"2026-11-23T21:07:32Z","parent":{"repo":"acme/widgets","number":239,"label":"widgets#239","url":"https://github.com/acme/widgets/issues/239","title":"research: stateful testing, fuzzing, and shadow-oracle verification for t3cm workflow"},"unblockedBy":[],"blockers":[{"repo":"acme/widgets","number":244,"label":"widgets#244","url":"https://github.com/acme/widgets/issues/244","title":"test: add shared arbitrary op decoder, swarm weights, and ddmin shrinker"}],"moreBlockers":false,"external":false}],"queue":[],"graph":{"nodes":[{"id":"acme/widgets#2","label":"widgets#2","number":2,"url":"https://github.com/acme/widgets/issues/2","title":"Release builds for Linux, macOS and Windows","state":"closed","priority":null,"labels":[]},{"id":"acme/widgets#51","label":"widgets#51","number":51,"url":"https://github.com/acme/widgets/issues/51","title":"Sign Windows release builds","state":"open","priority":"low","labels":["priority: low","blocked: external"]},{"id":"acme/widgets#58","label":"widgets#58","number":58,"url":"https://github.com/acme/widgets/issues/58","title":"Release and installer follow-ups from #2","state":"open","priority":"medium","labels":["priority: medium","ready"]},{"id":"acme/widgets#96","label":"widgets#96","number":96,"url":"https://github.com/acme/widgets/issues/96","title":"t3cm owns and updates the workflow skills","state":"closed","priority":null,"labels":[]},{"id":"acme/widgets#102","label":"widgets#102","number":102,"url":"https://github.com/acme/widgets/issues/102","title":"feat: render board answers as links, then primitives","state":"open","priority":"medium","labels":["priority: medium","ready"]},{"id":"acme/widgets#103","label":"widgets#103","number":103,"url":"https://github.com/acme/widgets/issues/103","title":"feat: Ask runs requests in the right project","state":"closed","priority":null,"labels":[]},{"id":"acme/widgets#105","label":"widgets#105","number":105,"url":"https://github.com/acme/widgets/issues/105","title":"Retire t3wf: t3cm runs the whole T3 workflow","state":"closed","priority":null,"labels":[]},{"id":"acme/widgets#107","label":"widgets#107","number":107,"url":"https://github.com/acme/widgets/issues/107","title":"feat: add a usage source for pool headroom","state":"open","priority":"low","labels":["enhancement","priority: low","blocked: external"]},{"id":"acme/widgets#115","label":"widgets#115","number":115,"url":"https://github.com/acme/widgets/issues/115","title":"feat: resolve slots in the t3cm service","state":"closed","priority":null,"labels":[]},{"id":"acme/widgets#118","label":"widgets#118","number":118,"url":"https://github.com/acme/widgets/issues/118","title":"feat: register t3cm for Codex","state":"open","priority":"high","labels":["enhancement","priority: high","workflow-track","ready"]},{"id":"acme/widgets#119","label":"widgets#119","number":119,"url":"https://github.com/acme/widgets/issues/119","title":"feat: render board answer links","state":"closed","priority":null,"labels":[]},{"id":"acme/widgets#120","label":"widgets#120","number":120,"url":"https://github.com/acme/widgets/issues/120","title":"feat: board primitives for answers and notes","state":"open","priority":"low","labels":["enhancement","priority: low","ready"]},{"id":"acme/widgets#123","label":"widgets#123","number":123,"url":"https://github.com/acme/widgets/issues/123","title":"Re-enable Windows CI and releases with signed binaries","state":"open","priority":"low","labels":["github_actions","priority: low","blocked","blocked: external"]},{"id":"acme/widgets#125","label":"widgets#125","number":125,"url":"https://github.com/acme/widgets/issues/125","title":"Windows: update's skills recovery hint needs the t3cm.exe path","state":"open","priority":"low","labels":["bug","priority: low","ready"]},{"id":"acme/widgets#128","label":"widgets#128","number":128,"url":"https://github.com/acme/widgets/issues/128","title":"Unix link fallback prints ln -s, which fails again","state":"open","priority":"low","labels":["bug","priority: low","ready"]},{"id":"acme/widgets#147","label":"widgets#147","number":147,"url":"https://github.com/acme/widgets/issues/147","title":"Windows recovery commands blocked under Restricted policy for npm installs","state":"open","priority":"low","labels":["bug","priority: low","ready"]},{"id":"acme/widgets#170","label":"widgets#170","number":170,"url":"https://github.com/acme/widgets/issues/170","title":"fix: resume a moved thread after an interrupted move","state":"open","priority":"low","labels":["bug","priority: low","ready"]},{"id":"acme/widgets#175","label":"widgets#175","number":175,"url":"https://github.com/acme/widgets/issues/175","title":"fix: close remote board review follow-ups from #164","state":"open","priority":"medium","labels":["enhancement","priority: medium","ready"]},{"id":"acme/widgets#184","label":"widgets#184","number":184,"url":"https://github.com/acme/widgets/issues/184","title":"fix: keep buttons on multiline refusal cards","state":"open","priority":null,"labels":["bug","needs-triage"]},{"id":"acme/widgets#185","label":"widgets#185","number":185,"url":"https://github.com/acme/widgets/issues/185","title":"fix: clear a gate whose card a new approval replaced","state":"open","priority":null,"labels":["bug","needs-triage"]},{"id":"acme/widgets#187","label":"widgets#187","number":187,"url":"https://github.com/acme/widgets/issues/187","title":"feat: adopt cargo-mutants for diff-based CI checks and core module audits","state":"open","priority":null,"labels":["enhancement"]},{"id":"acme/widgets#216","label":"widgets#216","number":216,"url":"https://github.com/acme/widgets/issues/216","title":"feat: chart token volume per instance on board","state":"open","priority":"low","labels":["enhancement","priority: low","workflow-track","blocked","blocked: external"]},{"id":"acme/widgets#226","label":"widgets#226","number":226,"url":"https://github.com/acme/widgets/issues/226","title":"feat: route multi-column graph edges through lane gutters","state":"open","priority":null,"labels":["enhancement","needs-triage"]},{"id":"acme/widgets#227","label":"widgets#227","number":227,"url":"https://github.com/acme/widgets/issues/227","title":"fix: show pending launching tickets on the Graph tab without flow","state":"open","priority":null,"labels":["bug","needs-triage"]},{"id":"acme/widgets#239","label":"widgets#239","number":239,"url":"https://github.com/acme/widgets/issues/239","title":"research: stateful testing, fuzzing, and shadow-oracle verification for t3cm workflow","state":"closed","priority":null,"labels":[]},{"id":"acme/widgets#241","label":"widgets#241","number":241,"url":"https://github.com/acme/widgets/issues/241","title":"test: unblind pr_chaos and add reachability assertions","state":"closed","priority":null,"labels":[]},{"id":"acme/widgets#243","label":"widgets#243","number":243,"url":"https://github.com/acme/widgets/issues/243","title":"test: add shadow-model oracle and runtime sentinels for workflow chaos","state":"closed","priority":null,"labels":[]},{"id":"acme/widgets#244","label":"widgets#244","number":244,"url":"https://github.com/acme/widgets/issues/244","title":"test: add shared arbitrary op decoder, swarm weights, and ddmin shrinker","state":"open","priority":"medium","labels":["enhancement","priority: medium","workflow-track","flow"]},{"id":"acme/widgets#245","label":"widgets#245","number":245,"url":"https://github.com/acme/widgets/issues/245","title":"test: add gate-able fakes, deterministic race tables, and fault/crash chaos","state":"open","priority":"medium","labels":["enhancement","priority: medium","workflow-track","flow"]},{"id":"acme/widgets#246","label":"widgets#246","number":246,"url":"https://github.com/acme/widgets/issues/246","title":"ci: add nightly chaos soak, cargo-mutants grading, and optional fuzz target","state":"open","priority":"low","labels":["enhancement","priority: low","workflow-track","flow"]},{"id":"acme/widgets#254","label":"widgets#254","number":254,"url":"https://github.com/acme/widgets/issues/254","title":"feat: automatic dependency DAG and flow wiring for project issues","state":"open","priority":"high","labels":["enhancement","priority: high","workflow-track","track: flow-dag"]},{"id":"acme/widgets#255","label":"widgets#255","number":255,"url":"https://github.com/acme/widgets/issues/255","title":"feat: zero-config dependency graph, body dependency parsing, and smart lane grouping","state":"closed","priority":null,"labels":[]},{"id":"acme/widgets#256","label":"widgets#256","number":256,"url":"https://github.com/acme/widgets/issues/256","title":"feat: wire native GitHub dependencies on issue filing and sync parsed links","state":"open","priority":"high","labels":["enhancement","priority: high","workflow-track","flow","track: flow-dag"]},{"id":"acme/widgets#257","label":"widgets#257","number":257,"url":"https://github.com/acme/widgets/issues/257","title":"feat: infer source-control dependencies from PR stacks, file overlaps, and module graph","state":"open","priority":"medium","labels":["enhancement","priority: medium","workflow-track","flow","track: flow-dag"]},{"id":"acme/widgets#258","label":"widgets#258","number":258,"url":"https://github.com/acme/widgets/issues/258","title":"feat: add Flow settings UI, setup interview, interactive graph editing, and LLM DAG triage","state":"open","priority":"low","labels":["enhancement","priority: low","workflow-track","flow","track: flow-dag"]}],"edges":[{"from":"acme/widgets#51","to":"acme/widgets#2","kind":"parent","source":"github"},{"from":"acme/widgets#118","to":"acme/widgets#96","kind":"blockedBy","source":"github"},{"from":"acme/widgets#118","to":"acme/widgets#115","kind":"blockedBy","source":"github"},{"from":"acme/widgets#118","to":"acme/widgets#105","kind":"parent","source":"github"},{"from":"acme/widgets#119","to":"acme/widgets#102","kind":"parent","source":"github"},{"from":"acme/widgets#120","to":"acme/widgets#103","kind":"blockedBy","source":"body"},{"from":"acme/widgets#120","to":"acme/widgets#102","kind":"parent","source":"github"},{"from":"acme/widgets#123","to":"acme/widgets#51","kind":"blockedBy","source":"github"},{"from":"acme/widgets#123","to":"acme/widgets#125","kind":"blockedBy","source":"github"},{"from":"acme/widgets#123","to":"acme/widgets#147","kind":"blockedBy","source":"github"},{"from":"acme/widgets#244","to":"acme/widgets#241","kind":"blockedBy","source":"body"},{"from":"acme/widgets#244","to":"acme/widgets#243","kind":"blockedBy","source":"body"},{"from":"acme/widgets#244","to":"acme/widgets#239","kind":"parent","source":"body"},{"from":"acme/widgets#246","to":"acme/widgets#244","kind":"blockedBy","source":"body"},{"from":"acme/widgets#246","to":"acme/widgets#239","kind":"parent","source":"body"},{"from":"acme/widgets#255","to":"acme/widgets#254","kind":"parent","source":"github"},{"from":"acme/widgets#256","to":"acme/widgets#255","kind":"blockedBy","source":"github"},{"from":"acme/widgets#256","to":"acme/widgets#254","kind":"parent","source":"github"},{"from":"acme/widgets#257","to":"acme/widgets#255","kind":"blockedBy","source":"github"},{"from":"acme/widgets#257","to":"acme/widgets#254","kind":"parent","source":"github"},{"from":"acme/widgets#258","to":"acme/widgets#256","kind":"blockedBy","source":"github"},{"from":"acme/widgets#258","to":"acme/widgets#257","kind":"blockedBy","source":"github"},{"from":"acme/widgets#258","to":"acme/widgets#254","kind":"parent","source":"github"}]}}}</script>
+<script>
+"use strict";
+
+/* =========================================================
+   DRAWN SVG ICON LIBRARY (SINGLE CONSISTENT 1.75px STROKE)
+   ========================================================= */
+const ICONS = {
+  diamond: '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.8 14.2 8 8 14.2 1.8 8z"/></svg>',
+  alert: '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2 14.5 13.5H1.5z"/><path d="M8 6.2v3.3M8 11.4v.2"/></svg>',
+  check: '<svg class="ico-sm" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5 6.4 12 13 4.5"/></svg>',
+  clock: '<svg class="ico-sm" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.5"/></svg>',
+  play: '<svg class="ico-sm" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round" aria-hidden="true"><path d="M5 3.2 12.5 8 5 12.8z"/></svg>',
+  pause: '<svg class="ico-sm" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5.5 3.5v9M10.5 3.5v9"/></svg>',
+  branch: '<svg class="ico-sm" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="4.5" cy="3.5" r="1.8"/><circle cx="4.5" cy="12.5" r="1.8"/><circle cx="11.5" cy="12.5" r="1.8"/><path d="M4.5 5.3v5.4M11.5 10.7V7.4c0-1.2-.8-2-2-2H6.5"/></svg>',
+  external: '<svg class="ico-sm" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2.5h4v4M13.5 2.5 7 9M11.5 9.5v4H2.5v-9h4"/></svg>',
+  sun: '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"/></svg>',
+  moon: '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 9.8A5.8 5.8 0 1 1 6.2 2.5a4.6 4.6 0 0 0 7.3 7.3z"/></svg>',
+  undo: '<svg class="ico-sm" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 3.5 2.5 6.5l3 3"/><path d="M3 6.5h6.5a3.5 3.5 0 1 1 0 7H7"/></svg>',
+  arrow: '<svg class="ico-sm" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4"/></svg>',
+};
+
+const BASE_SNAPSHOT = JSON.parse(document.getElementById("embedded-snapshot").textContent);
+
+/* =========================================================
+   APPLICATION STATE
+   ========================================================= */
+const app = {
+  data: structuredClone(BASE_SNAPSHOT),
+  liveConnected: false,
+  scenario: "live",
+  view: "dispatch",
+  prFilter: "active",
+  query: "",
+  showDismissed: false,
+  selectedDagId: null,
+  inspected: null,
+  lastTriggerEl: null,
+  pendingUndo: new Map(), // cardId -> { answer, remainingMs, timer }
+  expandedFeed: new Set(),
+  expandedCardFull: new Set(),
+  openCardReply: new Set(),
+  dismissedCards: new Set(),
+  launchedLocal: [],
+  asksLocal: [],
+  pausedTickets: new Set(),
+};
+
+/* =========================================================
+   HELPERS: HUMAN-READABLE COPY & DATA ENRICHMENT
+   ========================================================= */
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function cleanTitle(raw) {
+  if (!raw) return "";
+  let s = String(raw).trim();
+  const colonIdx = s.indexOf(": ");
+  if (colonIdx > 0 && colonIdx < 38 && /^([\w.-]+)?#\d+/.test(s)) {
+    const rest = s.slice(colonIdx + 2);
+    if (!rest.startsWith("http")) s = rest;
+  }
+  return s;
+}
+
+function relAge(isoOrLocal) {
+  if (!isoOrLocal) return "";
+  const d = Date.parse(isoOrLocal);
+  if (Number.isNaN(d)) return String(isoOrLocal);
+  const ref = Date.parse(app.data.capturedAt) || Date.now();
+  const mins = Math.max(0, Math.round((ref - d) / 60000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + "m";
+  const hrs = Math.floor(mins / 60);
+  const rem = mins % 60;
+  if (hrs < 24) return rem ? `${hrs}h ${rem}m` : `${hrs}h`;
+  return `${Math.floor(hrs / 24)}d`;
+}
+
+function graphNodeMap() {
+  const byId = new Map();
+  const byLabel = new Map();
+  const byNum = new Map();
+  for (const n of (app.data.flow?.graph?.nodes || [])) {
+    byId.set(n.id, n);
+    byLabel.set(n.label, n);
+    byNum.set(n.number, n);
+  }
+  return { byId, byLabel, byNum };
+}
+
+function parsePart(partStr) {
+  if (!partStr) return null;
+  const m = String(partStr).match(/^(\d+)\s*\/\s*(\d+)$/);
+  return m ? { n: Number(m[1]), of: Number(m[2]) } : null;
+}
+
+function cardHeadline(card) {
+  // Strip verbose "reply \"merge\" to ..." scaffolding into crisp operational headline
+  const t = card.text || "";
+  const prMatch = t.match(/#(\d+)/);
+  if (prMatch) {
+    const prNum = Number(prMatch[1]);
+    // Find PR human title from workers
+    for (const tk of app.data.tree || []) {
+      for (const w of tk.workers || []) {
+        if (w.pr && w.pr.number === prNum) {
+          const wt = cleanTitle(w.humanTitle || w.label);
+          if (/^merge\b/i.test(t)) return `Merge PR #${prNum}: ${wt}`;
+          return `PR #${prNum}: ${wt}`;
+        }
+      }
+    }
+  }
+  return t.replace(/\s*here:\s*https?:\/\/\S+/gi, "").replace(/\s*reply\s+"[^"]+"\s+to\s+/i, "").trim();
+}
+
+function buildScenarioCards() {
+  const liveCards = (app.data.cards || []).filter(c => !app.dismissedCards.has(c.id));
+  if (app.scenario === "clear") return [];
+  if (app.scenario === "live") return liveCards;
+  // Clearly labeled simulated busy load adding a blocker + pool move alongside real card b3
+  const demo = [
+    {
+      id: "demo-blocker",
+      kind: "blocker",
+      demo: true,
+      label: "widgets#244",
+      text: "Demo blocker: Seed 1080 chaos soak hit an unmodeled PR rebase race in FakeSetPrs. Choose whether to widen the oracle or pin seed 1080 as a regression test.",
+      options: ["Widen oracle", "Pin regression test", "Hold"],
+      atLocal: "09:28 MST",
+      at: app.data.capturedAt,
+      repo: "acme/widgets",
+    },
+    {
+      id: "demo-move",
+      kind: "gate",
+      demo: true,
+      label: "widgets#244",
+      text: "Demo pool limit: claudeSpare reached its 5h token cap while running PR 4/5. Move worker to claudeAgent (using reserve) or wait until 11:00 MST?",
+      options: ["Move to claudeAgent", "Wait until 11:00"],
+      atLocal: "09:27 MST",
+      at: app.data.capturedAt,
+      repo: "acme/widgets",
+    },
+  ].filter(c => !app.dismissedCards.has(c.id));
+  return [...demo, ...liveCards];
+}
+
+function extractPrRows() {
+  const rows = [];
+  const cards = buildScenarioCards();
+  const cardByPr = new Map();
+  for (const c of cards) {
+    const m = (c.text || "").match(/#(\d+)/);
+    if (m) cardByPr.set(Number(m[1]), c);
+  }
+  for (const tk of app.data.tree || []) {
+    const tkTitle = cleanTitle(tk.humanTitle || tk.label);
+    const tkNum = (tk.label || "").replace(/^[^#]+/, "");
+    const workers = tk.workers || [];
+    // Determine max step denominator across workers
+    let maxTotal = workers.length;
+    for (const w of workers) {
+      const p = parsePart(w.part);
+      if (p && p.of > maxTotal) maxTotal = p.of;
+    }
+    for (const w of workers) {
+      const p = parsePart(w.part);
+      const stepText = p ? `${p.n}/${maxTotal}` : (w.part || "");
+      const subIssue = w.issue ? "#" + w.issue.split("#")[1] : null;
+      const pr = w.pr;
+      let state = "running";
+      let stateLabel = "Building now";
+      let stateKind = "running";
+      let sha = null;
+      if (pr && pr.state === "merged") {
+        state = "merged";
+        stateLabel = "Merged";
+        stateKind = "merged";
+      } else if (pr && pr.state === "open") {
+        const rd = pr.readiness || {};
+        const hasGate = cardByPr.has(pr.number);
+        if (hasGate) {
+          state = "gate";
+          stateLabel = "Merge gate";
+          stateKind = "gate";
+        } else if (rd.checks === "failing") {
+          state = "failing";
+          stateLabel = "CI failing";
+          stateKind = "blocked";
+        } else if (rd.mergeStateStatus === "CLEAN" && rd.reviewDecision === "APPROVED" && !rd.isDraft) {
+          state = "ready";
+          stateLabel = "Ready to merge";
+          stateKind = "ready";
+        } else {
+          state = "review";
+          stateLabel = rd.isDraft ? "Draft PR" : "In review";
+          stateKind = "review";
+        }
+      } else if (w.status === "paused" || app.pausedTickets.has(tk.label)) {
+        state = "paused";
+        stateLabel = "Paused";
+        stateKind = "merged";
+      } else if (w.done) {
+        state = "merged";
+        stateLabel = "Done";
+        stateKind = "merged";
+      }
+      if (pr && cardByPr.has(pr.number)) {
+        const m = (cardByPr.get(pr.number).text || "").match(/head\s+([0-9a-f]{7,})/i);
+        if (m) sha = m[1].slice(0, 7);
+      }
+      rows.push({
+        key: pr ? `pr-${pr.number}` : `wip-${tk.label}-${w.label}`,
+        prNumber: pr ? pr.number : null,
+        prUrl: pr ? pr.url : null,
+        badge: pr ? `PR #${pr.number}` : `WIP ${stepText || "branch"}`,
+        title: cleanTitle(w.humanTitle || w.label),
+        subIssue,
+        subIssueTitle: w.issueTitle || null,
+        parentLabel: tk.label,
+        parentNum: tkNum,
+        parentTitle: tkTitle,
+        stepText,
+        state,
+        stateLabel,
+        stateKind,
+        sha,
+        isActive: state !== "merged",
+        upAt: w.upAt,
+        lastUp: w.lastUp,
+        link: w.link,
+        gateCard: pr ? cardByPr.get(pr.number) || null : null,
+        worker: w,
+        ticket: tk,
+      });
+    }
+  }
+  // Sort: gates first, then active running/review/ready, then merged newest first
+  const rank = { gate: 0, failing: 1, ready: 2, review: 3, running: 4, paused: 5, merged: 6 };
+  rows.sort((a, b) => (rank[a.state] - rank[b.state]) || ((Date.parse(b.upAt) || 0) - (Date.parse(a.upAt) || 0)));
+  return rows;
+}
+
+function matchesSearch(haystack) {
+  if (!app.query) return true;
+  const words = app.query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const low = haystack.toLowerCase();
+  return words.every(w => low.includes(w));
+}
+
+/* =========================================================
+   RENDERERS
+   ========================================================= */
+function renderHeaderAndTelemetry() {
+  const cards = buildScenarioCards();
+  const prs = extractPrRows();
+  const activePrs = prs.filter(p => p.isActive);
+  const mergedPrs = prs.filter(p => !p.isActive);
+  const openTickets = app.data.tree || [];
+
+  const navDispatch = document.getElementById("nav-c-dispatch");
+  navDispatch.innerHTML = cards.length > 0
+    ? `${cards.length}<span class="tab-long"> waiting</span>`
+    : `${openTickets.length}<span class="tab-long"> active</span>`;
+  navDispatch.classList.toggle("warn", cards.length > 0);
+
+  document.getElementById("nav-c-issues").textContent = String((app.data.newIssues || []).length);
+  document.getElementById("nav-c-graph").textContent = String((app.data.flow?.graph?.nodes || []).length);
+  document.getElementById("nav-c-activity").textContent = String((app.data.feed || []).length);
+
+  const maxSlots = app.data.flowMaxTickets || app.data.flow?.maxTickets || 2;
+  document.getElementById("t-slots").textContent = `${openTickets.length} / ${maxSlots}`;
+  document.getElementById("t-merged").textContent = String(mergedPrs.length);
+
+  document.getElementById("conn-mode").textContent = app.liveConnected ? "T3 live" : "Live snapshot";
+  document.getElementById("conn-time").textContent = app.data.capturedLocal || "";
+
+  const r = app.data.routing;
+  if (r && r.members && r.members.length) {
+    const sorted = [...r.members].sort((a, b) => (b.share || 0) - (a.share || 0));
+    const top = sorted[0];
+    document.getElementById("t-route-text").textContent = `Pool ${r.pool}: ${top.instanceId} ${Math.round((top.share || 0) * 100)}%`;
+  }
+
+  // Theme icon
+  const dark = document.documentElement.getAttribute("data-theme") === "dark";
+  document.getElementById("btn-theme").innerHTML = dark ? ICONS.sun : ICONS.moon;
+  document.getElementById("btn-theme").title = dark ? "Switch to light theme (t)" : "Switch to dark theme (t)";
+}
+
+function renderNeedsYou() {
+  const zone = document.getElementById("needs-zone");
+  const cards = buildScenarioCards().filter(c =>
+    matchesSearch(`${c.label} ${c.text} ${cardHeadline(c)} ${c.kind}`)
+  );
+
+  if (cards.length === 0) {
+    zone.innerHTML = `
+      <div class="all-clear">
+        <div class="all-clear-left">
+          ${ICONS.check}
+          <span>All clear - nothing waiting on your approval</span>
+        </div>
+        <span class="all-clear-sub">0 open gates · T3 watcher healthy</span>
+      </div>`;
+    return;
+  }
+
+  zone.innerHTML = cards.map(c => {
+    const pending = app.pendingUndo.get(c.id);
+    const isBlocker = c.kind === "blocker";
+    const headline = cardHeadline(c);
+    const prMatch = (c.text || "").match(/https:\/\/github\.com\/\S+\/pull\/(\d+)/i);
+    const prUrl = prMatch ? prMatch[0] : null;
+    const prNum = prMatch ? prMatch[1] : null;
+
+    const tk = (app.data.tree || []).find(t => t.label === c.label);
+    const tkHuman = tk ? cleanTitle(tk.humanTitle) : "";
+
+    if (pending) {
+      const pct = Math.max(0, Math.min(100, (pending.remainingMs / 5000) * 100));
+      const secs = Math.ceil(pending.remainingMs / 1000);
+      return `
+        <article class="gate-card ${isBlocker ? "kind-blocker" : ""}" data-card-id="${esc(c.id)}">
+          <div class="undo-bar">
+            <div class="undo-top">
+              <span data-undo-label="${esc(c.id)}">Sending "${esc(pending.answer)}" to ${esc(c.label)} in <span data-undo-secs="${esc(c.id)}">${secs}</span>s...</span>
+              <button class="btn sm" type="button" data-undo-card="${esc(c.id)}">${ICONS.undo}<span>Undo</span></button>
+            </div>
+            <div class="undo-track"><div class="undo-fill" data-undo-fill="${esc(c.id)}" style="width:${pct}%"></div></div>
+          </div>
+        </article>`;
+    }
+
+    const optsHtml = (c.options || []).map(opt => {
+      const lbl = (opt.toLowerCase() === "merge" && prNum) ? `Merge PR #${prNum}` : opt;
+      const isPrimary = opt.toLowerCase() !== "hold" && !opt.toLowerCase().startsWith("wait");
+      return `<button class="btn ${isPrimary ? (isBlocker ? "danger" : "primary") : ""}" type="button" data-answer-card="${esc(c.id)}" data-answer-val="${esc(opt)}">${esc(lbl)}</button>`;
+    }).join("");
+
+    const replyOpen = app.openCardReply.has(c.id);
+    const fullOpen = app.expandedCardFull.has(c.id);
+
+    return `
+      <article class="gate-card ${isBlocker ? "kind-blocker" : ""}" data-card-id="${esc(c.id)}">
+        <div class="gate-top">
+          <div class="gate-lead">
+            <span class="gate-icon">${isBlocker ? ICONS.alert : ICONS.diamond}</span>
+            <div class="gate-copy">
+              <div class="gate-title-row">
+                <span class="gate-title">${esc(headline)}</span>
+              </div>
+              <div class="gate-meta">
+                <span class="gate-kind">${c.demo ? "Simulated · " : ""}${isBlocker ? "Blocker" : "Waiting on you"}</span>
+                <span class="gate-meta-item"><strong>${esc(c.label)}</strong>${tkHuman ? " - " + esc(tkHuman) : ""}</span>
+                <span class="gate-meta-item num">${esc(relAge(c.at) || c.atLocal || "now")}</span>
+                ${prUrl ? `<a class="gate-meta-item" href="${esc(prUrl)}" target="_blank" rel="noopener noreferrer">Review PR #${esc(prNum)} ${ICONS.external}</a>` : ""}
+              </div>
+            </div>
+          </div>
+          <div class="gate-acts">
+            ${optsHtml}
+            <button class="btn quiet sm" type="button" data-toggle-reply="${esc(c.id)}">Reply</button>
+            <button class="btn quiet sm" type="button" data-toggle-full="${esc(c.id)}">${fullOpen ? "Hide raw" : "Details"}</button>
+            <button class="btn quiet sm" type="button" data-dismiss-card="${esc(c.id)}">Dismiss</button>
+          </div>
+        </div>
+        ${replyOpen ? `
+          <form class="gate-reply-row" data-reply-form="${esc(c.id)}">
+            <input type="text" placeholder="Type a custom answer for ${esc(c.label)}..." aria-label="Custom reply">
+            <button class="btn primary sm" type="submit">Send</button>
+          </form>` : ""}
+        ${fullOpen ? `<div class="gate-full">${esc(c.text)}</div>` : ""}
+      </article>`;
+  }).join("");
+}
+
+function renderActiveIssues() {
+  const container = document.getElementById("issues-list");
+  const allPrs = extractPrRows();
+  const cards = buildScenarioCards();
+  const tickets = (app.data.tree || []).filter(tk => {
+    const workerText = (tk.workers || []).map(w => `${w.label} ${w.humanTitle} ${w.pr?.number || ""}`).join(" ");
+    return matchesSearch(`${tk.label} ${tk.humanTitle} ${workerText} ${(tk.labels || []).join(" ")}`);
+  });
+
+  const runningWorkers = allPrs.filter(p => p.state === "running").length;
+  const openPrCount = allPrs.filter(p => p.isActive && p.prNumber).length;
+  document.getElementById("issues-meta").textContent =
+    `${tickets.length} open · ${openPrCount} PR open · ${runningWorkers} building`;
+
+  if (tickets.length === 0) {
+    container.innerHTML = `<div class="empty-state"><strong>No matching active issues.</strong><span>Clear the search filter or launch a ticket with the Launch button.</span></div>`;
+  } else {
+    container.innerHTML = tickets.map(tk => {
+      const tkTitle = cleanTitle(tk.humanTitle || tk.label);
+      const tkNum = "#" + (tk.issue ? tk.issue.split("#")[1] : tk.label.split("#")[1] || tk.label);
+      const workers = tk.workers || [];
+      let totalSteps = workers.length;
+      for (const w of workers) {
+        const p = parsePart(w.part);
+        if (p && p.of > totalSteps) totalSteps = p.of;
+      }
+      const mergedCount = workers.filter(w => w.pr?.state === "merged" || w.done).length;
+      const activeWorker = [...workers].reverse().find(w => !w.done) || workers[workers.length - 1];
+      const activeSubTitle = activeWorker ? cleanTitle(activeWorker.humanTitle || activeWorker.label) : "";
+      const activeSubNum = activeWorker?.issue ? "#" + activeWorker.issue.split("#")[1] : null;
+      const isPaused = tk.paused || app.pausedTickets.has(tk.label);
+      const hasGate = cards.some(c => c.label === tk.label);
+
+      // Build Swiss Railway PR station nodes with accurate state mapping
+      const stations = [];
+      let hasRunningWorker = false;
+      let hasReadyPr = false;
+      let hasReviewPr = false;
+      for (const w of workers) {
+        const p = parsePart(w.part);
+        const prNum = w.pr?.number;
+        const rd = w.pr?.readiness || {};
+        const isMerged = w.pr?.state === "merged" || w.done;
+        const prRe = prNum ? new RegExp(`#${prNum}\\b`) : null;
+        const isGate = !!(prRe && cards.some(c => prRe.test(c.text || "")));
+        const isFailing = !isMerged && w.pr?.state === "open" && rd.checks === "failing";
+        const isReady = !isMerged && !isGate && w.pr?.state === "open" && rd.mergeStateStatus === "CLEAN" && rd.reviewDecision === "APPROVED" && !rd.isDraft;
+        const isOpenReview = !isMerged && !isGate && !isReady && w.pr?.state === "open";
+        const isRun = !isMerged && w.status === "running";
+
+        if (isRun) hasRunningWorker = true;
+        if (isReady) hasReadyPr = true;
+        if (isOpenReview) hasReviewPr = true;
+
+        const kind = isMerged ? "merged"
+          : isGate ? "gate"
+          : isFailing ? "blocked"
+          : isReady ? "ready"
+          : isOpenReview ? "review"
+          : isRun ? "running"
+          : "remaining";
+        const code = prNum ? `#${prNum}` : (p ? `PR ${p.n}/${totalSteps}` : "WIP");
+        const stLabel = isMerged ? "merged"
+          : isGate ? "merge gate"
+          : isFailing ? "CI fail"
+          : isReady ? "ready"
+          : isOpenReview ? (rd.isDraft ? "draft" : "review")
+          : isRun ? "building"
+          : "idle";
+        stations.push({
+          key: prNum ? `pr-${prNum}` : `wip-${tk.label}-${w.label}`,
+          code,
+          stLabel,
+          kind,
+          tip: `${code}: ${cleanTitle(w.humanTitle || w.label)} (${stLabel})`,
+        });
+      }
+      // Show remaining steps cleanly as one final destination stop
+      const shownCount = workers.length;
+      if (totalSteps > shownCount) {
+        const nextIdx = shownCount + 1;
+        const remLabel = nextIdx === totalSteps ? `${totalSteps}/${totalSteps}` : `${nextIdx}..${totalSteps}`;
+        stations.push({
+          key: null,
+          code: remLabel,
+          stLabel: `${totalSteps - shownCount} left`,
+          kind: "remaining",
+          tip: `${totalSteps - shownCount} remaining PR steps planned for ${tkNum}`,
+        });
+      }
+
+      const routeHtml = stations.map((st, idx) => {
+        const prevMerged = idx > 0 && stations[idx - 1].kind === "merged" && st.kind === "merged";
+        const nextMerged = idx < stations.length - 1 && st.kind === "merged" && stations[idx + 1].kind === "merged";
+        const segAttrs = `${prevMerged ? ' data-seg-l="merged"' : ""}${nextMerged ? ' data-seg-r="merged"' : ""}`;
+        const selected = app.inspected && st.key && app.inspected.key === st.key;
+        if (!st.key) {
+          return `<span class="station is-remaining"${segAttrs} title="${esc(st.tip)}"><span class="st-dot remaining"></span><span class="st-code">${esc(st.code)}</span><span class="st-state">${esc(st.stLabel)}</span></span>`;
+        }
+        return `<button type="button" class="station is-${st.kind}"${segAttrs} data-inspect-pr="${esc(st.key)}" data-active-node="${selected}" title="${esc(st.tip)}">
+          <span class="st-dot ${st.kind}"></span>
+          <span class="st-code">${esc(st.code)}</span>
+          <span class="st-state">${esc(st.stLabel)}</span>
+        </button>`;
+      }).join("");
+
+      const trackBadge = (tk.labels || []).find(l => l.startsWith("track:"))?.replace("track:", "") || (tk.labels || []).find(l => l === "flow") || "ticket";
+      const pillHtml = isPaused
+        ? `<span class="status-pill merged">${ICONS.pause}Paused</span>`
+        : hasGate
+          ? `<span class="status-pill gate">${ICONS.diamond}Needs you</span>`
+          : hasRunningWorker
+            ? `<span class="status-pill running">${ICONS.play}Running</span>`
+            : hasReadyPr
+              ? `<span class="status-pill ready">${ICONS.check}Ready</span>`
+              : hasReviewPr
+                ? `<span class="status-pill review">${ICONS.clock}In review</span>`
+                : `<span class="status-pill merged">${ICONS.clock}Idle</span>`;
+
+      const isSelected = app.inspected && app.inspected.type === "ticket" && app.inspected.id === tk.label;
+
+      return `
+        <article class="issue-row" tabindex="0" data-inspect-ticket="${esc(tk.label)}" data-selected="${isSelected}">
+          <div class="ir-top">
+            <span class="ref-badge">${esc(tkNum)}</span>
+            <div class="ir-title-block">
+              <div class="ir-title">${esc(tkTitle)}</div>
+              <div class="ir-sub">
+                ${activeSubNum && activeSubNum !== tkNum ? `<strong>Active sub-issue ${esc(activeSubNum)}:</strong> ` : `<strong>Current step:</strong> `}
+                ${esc(activeSubTitle)}
+              </div>
+              <div class="ir-tags">
+                <span class="track-label">${esc(trackBadge)}</span>
+                ${tk.priority ? `<span class="track-label">priority: ${esc(tk.priority)}</span>` : ""}
+                <span class="num">Updated ${esc(relAge(tk.upAt) || tk.lastUp)}</span>
+              </div>
+            </div>
+            <div class="ir-side">
+              ${pillHtml}
+              <button class="btn sm quiet" type="button" data-toggle-pause="${esc(tk.label)}">${isPaused ? "Resume" : "Pause"}</button>
+            </div>
+          </div>
+
+          <div class="route-wrap">
+            <div class="route-header">
+              <span><strong>Step ${Math.min(workers.length, totalSteps)} of ${totalSteps}</strong> · ${mergedCount} merged · select a stop to inspect PR</span>
+              <span class="mono num route-pct">${Math.round((mergedCount / Math.max(1, totalSteps)) * 100)}% landed</span>
+            </div>
+            <div class="route-track" role="group" aria-label="Pull request progress for ${esc(tk.label)}">
+              ${routeHtml}
+            </div>
+          </div>
+        </article>`;
+    }).join("");
+  }
+
+  // Quiet blocked-flow summary footer
+  const blocked = app.data.flow?.blocked || [];
+  const foot = document.getElementById("issues-foot");
+  if (blocked.length > 0) {
+    foot.hidden = false;
+    const names = blocked.map(b => `#${b.number} (${cleanTitle(b.title).slice(0, 38)}...)`).join(" · ");
+    foot.innerHTML = `
+      <span><strong>${blocked.length} queued issues blocked:</strong> ${esc(names)}</span>
+      <button class="btn sm quiet" type="button" id="foot-open-graph">Open Queue &amp; Graph ${ICONS.arrow}</button>`;
+  } else {
+    foot.hidden = true;
+  }
+}
+
+function renderPrLedger() {
+  const container = document.getElementById("prs-list");
+  const allRows = extractPrRows().filter(r =>
+    matchesSearch(`${r.badge} ${r.title} ${r.parentLabel} ${r.parentTitle} ${r.subIssue || ""} ${r.stateLabel}`)
+  );
+  let rows = allRows;
+  if (app.prFilter === "active") rows = allRows.filter(r => r.isActive);
+  else if (app.prFilter === "merged") rows = allRows.filter(r => !r.isActive);
+
+  if (rows.length === 0) {
+    container.innerHTML = `<div class="empty-state"><strong>No PRs in this filter.</strong><span>Switch to "All" or "Merged" to inspect recently landed PRs.</span></div>`;
+  } else {
+    container.innerHTML = rows.map(r => {
+      const ico = r.stateKind === "gate" ? ICONS.diamond
+        : r.stateKind === "ready" ? ICONS.check
+        : r.stateKind === "running" ? ICONS.play
+        : r.stateKind === "review" ? ICONS.clock
+        : r.stateKind === "blocked" ? ICONS.alert
+        : ICONS.check;
+      const isSel = app.inspected && app.inspected.key === r.key;
+
+      return `
+        <article class="pr-row" tabindex="0" data-inspect-pr="${esc(r.key)}" data-selected="${isSel}">
+          <div class="pr-top">
+            <span class="ref-badge">${esc(r.badge)}</span>
+            <div class="pr-title">${esc(r.title)}</div>
+            <span class="status-pill ${r.stateKind}">${ico}${esc(r.stateLabel)}</span>
+          </div>
+          <div class="pr-meta">
+            <div class="pr-meta-left">
+              <span class="pr-parent-clip"><strong>${esc(r.parentNum)}</strong> ${esc(r.parentTitle)}</span>
+              ${r.stepText ? `<span class="mono" style="flex:none;">· ${esc(r.stepText)}</span>` : ""}
+              ${r.sha ? `<span class="mono" style="flex:none;">· ${esc(r.sha)}</span>` : ""}
+            </div>
+            <span class="num" style="flex:none;">${esc(relAge(r.upAt) || r.lastUp || "")}</span>
+          </div>
+        </article>`;
+    }).join("");
+  }
+
+  // Recently merged companion panel (shown when PR filter is Active so both columns balance cleanly)
+  const recPanel = document.getElementById("recent-merged-panel");
+  const merged = allRows.filter(r => !r.isActive);
+  if (app.prFilter === "active" && merged.length > 0) {
+    recPanel.hidden = false;
+    document.getElementById("recent-merged-meta").textContent = `${merged.length} landed in active epics`;
+    document.getElementById("recent-merged-list").innerHTML = merged.slice(0, 4).map(r => `
+      <div class="recent-row" tabindex="0" data-inspect-pr="${esc(r.key)}">
+        <div class="recent-top">
+          <span class="ref-badge">${esc(r.badge)}</span>
+          <span class="recent-title">${esc(r.title)}</span>
+        </div>
+        <div class="recent-foot">
+          <span class="mono">${esc(r.parentNum)} · Step ${esc(r.stepText)}</span>
+          <span class="recent-meta num">${esc(relAge(r.upAt) || r.lastUp || "")}</span>
+        </div>
+      </div>`).join("");
+  } else {
+    recPanel.hidden = true;
+  }
+}
+
+function renderNewIssues() {
+  const list = document.getElementById("triage-list");
+  const isDismissed = app.showDismissed;
+  const source = isDismissed ? (app.data.dismissedIssues || []) : (app.data.newIssues || []);
+  const filtered = source.filter(i => matchesSearch(`${i.repo}#${i.number} ${i.title} ${i.threadTitle || ""}`));
+
+  // Detect issues already covered by an active/merged worker so user isn't misled into double-launching
+  const covered = new Map();
+  for (const tk of app.data.tree || []) {
+    for (const w of tk.workers || []) {
+      if (w.issue) {
+        const n = Number(w.issue.split("#")[1]);
+        if (w.pr?.state === "merged") covered.set(n, { label: `Fixed by PR #${w.pr.number}`, kind: "ready" });
+        else if (w.pr?.state === "open") covered.set(n, { label: `PR #${w.pr.number} open`, kind: "review" });
+        else covered.set(n, { label: `Running in ${tk.label}`, kind: "running" });
+      }
+    }
+  }
+
+  document.getElementById("h-triage").textContent = isDismissed ? "Dismissed issues" : "New issues awaiting triage";
+  document.getElementById("triage-meta").textContent = `${filtered.length} shown · ${(app.data.dismissedIssues || []).length} dismissed`;
+  document.getElementById("btn-dismissed-toggle").textContent = isDismissed ? "Show new issues" : `Show dismissed (${(app.data.dismissedIssues || []).length})`;
+
+  if (filtered.length === 0) {
+    list.innerHTML = `<div class="empty-state"><strong>No issues in this list.</strong><span>Newly filed issues from agent threads appear here automatically.</span></div>`;
+    return;
+  }
+
+  list.innerHTML = filtered.map(i => {
+    const cov = covered.get(i.number);
+    return `
+      <article class="triage-row" tabindex="0" data-inspect-new="${esc(i.id)}">
+        <div class="triage-main">
+          <div class="triage-line1">
+            <span class="ref-badge">#${esc(i.number)}</span>
+            <span class="triage-title">${esc(i.title)}</span>
+            ${cov ? `<span class="status-pill ${cov.kind}">${esc(cov.label)}</span>` : ""}
+          </div>
+          <div class="triage-line2">
+            <span>${esc(i.repo)}</span>
+            <span>·</span>
+            <span class="num">Filed ${esc(relAge(i.at) || i.atLocal || "")}</span>
+            ${i.threadTitle ? `<span>·</span><span>from ${esc(i.threadTitle)}</span>` : ""}
+          </div>
+        </div>
+        <div class="triage-acts">
+          ${isDismissed
+            ? `<button class="btn sm" type="button" data-restore-issue="${esc(i.id)}">Restore</button>`
+            : `<button class="btn sm primary" type="button" data-launch-issue="${esc(i.id)}">Launch</button>
+               <button class="btn sm quiet" type="button" data-dismiss-issue="${esc(i.id)}">Dismiss</button>`}
+        </div>
+      </article>`;
+  }).join("");
+}
+
+function renderQueueAndGraph() {
+  const fl = app.data.flow || {};
+  const blocked = (fl.blocked || []).filter(b => matchesSearch(`${b.label} ${b.title}`));
+  const queue = (fl.queue || []).filter(q => matchesSearch(`${q.label} ${q.title}`));
+  const maxS = fl.maxTickets || 2;
+  const openCount = (app.data.tree || []).length;
+
+  document.getElementById("queue-meta").textContent =
+    `${openCount} of ${maxS} slots full · ${queue.length} ready · ${blocked.length} blocked · launch: ${fl.launch || "ask"}`;
+
+  const qList = document.getElementById("queue-list");
+  if (queue.length === 0 && blocked.length === 0) {
+    qList.innerHTML = `<div class="empty-state"><strong>Queue is clear.</strong><span>No ready or blocked flow issues.</span></div>`;
+  } else {
+    const rows = [
+      ...queue.map(q => ({ ...q, _st: "ready" })),
+      ...blocked.map(b => ({ ...b, _st: "blocked" })),
+    ];
+    qList.innerHTML = rows.map(item => {
+      const bNames = [
+        ...(item.blockers || []).map(x => `#${x.number}`),
+        ...(item.unresolved || []),
+      ];
+      return `
+        <article class="queue-row" tabindex="0" data-inspect-dag="${esc(item.repo + "#" + item.number)}">
+          <div style="min-width:0;display:grid;gap:4px;">
+            <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">
+              <span class="ref-badge">#${esc(item.number)}</span>
+              <span style="font-size:14.5px;font-weight:700;color:var(--fg);">${esc(item.title)}</span>
+            </div>
+            <div style="font-size:12.5px;color:var(--fg-2);">
+              ${item.priority ? `priority: ${esc(item.priority)} · ` : ""}
+              ${bNames.length ? `Waiting on: ${esc(bNames.join(", "))}` : "Ready when a flow slot opens"}
+            </div>
+          </div>
+          <span class="status-pill ${item._st === "ready" ? "ready" : "blocked"}">${item._st === "ready" ? ICONS.check + "Ready" : ICONS.alert + "Blocked"}</span>
+        </article>`;
+    }).join("");
+  }
+
+  // Render full-width track-grouped dependency map
+  const canvas = document.getElementById("dag-canvas");
+  const nodes = (fl.graph?.nodes || []).filter(n => matchesSearch(`${n.label} ${n.title} ${(n.labels || []).join(" ")}`));
+  const edges = fl.graph?.edges || [];
+  const activeNums = new Set((app.data.tree || []).map(t => Number((t.issue || t.label).split("#")[1])));
+
+  // Compute trace highlights if a node is selected
+  const blockersOfSel = new Set();
+  const unlocksFromSel = new Set();
+  const sel = app.selectedDagId;
+  if (sel) {
+    for (const e of edges) {
+      if (e.kind === "blockedBy") {
+        if (e.from === sel) blockersOfSel.add(e.to);
+        if (e.to === sel) unlocksFromSel.add(e.from);
+      }
+      if (e.kind === "parent") {
+        if (e.from === sel) blockersOfSel.add(e.to);
+        if (e.to === sel) unlocksFromSel.add(e.from);
+      }
+    }
+  }
+  document.getElementById("dag-clear-trace").hidden = !sel;
+
+  // Group into clear lanes
+  const lanes = new Map();
+  for (const n of nodes) {
+    const lbls = n.labels || [];
+    let lane = "General backlog";
+    const track = lbls.find(l => l.startsWith("track:"));
+    if (track) lane = track.replace("track:", "");
+    else if (lbls.includes("flow") && (n.number >= 239 && n.number <= 246)) lane = "chaos-testing";
+    else if (lbls.includes("workflow-track")) lane = "workflow-track";
+    else if (lbls.includes("needs-triage")) lane = "needs-triage";
+    if (!lanes.has(lane)) lanes.set(lane, []);
+    lanes.get(lane).push(n);
+  }
+
+  const laneEntries = [...lanes.entries()].sort((a, b) => {
+    const aHasActive = a[1].some(n => activeNums.has(n.number)) ? 0 : 1;
+    const bHasActive = b[1].some(n => activeNums.has(n.number)) ? 0 : 1;
+    return aHasActive - bHasActive || b[1].length - a[1].length;
+  });
+
+  canvas.innerHTML = laneEntries.map(([lane, items]) => {
+    items.sort((a, b) => (a.state === "open" ? 0 : 1) - (b.state === "open" ? 0 : 1) || a.number - b.number);
+    return `
+      <div class="dag-lane">
+        <div class="dag-lane-head">
+          <h3>${esc(lane)}</h3>
+          <span>${items.filter(i => i.state === "open").length} open / ${items.length} total</span>
+        </div>
+        <div class="dag-grid">
+          ${items.map(n => {
+            const isActive = activeNums.has(n.number);
+            const isClosed = n.state === "closed";
+            const blks = edges.filter(e => e.from === n.id && e.kind === "blockedBy").map(e => "#" + e.to.split("#")[1]);
+            const unlks = edges.filter(e => e.to === n.id && e.kind === "blockedBy").map(e => "#" + e.from.split("#")[1]);
+            let cls = isActive ? "state-active" : isClosed ? "state-closed" : "";
+            if (sel) {
+              if (n.id === sel) cls += " hl-selected";
+              else if (blockersOfSel.has(n.id)) cls += " hl-blocker";
+              else if (unlocksFromSel.has(n.id)) cls += " hl-unlocks";
+              else cls += " hl-dim";
+            }
+            const pill = isActive
+              ? `<span class="status-pill gate">Active</span>`
+              : isClosed
+                ? `<span class="status-pill merged">Closed</span>`
+                : blks.length
+                  ? `<span class="status-pill blocked">Blocked</span>`
+                  : `<span class="status-pill ready">Open</span>`;
+            const rels = [
+              blks.length ? `blocked by ${blks.join(", ")}` : "",
+              unlks.length ? `unlocks ${unlks.join(", ")}` : "",
+            ].filter(Boolean).join(" · ");
+            return `
+              <button type="button" class="dag-node ${cls}" data-dag-node="${esc(n.id)}">
+                <div class="dag-ntop">
+                  <span class="ref-badge">#${esc(n.number)}</span>
+                  ${pill}
+                </div>
+                <div class="dag-ntitle">${esc(n.title)}</div>
+                ${rels ? `<div class="dag-nrels">${esc(rels)}</div>` : ""}
+              </button>`;
+          }).join("")}
+        </div>
+      </div>`;
+  }).join("");
+}
+
+function renderActivityAndSettled() {
+  const feedEl = document.getElementById("feed-list");
+  const rawFeed = (app.data.feed || []).filter(f => matchesSearch(`${f.ticketLabel} ${f.head}`));
+
+  // Group consecutive events from same ticket
+  const groups = [];
+  for (const item of rawFeed) {
+    const head = (item.head || "").replace(/Publishing:\s*Publishing:\s*/gi, "").replace(/https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/(?:pull|issues)\/(\d+)/gi, "#$1");
+    const last = groups[groups.length - 1];
+    if (last && last.ticketLabel === item.ticketLabel) {
+      last.earlier.push({ ...item, cleanHead: head });
+    } else {
+      groups.push({ ...item, cleanHead: head, earlier: [] });
+    }
+  }
+  document.getElementById("feed-meta").textContent = `${rawFeed.length} recent events`;
+
+  feedEl.innerHTML = groups.map((g, idx) => {
+    const gk = `${g.ticketLabel}-${idx}`;
+    const open = app.expandedFeed.has(gk);
+    return `
+      <div class="feed-item">
+        <div class="feed-top">
+          <span class="feed-who">${esc(g.ticketLabel || "board")}</span>
+          <span class="feed-time">${esc(g.at || g.atLocal || "")}</span>
+        </div>
+        <div class="feed-text">${esc(g.cleanHead)}</div>
+        ${g.earlier.length ? `
+          <div>
+            <button class="btn sm quiet" type="button" data-toggle-feed="${esc(gk)}" style="padding-left:0;">
+              ${open ? "Hide" : `+ ${g.earlier.length} earlier from ${esc(g.ticketLabel)}`}
+            </button>
+          </div>
+          ${open ? `<div class="feed-earlier">${g.earlier.map(e => `
+            <div>
+              <div class="feed-top"><span style="color:var(--fg-3);font-size:12px;">${esc(e.kind || "note")}</span><span class="feed-time">${esc(e.at || "")}</span></div>
+              <div class="feed-text">${esc(e.cleanHead)}</div>
+            </div>`).join("")}</div>` : ""}` : ""}
+      </div>`;
+  }).join("") || `<div class="empty-state"><strong>No matching activity.</strong></div>`;
+
+  const settledEl = document.getElementById("settled-list");
+  const settled = (app.data.settled || []).filter(s => matchesSearch(`${s.label} ${s.title}`));
+  document.getElementById("settled-meta").textContent = `${app.data.counts?.settled || settled.length} total`;
+  settledEl.innerHTML = settled.map(s => `
+    <div class="settled-row" tabindex="0" data-inspect-settled="${esc(s.label)}">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;">
+        <span class="mono" style="font-weight:700;font-size:12.5px;color:var(--fg);">${esc(s.label)}</span>
+        <span class="num" style="font-size:12px;color:var(--fg-3);">${esc(s.settledAt || "")}</span>
+      </div>
+      <div style="font-size:13px;color:var(--fg-2);">${esc(cleanTitle(s.title))}</div>
+    </div>`).join("") || `<div class="empty-state"><strong>No matching settled tickets.</strong></div>`;
+}
+
+function renderRoutingPopover() {
+  const pop = document.getElementById("route-pop");
+  const r = app.data.routing;
+  if (!r) { pop.innerHTML = "<p>No routing data.</p>"; return; }
+  const buckets = r.series?.buckets || [];
+  const maxB = Math.max(1, ...buckets.map(b => Object.values(b.counts || {}).reduce((a, x) => a + x, 0)));
+
+  pop.innerHTML = `
+    <div class="pop-head">
+      <h3>Launch routing: pool ${esc(r.pool)}</h3>
+      <span class="mono" style="font-size:11.5px;color:var(--fg-2);">${esc(r.strategy)} · ${esc(r.model)}</span>
+    </div>
+    ${(r.members || []).map(m => {
+      const pct = Math.round((m.share || 0) * 100);
+      const isRes = m.status === "reserve";
+      return `
+        <div class="mem-row">
+          <div class="mem-top">
+            <span style="display:inline-flex;align-items:center;gap:7px;font-weight:700;">
+              <span class="sig-dot ${isRes ? "warn" : "ok"}"></span>
+              ${esc(m.instanceId)}
+            </span>
+            <span class="mono num" style="font-weight:700;">${pct}% · ${m.picks || 0} picks</span>
+          </div>
+          <div class="mem-bar ${isRes ? "reserve" : ""}"><span style="width:${Math.max(pct, isRes ? 8 : 0)}%"></span></div>
+          <div style="font-size:12px;color:var(--fg-2);">
+            ${isRes ? `Held at ${m.reserve}% reserve · skipped ${m.skips?.reserve || 0}x` : `Ready · weight ${m.weight} · last pick ${esc(m.lastPickLocal || "none")}`}
+          </div>
+        </div>`;
+    }).join("")}
+    <div style="display:grid;gap:6px;padding-top:6px;border-top:1px solid var(--border);">
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--fg-2);">
+        <span>24h picks timeline</span>
+        <span class="num">${r.picks || 0} total picks</span>
+      </div>
+      <div class="picks-chart" aria-label="Picks over last 24 hours">
+        ${buckets.map(b => {
+          const v = Object.values(b.counts || {}).reduce((a, x) => a + x, 0);
+          const h = v > 0 ? Math.max(20, Math.round((v / maxB) * 100)) : 8;
+          return `<span class="picks-bar ${v > 0 ? "hit" : ""}" style="height:${h}%" title="${esc(b.start)}: ${v} picks"></span>`;
+        }).join("")}
+      </div>
+    </div>`;
+}
+
+/* =========================================================
+   DETAIL INSPECTOR
+   ========================================================= */
+function syncSelectionHighlights() {
+  document.querySelectorAll("[data-selected]").forEach(el => {
+    const isTk = el.hasAttribute("data-inspect-ticket") && app.inspected?.type === "ticket" && el.dataset.inspectTicket === app.inspected.id;
+    const isPr = el.hasAttribute("data-inspect-pr") && app.inspected?.type === "pr" && el.dataset.inspectPr === app.inspected.key;
+    el.setAttribute("data-selected", String(Boolean(isTk || isPr)));
+  });
+  document.querySelectorAll("[data-active-node]").forEach(el => {
+    const on = app.inspected?.type === "pr" && el.dataset.inspectPr === app.inspected.key;
+    el.setAttribute("data-active-node", String(Boolean(on)));
+  });
+}
+
+function openInspector(item) {
+  if (!document.getElementById("inspector").classList.contains("open")) {
+    app.lastTriggerEl = document.activeElement;
+  }
+  app.inspected = item;
+  closeComposer(true);
+  const ins = document.getElementById("inspector");
+  const titleEl = document.getElementById("ins-title");
+  const subEl = document.getElementById("ins-sub");
+  const bodyEl = document.getElementById("ins-body");
+
+  if (item.type === "ticket") {
+    const tk = item.data;
+    const tkTitle = cleanTitle(tk.humanTitle || tk.label);
+    const issueUrl = tk.issue ? `https://github.com/${tk.issue.replace("#", "/issues/")}` : null;
+    titleEl.textContent = tkTitle;
+    subEl.textContent = `${tk.label} · ${tk.repo || ""}`;
+    bodyEl.innerHTML = `
+      <div class="dr-acts">
+        ${issueUrl ? `<a class="btn sm" href="${esc(issueUrl)}" target="_blank" rel="noopener noreferrer">Open Issue ${ICONS.external}</a>` : ""}
+        ${tk.link ? `<a class="btn sm" href="${esc(tk.link)}" target="_blank" rel="noopener noreferrer">Open T3 Thread ${ICONS.external}</a>` : ""}
+        <button class="btn sm" type="button" data-toggle-pause="${esc(tk.label)}">${app.pausedTickets.has(tk.label) ? "Resume" : "Pause"}</button>
+      </div>
+      ${tk.last ? `
+        <div class="dr-sec">
+          <h3>Latest update (${esc(tk.last.at || "")})</h3>
+          <div class="dr-prose">${esc(tk.last.head || "")}</div>
+        </div>` : ""}
+      <div class="dr-sec">
+        <h3>PRs &amp; workers (${(tk.workers || []).length})</h3>
+        <div class="dr-list">
+          ${(tk.workers || []).map(w => `
+            <div class="dr-item">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+                <span class="mono" style="font-weight:700;font-size:12.5px;">${w.pr ? `PR #${w.pr.number}` : esc(w.part || "WIP")}</span>
+                <span class="status-pill ${w.pr?.state === "merged" ? "merged" : w.pr?.state === "open" ? "ready" : "running"}">${esc(w.pr?.state || w.status)}</span>
+              </div>
+              <div style="font-size:13.5px;font-weight:600;">${esc(cleanTitle(w.humanTitle || w.label))}</div>
+              <div style="font-size:12px;color:var(--fg-2);display:flex;gap:12px;">
+                ${w.pr?.url ? `<a href="${esc(w.pr.url)}" target="_blank" rel="noopener noreferrer">GitHub PR ${ICONS.external}</a>` : ""}
+                ${w.link ? `<a href="${esc(w.link)}" target="_blank" rel="noopener noreferrer">Worker thread ${ICONS.external}</a>` : ""}
+              </div>
+            </div>`).join("")}
+        </div>
+      </div>`;
+  } else if (item.type === "pr") {
+    const r = item.data;
+    titleEl.textContent = r.title;
+    subEl.textContent = `${r.badge} · Part ${r.stepText || "?"} of ${r.parentLabel}`;
+    bodyEl.innerHTML = `
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+        <span class="status-pill ${r.stateKind}">${esc(r.stateLabel)}</span>
+        ${r.subIssue ? `<span class="ref-badge">Sub-issue ${esc(r.subIssue)}</span>` : ""}
+        ${r.sha ? `<span class="ref-badge">head ${esc(r.sha)}</span>` : ""}
+      </div>
+      <div class="dr-acts">
+        ${r.gateCard ? `<button class="btn primary sm" type="button" data-answer-card="${esc(r.gateCard.id)}" data-answer-val="${esc(r.gateCard.options?.[0] || "merge")}">Merge PR #${esc(r.prNumber)}</button>` : ""}
+        ${r.prUrl ? `<a class="btn sm" href="${esc(r.prUrl)}" target="_blank" rel="noopener noreferrer">Open on GitHub ${ICONS.external}</a>` : ""}
+        ${r.link ? `<a class="btn sm" href="${esc(r.link)}" target="_blank" rel="noopener noreferrer">Open Worker Thread ${ICONS.external}</a>` : ""}
+        <button class="btn sm quiet" type="button" data-inspect-ticket="${esc(r.parentLabel)}">View parent ${esc(r.parentNum)}</button>
+      </div>
+      <div class="dr-sec">
+        <h3>Parent issue</h3>
+        <div class="dr-prose"><strong>${esc(r.parentLabel)}</strong>\n${esc(r.parentTitle)}${r.subIssueTitle ? `\n\nSub-issue ${esc(r.subIssue)}: ${esc(r.subIssueTitle)}` : ""}</div>
+      </div>
+      ${r.gateCard ? `
+        <div class="dr-sec">
+          <h3>Open decision gate (${esc(r.gateCard.id)})</h3>
+          <div class="dr-prose">${esc(r.gateCard.text)}</div>
+        </div>` : ""}`;
+  } else if (item.type === "newIssue") {
+    const i = item.data;
+    titleEl.textContent = i.title;
+    subEl.textContent = `${i.repo}#${i.number} · filed ${relAge(i.at) || i.atLocal || ""}`;
+    bodyEl.innerHTML = `
+      <div class="dr-acts">
+        <button class="btn primary sm" type="button" data-launch-issue="${esc(i.id)}">Launch ticket</button>
+        <button class="btn sm" type="button" data-dismiss-issue="${esc(i.id)}">Dismiss</button>
+        ${i.url ? `<a class="btn sm" href="${esc(i.url)}" target="_blank" rel="noopener noreferrer">GitHub Issue ${ICONS.external}</a>` : ""}
+        ${i.threadLink ? `<a class="btn sm" href="${esc(i.threadLink)}" target="_blank" rel="noopener noreferrer">Filing Thread ${ICONS.external}</a>` : ""}
+      </div>
+      <div class="dr-sec">
+        <h3>Origin</h3>
+        <div class="dr-prose">Filed by thread: ${esc(i.threadTitle || "unknown")}\nTimestamp: ${esc(i.atLocal || i.at || "")}</div>
+      </div>`;
+  } else if (item.type === "dagNode") {
+    const n = item.data;
+    const edges = app.data.flow?.graph?.edges || [];
+    const { byId } = graphNodeMap();
+    const blockers = edges.filter(e => e.from === n.id && e.kind === "blockedBy").map(e => byId.get(e.to)).filter(Boolean);
+    const unlocks = edges.filter(e => e.to === n.id && e.kind === "blockedBy").map(e => byId.get(e.from)).filter(Boolean);
+    titleEl.textContent = n.title;
+    subEl.textContent = `${n.label} · ${n.state}${n.priority ? " · priority " + n.priority : ""}`;
+    bodyEl.innerHTML = `
+      <div class="dr-acts">
+        ${n.url ? `<a class="btn sm" href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">Open on GitHub ${ICONS.external}</a>` : ""}
+      </div>
+      <div class="dr-sec">
+        <h3>Dependencies</h3>
+        <div class="dr-list">
+          <div class="dr-item">
+            <span style="font-size:12px;color:var(--fg-2);font-weight:700;">Blocked by (${blockers.length})</span>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;">
+              ${blockers.map(b => `<button class="btn sm" type="button" data-inspect-dag="${esc(b.id)}">#${b.number}: ${esc(b.title.slice(0, 32))}</button>`).join("") || `<span style="color:var(--fg-3);font-size:13px;">None</span>`}
+            </div>
+          </div>
+          <div class="dr-item">
+            <span style="font-size:12px;color:var(--fg-2);font-weight:700;">Unlocks (${unlocks.length})</span>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;">
+              ${unlocks.map(u => `<button class="btn sm" type="button" data-inspect-dag="${esc(u.id)}">#${u.number}: ${esc(u.title.slice(0, 32))}</button>`).join("") || `<span style="color:var(--fg-3);font-size:13px;">None</span>`}
+            </div>
+          </div>
+        </div>
+      </div>`;
+  } else if (item.type === "settled") {
+    const s = item.data;
+    titleEl.textContent = cleanTitle(s.title);
+    subEl.textContent = `${s.label} · settled ${s.settledAt || ""}`;
+    bodyEl.innerHTML = `
+      <div class="dr-acts">
+        ${s.link ? `<a class="btn sm" href="${esc(s.link)}" target="_blank" rel="noopener noreferrer">Open T3 Thread ${ICONS.external}</a>` : ""}
+      </div>
+      <div class="dr-sec">
+        <h3>Archive status</h3>
+        <div class="dr-prose">Closed via: ${esc(s.closedHow || "handoff")}\nRepository: ${esc(s.repo || "")}</div>
+      </div>`;
+  }
+
+  ins.classList.add("open");
+  ins.setAttribute("aria-hidden", "false");
+  ins.setAttribute("aria-modal", "true");
+  document.getElementById("backdrop").classList.add("open");
+  syncSelectionHighlights();
+  setTimeout(() => document.getElementById("ins-close").focus(), 40);
+}
+
+function closeInspector(keepFocus) {
+  app.inspected = null;
+  const ins = document.getElementById("inspector");
+  ins.classList.remove("open");
+  ins.setAttribute("aria-hidden", "true");
+  ins.setAttribute("aria-modal", "false");
+  if (!document.getElementById("composer-drawer").classList.contains("open")) {
+    document.getElementById("backdrop").classList.remove("open");
+  }
+  syncSelectionHighlights();
+  if (!keepFocus && app.lastTriggerEl && typeof app.lastTriggerEl.focus === "function" && app.lastTriggerEl.isConnected) {
+    app.lastTriggerEl.focus();
+    app.lastTriggerEl = null;
+  }
+}
+
+function openComposer(mode) {
+  if (!document.getElementById("composer-drawer").classList.contains("open")) {
+    app.lastTriggerEl = document.activeElement;
+  }
+  closeInspector(true);
+  const dr = document.getElementById("composer-drawer");
+  const isAsk = mode === "ask";
+  document.getElementById("cm-launch").setAttribute("aria-pressed", String(!isAsk));
+  document.getElementById("cm-ask").setAttribute("aria-pressed", String(isAsk));
+  document.getElementById("form-launch").hidden = isAsk;
+  document.getElementById("form-ask").hidden = !isAsk;
+  document.getElementById("comp-title").textContent = isAsk ? "Ask your agent" : "Launch tickets";
+  document.getElementById("comp-sub").textContent = isAsk
+    ? "Ask model: claudeSpare · claude-haiku-5-5"
+    : `Pool ${app.data.routing?.pool || "claude"} · ${app.data.routing?.model || "claude-opus-5-5"} · ${app.data.routing?.effort || "high"}`;
+  dr.classList.add("open");
+  dr.setAttribute("aria-hidden", "false");
+  dr.setAttribute("aria-modal", "true");
+  document.getElementById("backdrop").classList.add("open");
+  setTimeout(() => document.getElementById(isAsk ? "ask-input" : "launch-input").focus(), 60);
+}
+
+function closeComposer(keepFocus) {
+  const dr = document.getElementById("composer-drawer");
+  dr.classList.remove("open");
+  dr.setAttribute("aria-hidden", "true");
+  dr.setAttribute("aria-modal", "false");
+  if (!document.getElementById("inspector").classList.contains("open")) {
+    document.getElementById("backdrop").classList.remove("open");
+  }
+  if (!keepFocus && app.lastTriggerEl && typeof app.lastTriggerEl.focus === "function" && app.lastTriggerEl.isConnected) {
+    app.lastTriggerEl.focus();
+    app.lastTriggerEl = null;
+  }
+}
+
+/* =========================================================
+   DECISION ANSWER WITH 5-SECOND UNDO COUNTDOWN (DOM-STABLE)
+   ========================================================= */
+function startCardAnswer(cardId, answerVal) {
+  if (app.pendingUndo.has(cardId)) return;
+  const entry = { answer: answerVal, remainingMs: 5000, timer: null };
+  app.pendingUndo.set(cardId, entry);
+  app.openCardReply.delete(cardId);
+  renderNeedsYou();
+  const undoBtn = document.querySelector(`[data-undo-card="${CSS.escape(cardId)}"]`);
+  if (undoBtn) undoBtn.focus();
+
+  entry.timer = setInterval(() => {
+    entry.remainingMs -= 100;
+    if (entry.remainingMs <= 0) {
+      clearInterval(entry.timer);
+      app.pendingUndo.delete(cardId);
+      app.dismissedCards.add(cardId);
+      showToast(`Sent "${answerVal}" - card resolved`);
+      renderAll();
+      return;
+    }
+    const fill = document.querySelector(`[data-undo-fill="${CSS.escape(cardId)}"]`);
+    const secs = document.querySelector(`[data-undo-secs="${CSS.escape(cardId)}"]`);
+    if (fill) fill.style.width = `${Math.max(0, Math.min(100, (entry.remainingMs / 5000) * 100))}%`;
+    if (secs) secs.textContent = String(Math.ceil(entry.remainingMs / 1000));
+  }, 100);
+}
+
+function cancelCardAnswer(cardId) {
+  const entry = app.pendingUndo.get(cardId);
+  if (entry) {
+    clearInterval(entry.timer);
+    app.pendingUndo.delete(cardId);
+    showToast("Reply cancelled");
+    renderNeedsYou();
+  }
+}
+
+let toastTimer = null;
+function showToast(msg) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.hidden = false;
+  document.getElementById("live-region").textContent = msg;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 3200);
+}
+
+function switchView(view) {
+  app.view = view;
+  document.querySelectorAll(".nav-tab").forEach(b => {
+    const on = b.dataset.view === view;
+    b.setAttribute("aria-selected", String(on));
+    b.setAttribute("tabindex", on ? "0" : "-1");
+  });
+  document.querySelectorAll(".workspace-view").forEach(el => {
+    el.hidden = el.id !== `view-${view}`;
+  });
+  renderAll();
+}
+
+function renderAll() {
+  renderHeaderAndTelemetry();
+  renderRoutingPopover();
+  if (app.view === "dispatch") {
+    renderNeedsYou();
+    renderActiveIssues();
+    renderPrLedger();
+  } else if (app.view === "issues") {
+    renderNewIssues();
+  } else if (app.view === "graph") {
+    renderQueueAndGraph();
+  } else if (app.view === "activity") {
+    renderActivityAndSettled();
+  }
+}
+
+/* =========================================================
+   OPTIONAL LIVE POLLING WHEN SERVED VIA BRIDGE / SAME ORIGIN
+   ========================================================= */
+async function tryLiveRefresh() {
+  if (location.protocol === "file:") return;
+  try {
+    const [stRes, flRes] = await Promise.all([
+      fetch("/api/state", { cache: "no-store" }),
+      fetch("/api/flow", { cache: "no-store" }),
+    ]);
+    if (!stRes.ok) return;
+    const st = await stRes.json();
+    const fl = flRes.ok ? await flRes.json() : app.data.flow;
+    const byId = new Map((fl?.graph?.nodes || []).map(n => [n.id, n]));
+    const byLbl = new Map((fl?.graph?.nodes || []).map(n => [n.label, n]));
+    const tree = (st.tree || []).map(tk => {
+      const gn = byId.get(tk.issue || "") || byLbl.get(tk.label || "");
+      return {
+        ...tk,
+        humanTitle: gn?.title || cleanTitle(tk.title || tk.label),
+        priority: gn?.priority || null,
+        labels: gn?.labels || [],
+        workers: (tk.workers || []).map(w => ({
+          ...w,
+          humanTitle: cleanTitle(w.title || w.label),
+          issueTitle: byId.get(w.issue || "")?.title || null,
+        })),
+      };
+    });
+    app.data = {
+      ...app.data,
+      capturedAt: st.service?.watcher?.lastPassAt || new Date().toISOString(),
+      capturedLocal: st.service?.watcher?.lastPass || "just now",
+      counts: st.counts,
+      flowMaxTickets: st.flowMaxTickets,
+      service: st.service,
+      routing: st.routing,
+      cards: st.cards || [],
+      tree,
+      newIssues: st.newIssues || [],
+      dismissedIssues: st.dismissedIssues || [],
+      feed: st.feed || [],
+      settled: st.settled?.tickets || [],
+      flow: fl || app.data.flow,
+    };
+    app.liveConnected = true;
+    renderAll();
+  } catch (_) {
+    // Silent fallback to embedded real snapshot
+  }
+}
+
+/* =========================================================
+   EVENT DELEGATION & KEYBOARD SHORTCUTS
+   ========================================================= */
+document.getElementById("main-nav").addEventListener("click", e => {
+  const b = e.target.closest(".nav-tab");
+  if (b) switchView(b.dataset.view);
+});
+document.getElementById("main-nav").addEventListener("keydown", e => {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== "Home" && e.key !== "End") return;
+  const tabs = [...document.querySelectorAll("#main-nav .nav-tab")];
+  const cur = tabs.indexOf(document.activeElement);
+  if (cur < 0) return;
+  e.preventDefault();
+  const next = e.key === "ArrowRight" ? (cur + 1) % tabs.length
+    : e.key === "ArrowLeft" ? (cur - 1 + tabs.length) % tabs.length
+    : e.key === "Home" ? 0 : tabs.length - 1;
+  switchView(tabs[next].dataset.view);
+  tabs[next].focus();
+});
+document.getElementById("brand-home").addEventListener("click", e => {
+  e.preventDefault();
+  switchView("dispatch");
+});
+document.getElementById("t-slots-btn").addEventListener("click", () => switchView("graph"));
+
+document.getElementById("pr-filter").addEventListener("click", e => {
+  const b = e.target.closest("button[data-prf]");
+  if (!b) return;
+  app.prFilter = b.dataset.prf;
+  document.querySelectorAll("#pr-filter button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  renderPrLedger();
+});
+
+document.getElementById("scenario-select").addEventListener("change", e => {
+  app.scenario = e.target.value;
+  app.dismissedCards.clear();
+  for (const [, p] of app.pendingUndo) clearInterval(p.timer);
+  app.pendingUndo.clear();
+  renderAll();
+});
+
+const searchInput = document.getElementById("search-input");
+const searchClear = document.getElementById("search-clear");
+searchInput.addEventListener("input", () => {
+  app.query = searchInput.value;
+  searchClear.hidden = !app.query;
+  renderAll();
+});
+searchClear.addEventListener("click", () => {
+  searchInput.value = "";
+  app.query = "";
+  searchClear.hidden = true;
+  renderAll();
+  searchInput.focus();
+});
+
+document.getElementById("btn-theme").addEventListener("click", () => {
+  const cur = document.documentElement.getAttribute("data-theme");
+  const next = cur === "dark" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  try { localStorage.setItem("t3dispatch.theme", next); } catch (_) {}
+  renderHeaderAndTelemetry();
+});
+
+document.getElementById("btn-density").addEventListener("click", () => {
+  const cur = document.documentElement.getAttribute("data-density");
+  const next = cur === "compact" ? "comfortable" : "compact";
+  document.documentElement.setAttribute("data-density", next);
+  showToast(`Density: ${next}`);
+});
+
+document.getElementById("btn-launch").addEventListener("click", () => openComposer("launch"));
+document.getElementById("btn-ask").addEventListener("click", () => openComposer("ask"));
+document.getElementById("cm-launch").addEventListener("click", () => openComposer("launch"));
+document.getElementById("cm-ask").addEventListener("click", () => openComposer("ask"));
+document.getElementById("ins-close").addEventListener("click", () => closeInspector());
+document.getElementById("comp-close").addEventListener("click", () => closeComposer());
+document.getElementById("backdrop").addEventListener("click", () => { closeInspector(); closeComposer(); });
+
+document.getElementById("btn-keys").addEventListener("click", () => document.getElementById("keys-dialog").showModal());
+document.getElementById("keys-close").addEventListener("click", () => document.getElementById("keys-dialog").close());
+document.getElementById("btn-dismissed-toggle").addEventListener("click", () => {
+  app.showDismissed = !app.showDismissed;
+  renderNewIssues();
+});
+document.getElementById("dag-clear-trace").addEventListener("click", () => {
+  app.selectedDagId = null;
+  renderQueueAndGraph();
+});
+
+const routeBtn = document.getElementById("t-route-btn");
+const routePop = document.getElementById("route-pop");
+routeBtn.addEventListener("click", e => {
+  e.stopPropagation();
+  const open = routePop.hidden;
+  routePop.hidden = !open;
+  routeBtn.setAttribute("aria-expanded", String(open));
+});
+
+document.getElementById("launch-sample").addEventListener("click", () => {
+  document.getElementById("launch-input").value = "acme/widgets#245";
+  document.getElementById("launch-input").focus();
+});
+
+document.getElementById("form-launch").addEventListener("submit", e => {
+  e.preventDefault();
+  const raw = document.getElementById("launch-input").value.trim();
+  if (!raw) return;
+  const refs = raw.split(/\n+/).map(s => s.trim()).filter(Boolean);
+  const res = document.getElementById("launch-result");
+  res.hidden = false;
+  res.innerHTML = `<h3>Prototype launch preview</h3><div class="dr-prose">${refs.map(r => `Queued ${esc(r)} on pool claude (claudeSpare)`).join("\n")}\n\nNote: prototype runs read-only against live t3cm.</div>`;
+  document.getElementById("launch-input").value = "";
+  showToast(`Previewed launch for ${refs.length} issue(s)`);
+});
+
+document.getElementById("form-ask").addEventListener("submit", e => {
+  e.preventDefault();
+  const q = document.getElementById("ask-input").value.trim();
+  if (!q) return;
+  const cards = buildScenarioCards();
+  const prs = extractPrRows().filter(p => p.isActive);
+  const answer = `Waiting on you: ${cards.length} (${cards.map(c => cardHeadline(c)).join("; ") || "none"}).\nActive issues: ${(app.data.tree || []).map(t => `${t.label} - ${cleanTitle(t.humanTitle)}`).join("; ")}.\nActive PRs: ${prs.map(p => `${p.badge} (${p.stateLabel}): ${p.title}`).join("; ")}.`;
+  app.asksLocal.unshift({ q, a: answer });
+  document.getElementById("ask-input").value = "";
+  document.getElementById("ask-history").innerHTML = app.asksLocal.map(x => `
+    <div class="dr-item">
+      <strong style="font-size:13px;">${esc(x.q)}</strong>
+      <div class="dr-prose" style="margin-top:4px;">${esc(x.a)}</div>
+    </div>`).join("");
+});
+
+// Global click delegation for dynamic elements
+document.addEventListener("click", e => {
+  if (!e.target.closest(".pop-anchor") && !routePop.hidden) {
+    routePop.hidden = true;
+    routeBtn.setAttribute("aria-expanded", "false");
+  }
+  const ansBtn = e.target.closest("[data-answer-card]");
+  if (ansBtn) {
+    e.stopPropagation();
+    startCardAnswer(ansBtn.dataset.answerCard, ansBtn.dataset.answerVal);
+    return;
+  }
+  const undoBtn = e.target.closest("[data-undo-card]");
+  if (undoBtn) {
+    e.stopPropagation();
+    cancelCardAnswer(undoBtn.dataset.undoCard);
+    return;
+  }
+  const disCard = e.target.closest("[data-dismiss-card]");
+  if (disCard) {
+    e.stopPropagation();
+    app.dismissedCards.add(disCard.dataset.dismissCard);
+    showToast("Decision dismissed");
+    renderAll();
+    return;
+  }
+  const tReply = e.target.closest("[data-toggle-reply]");
+  if (tReply) {
+    e.stopPropagation();
+    const id = tReply.dataset.toggleReply;
+    if (app.openCardReply.has(id)) app.openCardReply.delete(id);
+    else app.openCardReply.add(id);
+    renderNeedsYou();
+    return;
+  }
+  const tFull = e.target.closest("[data-toggle-full]");
+  if (tFull) {
+    e.stopPropagation();
+    const id = tFull.dataset.toggleFull;
+    if (app.expandedCardFull.has(id)) app.expandedCardFull.delete(id);
+    else app.expandedCardFull.add(id);
+    renderNeedsYou();
+    return;
+  }
+  const pauseBtn = e.target.closest("[data-toggle-pause]");
+  if (pauseBtn) {
+    e.stopPropagation();
+    const lbl = pauseBtn.dataset.togglePause;
+    if (app.pausedTickets.has(lbl)) {
+      app.pausedTickets.delete(lbl);
+      showToast(`Resumed ${lbl}`);
+    } else {
+      app.pausedTickets.add(lbl);
+      showToast(`Paused ${lbl}`);
+    }
+    renderAll();
+    return;
+  }
+  const footGraph = e.target.closest("#foot-open-graph");
+  if (footGraph) {
+    switchView("graph");
+    return;
+  }
+  const prEl = e.target.closest("[data-inspect-pr]");
+  if (prEl) {
+    e.stopPropagation();
+    const row = extractPrRows().find(r => r.key === prEl.dataset.inspectPr);
+    if (row) openInspector({ type: "pr", key: row.key, data: row });
+    return;
+  }
+  const tkEl = e.target.closest("[data-inspect-ticket]");
+  if (tkEl && !e.target.closest("a, button")) {
+    const tk = (app.data.tree || []).find(t => t.label === tkEl.dataset.inspectTicket);
+    if (tk) openInspector({ type: "ticket", id: tk.label, data: tk });
+    return;
+  }
+  const tkBtn = e.target.closest("button[data-inspect-ticket]");
+  if (tkBtn) {
+    const tk = (app.data.tree || []).find(t => t.label === tkBtn.dataset.inspectTicket);
+    if (tk) openInspector({ type: "ticket", id: tk.label, data: tk });
+    return;
+  }
+  const launchIss = e.target.closest("[data-launch-issue]");
+  if (launchIss) {
+    e.stopPropagation();
+    const idx = (app.data.newIssues || []).findIndex(i => i.id === launchIss.dataset.launchIssue);
+    if (idx >= 0) {
+      const [iss] = app.data.newIssues.splice(idx, 1);
+      showToast(`Previewed launch for #${iss.number}`);
+      closeInspector();
+      renderAll();
+    }
+    return;
+  }
+  const disIss = e.target.closest("[data-dismiss-issue]");
+  if (disIss) {
+    e.stopPropagation();
+    const idx = (app.data.newIssues || []).findIndex(i => i.id === disIss.dataset.dismissIssue);
+    if (idx >= 0) {
+      const [iss] = app.data.newIssues.splice(idx, 1);
+      app.data.dismissedIssues.unshift(iss);
+      showToast(`Dismissed #${iss.number}`);
+      closeInspector();
+      renderAll();
+    }
+    return;
+  }
+  const resIss = e.target.closest("[data-restore-issue]");
+  if (resIss) {
+    e.stopPropagation();
+    const idx = (app.data.dismissedIssues || []).findIndex(i => i.id === resIss.dataset.restoreIssue);
+    if (idx >= 0) {
+      const [iss] = app.data.dismissedIssues.splice(idx, 1);
+      app.data.newIssues.unshift(iss);
+      showToast(`Restored #${iss.number}`);
+      renderAll();
+    }
+    return;
+  }
+  const newEl = e.target.closest("[data-inspect-new]");
+  if (newEl && !e.target.closest("button, a")) {
+    const list = app.showDismissed ? app.data.dismissedIssues : app.data.newIssues;
+    const iss = (list || []).find(i => i.id === newEl.dataset.inspectNew);
+    if (iss) openInspector({ type: "newIssue", id: iss.id, data: iss });
+    return;
+  }
+  const dagNode = e.target.closest("[data-dag-node]");
+  if (dagNode) {
+    const id = dagNode.dataset.dagNode;
+    app.selectedDagId = app.selectedDagId === id ? null : id;
+    renderQueueAndGraph();
+    const n = graphNodeMap().byId.get(id);
+    if (n && app.selectedDagId) openInspector({ type: "dagNode", id, data: n });
+    return;
+  }
+  const insDag = e.target.closest("[data-inspect-dag]");
+  if (insDag) {
+    const id = insDag.dataset.inspectDag;
+    const n = graphNodeMap().byId.get(id);
+    if (n) {
+      app.selectedDagId = id;
+      openInspector({ type: "dagNode", id, data: n });
+    }
+    return;
+  }
+  const feedTog = e.target.closest("[data-toggle-feed]");
+  if (feedTog) {
+    const k = feedTog.dataset.toggleFeed;
+    if (app.expandedFeed.has(k)) app.expandedFeed.delete(k);
+    else app.expandedFeed.add(k);
+    renderActivityAndSettled();
+    return;
+  }
+  const setEl = e.target.closest("[data-inspect-settled]");
+  if (setEl) {
+    const s = (app.data.settled || []).find(x => x.label === setEl.dataset.inspectSettled);
+    if (s) openInspector({ type: "settled", id: s.label, data: s });
+  }
+});
+
+document.addEventListener("submit", e => {
+  const rf = e.target.closest("[data-reply-form]");
+  if (rf) {
+    e.preventDefault();
+    const v = rf.querySelector("input").value.trim();
+    if (v) startCardAnswer(rf.dataset.replyForm, v);
+  }
+});
+
+document.addEventListener("keydown", e => {
+  const inInput = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+  if (e.key === "Escape") {
+    if (!routePop.hidden) { routePop.hidden = true; routeBtn.setAttribute("aria-expanded", "false"); return; }
+    if (document.getElementById("inspector").classList.contains("open")) { closeInspector(); return; }
+    if (document.getElementById("composer-drawer").classList.contains("open")) { closeComposer(); return; }
+    if (app.query) { searchInput.value = ""; app.query = ""; searchClear.hidden = true; renderAll(); return; }
+    return;
+  }
+  if (inInput) return;
+  if (e.key === "/") { e.preventDefault(); searchInput.focus(); }
+  else if (e.key === "1") switchView("dispatch");
+  else if (e.key === "2") switchView("issues");
+  else if (e.key === "3") switchView("graph");
+  else if (e.key === "4") switchView("activity");
+  else if (e.key === "l") { e.preventDefault(); openComposer("launch"); }
+  else if (e.key === "a") { e.preventDefault(); openComposer("ask"); }
+  else if (e.key === "t") document.getElementById("btn-theme").click();
+  else if (e.key === "d") document.getElementById("btn-density").click();
+  else if (e.key === "?") { e.preventDefault(); document.getElementById("keys-dialog").showModal(); }
+  else if (e.key === "j" || e.key === "k") {
+    const rows = [...document.querySelectorAll(".issue-row, .pr-row, .recent-row, .triage-row, .queue-row, .settled-row")].filter(el => el.offsetParent !== null);
+    if (!rows.length) return;
+    const idx = rows.indexOf(document.activeElement);
+    const next = e.key === "j" ? Math.min(rows.length - 1, idx + 1) : Math.max(0, idx - 1);
+    rows[next].focus();
+  } else if (e.key === "Enter" && document.activeElement?.matches(".issue-row, .pr-row, .recent-row, .triage-row, .queue-row, .settled-row")) {
+    document.activeElement.click();
+  }
+});
+
+// Boot theme preference (default dark per user selection)
+try {
+  const saved = localStorage.getItem("t3dispatch.theme");
+  if (saved === "light" || saved === "dark") document.documentElement.setAttribute("data-theme", saved);
+} catch (_) {}
+
+renderAll();
+tryLiveRefresh();
+setInterval(tryLiveRefresh, 8000);
+</script>
+</body>
+</html>
