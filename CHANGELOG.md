@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1](https://github.com/OttoOps/t3-codemode/compare/v0.10.0...v0.10.1) - 2026-11-24
+
+### Other
+
+- plant runtime sentinels for chaos
+
 ## [0.10.0](https://github.com/OttoOps/t3-codemode/compare/v0.9.3...v0.10.0) - 2026-11-24
 
 ### Added
