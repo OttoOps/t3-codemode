@@ -101,6 +101,7 @@ pub struct ExecuteRequest {
     pub session: Option<String>,
     pub timeout_ms: Option<u64>,
     pub caller: Option<String>,
+    pub caller_from_arg: bool,
     pub reported: crate::wf_slots::Reported,
 }
 
@@ -445,15 +446,39 @@ impl App {
             Err(e) => return error_output(&e, Vec::new(), &globals),
         };
         let caller = nonempty(req.caller);
+        let caller_from_arg = req.caller_from_arg && caller.is_some();
+        if caller_from_arg {
+            match self.store.triage_live() {
+                Ok(true) => {
+                    return error_output(
+                        "X-T3-Thread header is required instead of the `thread` argument while a read-only DAG triage is running",
+                        Vec::new(),
+                        &globals,
+                    );
+                }
+                Err(e) => return error_output(&format!("store: {e}"), Vec::new(), &globals),
+                Ok(false) => {}
+            }
+        }
         let ns = App::session_ns(req.session, caller.as_deref());
-        let vars =
-            self.store.kv_get(&ns, VARS_KEY).ok().flatten().filter(Value::is_object).unwrap_or_else(|| json!({}));
-        let keep_vars = matches!(self.triage_blocks_vars(caller.as_deref()), Ok(false));
+        let keep_vars = matches!(self.triage_blocks_vars(caller.as_deref(), caller_from_arg), Ok(false));
+        let vars = if keep_vars {
+            self.store.kv_get(&ns, VARS_KEY).ok().flatten().filter(Value::is_object).unwrap_or_else(|| json!({}))
+        } else {
+            json!({})
+        };
         let catalog = self.catalog_for_run().await;
         let names = serde_json::to_string(&catalog.t3_names).unwrap_or_else(|_| "[]".into());
         let upstreams: Vec<Value> = namespaces.iter().map(|n| json!([n, aliases(&catalog.tools_of(n))])).collect();
         let caller_for_save = caller.clone();
-        let host = Arc::new(ExecHost { app: self.clone(), caller, reported: req.reported, ns: ns.clone(), catalog });
+        let host = Arc::new(ExecHost {
+            app: self.clone(),
+            caller,
+            caller_from_arg,
+            reported: req.reported,
+            ns: ns.clone(),
+            catalog,
+        });
         let _slot = match self.run_slot().await {
             Ok(p) => p,
             Err(e) => return error_output(&e, Vec::new(), &globals),
@@ -473,7 +498,7 @@ impl App {
         .await;
         let mut logs: Vec<String> = out.logs.into_iter().map(|l| self.redact(l)).collect();
         if let Some(v) = out.vars {
-            match self.triage_blocks_vars(caller_for_save.as_deref()) {
+            match self.triage_blocks_vars(caller_for_save.as_deref(), caller_from_arg) {
                 Ok(true) => {}
                 Err(e) => logs.push(format!("[t3cm] vars not saved: {e}")),
                 Ok(false) => {
@@ -716,24 +741,26 @@ impl App {
         self.health_with_remote(self.remote_health_with(ts_login))
     }
 
-    fn triage_blocks_vars(&self, caller: Option<&str>) -> Result<bool, String> {
+    fn triage_blocks_vars(&self, caller: Option<&str>, caller_from_arg: bool) -> Result<bool, String> {
         let store_err = |e: anyhow::Error| format!("store: {e}");
-        match caller.filter(|c| !c.is_empty()) {
-            Some(c) => self.store.triage_thread(c).map_err(store_err),
-            None => self.store.triage_live().map_err(store_err),
+        let caller = caller.filter(|c| !c.is_empty());
+        if let Some(c) = caller
+            && self.store.triage_thread(c).map_err(store_err)?
+        {
+            return Ok(true);
         }
+        if caller.is_none() || caller_from_arg {
+            return self.store.triage_live().map_err(store_err);
+        }
+        Ok(false)
     }
 
-    async fn host_op(
-        &self,
-        op: &str,
-        args: Value,
-        caller: Option<&str>,
-        reported: &crate::wf_slots::Reported,
-        ns: &str,
-        catalog: &Catalog,
-    ) -> Result<Value, String> {
+    async fn host_op(&self, op: &str, args: Value, ctx: &ExecHost) -> Result<Value, String> {
         let store_err = |e: anyhow::Error| format!("store: {e}");
+        let caller = ctx.caller.as_deref().filter(|c| !c.is_empty());
+        let reported = &ctx.reported;
+        let ns = ctx.ns.as_str();
+        let catalog = ctx.catalog.as_ref();
         const TRIAGE_ANON_READ_ONLY: &[&str] = &[
             "mem.get",
             "mem.list",
@@ -748,22 +775,22 @@ impl App {
             "wf.limits",
             "wf.status",
         ];
-        match caller.filter(|c| !c.is_empty()) {
-            Some(c) => {
-                if self.store.triage_thread(c).map_err(store_err)? {
-                    return Err(
-                        "triage scratch threads are read-only; no t3cm tool or wf operations are allowed".into()
-                    );
-                }
-            }
-            None => {
-                if !TRIAGE_ANON_READ_ONLY.contains(&op) && self.store.triage_live().map_err(store_err)? {
-                    return Err(
-                        "caller thread id is required for tool and write operations while a read-only DAG triage is running"
-                            .into(),
-                    );
-                }
-            }
+        if let Some(c) = caller
+            && self.store.triage_thread(c).map_err(store_err)?
+        {
+            return Err("triage scratch threads are read-only; no t3cm tool or wf operations are allowed".into());
+        }
+        if ctx.caller_from_arg && self.store.triage_live().map_err(store_err)? {
+            return Err(
+                "X-T3-Thread header is required instead of the `thread` argument while a read-only DAG triage is running"
+                    .into(),
+            );
+        }
+        if caller.is_none() && !TRIAGE_ANON_READ_ONLY.contains(&op) && self.store.triage_live().map_err(store_err)? {
+            return Err(
+                "caller thread id is required for tool and write operations while a read-only DAG triage is running"
+                    .into(),
+            );
         }
         let pick_ns = |args: &Value| -> Result<String, String> {
             match &args["ns"] {
@@ -871,6 +898,7 @@ impl App {
 struct ExecHost {
     app: Arc<App>,
     caller: Option<String>,
+    caller_from_arg: bool,
     reported: crate::wf_slots::Reported,
     ns: String,
     catalog: Arc<Catalog>,
@@ -878,13 +906,14 @@ struct ExecHost {
 
 impl Host for ExecHost {
     fn call(&self, op: String, args: Value) -> BoxFut<'static, Result<Value, String>> {
-        let app = self.app.clone();
-        let caller = self.caller.clone();
-        let reported = self.reported.clone();
-        let ns = self.ns.clone();
-        let catalog = self.catalog.clone();
-        Box::pin(async move {
-            app.host_op(&op, args, caller.as_deref(), &reported, &ns, &catalog).await.map_err(|e| app.redact(e))
-        })
+        let ctx = ExecHost {
+            app: self.app.clone(),
+            caller: self.caller.clone(),
+            caller_from_arg: self.caller_from_arg,
+            reported: self.reported.clone(),
+            ns: self.ns.clone(),
+            catalog: self.catalog.clone(),
+        };
+        Box::pin(async move { ctx.app.host_op(&op, args, &ctx).await.map_err(|e| ctx.app.redact(e)) })
     }
 }

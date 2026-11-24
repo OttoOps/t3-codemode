@@ -67,6 +67,7 @@ impl S {
                 session: None,
                 timeout_ms: None,
                 caller: caller.map(String::from),
+                caller_from_arg: false,
                 reported,
             })
             .await

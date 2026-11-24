@@ -148,12 +148,24 @@ pub async fn handle_with(app: &Arc<App>, msg: Value, caller: Option<&str>, repor
             let out = match name {
                 "search" => app.search(&code).await,
                 "execute" => {
-                    let thread = args["thread"].as_str().map(String::from);
+                    let header_caller = caller_from_header(caller);
+                    let arg_thread = args["thread"].as_str().and_then(|s| {
+                        let t = s.trim();
+                        (!t.is_empty()).then(|| t.to_string())
+                    });
+                    let (effective_caller, caller_from_arg) = match header_caller {
+                        Some(c) => (Some(c), false),
+                        None => match arg_thread {
+                            Some(t) => (Some(t), true),
+                            None => (None, false),
+                        },
+                    };
                     app.execute(ExecuteRequest {
                         code,
                         session: args["session"].as_str().map(String::from),
                         timeout_ms: args["timeout_ms"].as_u64(),
-                        caller: caller.map(String::from).or(thread),
+                        caller: effective_caller,
+                        caller_from_arg,
                         reported: reported.clone(),
                     })
                     .await

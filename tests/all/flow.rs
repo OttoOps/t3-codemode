@@ -6382,14 +6382,61 @@ async fn board_triage_dag_safety_guards_cycles_vars_and_scope() {
     // 2. Session vars persistence is blocked for both the triage thread and caller-less runs while triage is live (CR#1).
     let _ = s.h.exec_as("launch:1", "async () => { vars.pwn = 1; return 1; }").await;
     assert!(
-        s.h.app.store.kv_get("thread:launch:1", "__vars").unwrap().is_none(),
+        s.h.app.store.kv_get("thread:launch:1", t3_codemode::app::VARS_KEY).unwrap().is_none(),
         "triage thread must not persist session vars"
     );
     let _ = s.h.exec("async () => { vars.anon = 1; return 1; }").await;
     assert!(
-        s.h.app.store.kv_get("default", "__vars").unwrap().is_none(),
+        s.h.app.store.kv_get("default", t3_codemode::app::VARS_KEY).unwrap().is_none(),
         "anonymous run must not persist session vars while triage is live"
     );
+
+    // 2b. Body `thread` fallback without X-T3-Thread header (or with unexpanded `${...}`) cannot bypass triage guards (CR R2).
+    let mcp_call = |header: Option<&str>, args: Value| {
+        let base = s.base.clone();
+        let http = s.http.clone();
+        let header = header.map(String::from);
+        async move {
+            let mut req = http.post(format!("{base}/mcp")).json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "execute", "arguments": args}
+            }));
+            if let Some(h) = header {
+                req = req.header("X-T3-Thread", h);
+            }
+            req.send().await.unwrap().json::<Value>().await.unwrap()["result"].clone()
+        }
+    };
+    let spoof_no_hdr = mcp_call(
+        None,
+        json!({"code": "async () => { vars.spoof = 1; await mem.set('spoof', 1); return 1; }", "thread": "mcp:worker"}),
+    )
+    .await;
+    assert_eq!(spoof_no_hdr["isError"], true, "{spoof_no_hdr}");
+    assert!(spoof_no_hdr["content"][0]["text"].as_str().unwrap_or("").contains("X-T3-Thread"), "{spoof_no_hdr}");
+    let spoof_template_hdr = mcp_call(
+        Some("${T3CODE_THREAD_ID}"),
+        json!({"code": "async () => { vars.spoof = 1; await mem.set('spoof', 1); return 1; }", "thread": "mcp:worker"}),
+    )
+    .await;
+    assert_eq!(spoof_template_hdr["isError"], true, "{spoof_template_hdr}");
+    let spoof_triage_hdr = mcp_call(
+        Some("launch:1"),
+        json!({"code": "async () => { await mem.set('spoof', 1); return 1; }", "thread": "mcp:worker"}),
+    )
+    .await;
+    assert_eq!(spoof_triage_hdr["isError"], true, "{spoof_triage_hdr}");
+    assert!(s.h.app.store.kv_get("thread:mcp:worker", t3_codemode::app::VARS_KEY).unwrap().is_none());
+    assert!(s.h.app.store.kv_get("thread:mcp:worker", "spoof").unwrap().is_none());
+    // Header-authenticated non-triage thread still works while triage is live.
+    let legit_hdr =
+        mcp_call(Some("mcp:worker"), json!({"code": "async () => { vars.ok = 1; await mem.set('ok', 1); return 1; }"}))
+            .await;
+    assert!(legit_hdr.get("isError").is_none(), "{legit_hdr}");
+    assert_eq!(s.h.app.store.kv_get("thread:mcp:worker", "ok").unwrap(), Some(json!(1)));
+    assert_eq!(s.h.app.store.kv_get("thread:mcp:worker", t3_codemode::app::VARS_KEY).unwrap(), Some(json!({"ok": 1})));
 
     // 3. Omitted blockedOnThreadWait / pendingBackgroundTasks in terminal thread reply keeps triage open (CR#10).
     s.h.fake.put(json!({
@@ -6413,6 +6460,13 @@ async fn board_triage_dag_safety_guards_cycles_vars_and_scope() {
     // Explicitly empty pending-work fields allow completion.
     s.h.fake.put(t3_codemode::fake::thread("launch:1", "completed", "2026-10-18T10:01:00Z"));
     assert!(!s.h.app.wf.check_asks(None).await.unwrap());
+
+    // Once no triage run is live, body `thread` fallback works again for non-triage threads.
+    let post_triage_arg =
+        mcp_call(None, json!({"code": "async () => { await mem.set('after', 1); return 1; }", "thread": "mcp:worker"}))
+            .await;
+    assert!(post_triage_arg.get("isError").is_none(), "{post_triage_arg}");
+    assert_eq!(s.h.app.store.kv_get("thread:mcp:worker", "after").unwrap(), Some(json!(1)));
 
     // 4. Applying conflicting cycle proposals applies first edge and rejects cycle edge before GitHub write (CR#6).
     let applied: Value = s

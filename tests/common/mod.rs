@@ -153,6 +153,7 @@ impl H {
                 session: None,
                 timeout_ms,
                 caller: caller.map(String::from),
+                caller_from_arg: false,
                 reported: Default::default(),
             })
             .await

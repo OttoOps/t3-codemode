@@ -56,6 +56,7 @@ async fn an_explicit_session_names_the_namespace() {
             session: Some(session.into()),
             timeout_ms: None,
             caller: Some(WORKER.into()),
+            caller_from_arg: false,
             reported: Default::default(),
         })
     };

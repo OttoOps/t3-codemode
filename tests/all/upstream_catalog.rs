@@ -224,6 +224,7 @@ impl U {
                 session: None,
                 timeout_ms: None,
                 caller: None,
+                caller_from_arg: false,
                 reported: Default::default(),
             })
             .await
@@ -551,6 +552,7 @@ async fn a_hung_upstream_does_not_stall_search_or_execute() {
                 session: None,
                 timeout_ms: None,
                 caller: None,
+                caller_from_arg: false,
                 reported: Default::default(),
             })
             .await;
