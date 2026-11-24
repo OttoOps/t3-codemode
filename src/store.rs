@@ -475,15 +475,7 @@ fn handle_seq(handle: &str) -> Option<i64> {
 }
 
 impl Store {
-    pub fn open(dir: &Path) -> Result<Store> {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        crate::platform::private_dir(dir)?;
-        let path = dir.join("store.db");
-        let conn = Connection::open(&path).with_context(|| format!("opening {}", path.display()))?;
-        crate::platform::private_file(&path)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+    fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute_batch(SCHEMA)?;
         let has_data: i64 =
             conn.query_row("SELECT COUNT(*) FROM pragma_table_info('waiting') WHERE name = 'data'", [], |r| r.get(0))?;
@@ -497,7 +489,32 @@ impl Store {
         if has_allow_closed == 0 {
             conn.execute_batch("ALTER TABLE outbox ADD COLUMN allow_closed INTEGER NOT NULL DEFAULT 0")?;
         }
+        Ok(())
+    }
+
+    pub fn open(dir: &Path) -> Result<Store> {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        crate::platform::private_dir(dir)?;
+        let path = dir.join("store.db");
+        let conn = Connection::open(&path).with_context(|| format!("opening {}", path.display()))?;
+        crate::platform::private_file(&path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        Self::init_schema(&conn)?;
         Ok(Store { conn: Mutex::new(conn), path })
+    }
+
+    /// Open a private in-memory SQLite store with the same schema and migrations as [`Store::open`].
+    ///
+    /// For single-process use only: SQLite `:memory:` databases belong to a single connection, do
+    /// not persist across reopen, and cannot be shared with a peer handle or second process. Use
+    /// [`Store::open`] for crash recovery, reopen, and multi-process contention tests.
+    pub fn open_memory() -> Result<Store> {
+        let conn = Connection::open_in_memory().context("opening in-memory store")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Self::init_schema(&conn)?;
+        Ok(Store { conn: Mutex::new(conn), path: PathBuf::from(":memory:") })
     }
 
     pub fn path(&self) -> &Path {
@@ -677,6 +694,10 @@ impl Store {
         self.links_where("WHERE closed = 0", [])
     }
 
+    pub fn links_all(&self) -> Result<Vec<Link>> {
+        self.links_where("", [])
+    }
+
     pub fn children(&self, parent: &str, open_only: bool) -> Result<Vec<Link>> {
         if open_only {
             self.links_where("WHERE parent = ?1 AND closed = 0", [parent])
@@ -804,6 +825,14 @@ impl Store {
         raws.iter().map(|s| Ok(serde_json::from_str(s)?)).collect()
     }
 
+    pub fn merge_wait_rows(&self) -> Result<Vec<(String, u64, MergeWait)>> {
+        let rows: Vec<(String, i64, String)> = self.with(|c| {
+            let mut st = c.prepare("SELECT repo, pr, data FROM merge_waits ORDER BY rowid")?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect()
+        })?;
+        rows.into_iter().map(|(repo, pr, s)| Ok((repo, pr as u64, serde_json::from_str(&s)?))).collect()
+    }
+
     pub fn merge_wait_get(&self, repo: &str, pr: u64) -> Result<Option<MergeWait>> {
         let raw: Option<String> = self.with(|c| {
             c.query_row("SELECT data FROM merge_waits WHERE repo = ?1 AND pr = ?2", params![repo, pr as i64], |r| {
@@ -869,6 +898,14 @@ impl Store {
     pub fn pr_event_seen(&self, repo: &str, pr: u64, event: &str, ticket: &str) -> Result<bool> {
         let sql = "SELECT EXISTS (SELECT 1 FROM pr_events WHERE repo = ?1 AND pr = ?2 AND event = ?3 AND ticket = ?4)";
         self.with(|c| c.query_row(sql, params![repo, pr as i64, event, ticket], |r| r.get(0)))
+    }
+
+    pub fn pr_events_all(&self) -> Result<Vec<(String, u64, String, String)>> {
+        let rows: Vec<(String, i64, String, String)> = self.with(|c| {
+            let mut st = c.prepare("SELECT repo, pr, event, ticket FROM pr_events ORDER BY rowid")?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect()
+        })?;
+        Ok(rows.into_iter().map(|(repo, pr, event, ticket)| (repo, pr as u64, event, ticket)).collect())
     }
 
     pub fn pr_event_mark(&self, repo: &str, pr: u64, event: &str, ticket: &str, at: &str) -> Result<bool> {
@@ -1804,5 +1841,123 @@ impl Store {
         tx.execute("DELETE FROM board_sessions", [])?;
         tx.commit()?;
         Ok(active)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schema_objects(store: &Store) -> Vec<(String, String, String, String)> {
+        store
+            .with(|c| {
+                let mut st = c.prepare(
+                    "SELECT type, name, tbl_name, sql FROM sqlite_master \
+                     WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type, name",
+                )?;
+                st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect()
+            })
+            .unwrap()
+    }
+
+    fn table_columns(store: &Store, table: &str) -> Vec<String> {
+        store
+            .with(|c| {
+                let mut st = c.prepare(&format!("SELECT name FROM pragma_table_info('{table}') ORDER BY cid"))?;
+                st.query_map([], |r| r.get(0))?.collect()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn open_memory_matches_open_schema_and_migrations() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Store::open(dir.path()).unwrap();
+        let mem = Store::open_memory().unwrap();
+
+        assert_eq!(mem.path(), Path::new(":memory:"));
+        assert_eq!(schema_objects(&mem), schema_objects(&wal));
+        assert_eq!(table_columns(&mem, "waiting"), table_columns(&wal, "waiting"));
+        assert_eq!(table_columns(&mem, "outbox"), table_columns(&wal, "outbox"));
+        assert!(table_columns(&mem, "waiting").iter().any(|c| c == "data"));
+        assert!(table_columns(&mem, "outbox").iter().any(|c| c == "allow_closed"));
+    }
+
+    #[test]
+    fn open_memory_is_isolated_and_supports_core_and_transactional_ops() {
+        let a = Store::open_memory().unwrap();
+        let b = Store::open_memory().unwrap();
+
+        a.meta_set("k", "v").unwrap();
+        assert_eq!(a.meta_get("k").unwrap().as_deref(), Some("v"));
+        assert_eq!(b.meta_get("k").unwrap(), None);
+
+        let link = Link {
+            child: "mcp:w1".into(),
+            parent: "mcp:t1".into(),
+            label: "#41 PR 1/1".into(),
+            role: "worker".into(),
+            parent_role: Some("ticket".into()),
+            params: LinkParams { down: 45, miss: 2, stall: 240 },
+            link: None,
+            opened: "2026-11-17T12:00:00Z".into(),
+            last_up: "2026-11-17T12:00:00Z".into(),
+            last_seen: None,
+            last_nudge: None,
+            nudges: 0,
+            escalated: false,
+            reported: Vec::new(),
+            gate: None,
+            gate_since: None,
+            gate_pr: None,
+            closed: false,
+            closed_at: None,
+            closed_how: None,
+            unread: Vec::new(),
+            bad_run: None,
+            settled_at: None,
+            restored_at: None,
+            project: None,
+            paused_at: None,
+            identity: Identity::default(),
+            brief: None,
+            pr: None,
+        };
+        assert!(matches!(a.link_bind("mcp:w1", false, |_| Bind::Saved(link.clone())).unwrap(), Bind::Saved(_)));
+        assert_eq!(a.links_all().unwrap().len(), 1);
+        assert!(b.links_all().unwrap().is_empty());
+
+        let wait = MergeWait {
+            repo: "acme/widgets".into(),
+            pr: 7,
+            head: "1111111".into(),
+            pull_request_id: "PR_acme/widgets_7".into(),
+            method: None,
+            thread: Some("mcp:t1".into()),
+            label: Some("widgets#7".into()),
+            merge_state: "CLEAN".into(),
+            at: "2026-11-17T12:00:00Z".into(),
+            status: WaitStatus::Waiting,
+            approval: "appr-1".into(),
+            failures: 0,
+            last_error: None,
+        };
+        a.merge_wait_put(&wait).unwrap();
+        assert_eq!(a.merge_wait_rows().unwrap(), vec![("acme/widgets".into(), 7, wait)]);
+
+        let wake = Wake {
+            repo: "acme/widgets",
+            pr: 7,
+            event: Some("merged"),
+            ticket: "mcp:t1",
+            from: "github",
+            kind: "event",
+            body: "acme/widgets#7 merged",
+            at: "2026-11-17T12:01:00Z",
+        };
+        let handle = a.pr_event_wake(&wake, |h| format!("[t3cm event from=github msg={h}]\nmerged")).unwrap().unwrap();
+        assert_eq!(a.msg_get(&handle).unwrap().unwrap().body, "acme/widgets#7 merged");
+        assert_eq!(a.pr_events_all().unwrap(), vec![("acme/widgets".into(), 7, "merged".into(), "mcp:t1".into())]);
+        assert!(b.pr_events_all().unwrap().is_empty());
     }
 }

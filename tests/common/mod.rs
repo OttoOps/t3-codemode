@@ -10,7 +10,7 @@ use t3_codemode::clock::FakeClock;
 use t3_codemode::config::Config;
 use t3_codemode::drift::Home;
 use t3_codemode::fake::{FakeDesktop, FakeGitHub, FakeRemotes, FakeT3, FakeTailscale, provider, thread};
-use t3_codemode::store::{Link, MergeWait, Store};
+use t3_codemode::store::Store;
 
 pub const BOSS: &str = "mcp:boss";
 pub const TICKET: &str = "mcp:ticket";
@@ -37,11 +37,18 @@ pub struct H {
     pub desktop: Arc<FakeDesktop>,
     pub tailscale: Arc<FakeTailscale>,
     pub config: Config,
+    in_memory: bool,
 }
 
 impl H {
     pub fn new() -> H {
         H::build(Vec::new(), Config::default())
+    }
+
+    pub fn new_memory() -> H {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_memory().unwrap();
+        H::build_with_store(dir, Vec::new(), Config::default(), store, true)
     }
 
     pub fn with_tools() -> H {
@@ -50,13 +57,18 @@ impl H {
 
     pub fn build(tools: Vec<Value>, config: Config) -> H {
         let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        H::build_with_store(dir, tools, config, store, false)
+    }
+
+    fn build_with_store(dir: tempfile::TempDir, tools: Vec<Value>, config: Config, store: Store, in_memory: bool) -> H {
         let fake = Arc::new(FakeT3::with_tools(tools));
         for id in [BOSS, TICKET, WORKER] {
             fake.put(thread(id, "idle", T0));
         }
         fake.set_providers(vec![provider("claudeAgent", "claudeAgent", &["claude-opus-5-5", "claude-haiku-5-5"])]);
         let clock = Arc::new(FakeClock::at(T0));
-        let store = Arc::new(Store::open(dir.path()).unwrap());
+        let store = Arc::new(store);
         let remotes = Arc::new(FakeRemotes::default());
         let github = Arc::new(FakeGitHub::default());
         let desktop = Arc::new(FakeDesktop::default());
@@ -74,7 +86,7 @@ impl H {
         app.wf.set_skills_home(Home::under(&dir.path().join("home")));
         app.wf.set_slot_folders(t3_codemode::slots::Folders::under(&dir.path().join("home"), None));
         app.wf.set_config_path(dir.path().join("t3cm-config.json"));
-        H { dir, fake, clock, app, remotes, github, desktop, tailscale, config }
+        H { dir, fake, clock, app, remotes, github, desktop, tailscale, config, in_memory }
     }
 
     pub async fn load_catalog(&self) {
@@ -82,6 +94,7 @@ impl H {
     }
 
     pub fn reopen(&mut self) {
+        assert!(!self.in_memory, "H::reopen requires a file-backed WAL store; use H::new or H::build");
         let store = Arc::new(Store::open(self.dir.path()).unwrap());
         self.app = App::with_host_and_tailscale(
             self.config.clone(),
@@ -99,6 +112,7 @@ impl H {
     }
 
     pub fn peer(&self) -> Arc<App> {
+        assert!(!self.in_memory, "H::peer requires a file-backed WAL store; use H::new or H::build");
         let app = App::with_host_and_tailscale(
             self.config.clone(),
             Arc::new(Store::open(self.dir.path()).unwrap()),
@@ -323,24 +337,18 @@ pub fn delivered_headers(sent: &[Value], known: Known) -> Vec<(String, String, S
     wake_lines(sent, known).into_iter().map(|w| (w.to, w.kind, w.from)).collect()
 }
 
-fn message_record(db: &rusqlite::Connection, handle: &str) -> Option<Record> {
-    let seq = handle.strip_prefix('m')?.parse::<i64>().ok()?;
-    db.query_row("SELECT to_id, kind, body FROM messages WHERE seq = ?1", [seq], |r| {
-        Ok(Record { to: r.get(0)?, kind: r.get(1)?, body: r.get(2)? })
-    })
-    .ok()
-}
-
 impl H {
+    fn message_record(&self, handle: &str) -> Option<Record> {
+        self.app.store.msg_get(handle).unwrap().map(|m| Record { to: m.to, kind: m.kind, body: m.body })
+    }
+
     pub fn delivered(&self, sent: &[Value]) -> Vec<(String, String, String)> {
-        let db = rusqlite::Connection::open(self.app.store.path()).unwrap();
-        let known = |handle: &str| message_record(&db, handle);
+        let known = |handle: &str| self.message_record(handle);
         delivered_headers(sent, &known)
     }
 
     pub fn wake_lines(&self, sent: &[Value]) -> Vec<WakeLine> {
-        let db = rusqlite::Connection::open(self.app.store.path()).unwrap();
-        let known = |handle: &str| message_record(&db, handle);
+        let known = |handle: &str| self.message_record(handle);
         wake_lines(sent, &known)
     }
 
@@ -360,13 +368,13 @@ impl H {
                 ready: c.pr.as_ref().is_some_and(|p| p.ready),
             })
             .collect();
-        let db = rusqlite::Connection::open(self.app.store.path()).unwrap();
-        let mut st = db.prepare("SELECT data FROM links").unwrap();
-        let links = st
-            .query_map([], |r| r.get::<_, String>(0))
+        let links = self
+            .app
+            .store
+            .links_all()
             .unwrap()
-            .map(|row| {
-                let l: Link = serde_json::from_str(&row.unwrap()).unwrap();
+            .into_iter()
+            .map(|l| {
                 let view = LinkView {
                     parent: l.parent,
                     closed: l.closed,
@@ -377,13 +385,13 @@ impl H {
                 (l.child, view)
             })
             .collect();
-        let mut st = db.prepare("SELECT repo, pr, data FROM merge_waits").unwrap();
-        let merge_waits = st
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, String>(2)?)))
+        let merge_waits = self
+            .app
+            .store
+            .merge_wait_rows()
             .unwrap()
-            .map(|row| {
-                let (repo, pr, data) = row.unwrap();
-                let w: MergeWait = serde_json::from_str(&data).unwrap();
+            .into_iter()
+            .map(|(repo, pr, w)| {
                 if (&w.repo, w.pr) != (&repo, pr) {
                     oracle_fail(format!(
                         "merge wait row key ({repo}, {pr}) disagrees with its payload ({}, {})",
@@ -393,12 +401,7 @@ impl H {
                 ((repo, pr), (format!("{:?}", w.status), w.head, w.thread, w.failures))
             })
             .collect();
-        let mut st = db.prepare("SELECT repo, pr, event, ticket FROM pr_events").unwrap();
-        let pr_events = st
-            .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?, r.get(3)?)))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
+        let pr_events = self.app.store.pr_events_all().unwrap().into_iter().collect();
         let pr_seen = self
             .app
             .store

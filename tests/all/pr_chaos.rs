@@ -144,8 +144,8 @@ fn pending_check(name: &str) -> Value {
     json!({"__typename": "CheckRun", "name": name, "status": "IN_PROGRESS", "conclusion": null})
 }
 
-fn setup_chaos() -> (H, BTreeMap<u64, GhPrModel>) {
-    let h = H::new();
+fn setup_chaos(in_memory: bool) -> (H, BTreeMap<u64, GhPrModel>) {
+    let h = if in_memory { H::new_memory() } else { H::new() };
     let home = h.dir.path().join("home");
     let repo = h.dir.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -845,8 +845,17 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
 }
 
 async fn run_sequential_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec<String>, ReachSnapshot) {
+    // Sequential chaos has no reopen or peer ops, so it runs on the in-memory store.
+    run_sequential_seed_inner(seed, sentinel, true).await
+}
+
+async fn run_sequential_seed_inner(
+    seed: u64,
+    sentinel: Option<Sentinel>,
+    in_memory: bool,
+) -> (Vec<String>, ReachSnapshot) {
     let mut rng = Rng::new(seed);
-    let (h, mut gh) = setup_chaos();
+    let (h, mut gh) = setup_chaos(in_memory);
     enable_sentinel(&h, sentinel);
     for m in gh.values_mut() {
         m.queue_enabled = rng.coin();
@@ -1549,7 +1558,7 @@ async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
 
 async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec<String>, H) {
     let mut rng = Rng::new(seed ^ 0x55aa_1234_9876_fedc);
-    let (h, mut gh) = setup_chaos();
+    let (h, mut gh) = setup_chaos(false);
     enable_sentinel(&h, sentinel);
     for m in gh.values_mut() {
         m.queue_enabled = rng.coin();
@@ -2075,4 +2084,31 @@ fn oracle_parses_wake_headers_and_github_subjects() {
     let misrouted = misrouted_wake_sent();
     let caught = std::panic::catch_unwind(|| delivered_headers(&misrouted, &sample_wake_record));
     assert!(caught.is_err(), "a delivery to the wrong recipient must fail, not be filtered out");
+}
+
+#[tokio::test]
+async fn memory_store_matches_wal_store_on_sequential_replay() {
+    let mem_h = H::new_memory();
+    assert_eq!(mem_h.app.store.path(), std::path::Path::new(":memory:"));
+    assert!(!mem_h.dir.path().join("store.db").exists());
+
+    let wal_h = H::new();
+    assert!(wal_h.dir.path().join("store.db").exists());
+
+    for seed in [0, 7] {
+        let mem = run_sequential_seed_inner(seed, None, true).await;
+        let wal = run_sequential_seed_inner(seed, None, false).await;
+        assert_eq!(mem, wal, "in-memory and WAL sequential chaos diverged on seed={seed}");
+    }
+}
+
+#[test]
+fn memory_harness_rejects_reopen_and_peer() {
+    let mut h = H::new_memory();
+    let reopen = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.reopen()));
+    assert!(reopen.is_err(), "H::reopen must reject an in-memory store");
+    let peer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = h.peer();
+    }));
+    assert!(peer.is_err(), "H::peer must reject an in-memory store");
 }
