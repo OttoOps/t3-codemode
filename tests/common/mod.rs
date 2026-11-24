@@ -216,31 +216,70 @@ pub struct Snapshot {
     pub delivered: Vec<(String, String, String)>,
 }
 
-pub fn delivered_headers(sent: &[Value]) -> Vec<(String, String, String)> {
+pub struct WakeLine {
+    pub to: String,
+    pub kind: String,
+    pub from: String,
+    pub subject: String,
+}
+
+pub fn wake_lines(sent: &[Value], known: &dyn Fn(&str, &str, &str) -> bool) -> Vec<WakeLine> {
     let mut out = Vec::new();
     for s in sent {
         let to = s["threadId"].as_str().unwrap_or_default();
-        for line in s["message"].as_str().unwrap_or_default().lines() {
-            let Some(rest) = line.strip_prefix("[t3cm ").filter(|r| r.ends_with(']') && r.contains(" msg=")) else {
-                continue;
-            };
-            let Some((kind, from)) = rest.split_once(" from=").filter(|(k, _)| !k.is_empty() && !k.contains(' '))
+        let mut handles = BTreeSet::new();
+        let mut lines = s["message"].as_str().unwrap_or_default().lines().peekable();
+        while let Some(line) = lines.next() {
+            let Some(rest) = line.strip_prefix("[t3cm ").and_then(|r| r.strip_suffix(']')) else { continue };
+            let Some((head, tail)) = rest.rsplit_once(" msg=") else { continue };
+            let handle = tail.split(' ').next().unwrap_or_default();
+            let Some((kind, from)) = head.split_once(" from=").filter(|(k, _)| !k.is_empty() && !k.contains(' '))
             else {
                 continue;
             };
             let from = if from.starts_with('"') {
-                serde_json::Deserializer::from_str(from).into_iter::<String>().next().and_then(Result::ok)
+                serde_json::from_str::<String>(from).ok()
             } else {
-                from.split([' ', ']']).next().map(String::from)
+                Some(from.to_string()).filter(|f| !f.contains(' '))
             };
             let Some(from) = from.filter(|f| !f.is_empty()) else { continue };
-            out.push((to.to_string(), kind.to_string(), from));
+            if !known(to, kind, handle) || !handles.insert(handle.to_string()) {
+                continue;
+            }
+            let subject = lines.peek().copied().unwrap_or_default().to_string();
+            out.push(WakeLine { to: to.into(), kind: kind.into(), from, subject });
         }
     }
     out
 }
 
+pub fn delivered_headers(sent: &[Value], known: &dyn Fn(&str, &str, &str) -> bool) -> Vec<(String, String, String)> {
+    wake_lines(sent, known).into_iter().map(|w| (w.to, w.kind, w.from)).collect()
+}
+
+fn message_known(db: &rusqlite::Connection, to: &str, kind: &str, handle: &str) -> bool {
+    let Some(seq) = handle.strip_prefix('m').and_then(|n| n.parse::<i64>().ok()) else { return false };
+    db.query_row(
+        "SELECT 1 FROM messages WHERE seq = ?1 AND to_id = ?2 AND kind = ?3",
+        rusqlite::params![seq, to, kind],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 impl H {
+    pub fn delivered(&self, sent: &[Value]) -> Vec<(String, String, String)> {
+        let db = rusqlite::Connection::open(self.app.store.path()).unwrap();
+        let known = |to: &str, kind: &str, handle: &str| message_known(&db, to, kind, handle);
+        delivered_headers(sent, &known)
+    }
+
+    pub fn wake_lines(&self, sent: &[Value]) -> Vec<WakeLine> {
+        let db = rusqlite::Connection::open(self.app.store.path()).unwrap();
+        let known = |to: &str, kind: &str, handle: &str| message_known(&db, to, kind, handle);
+        wake_lines(sent, &known)
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         let cards: Vec<CardView> = self
             .app
@@ -303,6 +342,6 @@ impl H {
         for item in self.app.store.outbox_all().unwrap() {
             *outbox.entry(item.to).or_insert(0) += 1;
         }
-        Snapshot { cards, links, merge_waits, pr_events, pr_seen, outbox, delivered: delivered_headers(&self.sent()) }
+        Snapshot { cards, links, merge_waits, pr_events, pr_seen, outbox, delivered: self.delivered(&self.sent()) }
     }
 }
