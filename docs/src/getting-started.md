@@ -228,7 +228,7 @@ starts.
 ## Update
 
 ```bash
-t3cm update          # install the latest release, and on Linux restart the service on it
+t3cm update          # install the latest release and restart the service on it
 t3cm update --check  # only say whether a newer release is out
 ```
 
@@ -237,9 +237,12 @@ machine's archive, and checks it against the release's `SHA256SUMS` and, with
 `gh` signed in, its build provenance, as the installers do. It replaces the
 binary in place and keeps the old one next to it as `t3cm.old`.
 
-On Linux, when the systemd service is running, `t3cm update` restarts it.
-Runs in flight finish first, up to systemd's stop timeout, and the board
-reconnects by itself. It then waits for `/healthz` to report the new version.
+When the service is running, `t3cm update` restarts it: on Linux with
+`systemctl --user restart`, on macOS with `launchctl kickstart -k`, and on
+Windows with the scheduled task's `/End` and `/Run`. Under systemd, runs in
+flight finish first, up to systemd's stop timeout. On macOS and Windows the
+restart ends runs in flight. The board reconnects by itself. The update then
+waits for `/healthz` to report the new version.
 If the service stops or does not report it within 45 seconds, `t3cm update`
 puts the old binary back, restarts the service on it, and exits non-zero. Once
 the new version serves, it deletes `t3cm.old`.
@@ -258,17 +261,24 @@ prints the command that installs it. Keep local settings in a drop-in
 (`systemctl --user edit t3-codemode`) so that you can copy a new unit over
 without losing them.
 
-On macOS and Windows, `t3cm update` replaces the binary and prints the command
-that restarts the service on it, along with the one that goes back to
-`t3cm.old`. On macOS that is `launchctl kickstart -k`, and on Windows the
-scheduled task's `/End` and `/Run`; both end runs in flight. Rerun the
-installer to pick up a changed launchd agent or task. While Windows release
+When the service is stopped, or with `--no-restart`, `t3cm update` replaces
+the binary and leaves the service alone. On macOS and Windows it prints the
+command that restarts the service on the new binary and the one that goes back
+to `t3cm.old`. Under systemd it prints the restart command when the service is
+running, and a stopped service starts on the new binary. Rerun the installer
+to pick up a changed launchd agent or task. While Windows release
 binaries are paused, `t3cm update` on Windows fails once a release newer than
 v0.6.0 is out, because that release has no Windows archive.
 
-Only one `t3cm update` runs at a time, and it changes nothing while a service
+Only one `t3cm update` runs at a time, and it installs nothing while a service
 answers with a version other than the binary on disk, for example after an
-update with `--no-restart` that the service has not restarted onto yet.
+update with `--no-restart` that the service has not restarted onto yet. When
+the binary is already current but the service still serves an older version,
+and the service starts this binary, `t3cm update` restarts the service and
+waits for it to report the current one. A service that starts another binary
+is left alone, and the update names that binary to run `update` from.
+With `--no-restart`, or with no service it can restart, it prints the restart
+command and exits non-zero instead of reporting t3cm up to date.
 
 `--version vX.Y.Z` installs that release instead, older ones included, and
 `--no-restart` replaces the binary but leaves the running service alone, and
@@ -295,7 +305,7 @@ when `CI` is set.
 | `t3cm status` | The running service's `/healthz` |
 | `t3cm exec <file\|->`, `t3cm search <file\|->` | Call the running service's tools, for humans and scripts |
 | `t3cm auth` | Acquire a fresh T3 session now; prints only its expiry |
-| `t3cm update [--check] [--version vX.Y.Z] [--no-restart]` | Install the latest (or a given) release in place, and on Linux restart the service on it; see [Update](#update) |
+| `t3cm update [--check] [--version vX.Y.Z] [--no-restart]` | Install the latest (or a given) release in place and restart the service on it; see [Update](#update) |
 | `t3cm types [--from tools.json]` | Print the generated TypeScript declarations and their size |
 | `t3cm skills install\|update\|status` | Install the workflow skills this binary carries, bring them to its release, or check them ([below](#install-the-skills-with-t3cm)) |
 | `t3cm slots [--repo D] [--json] [--no-t3]` | The T3 workflow slots as the service resolves them for this shell's agent and repository ([Slots](#slots)) |

@@ -197,6 +197,7 @@ enum Manager {
 const UNIT: &str = "t3-codemode.service";
 const LABEL: &str = "com.ottoops.t3-codemode";
 const TASK: &str = "t3-codemode";
+const TASK_END_WAIT: Duration = Duration::from_secs(10);
 
 #[cfg(unix)]
 fn uid() -> u32 {
@@ -208,11 +209,97 @@ fn uid() -> u32 {
     0
 }
 
+type Step = (&'static str, Vec<String>);
+
+fn step(cmd: &'static str, args: &[&str]) -> Step {
+    (cmd, args.iter().map(|a| a.to_string()).collect())
+}
+
+fn shown(s: &Step) -> String {
+    std::iter::once(s.0.to_string()).chain(s.1.iter().cloned()).collect::<Vec<_>>().join(" ")
+}
+
+fn powershell(script: &str) -> Step {
+    let script = format!("[Console]::OutputEncoding = [Text.Encoding]::UTF8; {script}");
+    step("powershell", &["-NoProfile", "-NonInteractive", "-Command", &script])
+}
+
+impl Manager {
+    fn job(uid: u32) -> String {
+        format!("gui/{uid}/{LABEL}")
+    }
+
+    fn probe(self, uid: u32) -> Step {
+        match self {
+            Manager::Systemd => step("systemctl", &["--user", "is-active", "--quiet", UNIT]),
+            Manager::Launchd => step("launchctl", &["print", &Manager::job(uid)]),
+            Manager::Task => powershell(&format!("(Get-ScheduledTask -TaskName '{TASK}').State")),
+        }
+    }
+
+    fn restart_steps(self, uid: u32) -> Vec<Step> {
+        match self {
+            Manager::Systemd => vec![step("systemctl", &["--user", "restart", UNIT])],
+            Manager::Launchd => vec![step("launchctl", &["kickstart", "-k", &Manager::job(uid)])],
+            Manager::Task => vec![step("schtasks", &["/End", "/TN", TASK]), step("schtasks", &["/Run", "/TN", TASK])],
+        }
+    }
+
+    fn restart_hint(self, uid: u32) -> String {
+        self.restart_steps(uid).iter().map(shown).collect::<Vec<_>>().join("; ")
+    }
+
+    fn stop_hint(self, uid: u32) -> String {
+        match self {
+            Manager::Systemd => format!("systemctl --user stop {UNIT}"),
+            Manager::Launchd => format!("launchctl kill TERM {}", Manager::job(uid)),
+            Manager::Task => format!("schtasks /End /TN {TASK}"),
+        }
+    }
+
+    fn drains(self) -> bool {
+        self == Manager::Systemd
+    }
+}
+
+fn launchd_field<'a>(print: &'a str, key: &str) -> Option<&'a str> {
+    print.lines().find_map(|l| {
+        let top = l.strip_prefix('\t').filter(|r| !r.starts_with(char::is_whitespace))?;
+        top.strip_prefix(key)?.strip_prefix(" = ").map(str::trim)
+    })
+}
+
+fn launchd_program(print: &str) -> Option<PathBuf> {
+    let first_arg = || {
+        let mut lines = print.lines().skip_while(|l| l.trim_end() != "\targuments = {");
+        lines.nth(1).map(str::trim).filter(|a| !a.is_empty() && *a != "}")
+    };
+    launchd_field(print, "program").or_else(first_arg).map(PathBuf::from)
+}
+
+fn systemd_exec_path(show: &str) -> Option<PathBuf> {
+    let path = show.split_once("path=")?.1.split(" ;").next()?.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+fn launchd_running(print: &str) -> bool {
+    launchd_field(print, "state") == Some("running")
+}
+
+fn launchd_pid(print: &str) -> Option<u32> {
+    launchd_field(print, "pid")?.parse().ok().filter(|p| *p > 0)
+}
+
+async fn run_step(s: &Step) -> Option<std::process::Output> {
+    let args: Vec<&str> = s.1.iter().map(String::as_str).collect();
+    quiet(s.0, &args).await
+}
+
 async fn manager() -> Option<Manager> {
     if cfg!(target_os = "linux") {
         ok("systemctl", &["--user", "cat", UNIT]).await.then_some(Manager::Systemd)
     } else if cfg!(target_os = "macos") {
-        ok("launchctl", &["print", &format!("gui/{}/{LABEL}", uid())]).await.then_some(Manager::Launchd)
+        ok("launchctl", &["print", &Manager::job(uid())]).await.then_some(Manager::Launchd)
     } else if cfg!(windows) {
         ok("schtasks", &["/Query", "/TN", TASK]).await.then_some(Manager::Task)
     } else {
@@ -220,33 +307,254 @@ async fn manager() -> Option<Manager> {
     }
 }
 
-async fn active() -> bool {
-    ok("systemctl", &["--user", "is-active", "--quiet", UNIT]).await
+async fn active(m: Manager) -> bool {
+    let Some(out) = run_step(&m.probe(uid())).await.filter(|o| o.status.success()) else { return false };
+    let text = String::from_utf8_lossy(&out.stdout);
+    match m {
+        Manager::Systemd => true,
+        Manager::Launchd => launchd_running(&text),
+        Manager::Task => text.trim() == "Running",
+    }
 }
 
-async fn service_exe() -> Option<PathBuf> {
-    let out = quiet("systemctl", &["--user", "show", "-p", "MainPID", "--value", UNIT]).await?;
-    let pid: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().ok().filter(|p| *p > 0)?;
-    platform::process_exe(pid)
+async fn service_pid(m: Manager) -> Option<u32> {
+    match m {
+        Manager::Systemd => {
+            let out = quiet("systemctl", &["--user", "show", "-p", "MainPID", "--value", UNIT]).await?;
+            if !out.status.success() {
+                return None;
+            }
+            String::from_utf8_lossy(&out.stdout).trim().parse().ok().filter(|p| *p > 0)
+        }
+        Manager::Launchd => {
+            let out = run_step(&m.probe(uid())).await.filter(|o| o.status.success())?;
+            launchd_pid(&String::from_utf8_lossy(&out.stdout))
+        }
+        Manager::Task => None,
+    }
 }
 
-async fn restart() -> Result<()> {
-    let out =
-        quiet("systemctl", &["--user", "restart", UNIT]).await.ok_or_else(|| anyhow!("could not run systemctl"))?;
-    if !out.status.success() {
-        bail!("systemctl --user restart {UNIT} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+async fn service_exe(m: Manager) -> Option<PathBuf> {
+    match m {
+        Manager::Systemd | Manager::Launchd => platform::process_exe(service_pid(m).await?),
+        Manager::Task => task_exe().await,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_addr(hex: &str) -> Option<std::net::IpAddr> {
+    if !hex.is_ascii() {
+        return None;
+    }
+    match hex.len() {
+        8 => u32::from_str_radix(hex, 16).ok().map(|v| std::net::Ipv4Addr::from(v.to_ne_bytes()).into()),
+        32 => {
+            let mut bytes = [0u8; 16];
+            for (i, chunk) in bytes.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let w = u32::from_str_radix(&hex[i * 8..(i + 1) * 8], 16).ok()?;
+                *chunk = w.to_ne_bytes();
+            }
+            Some(std::net::Ipv6Addr::from(bytes).into())
+        }
+        _ => None,
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn proc_listen_inode(table: &str, port: u16) -> Option<u64> {
+    let mut exact = None;
+    let mut wildcard = None;
+    for line in table.lines().skip(1) {
+        let mut cols = line.split_whitespace();
+        let Some(local) = cols.nth(1) else { continue };
+        let Some(state) = cols.nth(1) else { continue };
+        if !state.eq_ignore_ascii_case("0A") {
+            continue;
+        }
+        let Some((addr, hex_port)) = local.split_once(':') else { continue };
+        if u16::from_str_radix(hex_port, 16).ok() != Some(port) {
+            continue;
+        }
+        let Some(ip) = parse_proc_addr(addr) else { continue };
+        let Some(inode) = cols.nth(5).and_then(|s| s.parse::<u64>().ok()).filter(|i| *i > 0) else {
+            continue;
+        };
+        let is_exact = match ip {
+            std::net::IpAddr::V4(v4) => v4 == std::net::Ipv4Addr::LOCALHOST,
+            std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped() == Some(std::net::Ipv4Addr::LOCALHOST),
+        };
+        if is_exact {
+            if exact.is_some_and(|prev| prev != inode) {
+                return None;
+            }
+            exact = Some(inode);
+        } else if ip.is_unspecified() {
+            wildcard = Some(if wildcard.is_some_and(|prev| prev != inode) { 0 } else { inode });
+        }
+    }
+    exact.or_else(|| wildcard.filter(|i| *i > 0))
+}
+
+#[cfg(target_os = "linux")]
+fn proc_socket_pid(inode: u64) -> Option<u32> {
+    let want = format!("socket:[{inode}]");
+    let want = std::ffi::OsStr::new(&want);
+    let mut found = None;
+    for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()).filter(|p| *p > 0) else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else { continue };
+        for fd in fds.flatten() {
+            if std::fs::read_link(fd.path()).is_ok_and(|p| p.as_os_str() == want) {
+                if found.is_some_and(|prev| prev != pid) {
+                    return None;
+                }
+                found = Some(pid);
+                break;
+            }
+        }
+    }
+    found
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+fn unique_pid(output: &str) -> Option<u32> {
+    let mut found = None;
+    for line in output.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let pid: u32 = line.parse().ok().filter(|p| *p > 0)?;
+        if found.is_some_and(|prev| prev != pid) {
+            return None;
+        }
+        found = Some(pid);
+    }
+    found
+}
+
+#[cfg(target_os = "linux")]
+async fn listener_pid(port: u16) -> Option<u32> {
+    let inode = std::fs::read_to_string("/proc/net/tcp")
+        .ok()
+        .and_then(|t| proc_listen_inode(&t, port))
+        .or_else(|| std::fs::read_to_string("/proc/net/tcp6").ok().and_then(|t| proc_listen_inode(&t, port)))?;
+    proc_socket_pid(inode)
+}
+
+#[cfg(target_os = "macos")]
+async fn listener_pid(port: u16) -> Option<u32> {
+    let out = quiet("lsof", &["-nP", &format!("-iTCP@127.0.0.1:{port}"), "-sTCP:LISTEN", "-t"]).await?;
+    out.status.success().then(|| unique_pid(&String::from_utf8_lossy(&out.stdout)))?
+}
+
+#[cfg(windows)]
+async fn listener_pid(port: u16) -> Option<u32> {
+    let out = run_step(&powershell(&format!(
+        "(Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort {port} -State Listen -ErrorAction SilentlyContinue).OwningProcess"
+    )))
+    .await?;
+    out.status.success().then(|| unique_pid(&String::from_utf8_lossy(&out.stdout)))?
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+async fn listener_pid(_port: u16) -> Option<u32> {
+    None
+}
+
+fn scheduler_parent_probe(pid: u32) -> Step {
+    powershell(&format!(
+        "$p = (Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').ParentProcessId; \
+         $s = (Get-CimInstance Win32_Service -Filter 'Name=''Schedule''').ProcessId; \
+         if ($p -and $s) {{ $p -eq $s }}"
+    ))
+}
+
+async fn started_by_scheduler(pid: u32) -> Option<bool> {
+    let out = run_step(&scheduler_parent_probe(pid)).await.filter(|o| o.status.success())?;
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "True" => Some(true),
+        "False" => Some(false),
+        _ => None,
+    }
+}
+
+fn matches_task_exe(proc_exe: &Path, launch: &Path) -> bool {
+    let proc_exe = canonical(proc_exe.to_path_buf());
+    proc_exe == canonical(launch.to_path_buf()) || proc_exe == canonical(sibling(launch, ".old"))
+}
+
+enum ListenerOwner {
+    Service,
+    Other,
+    Unknown,
+}
+
+async fn listener_owner(m: Manager, port: u16, launch: &Path) -> ListenerOwner {
+    let Some(listener) = listener_pid(port).await else { return ListenerOwner::Unknown };
+    match m {
+        Manager::Systemd | Manager::Launchd => match service_pid(m).await {
+            Some(svc) if svc == listener => ListenerOwner::Service,
+            Some(_) => ListenerOwner::Other,
+            None => ListenerOwner::Unknown,
+        },
+        Manager::Task => match platform::process_exe(listener) {
+            Some(proc_exe) if matches_task_exe(&proc_exe, launch) => match started_by_scheduler(listener).await {
+                Some(true) => ListenerOwner::Service,
+                Some(false) => ListenerOwner::Other,
+                None => ListenerOwner::Unknown,
+            },
+            Some(_) => ListenerOwner::Other,
+            None => ListenerOwner::Unknown,
+        },
+    }
+}
+
+async fn task_exe() -> Option<PathBuf> {
+    let out = run_step(&powershell(&format!("(Get-ScheduledTask -TaskName '{TASK}').Actions[0].Execute"))).await?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !path.is_empty()).then(|| PathBuf::from(path))
+}
+
+async fn launch_exe(m: Manager) -> Option<PathBuf> {
+    match m {
+        Manager::Systemd => {
+            let out = quiet("systemctl", &["--user", "show", "-p", "ExecStart", "--value", UNIT]).await?;
+            out.status.success().then(|| systemd_exec_path(&String::from_utf8_lossy(&out.stdout)))?
+        }
+        Manager::Launchd => {
+            let out = run_step(&m.probe(uid())).await.filter(|o| o.status.success())?;
+            launchd_program(&String::from_utf8_lossy(&out.stdout))
+        }
+        Manager::Task => task_exe().await,
+    }
+}
+
+async fn restart(m: Manager) -> Result<()> {
+    let steps = m.restart_steps(uid());
+    let last = steps.len() - 1;
+    for (i, s) in steps.iter().enumerate() {
+        let out = run_step(s).await.ok_or_else(|| anyhow!("could not run {}", s.0))?;
+        if i < last {
+            let start = Instant::now();
+            while active(m).await && start.elapsed() < TASK_END_WAIT {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            continue;
+        }
+        if !out.status.success() {
+            bail!("{} failed: {}", shown(s), String::from_utf8_lossy(&out.stderr).trim());
+        }
     }
     Ok(())
 }
 
-async fn await_version(port: u16, want: &str) -> Result<Duration> {
+async fn await_version(m: Manager, port: u16, want: &str) -> Result<Duration> {
     let start = Instant::now();
     let mut down = 0;
     loop {
         if served_version(port).await.as_deref() == Some(want) {
             return Ok(start.elapsed());
         }
-        down = if active().await { 0 } else { down + 1 };
+        down = if active(m).await { 0 } else { down + 1 };
         if down >= 3 {
             bail!("the service stopped before it reported {want} on 127.0.0.1:{port}");
         }
@@ -268,14 +576,12 @@ pub(crate) fn plain(p: &Path) -> String {
 
 fn manual_steps(m: Manager, exe: &Path, old: &Path) -> Option<(String, String)> {
     let (exe, old) = (plain(exe), plain(old));
+    let kick = m.restart_hint(uid());
     match m {
         Manager::Systemd => None,
-        Manager::Launchd => {
-            let kick = format!("launchctl kickstart -k gui/{}/{LABEL}", uid());
-            Some((kick.clone(), format!("mv '{old}' '{exe}' && {kick}")))
-        }
+        Manager::Launchd => Some((kick.clone(), format!("mv '{old}' '{exe}' && {kick}"))),
         Manager::Task => Some((
-            format!("schtasks /End /TN {TASK}; schtasks /Run /TN {TASK}"),
+            kick,
             format!(
                 "schtasks /End /TN {TASK}; Move-Item -Force -LiteralPath '{old}' -Destination '{exe}'; schtasks /Run /TN {TASK}"
             ),
@@ -456,6 +762,74 @@ fn up_to_date(current: &Version, published: &Version) -> String {
     }
 }
 
+fn restart_hint(found: Option<Manager>) -> String {
+    found.map(|m| m.restart_hint(uid())).unwrap_or_else(|| platform::SERVICE.restart.to_string())
+}
+
+fn canonical(p: PathBuf) -> PathBuf {
+    p.canonicalize().unwrap_or(p)
+}
+
+async fn restart_stale(o: &Opts, current: &Version) -> Result<()> {
+    let Some(served) = served_version(o.port).await else { return Ok(()) };
+    if served == current.to_string() {
+        return Ok(());
+    }
+    let port = o.port;
+    let found = manager().await;
+    let hint = restart_hint(found);
+    if Version::parse(&served).is_none_or(|v| v > *current) {
+        bail!(
+            "a t3cm {served} answers on 127.0.0.1:{port}, but this is t3cm {current}; run the t3cm the service runs, or restart the service on this one: {hint}"
+        );
+    }
+    let Some(m) = found.filter(|_| o.restart) else {
+        bail!(
+            "the service on 127.0.0.1:{port} still runs t3cm {served}, not {current}; restart it to run {current}: {hint}"
+        );
+    };
+    if !active(m).await {
+        bail!(
+            "a t3cm {served} answers on 127.0.0.1:{port}, but the service is not running; stop that t3cm, then start the service: {hint}"
+        );
+    }
+    let exe = canonical(std::env::current_exe()?);
+    let runs = launch_exe(m)
+        .await
+        .ok_or_else(|| anyhow!("could not tell which binary the service starts; restart it ({hint}), then update"))?;
+    if canonical(runs.clone()) != exe {
+        bail!(
+            "the service runs {}, but this is {}; run `{} update` instead, or restart the service: {hint}",
+            runs.display(),
+            exe.display(),
+            runs.display()
+        );
+    }
+    match listener_owner(m, port, &runs).await {
+        ListenerOwner::Service => {}
+        ListenerOwner::Other => bail!(
+            "a t3cm {served} answers on 127.0.0.1:{port}, but that listener is not the service; stop it, or pass the service's port with --port (or restart the service: {hint})"
+        ),
+        ListenerOwner::Unknown => bail!(
+            "a t3cm {served} answers on 127.0.0.1:{port}, but could not tell whether that listener is the service; pass the service's port with --port, or restart the service: {hint}"
+        ),
+    }
+    println!("The service still runs t3cm {served}; restarting it on {current}.");
+    let restarted = match restart(m).await {
+        Ok(()) => await_version(m, port, &current.to_string()).await,
+        Err(e) => Err(e),
+    };
+    let took = restarted.with_context(|| {
+        format!(
+            "restart the service with {hint}; check it with {} and its logs at {}",
+            platform::SERVICE.status,
+            platform::SERVICE.logs
+        )
+    })?;
+    println!("The service answered on t3cm {current} in {:.1}s.", took.as_secs_f64());
+    Ok(())
+}
+
 pub async fn run(o: Opts) -> Result<()> {
     let releases = release::releases_url()?;
     let current = Version::current();
@@ -480,6 +854,7 @@ pub async fn run(o: Opts) -> Result<()> {
     }
     if want == current || (asked.is_none() && want < current) {
         let _lock = lock_updates(&o.state_dir)?;
+        restart_stale(&o, &current).await?;
         println!("{}", up_to_date(&current, &want));
         if skills_managed()?.is_none() {
             if let Err(e) = offer_take_over() {
@@ -541,22 +916,30 @@ pub async fn run(o: Opts) -> Result<()> {
     let served = served_version(o.port).await;
     if let Some(v) = served.as_deref().filter(|v| *v != current.to_string()) {
         bail!(
-            "a t3cm {v} answers on 127.0.0.1:{}, but {} is t3cm {current}; restart the service so it runs {current}, then update",
+            "a t3cm {v} answers on 127.0.0.1:{}, but {} is t3cm {current}; restart the service so it runs {current} ({}), then update",
             o.port,
-            exe.display()
+            exe.display(),
+            restart_hint(found)
         );
     }
-    let running = found == Some(Manager::Systemd) && active().await;
-    if running && served.is_none() {
+    let running = match found {
+        Some(m) => active(m).await,
+        None => false,
+    };
+    if let Some(m) = found.filter(|_| running && served.is_none()) {
         bail!(
-            "the service is running but nothing answers on 127.0.0.1:{}; pass its port with --port, or stop it (systemctl --user stop {UNIT}) and run `t3cm update` again",
-            o.port
+            "the service is running but nothing answers on 127.0.0.1:{}; pass its port with --port, or stop it ({}) and run `t3cm update` again",
+            o.port,
+            m.stop_hint(uid())
         );
     }
-    if found.is_some() {
+    if let Some(m) = found {
         let runs = if running {
-            service_exe().await.ok_or_else(|| {
-                anyhow!("could not tell which binary the running service runs; restart it (systemctl --user restart {UNIT}), then update")
+            service_exe(m).await.ok_or_else(|| {
+                anyhow!(
+                    "could not tell which binary the running service runs; restart it ({}), then update",
+                    m.restart_hint(uid())
+                )
             })?
         } else {
             platform::installed_exe()
@@ -591,7 +974,7 @@ pub async fn run(o: Opts) -> Result<()> {
 
     let swap = Swap::install(&exe, &new)?;
     println!("Installed t3cm {want} at {}", exe.display());
-    if !(o.restart && running) {
+    let Some(m) = found.filter(|_| o.restart && running) else {
         println!("t3cm {current} is kept at {} to go back to.", swap.old.display());
         match found.and_then(|m| manual_steps(m, &exe, &swap.old)) {
             Some((restart, back)) => {
@@ -608,11 +991,15 @@ pub async fn run(o: Opts) -> Result<()> {
             None => {}
         }
         return sync_skills(&exe, &want).await;
-    }
+    };
 
-    println!("Restarting the service; runs in flight finish first.");
-    let cutover = match restart().await {
-        Ok(()) => await_version(o.port, &want.to_string()).await,
+    if m.drains() {
+        println!("Restarting the service; runs in flight finish first.");
+    } else {
+        println!("Restarting the service; this ends runs in flight.");
+    }
+    let cutover = match restart(m).await {
+        Ok(()) => await_version(m, o.port, &want.to_string()).await,
         Err(e) => Err(e),
     };
     match cutover {
@@ -627,8 +1014,8 @@ pub async fn run(o: Opts) -> Result<()> {
         Err(e) => {
             let back = async {
                 swap.roll_back()?;
-                restart().await?;
-                await_version(o.port, &current.to_string()).await.map(|_| ())
+                restart(m).await?;
+                await_version(m, o.port, &current.to_string()).await.map(|_| ())
             };
             let hint = match &unit {
                 Some(copy) => format!(
@@ -683,6 +1070,92 @@ mod tests {
         assert!(back.contains(r"Move-Item -Force -LiteralPath 'C:\p\t3cm.old' -Destination 'C:\p\t3cm.exe'"), "{back}");
     }
 
+    fn argv(steps: &[Step]) -> Vec<String> {
+        steps.iter().map(shown).collect()
+    }
+
+    #[test]
+    fn each_manager_restarts_its_own_service() {
+        assert_eq!(argv(&Manager::Systemd.restart_steps(501)), ["systemctl --user restart t3-codemode.service"]);
+        assert_eq!(
+            argv(&Manager::Launchd.restart_steps(501)),
+            ["launchctl kickstart -k gui/501/com.ottoops.t3-codemode"]
+        );
+        assert_eq!(
+            argv(&Manager::Task.restart_steps(0)),
+            ["schtasks /End /TN t3-codemode", "schtasks /Run /TN t3-codemode"]
+        );
+        assert_eq!(Manager::Task.restart_hint(0), "schtasks /End /TN t3-codemode; schtasks /Run /TN t3-codemode");
+        assert!(Manager::Systemd.drains() && !Manager::Launchd.drains() && !Manager::Task.drains());
+    }
+
+    #[test]
+    fn each_manager_probes_its_own_service() {
+        assert_eq!(shown(&Manager::Systemd.probe(501)), "systemctl --user is-active --quiet t3-codemode.service");
+        assert_eq!(shown(&Manager::Launchd.probe(501)), "launchctl print gui/501/com.ottoops.t3-codemode");
+        let (cmd, args) = Manager::Task.probe(0);
+        assert_eq!(cmd, "powershell");
+        assert_eq!(
+            args.last().unwrap(),
+            "[Console]::OutputEncoding = [Text.Encoding]::UTF8; (Get-ScheduledTask -TaskName 't3-codemode').State"
+        );
+        assert_eq!(Manager::Launchd.stop_hint(501), "launchctl kill TERM gui/501/com.ottoops.t3-codemode");
+        assert_eq!(Manager::Task.stop_hint(0), "schtasks /End /TN t3-codemode");
+    }
+
+    const LAUNCHD_RUNNING: &str = "gui/501/com.ottoops.t3-codemode = {
+\tactive count = 1
+\tpath = /Users/a/Library/LaunchAgents/com.ottoops.t3-codemode.plist
+\ttype = LaunchAgent
+\tstate = running
+
+\tprogram = /Users/a/.local/bin/t3cm
+\targuments = {
+\t\t/Users/a/.local/bin/t3cm
+\t\tserve
+\t}
+
+\tendpoints = {
+\t\tstate = waiting
+\t\tpid = 7
+\t}
+\tpid = 4242
+\tlast exit code = (never exited)
+}
+";
+
+    #[test]
+    fn the_service_managers_name_the_binary_they_start() {
+        assert_eq!(launchd_program(LAUNCHD_RUNNING), Some(PathBuf::from("/Users/a/.local/bin/t3cm")));
+        let no_program = LAUNCHD_RUNNING.replace("\tprogram = /Users/a/.local/bin/t3cm\n", "");
+        assert_eq!(launchd_program(&no_program), Some(PathBuf::from("/Users/a/.local/bin/t3cm")));
+        let show = "{ path=/home/a/.local/bin/t3cm ; argv[]=/home/a/.local/bin/t3cm serve ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n";
+        assert_eq!(systemd_exec_path(show), Some(PathBuf::from("/home/a/.local/bin/t3cm")));
+        assert_eq!(systemd_exec_path(""), None);
+    }
+
+    #[test]
+    fn launchctl_print_tells_whether_the_agent_runs_and_its_pid() {
+        assert!(launchd_running(LAUNCHD_RUNNING));
+        assert_eq!(launchd_pid(LAUNCHD_RUNNING), Some(4242));
+        let stopped = "gui/501/com.ottoops.t3-codemode = {
+\tstate = not running
+\tlast exit code = 1
+}
+";
+        assert!(!launchd_running(stopped));
+        assert_eq!(launchd_pid(stopped), None);
+        assert_eq!(launchd_pid("\tpid = 0\n"), None);
+    }
+
+    #[test]
+    fn manual_steps_print_the_same_restart_the_update_runs() {
+        let (kick, back) = manual_steps(Manager::Launchd, Path::new("/u/t3cm"), Path::new("/u/t3cm.old")).unwrap();
+        assert_eq!(kick, Manager::Launchd.restart_hint(uid()));
+        assert_eq!(back, format!("mv '/u/t3cm.old' '/u/t3cm' && {kick}"));
+        assert!(manual_steps(Manager::Systemd, Path::new("/u/t3cm"), Path::new("/u/t3cm.old")).is_none());
+    }
+
     #[test]
     fn a_unit_change_is_reported_only_when_the_release_makes_one() {
         assert!(!unit_changed(b"old", b"old", b"old"));
@@ -716,6 +1189,82 @@ mod tests {
         swap.roll_back().unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), b"old");
         assert!(!sibling(&exe, ".new").exists());
+    }
+
+    #[test]
+    fn proc_net_tcp_lines_find_the_listening_loopback_inode() {
+        let lo4 = format!("{:08X}", u32::from_ne_bytes([127, 0, 0, 1]));
+        let other4 = format!("{:08X}", u32::from_ne_bytes([10, 0, 0, 1]));
+        let v4 = format!(
+            "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+               0: {other4}:BA73 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 111 1\n\
+               1: {lo4}:BA73 0100007F:C350 01 00000000:00000000 00:00000000 00000000  1000        0 222 1\n\
+               2: 00000000:BA73 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 333 1\n\
+               3: {lo4}:BA73 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 444 1\n\
+               4: 00000000:BA74 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 555 1\n\
+               5: {lo4}:BA75 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 0 1\n"
+        );
+        assert_eq!(proc_listen_inode(&v4, 47731), Some(444));
+        assert_eq!(proc_listen_inode(&v4, 47732), Some(555));
+        assert_eq!(proc_listen_inode(&v4, 47733), None);
+        assert_eq!(proc_listen_inode(&v4, 47734), None);
+
+        let mapped_lo = format!(
+            "0000000000000000{:08X}{:08X}",
+            u32::from_ne_bytes([0, 0, 0xFF, 0xFF]),
+            u32::from_ne_bytes([127, 0, 0, 1])
+        );
+        let lo6 = format!("000000000000000000000000{:08X}", u32::from_ne_bytes([0, 0, 0, 1]));
+        let v6 = format!(
+            "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+               0: {lo6}:BA73 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 666 1\n\
+               1: {mapped_lo}:BA74 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 777 1\n\
+               2: 00000000000000000000000000000000:BA75 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 888 1\n"
+        );
+        assert_eq!(proc_listen_inode(&v6, 47731), None);
+        assert_eq!(proc_listen_inode(&v6, 47732), Some(777));
+        assert_eq!(proc_listen_inode(&v6, 47733), Some(888));
+
+        let dup = format!(
+            "  sl local rem st q t r u to inode\n\
+               0: {lo4}:BA73 00000000:0000 0A 0:0 0:0 0 1000 0 111 1\n\
+               1: {lo4}:BA73 00000000:0000 0A 0:0 0:0 0 1000 0 222 1\n"
+        );
+        assert_eq!(proc_listen_inode(&dup, 47731), None);
+    }
+
+    #[test]
+    fn unique_pid_accepts_one_positive_pid_and_refuses_ambiguity() {
+        assert_eq!(unique_pid("4242\n"), Some(4242));
+        assert_eq!(unique_pid(" 4242 \r\n4242\r\n"), Some(4242));
+        assert_eq!(unique_pid("4242\n4243\n"), None);
+        assert_eq!(unique_pid("0\n"), None);
+        assert_eq!(unique_pid(""), None);
+        assert_eq!(unique_pid("err\n"), None);
+    }
+
+    #[test]
+    fn the_task_listener_must_be_a_child_of_the_task_scheduler_service() {
+        let (cmd, args) = scheduler_parent_probe(4242);
+        assert_eq!(cmd, "powershell");
+        let script = args.last().unwrap();
+        assert!(script.contains("Win32_Process -Filter 'ProcessId=4242'"), "{script}");
+        assert!(script.contains("Win32_Service -Filter 'Name=''Schedule'''"), "{script}");
+        assert!(script.contains("$p -eq $s"), "{script}");
+    }
+
+    #[test]
+    fn task_exe_match_accepts_the_installed_binary_and_its_old_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("t3cm.exe");
+        let old = sibling(&exe, ".old");
+        let other = dir.path().join("other.exe");
+        std::fs::write(&exe, b"new").unwrap();
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&other, b"other").unwrap();
+        assert!(matches_task_exe(&exe, &exe));
+        assert!(matches_task_exe(&old, &exe));
+        assert!(!matches_task_exe(&other, &exe));
     }
 
     #[test]

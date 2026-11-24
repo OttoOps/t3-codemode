@@ -95,7 +95,7 @@ enum Cmd {
         #[command(flatten)]
         port: PortArgs,
     },
-    /// Install the latest release in place and restart the service on it
+    /// Install the latest release in place and restart the service (systemd, launchd or Task Scheduler) on it
     #[command(visible_alias = "upgrade")]
     Update {
         /// Only report whether a newer release is out
