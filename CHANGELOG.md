@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/OttoOps/t3-codemode/compare/v0.11.0...v0.12.0) - 2026-11-24
+
+### Added
+
+- check for new releases every hour
+
 ## [0.11.0](https://github.com/OttoOps/t3-codemode/compare/v0.10.2...v0.11.0) - 2026-11-24
 
 ### Added
