@@ -87,6 +87,14 @@ def main():
                 sys.exit(1)
             sys.stdout.write(text + "\n")
             return
+        if args[:2] == ["config", "get"]:
+            with open(os.environ["T3CM_STUB_CONFIG"]) as f:
+                value = json.load(f)
+            for key in (args[2].split(".") if len(args) > 2 else []):
+                value = value.get(key) if isinstance(value, dict) else None
+            log("config", {"args": args})
+            sys.stdout.write(json.dumps(value, indent=2) + "\n")
+            return
         sys.stderr.write(f"stub t3cm: unsupported args {args}\n")
         sys.exit(1)
     for line in sys.stdin:

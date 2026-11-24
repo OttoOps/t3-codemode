@@ -197,6 +197,70 @@
           }
         }
       }
+    },
+    {
+      "id": 4,
+      "name": "gitlab-split-checks-branches-with-glab",
+      "prompt": "Work on https://gitlab.acme.example/acme/widgets/-/issues/46 and ship it.",
+      "expected_output": "Joins the workflow, finds the GitLab origin listed under t3cm's forges, reads the issue with glab, checks the proposed branch name with glab mr list, and shows the PR split for approval without launching a worker.",
+      "files": [],
+      "expectations": [
+        "Joins the workflow as a ticket thread",
+        "Reads t3cm's forges config to see whether the GitLab host is tracked",
+        "Reads the GitLab issue with glab",
+        "Checks the branch name against the host's merge requests with glab mr list --source-branch",
+        "Runs no gh pr command against the GitLab repo",
+        "Shows the PR split under an action line asking the user to approve it",
+        "Launches no worker thread before the split is approved"
+      ],
+      "checks": [
+        {
+          "tool": "*",
+          "input": "wf\\.init\\([^)]*ticket"
+        },
+        {
+          "bash": "t3cm config get forges"
+        },
+        {
+          "glab": "issue view 46"
+        },
+        {
+          "glab": "mr list.*--source-branch"
+        },
+        {
+          "gh": "^pr ",
+          "none": true
+        },
+        {
+          "text": "approve this PR split"
+        },
+        {
+          "t3": "t3_thread_launch",
+          "none": true
+        }
+      ],
+      "setup": {
+        "origin": "https://gitlab.acme.example/acme/widgets.git",
+        "forges": {
+          "gitlab.acme.example": {
+            "kind": "gitlab",
+            "cli": "glab"
+          }
+        },
+        "issues": {
+          "46": {
+            "iid": 46,
+            "title": "Add a loud() helper",
+            "state": "opened",
+            "description": "Add loud(name), which returns widget(name) followed by '!', with a test.",
+            "labels": [],
+            "web_url": "https://gitlab.acme.example/acme/widgets/-/issues/46"
+          }
+        },
+        "repo_files": {
+          "AGENTS.md": "# Agent rules\n\nIssues and merge requests live on GitLab at gitlab.acme.example. Read an issue with `glab issue view <iid>`.\nMerge requests use \"Rebase and merge\".\n"
+        }
+      }
     }
   ]
 }

@@ -2,7 +2,7 @@
 """Live evals for the skills in skills/: trigger evals and with/without-skill behavior evals.
 
 Every run happens in a throwaway sandbox: its own HOME, XDG dirs and T3 home, a
-stub T3 MCP server, a fake gh on PATH, and a git repo whose pushes land in a
+stub T3 MCP server, a fake gh and glab on PATH, and a git repo whose pushes land in a
 local bare repo. Nothing reads or writes the real ~/.claude, ~/.agents or
 ~/.codex, a T3 server, or GitHub. Auth comes from ANTHROPIC_API_KEY or
 CLAUDE_CODE_OAUTH_TOKEN in the environment.
@@ -43,7 +43,7 @@ RUNTIME_NOTE = ("<runtime_info>You are running in T3 Code through the Claude Cod
                 "No need to mention this otherwise.</runtime_info>\n")
 ALLOW = ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "ToolSearch", "mcp__t3-code"]
 DENY = ["WebFetch", "WebSearch", "AskUserQuestion"]
-CHECK_KINDS = ("tool", "bash", "text", "file", "gh", "t3", "repo")
+CHECK_KINDS = ("tool", "bash", "text", "file", "gh", "glab", "t3", "repo")
 LINK_HEADING = "## t3-codemode link"
 LINK_HEADINGS = ("## t3-codemode link", "## t3-workflow link")
 BRIEF_TOOLS = 8
@@ -94,6 +94,8 @@ class Sandbox:
         self.t3_log = self.root / "t3-calls.jsonl"
         self.t3cm_log = self.root / "t3cm-calls.jsonl"
         self.gh_log = self.root / "gh.log"
+        self.glab_log = self.root / "glab.log"
+        self.origin = self.setup.get("origin", REPO_URL)
         self.t3 = t3
         for d in (self.home / ".claude" / "skills", self.bin, self.root / "config", self.root / "state",
                   self.root / "t3home"):
@@ -198,33 +200,38 @@ class Sandbox:
             (self.bin / "claude").symlink_to(shutil.which("claude"))
         gh = self.bin / "gh"
         gh.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'fake_gh.py'))} \"$@\"\n")
+        glab = self.bin / "glab"
+        glab.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'fake_glab.py'))} \"$@\"\n")
         t3cm = self.bin / "t3cm"
         t3cm.write_text(
             f"#!/bin/sh\nT3CM_STUB_LOG={shlex.quote(str(self.t3cm_log))} "
             f"T3CM_STUB_FIXTURE={shlex.quote(str(self.root / 't3cm.json'))} "
+            f"T3CM_STUB_CONFIG={shlex.quote(str(self.root / 't3cm-config.json'))} "
             f"exec {shlex.quote(sys.executable)} {shlex.quote(str(HERE / 'stub_t3cm_mcp.py'))} --cli \"$@\"\n"
         )
         sysctl = self.bin / "systemctl"
         sysctl.write_text("#!/bin/sh\nexit 1\n")
-        for p in (gh, t3cm, sysctl):
+        for p in (gh, glab, t3cm, sysctl):
             p.chmod(0o755)
         fixtures = {"issues": self.setup.get("issues", {})}
         (self.root / "gh.json").write_text(json.dumps(fixtures))
+        (self.root / "glab.json").write_text(json.dumps(fixtures))
+        (self.root / "t3cm-config.json").write_text(json.dumps({"forges": self.setup.get("forges", {})}))
 
     def _git(self, *args, cwd=None):
         subprocess.run(["git", *args], cwd=cwd or self.repo, check=True, capture_output=True,
                        env={**self.environ(), "GIT_CONFIG_NOSYSTEM": "1"})
 
     def _repo(self):
-        remote = self.root / "github.com" / "acme" / "widgets.git"
+        remote = self.root / self.origin.split("://", 1)[1]
         subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True,
                        capture_output=True, env={**self.environ(), "GIT_CONFIG_NOSYSTEM": "1"})
         self.repo.mkdir()
         self._git("init", "-q", "-b", "main")
         self._git("config", "user.name", "Eval User")
         self._git("config", "user.email", "eval-user@example.invalid")
-        self._git("remote", "add", "origin", REPO_URL)
-        self._git("config", f"url.{remote}.insteadOf", REPO_URL)
+        self._git("remote", "add", "origin", self.origin)
+        self._git("config", f"url.{remote}.insteadOf", self.origin)
         files = {"README.md": "# widgets\n\nA small widget library.\n",
                  "widgets.py": "def widget(name):\n    return f\"widget {name}\"\n",
                  **self.setup.get("repo_files", {})}
@@ -491,9 +498,9 @@ def count_hits(check, facts, box_root):
                    and matches(check["bash"], u["input"].get("command", "")))
     if kind == "text":
         return int(matches(check["text"], facts["text"]))
-    if kind == "gh":
-        return sum(1 for c in read_jsonl(box_root / "gh.log")
-                   if matches(check["gh"], " ".join(c["argv"])) and (want is None or matches(want, c.get("body") or "")))
+    if kind in ("gh", "glab"):
+        return sum(1 for c in read_jsonl(box_root / f"{kind}.log")
+                   if matches(check[kind], " ".join(c["argv"])) and (want is None or matches(want, c.get("body") or "")))
     if kind == "t3":
         return sum(1 for c in read_jsonl(box_root / "t3-calls.jsonl")
                    if c["tool"] == check["t3"] and (want is None or matches(want, c["input"])))
