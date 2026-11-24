@@ -11,7 +11,7 @@ use t3_codemode::board::{BOARD, Card, CardRef};
 use t3_codemode::clock::{Clock, iso, plus_minutes};
 use t3_codemode::config::Config;
 use t3_codemode::fake::{
-    check_run, github_pr, gitlab_mr, gitlab_pipeline, merge_request, project, pull_request, thread,
+    check_run, github_pr, gitlab_gid, gitlab_mr, gitlab_pipeline, merge_request, project, pull_request, thread,
 };
 use t3_codemode::reach::{ReachPoint, ReachSnapshot};
 use t3_codemode::sentinels::Sentinel;
@@ -98,7 +98,6 @@ fn live_pr(number: u64) -> Value {
     }
 }
 
-const GITLAB_UNSUPPORTED: &[OpKind] = &[OpKind::AnswerReadyAndClearGate, OpKind::MergeWaitPut, OpKind::GhQueueDrop];
 const HEADS: &[&str] = &[
     "1111111111111111111111111111111111111111",
     "2222222222222222222222222222222222222222",
@@ -186,19 +185,52 @@ fn before_tracking(t0: jiff::Timestamp) -> String {
 fn advance_mutations(h: &H) -> (usize, usize) {
     let mut merges = 0;
     let mut enqueues = 0;
-    for op in h.github.operations() {
+    let ops = match forge() {
+        Forge::Github => h.github.operations(),
+        Forge::Gitlab => h.gitlab.operations(),
+    };
+    for op in ops {
         match op.as_str() {
-            "mergePullRequest" => merges += 1,
-            "enqueuePullRequest" => enqueues += 1,
+            "mergePullRequest" | "merge" => merges += 1,
+            "enqueuePullRequest" | "joinTrain" => enqueues += 1,
             _ => {}
         }
     }
     (merges, enqueues)
 }
 
+fn queue_enabled(prs: &mut BTreeMap<u64, GhPrModel>, pr: u64, enabled: bool) {
+    for (&n, m) in prs.iter_mut() {
+        if n == pr || forge() == Forge::Gitlab {
+            m.queue_enabled = enabled;
+            m.queued &= enabled;
+        }
+    }
+}
+
+fn pull_lab_mutations(h: &H, prs: &mut BTreeMap<u64, GhPrModel>) {
+    for (&number, m) in prs.iter_mut() {
+        if !m.exists {
+            continue;
+        }
+        let cur = h.gitlab.mr(LAB, REPO, number);
+        let active =
+            cur["train"]["status"].as_str().is_some_and(|s| ["idle", "fresh", "stale", "merging"].contains(&s));
+        if cur["state"] == "merged" && m.state != "MERGED" {
+            m.state = "MERGED";
+            m.queued = false;
+            m.merge_commit =
+                ["merge_commit_sha", "squash_commit_sha"].iter().find_map(|k| cur[*k].as_str().map(String::from));
+            m.ended_at = cur["merged_at"].as_str().map(String::from);
+        } else if active && !m.queued {
+            m.queued = true;
+        }
+    }
+}
+
 fn pull_gh_mutations(h: &H, prs: &mut BTreeMap<u64, GhPrModel>) {
     if forge() == Forge::Gitlab {
-        return;
+        return pull_lab_mutations(h, prs);
     }
     for (&number, m) in prs.iter_mut() {
         if !m.exists {
@@ -266,6 +298,7 @@ fn setup_chaos(in_memory: bool) -> (H, BTreeMap<u64, GhPrModel>) {
 
 fn sync_lab(h: &H, prs: &BTreeMap<u64, GhPrModel>) {
     h.gitlab.clear_read_errors();
+    h.gitlab.set_trains(LAB, REPO, prs.values().any(|m| m.queue_enabled));
     for (&number, m) in prs {
         if !m.exists {
             h.gitlab.remove_mr(LAB, REPO, number);
@@ -1198,7 +1231,7 @@ async fn run_sequential_ops(
     enable_sentinel(&h, sentinel);
     for (idx, &pr) in PRS.iter().enumerate() {
         let m = gh.get_mut(&pr).unwrap();
-        m.queue_enabled = INIT_PR_QUEUE_ENABLED[idx];
+        m.queue_enabled = INIT_PR_QUEUE_ENABLED[if forge() == Forge::Gitlab { 0 } else { idx }];
         m.checks = INIT_PR_CHECKS[idx];
     }
     sync_gh(&h, &gh);
@@ -1786,18 +1819,18 @@ async fn run_sequential_ops(
                         return false;
                     }
                     let head = HEADS[m.head_idx].to_string();
-                    let pull_request_id = if reassigned_id {
-                        format!("PR_{REPO}_{pr_num}_reassigned")
-                    } else {
-                        format!("PR_{REPO}_{pr_num}")
+                    let id = match forge() {
+                        Forge::Github => format!("PR_{REPO}_{pr_num}"),
+                        Forge::Gitlab => gitlab_gid(pr_num),
                     };
+                    let pull_request_id = if reassigned_id { format!("{id}_reassigned") } else { id };
                     let approval = if reassigned_id {
                         format!("appr-{step}-reassigned")
                     } else {
                         format!("appr-{step}")
                     };
                     let w = MergeWait {
-                        repo: REPO.into(),
+                        repo: repo_key().into(),
                         pr: pr_num,
                         head: head.clone(),
                         pull_request_id,
@@ -1827,13 +1860,9 @@ async fn run_sequential_ops(
                     let changed = {
                         let m = gh.get_mut(&pr_num).unwrap();
                         if m.exists && m.state == "OPEN" {
-                            m.queue_enabled = enabled;
                             m.queued = enabled && queued;
                             m.removed = None;
-                            trace.push(format!(
-                                "#{step} gh queue #{pr_num} enabled={} queued={}",
-                                m.queue_enabled, m.queued
-                            ));
+                            trace.push(format!("#{step} gh queue #{pr_num} enabled={enabled} queued={}", m.queued));
                             true
                         } else {
                             trace.push(format!("#{step} noop (gh queue #{pr_num} closed/missing)"));
@@ -1841,6 +1870,7 @@ async fn run_sequential_ops(
                         }
                     };
                     if changed {
+                        queue_enabled(&mut gh, pr_num, enabled);
                         sync_gh(&h, &gh);
                     }
                     changed
@@ -1855,7 +1885,7 @@ async fn run_sequential_ops(
                         if m.exists && m.state == "OPEN" {
                             m.queued = false;
                             let at = if predates { before_tracking(t0) } else { clock_now(&h) };
-                            m.removed = Some((reason.as_str(), at));
+                            m.removed = (forge() == Forge::Github).then(|| (reason.as_str(), at));
                             trace.push(format!("#{step} gh queue drop #{pr_num} removed={:?}", m.removed));
                             true
                         } else {
@@ -2383,18 +2413,6 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
     }
 }
 
-fn decode_gitlab_seed_ops(seed: u64) -> Vec<Op> {
-    let mut weights = OpWeights::swarm(seed);
-    for &kind in GITLAB_UNSUPPORTED {
-        weights.set(kind, 0);
-    }
-    if weights.total_weight() == 0 {
-        weights.set(OpKind::Reconcile, 1);
-    }
-    let bytes = seed_bytes(seed);
-    decode_ops(&mut Unstructured::new(&bytes), &weights)
-}
-
 #[tokio::test]
 async fn seeded_sequential_chaos_holds_all_invariants_on_gitlab() {
     let _gitlab = OnForge::set(Forge::Gitlab);
@@ -2402,13 +2420,13 @@ async fn seeded_sequential_chaos_holds_all_invariants_on_gitlab() {
     let mut reach = ReachSnapshot::default();
     let mut op_stats = OpStats::default();
     for seed in range.seeds() {
-        let ops = decode_gitlab_seed_ops(seed);
+        let ops = decode_seed_ops(seed);
         let (_, snap, stats) = run_sequential_ops(&ops, None, true, &format!("gitlab seed {seed}")).await;
         reach.merge(&snap);
         op_stats.merge(&stats);
     }
     if range.count >= DEFAULT_SEQ_SEEDS {
-        for &kind in OpKind::ALL.iter().filter(|k| !GITLAB_UNSUPPORTED.contains(k)) {
+        for &kind in OpKind::ALL {
             assert!(op_stats.executed(kind) > 0, "the GitLab chaos run never executed {kind:?}\n{op_stats}");
         }
         reach.assert_all(
@@ -2418,6 +2436,10 @@ async fn seeded_sequential_chaos_holds_all_invariants_on_gitlab() {
                 ReachPoint::ReconcileAdoptedPr,
                 ReachPoint::PrFilesPaginatedFallback,
                 ReachPoint::PrFollowupRecorded,
+                ReachPoint::AdvanceMerged,
+                ReachPoint::AdvanceEnqueued,
+                ReachPoint::ReassignedIdRejected,
+                ReachPoint::GateClearPreservedReadyCard,
             ],
             "seeded_sequential_chaos_on_gitlab",
         );
