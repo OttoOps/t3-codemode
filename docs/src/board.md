@@ -178,6 +178,7 @@ read returns.
 | Launches | The ticket and ask model pickers, and `board.runtimeMode` |
 | Pools | Each [pool](config.md#pools) and its members, with each member's live state |
 | Board | The other `board` keys, such as `feed`, the GitHub check intervals, `openLinks` and `remote` |
+| Flow | Launch mode, `maxTickets`, repository discovery (`repos`, `includeRepos`, `excludeRepos`), queue opt-in filter (`optIn.label`, `optIn.milestone`), and `serializeFileConflicts` |
 | Workflow links | `link`, `wake`, the body and reply caps, `digestLines`, and a JSON editor for `roles` |
 | Runtime | Timeouts, run limits, the watcher interval, the hold limits and `updateCheck` |
 | Upstreams and deny list | `deny`, one tool per line, and a JSON editor for `upstreams` |
@@ -253,9 +254,9 @@ file that holds one with `t3cm config edit`. A whole number written with a
 decimal, such as `25.0`, becomes `25` when Settings saves the file, even when
 you did not edit it, and a number with more digits than a browser keeps is
 rounded, so `700000.00000000001` saves as `700000`. When All keys (JSON) repeats
-a key, the last one wins and Settings drops the others. When `link`, `board` or
-`board.remote` holds a list with entries, the dialog edits nothing until
-`t3cm config edit` makes it an object. The JSON editors
+a key, the last one wins and Settings drops the others. When `link`, `board`,
+`board.remote`, `flow` or `flow.optIn` holds a list with entries, the dialog
+edits nothing until `t3cm config edit` makes it an object. The JSON editors
 show any literal credential in the file, so use an `${env:NAME}` or
 `${file:path}` reference in `upstreams`.
 
@@ -719,8 +720,10 @@ tint holds still for a moment and then goes, with no fade.
 
 ## The flow
 
-With a [`flow` block](config.md#flow) in the config, the board starts the next
-ready issue when a ticket slot opens. A slot opens when a flow ticket sends its
+With a [`flow` block](config.md#flow) in the config, which you can set from
+[Settings](#settings) under **Flow**, from `setup-t3-workflow`, or with
+`t3cm config`, the board starts the next ready issue when a ticket slot opens.
+A slot opens when a flow ticket sends its
 handoff or `closed`, when its link closes because its thread is gone or
 archived, and when its issue closes. The board also picks again on each
 [GitHub reconcile](#github-reconcile) pass, so an issue whose last blocker

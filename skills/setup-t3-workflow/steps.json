@@ -10,6 +10,7 @@
     {"id": "mcp:config-dir-header", "since": "0.7.0", "kind": "auto"},
     {"id": "retire:t3wf", "since": "0.7.0", "kind": "auto"},
     {"id": "mcp:antigravity", "since": "0.7.0", "kind": "auto"},
-    {"id": "board:remote", "since": "0.8.0", "kind": "interview", "slot": "remote"}
+    {"id": "board:remote", "since": "0.8.0", "kind": "interview", "slot": "remote"},
+    {"id": "board:flow", "since": "0.11.0", "kind": "interview", "slot": "flow"}
   ]
 }

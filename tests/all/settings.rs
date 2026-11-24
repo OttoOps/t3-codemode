@@ -792,6 +792,15 @@ async fn the_dialog_has_a_control_or_an_editor_for_every_key() {
             "tier": {"mixed": true, "members": [{"instanceId": "claudeAgent", "model": "m", "effort": "low"}]},
         },
         "board": {"remote": {"mode": "tailscale", "origin": "https://board.acme.example", "allowUsers": ["alice@acme.example"], "requirePairing": true, "settingsUsers": ["alice@acme.example"]}},
+        "flow": {
+            "repos": ["acme/widgets"],
+            "includeRepos": ["acme/extra"],
+            "excludeRepos": ["acme/archive"],
+            "optIn": {"label": "flow", "milestone": "v1.0"},
+            "maxTickets": 2,
+            "launch": "ask",
+            "serializeFileConflicts": true,
+        },
         "maxConcurrentRuns": 4,
         "upstreams": [{"name": "docs", "transport": "stdio", "stdio": {"command": "docs-mcp"}}],
     });
@@ -826,7 +835,6 @@ async fn the_dialog_has_a_control_or_an_editor_for_every_key() {
             "board.pool",
             "board.ticketEffort",
             "board.ticketModel",
-            "flow",
             "trackers.hosts",
             "trackers.jira",
         ],
@@ -1521,5 +1529,166 @@ globalThis.__fetchReply = (url) => url === "/api/models" && ++modelReads === {re
         );
         let r = run_page_async_with(&b.page().await, &prelude, &scenario);
         assert_eq!(r, json!({"mode": "pool", "pool": "opus", "off": false}), "the {answered} read answers first");
+    }
+}
+
+#[tokio::test]
+async fn the_flow_section_edits_and_saves_every_flow_key() {
+    let b = Board::start(H::new()).await;
+    let opened = b.settings().await;
+    let saved = json!({"revision": "next", "restart": [], "warnings": []});
+    let r = run_dialog(
+        &b.page().await,
+        &[&opened],
+        (200, &saved),
+        r#"await open();
+  modelsState.data = {
+    projects: [
+      { id: "p1", title: "Widgets", remote: { host: "github.com", path: "acme/widgets" } },
+      { id: "p2", title: "GitLab", remote: { host: "gitlab.acme.example", path: "acme/internal" } },
+    ],
+  };
+  showSection("flow");
+  const initialLaunch = field("flow.launch").value;
+  const discoveredNote = conf.flowNote.textContent;
+  byKey(field("flow.maxTickets"), "3");
+  const launchAfterMax = field("flow.launch").value;
+  pick(field("flow.launch"), "auto");
+  const ser = field("flow.serializeFileConflicts");
+  ser.checked = true;
+  ser.dispatch("change");
+  enter(field("flow.repos"), "acme/widgets\nacme/tools");
+  const explicitNote = conf.flowNote.textContent;
+  enter(field("flow.includeRepos"), "acme/extra");
+  enter(field("flow.excludeRepos"), "acme/archive");
+  enter(field("flow.optIn.label"), "flow");
+  enter(field("flow.optIn.milestone"), "v1.0");
+  await saveSettings();
+  return { initialLaunch, discoveredNote, launchAfterMax, explicitNote, puts: puts() };"#,
+    );
+    assert_eq!(r["initialLaunch"], "off", "launch defaults to off while maxTickets is unset: {r}");
+    assert!(r["discoveredNote"].as_str().unwrap().contains("acme/widgets"), "{r}");
+    assert!(!r["discoveredNote"].as_str().unwrap().contains("acme/internal"), "non-GitHub remotes ignored: {r}");
+    assert_eq!(r["launchAfterMax"], "ask", "setting maxTickets switches default launch display to ask: {r}");
+    assert!(r["explicitNote"].as_str().unwrap().contains("explicit repository list"), "{r}");
+
+    let puts = r["puts"].as_array().unwrap();
+    assert_eq!(puts.len(), 1, "{r}");
+    let want = json!({
+        "flow": {
+            "maxTickets": 3,
+            "launch": "auto",
+            "serializeFileConflicts": true,
+            "repos": ["acme/widgets", "acme/tools"],
+            "includeRepos": ["acme/extra"],
+            "excludeRepos": ["acme/archive"],
+            "optIn": {"label": "flow", "milestone": "v1.0"},
+        }
+    });
+    assert_eq!(puts[0], json!({"revision": opened["revision"], "file": want}));
+    let (status, reply) = b.put(&puts[0]).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["restart"], json!([]), "flow settings reload with no restart");
+    assert_eq!(Document::read(&b.file()).unwrap().value().unwrap(), want);
+    let live = b.h.app.config().flow.clone().expect("flow config reloaded live");
+    assert_eq!(live.max_tickets, Some(3));
+    assert_eq!(live.launch.as_str(), "auto");
+    assert!(live.serialize_file_conflicts);
+    assert_eq!(live.repos, Some(vec!["acme/widgets".into(), "acme/tools".into()]));
+    assert_eq!(live.include_repos, vec!["acme/extra"]);
+    assert_eq!(live.exclude_repos, vec!["acme/archive"]);
+    let opt = live.opt_in.expect("optIn loaded");
+    assert_eq!(opt.label.as_deref(), Some("flow"));
+    assert_eq!(opt.milestone.as_deref(), Some("v1.0"));
+}
+
+#[tokio::test]
+async fn the_flow_section_clears_optional_keys_and_surfaces_validation_errors() {
+    // 1. Clearing flow.repos and flow.optIn.label on an existing config produces a valid save.
+    let before = json!({
+        "flow": {
+            "repos": ["acme/widgets"],
+            "maxTickets": 2,
+            "optIn": {"label": "flow", "milestone": null},
+        }
+    });
+    let (b, r) = drive(
+        &before,
+        r#"await open();
+  showSection("flow");
+  enter(field("flow.repos"), "");
+  enter(field("flow.optIn.label"), "");
+  await saveSettings();
+  return { puts: puts() };"#,
+    )
+    .await;
+    let put = &r["puts"][0];
+    assert_eq!(put["file"], json!({"flow": {"maxTickets": 2}}), "clearing repos and optIn prunes invalid empties");
+    assert_eq!(b.put(put).await.0, 200);
+    let live = b.h.app.config().flow.clone().unwrap();
+    assert_eq!(live.repos, None);
+    assert!(live.opt_in.is_none());
+
+    // 2. Typing and clearing optIn.label from an empty config leaves draft clean (not dirty).
+    let (_, clean) = drive(
+        &json!({}),
+        r#"await open();
+  showSection("flow");
+  enter(field("flow.optIn.label"), "ready");
+  enter(field("flow.optIn.label"), "");
+  return { draft: conf.draft, dirty: confDirty() };"#,
+    )
+    .await;
+    assert_eq!(clean, json!({"draft": {}, "dirty": false}));
+
+    // 3. Server validation errors route back to the Flow tab and the exact field.
+    let b = Board::start(H::new()).await;
+    let opened = b.settings().await;
+    let (status, refused) = b.save(json!({"flow": {"launch": "ask"}})).await;
+    assert_eq!(status, 422);
+    let r = run_dialog(
+        &b.page().await,
+        &[&opened],
+        (status, &refused),
+        r#"await open();
+  showSection("flow");
+  pick(field("flow.launch"), "ask");
+  showSection("board");
+  await saveSettings();
+  const max = field("flow.maxTickets");
+  const err = max.parentNode.parentNode.querySelector(".conf-err");
+  return { tab: conf.tab, focused: document.activeElement === max, invalid: max.getAttribute("aria-invalid"), err: err.hidden ? "" : err.textContent };"#,
+    );
+    assert_eq!((&r["tab"], &r["focused"], &r["invalid"]), (&json!("flow"), &json!(true), &json!("true")), "{r}");
+    assert!(r["err"].as_str().unwrap().contains("maxTickets must be at least 1"), "{r}");
+
+    let (status, refused) = b.save(json!({"flow": {"repos": ["not-a-repo"]}})).await;
+    assert_eq!(status, 422);
+    let r = run_dialog(
+        &b.page().await,
+        &[&opened],
+        (status, &refused),
+        r#"await open();
+  showSection("flow");
+  enter(field("flow.repos"), "not-a-repo");
+  await saveSettings();
+  const repos = field("flow.repos");
+  const err = repos.parentNode.parentNode.querySelector(".conf-err");
+  return { focused: document.activeElement === repos, invalid: repos.getAttribute("aria-invalid"), err: err.hidden ? "" : err.textContent };"#,
+    );
+    assert_eq!((&r["focused"], &r["invalid"]), (&json!(true), &json!("true")), "{r}");
+    assert!(r["err"].as_str().unwrap().contains("owner/name"), "{r}");
+
+    // 4. Non-empty list where flow or flow.optIn object belongs is left to the CLI.
+    for before in [json!({"flow": ["acme/widgets"]}), json!({"flow": {"optIn": ["flow"]}})] {
+        let (_, r) = drive(
+            &before,
+            r#"await open();
+  await saveSettings();
+  return { puts: puts(), editable: !!conf.draft, note: $("settings-notes").textContent };"#,
+        )
+        .await;
+        assert_eq!((&r["puts"], &r["editable"]), (&json!([]), &json!(false)), "{before}: {r}");
+        assert!(r["note"].as_str().unwrap().contains("t3cm config edit"), "{before}: {r}");
     }
 }
