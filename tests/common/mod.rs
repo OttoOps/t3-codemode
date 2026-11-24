@@ -187,7 +187,7 @@ pub struct CardView {
     pub kind: String,
     pub ticket: Option<String>,
     pub worker: Option<(String, String)>,
-    pub pr: Option<u64>,
+    pub pr: Option<(String, u64)>,
     pub head: Option<String>,
     pub ready: bool,
 }
@@ -197,11 +197,13 @@ pub struct LinkView {
     pub parent: String,
     pub closed: bool,
     pub gate: Option<String>,
-    pub gate_pr: Option<u64>,
-    pub pr: Option<(u64, String, bool)>,
+    pub gate_pr: Option<(String, u64)>,
+    pub pr: Option<(String, u64, String, bool)>,
 }
 
 pub type WaitView = (String, String, Option<String>, u32);
+
+pub type SeenView = (bool, String, Option<String>, Option<String>);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
@@ -209,6 +211,7 @@ pub struct Snapshot {
     pub links: BTreeMap<String, LinkView>,
     pub merge_waits: BTreeMap<(String, u64), WaitView>,
     pub pr_events: BTreeSet<(String, u64, String, String)>,
+    pub pr_seen: BTreeMap<(String, u64), SeenView>,
     pub outbox: BTreeMap<String, usize>,
     pub delivered: Vec<(String, String, String)>,
 }
@@ -218,15 +221,20 @@ pub fn delivered_headers(sent: &[Value]) -> Vec<(String, String, String)> {
     for s in sent {
         let to = s["threadId"].as_str().unwrap_or_default();
         for line in s["message"].as_str().unwrap_or_default().lines() {
-            let Some(rest) = line.strip_prefix("[t3cm ") else { continue };
-            let kind = rest.split(' ').next().unwrap_or_default();
-            let from = rest.split_once(" from=").map(|(_, f)| f).unwrap_or_default();
+            let Some(rest) = line.strip_prefix("[t3cm ").filter(|r| r.ends_with(']') && r.contains(" msg=")) else {
+                continue;
+            };
+            let Some((kind, from)) = rest.split_once(" from=").filter(|(k, _)| !k.is_empty() && !k.contains(' '))
+            else {
+                continue;
+            };
             let from = if from.starts_with('"') {
                 serde_json::Deserializer::from_str(from).into_iter::<String>().next().and_then(Result::ok)
             } else {
                 from.split([' ', ']']).next().map(String::from)
             };
-            out.push((to.to_string(), kind.to_string(), from.unwrap_or_default()));
+            let Some(from) = from.filter(|f| !f.is_empty()) else { continue };
+            out.push((to.to_string(), kind.to_string(), from));
         }
     }
     out
@@ -244,7 +252,7 @@ impl H {
                 kind: c.kind,
                 ticket: c.ticket,
                 worker: c.worker.map(|w| (w.thread, w.gate)),
-                pr: c.pr.as_ref().map(|p| p.number),
+                pr: c.pr.as_ref().map(|p| (p.repo.clone(), p.number)),
                 head: c.pr.as_ref().and_then(|p| p.head.clone()),
                 ready: c.pr.as_ref().is_some_and(|p| p.ready),
             })
@@ -260,8 +268,8 @@ impl H {
                     parent: l.parent,
                     closed: l.closed,
                     gate: l.gate,
-                    gate_pr: l.gate_pr.map(|(_, n)| n),
-                    pr: l.pr.map(|p| (p.number, p.head, p.waiting)),
+                    gate_pr: l.gate_pr,
+                    pr: l.pr.map(|p| (p.repo, p.number, p.head, p.waiting)),
                 };
                 (l.child, view)
             })
@@ -283,10 +291,18 @@ impl H {
             .unwrap()
             .map(Result::unwrap)
             .collect();
+        let pr_seen = self
+            .app
+            .store
+            .pr_seen_all()
+            .unwrap()
+            .into_iter()
+            .map(|r| ((r.repo, r.pr), (r.queued, r.since, r.left, r.queued_at)))
+            .collect();
         let mut outbox = BTreeMap::new();
         for item in self.app.store.outbox_all().unwrap() {
             *outbox.entry(item.to).or_insert(0) += 1;
         }
-        Snapshot { cards, links, merge_waits, pr_events, outbox, delivered: delivered_headers(&self.sent()) }
+        Snapshot { cards, links, merge_waits, pr_events, pr_seen, outbox, delivered: delivered_headers(&self.sent()) }
     }
 }
