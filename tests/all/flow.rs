@@ -2682,9 +2682,68 @@ async fn active_unlabelled_epic_tasklist_suppresses_its_child_in_queue_and_launc
     assert_eq!(pick["picked"], json!([]), "auto launch must not pick tasklist child #11: {pick}");
     assert!(h.fake.launched().is_empty());
 
-    // Closing #10 unblocks #12 with no leftover unresolved warning from ", which sets up the epic.".
+    // Closing #10 on GitHub while its ticket is still active unblocks #12 (blocker) while
+    // keeping #11 suppressed consistently across wf.flow(), wf.flow({ graph: true }), and next().
     h.github.close_issue(REPO, 10);
     let q2 = flow(&h).await;
-    assert_eq!(labels(&q2["queue"]), ["widgets#11", "widgets#12"], "{q2}");
-    assert_eq!(labels(&q2["queue"][1]["unblockedBy"]), ["widgets#10"]);
+    let g2 = graph(&h).await;
+    assert_eq!(labels(&q2["queue"]), ["widgets#12"], "{q2}");
+    assert_eq!(labels(&g2["queue"]), ["widgets#12"], "graph queue must match wf.flow(): {g2}");
+    assert_eq!(labels(&q2["queue"][0]["unblockedBy"]), ["widgets#10"]);
+    assert_eq!(node(&g2, "acme/widgets#11")["ready"], false);
+
+    // Once #10's board ticket hands off, auto-launch picks up both #11 and #12 consistently.
+    h.wf("mcp:t10", "send", json!({"kind": "handoff", "body": "done"})).await;
+    let q3 = flow(&h).await;
+    let g3 = graph(&h).await;
+    assert_eq!(labels(&q3["running"]), ["widgets#11", "widgets#12"], "{q3}");
+    assert_eq!(labels(&g3["running"]), ["widgets#11", "widgets#12"], "{g3}");
+    assert_eq!(labels(&q3["queue"]), Vec::<String>::new(), "{q3}");
+    assert_eq!(labels(&g3["queue"]), Vec::<String>::new(), "{g3}");
+}
+
+#[tokio::test]
+async fn closed_symbolic_sibling_paginates_past_100_and_closed_epic_never_overrides_open_epic() {
+    let h = flowing(4);
+    // S1: older closed blocker #1 ("Setup auth") buried behind 105 newer closed issues.
+    h.github.set_issue(REPO, github_issue(1, "Setup auth", &[], "2026-01-01T00:00:00Z"));
+    h.github.close_issue(REPO, 1);
+    for n in 100..205u64 {
+        let day = ((n - 100) % 28) + 1;
+        let month = ((n - 100) / 28) + 2;
+        h.github.set_issue(
+            REPO,
+            github_issue(n, &format!("Closed noise {n}"), &[], &format!("2026-{month:02}-{day:02}T00:00:00Z")),
+        );
+        h.github.close_issue(REPO, n);
+    }
+    h.github.set_issue(REPO, github_issue(2, "Use auth", &[FLOW], "2026-10-01T09:00:00Z"));
+    h.github.set_body(REPO, 2, "Depends on \"Setup auth\"\n");
+
+    // S7: older closed epic #3 lists closed Phase 1 (#4) AND open child #12 in its tasklist,
+    // while current open epic #10 lists open Phase 1 (#11) and open child #12.
+    h.github.set_issue(REPO, github_issue(3, "Old closed epic", &[], "2026-01-02T00:00:00Z"));
+    h.github.set_body(REPO, 3, "- [x] #4\n- [x] #12\n");
+    h.github.close_issue(REPO, 3);
+    h.github.set_issue(REPO, github_issue(4, "Phase 1: old", &[], "2026-01-03T00:00:00Z"));
+    h.github.close_issue(REPO, 4);
+
+    h.github.set_issue(REPO, github_issue(10, "Current open epic", &[], "2026-10-02T09:00:00Z"));
+    h.github.set_body(REPO, 10, "- [ ] #11\n- [ ] #12\n");
+    h.github.set_issue(REPO, github_issue(11, "Phase 1: current", &[], "2026-10-03T09:00:00Z"));
+    h.github.set_issue(REPO, github_issue(12, "Phase 2: current", &[FLOW], "2026-10-04T09:00:00Z"));
+    h.github.set_body(REPO, 12, "Depends on Phase 1\n");
+
+    let q = flow(&h).await;
+    let g = graph(&h).await;
+    // #2 resolves older closed #1 past 100 newer closed issues and is ready with zero warnings.
+    assert_eq!(labels(&q["queue"]), ["widgets#2"], "{q}");
+    assert_eq!(labels(&q["queue"][0]["unblockedBy"]), ["widgets#1"]);
+    assert_eq!(node(&g, "acme/widgets#2")["warnings"], json!([]));
+    // #12 stays blocked by open #11 (from open epic #10), never redirected to closed #4 via closed epic #3.
+    assert_eq!(labels(&q["blocked"]), ["widgets#12"], "{q}");
+    assert_eq!(labels(&q["blocked"][0]["blockers"]), ["widgets#11"]);
+    assert_eq!(labels(&g["queue"]), ["widgets#2"], "{g}");
+    assert_eq!(ids(&node(&g, "acme/widgets#12")["blockedBy"]), ["acme/widgets#11"]);
+    assert_eq!(node(&g, "acme/widgets#12")["parent"], "acme/widgets#10");
 }
