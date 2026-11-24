@@ -1608,7 +1608,7 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
     let mut flow_list_key: Option<FlowListKey> = None;
     let mut flow_form_section: Option<FlowFormSection> = None;
     let mut pending_prose_role: Option<RefRole> = None;
-    let mut in_dep_section = false;
+    let mut section_role: Option<RefRole> = None;
 
     for raw_line in body.lines() {
         if let Some(active) = fence.as_ref() {
@@ -1673,7 +1673,7 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
             }
             if (level == 2 || level == 3) && heading.eq_ignore_ascii_case("flow") {
                 flow_level = Some(level);
-                in_dep_section = false;
+                section_role = None;
                 continue;
             }
             if level == 3
@@ -1681,60 +1681,63 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
                 && let Some(form_sec) = flow_form_heading(heading)
             {
                 flow_form_section = Some(form_sec);
-                in_dep_section = form_sec == FlowFormSection::BlockedBy;
+                section_role = match form_sec {
+                    FlowFormSection::Parent => Some(RefRole::Parent),
+                    FlowFormSection::BlockedBy => Some(RefRole::Blocker),
+                    FlowFormSection::Track | FlowFormSection::Touches => None,
+                };
                 continue;
             }
-            in_dep_section = is_dep_heading(heading);
+            section_role = is_dep_heading(heading).then_some(RefRole::Blocker);
             let clean_heading = strip_inline_code(heading);
             scan_prose_segment(default_repo, &clean_heading, false, &mut parsed);
             continue;
         }
 
         if let Some(form_sec) = flow_form_section {
-            let (_, stripped) = strip_bullet_and_quote(&line);
-            if is_placeholder(stripped) {
+            let (_, raw_stripped) = strip_bullet_and_quote(&line);
+            if is_placeholder(raw_stripped) {
                 continue;
             }
             match form_sec {
-                FlowFormSection::Parent => {
-                    if let Some(task_rest) = parse_tasklist_item(stripped) {
-                        if let Some(item_ref) = extract_leading_issue_ref(default_repo, task_rest) {
-                            push_unique_ref(&mut parsed.parents, item_ref);
-                        } else {
-                            for r in parse_ref_list(default_repo, task_rest, true) {
-                                push_unique_ref(&mut parsed.parents, r);
-                            }
-                        }
-                    } else {
-                        for r in parse_ref_list(default_repo, stripped, true) {
-                            push_unique_ref(&mut parsed.parents, r);
-                        }
-                    }
-                }
-                FlowFormSection::BlockedBy => {
-                    if let Some(task_rest) = parse_tasklist_item(stripped) {
-                        if let Some(item_ref) = extract_leading_issue_ref(default_repo, task_rest) {
-                            push_unique_ref(&mut parsed.blockers, item_ref);
-                        } else {
-                            for r in parse_ref_list(default_repo, task_rest, true) {
-                                push_unique_ref(&mut parsed.blockers, r);
-                            }
-                        }
-                    } else {
-                        for r in parse_ref_list(default_repo, stripped, true) {
-                            push_unique_ref(&mut parsed.blockers, r);
-                        }
-                    }
-                }
                 FlowFormSection::Track => {
-                    let t = strip_wrappers(stripped).trim();
+                    let t = strip_wrappers(raw_stripped).trim();
                     if !t.is_empty() && !is_placeholder(t) && parsed.track.is_none() {
                         parsed.track = Some(t.to_string());
                     }
+                    continue;
                 }
-                FlowFormSection::Touches => parse_touches_items(stripped, &mut parsed.touches),
+                FlowFormSection::Touches => {
+                    parse_touches_items(raw_stripped, &mut parsed.touches);
+                    continue;
+                }
+                FlowFormSection::Parent | FlowFormSection::BlockedBy => {
+                    let clean = strip_inline_code(&line);
+                    let trimmed = clean.trim();
+                    let (_, clean_stripped) = strip_bullet_and_quote(&clean);
+                    let bare_unquoted =
+                        raw_stripped.trim_start().starts_with('`').then(|| raw_stripped.replace('`', ""));
+                    let is_bare_value = pending_prose_role.is_none()
+                        && !trimmed.starts_with('|')
+                        && parse_tasklist_item(&clean).is_none()
+                        && !starts_with_directive_keyword(clean_stripped)
+                        && (starts_with_explicit_or_phase_or_quote(clean_stripped)
+                            || bare_unquoted.as_deref().is_some_and(|u| {
+                                !starts_with_directive_keyword(u) && starts_with_explicit_or_phase_or_quote(u)
+                            }));
+                    if is_bare_value {
+                        let dest = match form_sec {
+                            FlowFormSection::Parent => &mut parsed.parents,
+                            FlowFormSection::BlockedBy => &mut parsed.blockers,
+                            FlowFormSection::Track | FlowFormSection::Touches => unreachable!(),
+                        };
+                        for r in parse_ref_list(default_repo, raw_stripped, true) {
+                            push_unique_ref(dest, r);
+                        }
+                        continue;
+                    }
+                }
             }
-            continue;
         }
 
         if flow_level.is_some() {
@@ -1818,7 +1821,7 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
 
         // Tasklist items: "- [ ] #N" or "- [x] #N"
         if let Some(task_rest) = parse_tasklist_item(&clean) {
-            let role = pending_prose_role.or_else(|| in_dep_section.then_some(RefRole::Blocker));
+            let role = pending_prose_role.or(section_role);
             if starts_with_directive_keyword(task_rest) {
                 pending_prose_role = scan_prose_segment(default_repo, task_rest, true, &mut parsed);
             } else if let Some(item_ref) = extract_leading_issue_ref(default_repo, task_rest) {
@@ -2651,5 +2654,31 @@ _No response_
         assert!(empty.blockers.is_empty(), "{empty:?}");
         assert!(empty.track.is_none(), "{empty:?}");
         assert!(empty.touches.is_empty(), "{empty:?}");
+
+        // Explicit directives inside ### Blocked by keep their prose semantics (e.g. Part of -> parent).
+        let mixed = "\
+### Blocked by
+
+- [ ] Part of #10
+- [ ] #11
+Part of #12
+Phase 1 of #13
+Not blocked by #14
+Part of:
+- #15
+";
+        let mixed_parsed = parse_body(REPO, mixed);
+        assert_eq!(
+            mixed_parsed.parents,
+            vec![
+                BodyRef::Issue { repo: REPO.into(), number: 10 },
+                BodyRef::Issue { repo: REPO.into(), number: 12 },
+                BodyRef::Issue { repo: REPO.into(), number: 13 },
+                BodyRef::Issue { repo: REPO.into(), number: 15 },
+            ],
+            "{mixed_parsed:?}"
+        );
+        assert_eq!(mixed_parsed.blockers, vec![BodyRef::Issue { repo: REPO.into(), number: 11 }], "{mixed_parsed:?}");
+        assert_eq!(mixed_parsed.declared_phase, Some(1));
     }
 }

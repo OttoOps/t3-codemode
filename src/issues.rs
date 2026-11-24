@@ -1259,8 +1259,29 @@ impl Wf {
             }
         }
 
+        let primary_parent_of: HashMap<String, String> = initial
+            .graph
+            .as_ref()
+            .map(|g| {
+                g.nodes
+                    .iter()
+                    .filter_map(|n| n.parent.as_ref().map(|p| (n.id.to_ascii_lowercase(), p.to_ascii_lowercase())))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let mut caches = WireCaches::new();
-        for group in groups {
+        for mut group in groups {
+            if let Some(primary) = primary_parent_of.get(&group.from_id.to_ascii_lowercase())
+                && let Some(pos) = group.parents.iter().position(|(_, r, n, to_id)| {
+                    to_id.eq_ignore_ascii_case(primary) || ref_slug(r, *n).eq_ignore_ascii_case(primary)
+                })
+                && pos > 0
+            {
+                let primary_edge = group.parents.remove(pos);
+                group.parents.insert(0, primary_edge);
+            }
+
             let mut from_node = match self.resolve_issue_cached(&mut caches, &group.repo, group.number).await {
                 Ok(n) => n,
                 Err(e) => {
@@ -1306,7 +1327,9 @@ impl Wf {
             };
             let report = self.wire_issue_node(&from_node, &plan, &mut caches).await;
 
+            let mut primary_target = None;
             if let (Some((idx, p_repo, p_num, _)), Some(lr)) = (group.parents.first(), report.parent) {
+                primary_target = Some(lr.reference.clone());
                 if lr.status == "error" {
                     let msg = lr.error.unwrap_or_else(|| "GitHub returned an error".to_string());
                     let existing = from_node.parent.as_ref().map(|p| ref_slug(&p.repo, p.number));
@@ -1342,6 +1365,32 @@ impl Wf {
                         existing_parent: None,
                     });
                 }
+            }
+
+            // Secondary parent candidates conflict with the node's existing or primary parent and are never written.
+            for (idx, p_repo, p_num, _) in group.parents.iter().skip(1) {
+                let target = ref_slug(p_repo, *p_num);
+                let existing = from_node.parent.as_ref().map(|p| ref_slug(&p.repo, p.number));
+                let msg = match (&existing, &primary_target) {
+                    (Some(ex), _) => format!("issue already has parent {ex}; skipped conflicting parent {target}"),
+                    (None, Some(pri)) => {
+                        format!("skipped conflicting parent {target}; primary parent {pri} takes precedence")
+                    }
+                    (None, None) => format!("skipped conflicting parent {target}"),
+                };
+                record_err(
+                    &mut slots,
+                    &mut error_slots,
+                    *idx,
+                    from_canon.clone(),
+                    target,
+                    PARENT,
+                    "addSubIssue",
+                    msg,
+                    false,
+                    true,
+                    existing,
+                );
             }
 
             for ((idx, b_repo, b_num, _), lr) in group.blockers.iter().zip(report.blocked_by) {
@@ -1380,50 +1429,6 @@ impl Wf {
                         conflict: false,
                         existing_parent: None,
                     });
-                }
-            }
-
-            for (idx, p_repo, p_num, _) in group.parents.iter().skip(1) {
-                let extra_plan =
-                    WiringPlan { blocked_by: Vec::new(), parent: Some((p_repo.clone(), *p_num)), labels: Vec::new() };
-                let extra_report = self.wire_issue_node(&from_node, &extra_plan, &mut caches).await;
-                if let Some(lr) = extra_report.parent {
-                    if lr.status == "error" {
-                        let msg = lr.error.unwrap_or_else(|| "GitHub returned an error".to_string());
-                        let existing = from_node.parent.as_ref().map(|p| ref_slug(&p.repo, p.number));
-                        let conflict =
-                            !lr.permission && (github::is_parent_conflict_message(&msg) || existing.is_some());
-                        record_err(
-                            &mut slots,
-                            &mut error_slots,
-                            *idx,
-                            from_canon.clone(),
-                            lr.reference,
-                            PARENT,
-                            lr.op.unwrap_or("addSubIssue"),
-                            msg,
-                            lr.permission,
-                            conflict,
-                            conflict.then_some(existing).flatten(),
-                        );
-                    } else {
-                        if lr.status == "linked"
-                            && let Some(p_node) = caches.nodes.get(&node_cache_key(p_repo, *p_num)).cloned()
-                        {
-                            from_node.parent =
-                                Some(IssueNodeRef { id: p_node.id, repo: p_node.repo, number: p_node.number });
-                        }
-                        slots[*idx] = Some(SyncLinkResult {
-                            from: from_canon.clone(),
-                            to: lr.reference,
-                            kind: PARENT,
-                            status: lr.status,
-                            error: None,
-                            permission: false,
-                            conflict: false,
-                            existing_parent: None,
-                        });
-                    }
                 }
             }
 
