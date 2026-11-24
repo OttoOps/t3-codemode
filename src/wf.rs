@@ -239,10 +239,10 @@ pub(crate) fn thread_is_stopped(th: &Value) -> bool {
         return false;
     };
     let status = obj.get("status").and_then(Value::as_str).unwrap_or("");
-    TERMINAL.contains(&status)
-        && !truthy(&th["blockedOnThreadWait"])
-        && !truthy(&th["pendingBackgroundTasks"])
-        && !truthy(&th["pendingRequestCount"])
+    let no_wait = obj.get("blockedOnThreadWait").and_then(Value::as_bool) == Some(false);
+    let no_bg = obj.get("pendingBackgroundTasks").and_then(Value::as_array).is_some_and(Vec::is_empty);
+    let no_req = obj.get("pendingRequestCount").and_then(Value::as_u64) == Some(0);
+    TERMINAL.contains(&status) && no_wait && no_bg && no_req
 }
 
 pub(crate) fn count(v: &Value) -> i64 {
@@ -331,6 +331,7 @@ pub struct Wf {
     pub(crate) reconcile_lock: tokio::sync::Mutex<()>,
     pub(crate) flow_lock: tokio::sync::Mutex<()>,
     pub(crate) triage_lock: tokio::sync::Mutex<()>,
+    pub(crate) issue_edit_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub(crate) flow_due: std::sync::atomic::AtomicBool,
     pub(crate) usage: Mutex<Option<Arc<dyn UsageSource>>>,
     pub(crate) tokens: Mutex<Arc<dyn TokenSource>>,
@@ -410,6 +411,7 @@ impl Wf {
             reconcile_lock: tokio::sync::Mutex::new(()),
             flow_lock: tokio::sync::Mutex::new(()),
             triage_lock: tokio::sync::Mutex::new(()),
+            issue_edit_locks: Mutex::new(HashMap::new()),
             flow_due: std::sync::atomic::AtomicBool::new(false),
             usage: Mutex::new(None),
             tokens: Mutex::new(Arc::new(T3Tokens)),

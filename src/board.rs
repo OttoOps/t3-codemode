@@ -2932,7 +2932,22 @@ impl Wf {
                     continue;
                 }
                 Err(_) => {
-                    if self.store.ask_is_open_unsettled(seq)? {
+                    if is_triage && age >= self.config().board.ask_timeout_minutes as f64 {
+                        if self.store.ask_is_open_unsettled(seq)? {
+                            let (stopped, archived) = self.stop_triage_thread(&thread, "triage timed out").await;
+                            data["status"] = json!("timed out");
+                            data["threadStopped"] = json!(stopped);
+                            data["archived"] = json!(archived);
+                            data["error"] = json!("triage thread timed out");
+                            data["finishedAt"] = json!(self.now());
+                            if self.store.ask_update_if_open_unsettled(seq, false, &data)? {
+                                self.changed();
+                            }
+                            if !stopped {
+                                still_open = true;
+                            }
+                        }
+                    } else if self.store.ask_is_open_unsettled(seq)? {
                         still_open = true;
                     }
                     continue;

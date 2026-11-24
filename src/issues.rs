@@ -1589,6 +1589,13 @@ impl Wf {
         Ok(removed)
     }
 
+    pub(crate) fn issue_edit_lock(&self, repo: &str, number: u64) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let canon = self.canonical_github_repo(repo);
+        let key = format!("{}#{number}", canon.to_ascii_lowercase());
+        let mut map = self.issue_edit_locks.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(key).or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(()))).clone()
+    }
+
     pub(crate) async fn apply_track_and_priority(
         &self,
         issue_node: &IssueNode,
@@ -1903,27 +1910,30 @@ impl Wf {
             Some(opt) => Some(normalize_priority(opt, "update_flow_issue")?),
         };
 
-        let mut caches = WireCaches::new();
-        let (issue_canon, labels, errors) = match self.resolve_issue_cached(&mut caches, &full_repo, number).await {
-            Err(e) => {
-                let target = ref_slug(&full_repo, number);
-                (
-                    target.clone(),
-                    Vec::new(),
-                    vec![WiringError { op: "readIssue", target, message: e.message, permission: e.permission }],
-                )
-            }
-            Ok(node) => {
-                let canon = ref_slug(&node.repo, node.number);
-                let (lbls, errs) = self
-                    .apply_track_and_priority(
-                        &node,
-                        track_edit.as_ref().map(|o| o.as_deref()),
-                        priority_edit,
-                        &mut caches,
+        let (issue_canon, labels, errors) = {
+            let _issue_guard = self.issue_edit_lock(&full_repo, number).lock_owned().await;
+            let mut caches = WireCaches::new();
+            match self.resolve_issue_cached(&mut caches, &full_repo, number).await {
+                Err(e) => {
+                    let target = ref_slug(&full_repo, number);
+                    (
+                        target.clone(),
+                        Vec::new(),
+                        vec![WiringError { op: "readIssue", target, message: e.message, permission: e.permission }],
                     )
-                    .await;
-                (canon, lbls, errs)
+                }
+                Ok(node) => {
+                    let canon = ref_slug(&node.repo, node.number);
+                    let (lbls, errs) = self
+                        .apply_track_and_priority(
+                            &node,
+                            track_edit.as_ref().map(|o| o.as_deref()),
+                            priority_edit,
+                            &mut caches,
+                        )
+                        .await;
+                    (canon, lbls, errs)
+                }
             }
         };
 

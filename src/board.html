@@ -5359,6 +5359,7 @@ function paintGraphTriage() {
   const isErr = t.status === "failed" || t.status === "gone" || t.status === "timed out" || t.status === "no answer" || !!graph.triageErr;
   box.classList.toggle("err", isErr);
   const busy = graph.triageBusy;
+  const applyBusy = busy || graph.editing;
   if (t.status === "running" || t.status === "waiting") {
     const acts = [];
     if (safeUrl(t.link)) {
@@ -5391,7 +5392,7 @@ function paintGraphTriage() {
   const appliedCount = counts.applied ?? changes.filter((c) => c.status === "applied" || c.status === "alreadySet").length;
   const acts = [];
   if (pendingCount > 0) {
-    const applyAll = h("button", { class: "btn go", type: "button", id: "graph-triage-apply-all", "aria-disabled": busy ? "true" : null },
+    const applyAll = h("button", { class: "btn go", type: "button", id: "graph-triage-apply-all", "aria-disabled": applyBusy ? "true" : null },
       "Confirm all (" + pendingCount + ")");
     applyAll.addEventListener("click", () => applyGraphTriage(t.id, { all: true }));
     acts.push(applyAll);
@@ -5417,11 +5418,11 @@ function paintGraphTriage() {
       const rowActs = [];
       if (c.status === "pending" || c.status === "error") {
         if (c.conflict) {
-          const rep = h("button", { class: "btn", type: "button", "data-triage-act": "replace", "data-change-id": c.id, "aria-disabled": busy ? "true" : null }, "Replace parent");
+          const rep = h("button", { class: "btn", type: "button", "data-triage-act": "replace", "data-change-id": c.id, "aria-disabled": applyBusy ? "true" : null }, "Replace parent");
           rep.addEventListener("click", () => applyGraphTriage(t.id, { changeIds: [c.id], replaceParent: true }));
           rowActs.push(rep);
         }
-        const okBtn = h("button", { class: "btn", type: "button", "data-triage-act": "apply", "data-change-id": c.id, "aria-disabled": busy ? "true" : null }, "Confirm");
+        const okBtn = h("button", { class: "btn", type: "button", "data-triage-act": "apply", "data-change-id": c.id, "aria-disabled": applyBusy ? "true" : null }, "Confirm");
         okBtn.addEventListener("click", () => applyGraphTriage(t.id, { changeIds: [c.id] }));
         const skipBtn = h("button", { class: "btn quiet", type: "button", "data-triage-act": "dismiss", "data-change-id": c.id, "aria-disabled": busy ? "true" : null }, "Skip");
         skipBtn.addEventListener("click", () => dismissGraphTriage(t.id, { changeIds: [c.id] }));
@@ -5466,12 +5467,13 @@ async function startGraphTriage() {
 }
 
 async function applyGraphTriage(id, payload) {
-  if (graph.triageBusy) return;
+  if (graph.triageBusy || graph.editing) return;
   graph.triageBusy = true;
   graph.editing = true;
   graph.triageErr = null;
   ++flow.seq;
   paintGraphTriage();
+  if (dr.open) paintDrawer();
   try {
     const res = await post("/api/flow/triage/" + encodeURIComponent(id) + "/apply", payload);
     if (res && res.triage) {
@@ -5492,6 +5494,7 @@ async function applyGraphTriage(id, payload) {
     graph.triageBusy = false;
     graph.editing = false;
     paintGraphTriage();
+    if (dr.open) paintDrawer();
     if (!flow.busy && flow.again && !graph.syncing) { flow.again = false; loadFlow(); }
   }
 }
@@ -7592,6 +7595,7 @@ async function editGraphEdge(nodeId, payload) {
   graph.editing = true;
   graph.pendingConfirm = null;
   ++flow.seq;
+  paintGraphTriage();
   setDrEditFeedback(nodeId, true, "Updating...");
   try {
     const res = await post("/api/flow/edge", payload);
@@ -7620,6 +7624,7 @@ async function editGraphEdge(nodeId, payload) {
     return null;
   } finally {
     graph.editing = false;
+    paintGraphTriage();
     if (!flow.busy && flow.again && !graph.syncing) { flow.again = false; loadFlow(); }
   }
 }
@@ -7629,6 +7634,7 @@ async function editGraphIssue(nodeId, payload) {
   graph.editing = true;
   graph.pendingConfirm = null;
   ++flow.seq;
+  paintGraphTriage();
   setDrEditFeedback(nodeId, true, "Updating issue...");
   try {
     const res = await post("/api/flow/issue", payload);
@@ -7657,6 +7663,7 @@ async function editGraphIssue(nodeId, payload) {
     return null;
   } finally {
     graph.editing = false;
+    paintGraphTriage();
     if (!flow.busy && flow.again && !graph.syncing) { flow.again = false; loadFlow(); }
   }
 }

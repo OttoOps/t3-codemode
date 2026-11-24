@@ -448,9 +448,11 @@ impl App {
         let ns = App::session_ns(req.session, caller.as_deref());
         let vars =
             self.store.kv_get(&ns, VARS_KEY).ok().flatten().filter(Value::is_object).unwrap_or_else(|| json!({}));
+        let keep_vars = matches!(self.triage_blocks_vars(caller.as_deref()), Ok(false));
         let catalog = self.catalog_for_run().await;
         let names = serde_json::to_string(&catalog.t3_names).unwrap_or_else(|_| "[]".into());
         let upstreams: Vec<Value> = namespaces.iter().map(|n| json!([n, aliases(&catalog.tools_of(n))])).collect();
+        let caller_for_save = caller.clone();
         let host = Arc::new(ExecHost { app: self.clone(), caller, reported: req.reported, ns: ns.clone(), catalog });
         let _slot = match self.run_slot().await {
             Ok(p) => p,
@@ -466,15 +468,21 @@ impl App {
             ],
             host,
             limits: self.limits(req.timeout_ms),
-            keep_vars: true,
+            keep_vars,
         })
         .await;
         let mut logs: Vec<String> = out.logs.into_iter().map(|l| self.redact(l)).collect();
         if let Some(v) = out.vars {
-            if v.to_string().len() > MAX_VALUE {
-                logs.push("[t3cm] vars not saved: over 1 MB serialized".into());
-            } else if let Err(e) = self.store.kv_set(&ns, VARS_KEY, &v, &iso(self.clock.now())) {
-                logs.push(format!("[t3cm] vars not saved: {e}"));
+            match self.triage_blocks_vars(caller_for_save.as_deref()) {
+                Ok(true) => {}
+                Err(e) => logs.push(format!("[t3cm] vars not saved: {e}")),
+                Ok(false) => {
+                    if v.to_string().len() > MAX_VALUE {
+                        logs.push("[t3cm] vars not saved: over 1 MB serialized".into());
+                    } else if let Err(e) = self.store.kv_set(&ns, VARS_KEY, &v, &iso(self.clock.now())) {
+                        logs.push(format!("[t3cm] vars not saved: {e}"));
+                    }
+                }
             }
         }
         let output = match out.result {
@@ -706,6 +714,14 @@ impl App {
             None
         };
         self.health_with_remote(self.remote_health_with(ts_login))
+    }
+
+    fn triage_blocks_vars(&self, caller: Option<&str>) -> Result<bool, String> {
+        let store_err = |e: anyhow::Error| format!("store: {e}");
+        match caller.filter(|c| !c.is_empty()) {
+            Some(c) => self.store.triage_thread(c).map_err(store_err),
+            None => self.store.triage_live().map_err(store_err),
+        }
     }
 
     async fn host_op(
