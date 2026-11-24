@@ -541,8 +541,11 @@ leaves the Up next queue and launching off.
 When `maxTickets` is set, an issue is ready when all of these hold:
 
 - It is open, in a covered repo, and matches `optIn` when `optIn` is set.
-- No open issue blocks it through GitHub's blocked-by links.
-- It is not labelled `blocked: external`.
+- No open issue blocks it through GitHub's blocked-by links or parsed
+  issue-body dependencies from `## Flow` `Blocked by:`, `Depends on`,
+  `Blocked by`, or `After`, and it has no unresolved blocker reference in its
+  body.
+- It is not labelled `blocked` or `blocked: external`.
 - No board ticket is open for it.
 - It isn't skipped. A skipped issue, or one still open after its board ticket
   finished, comes back once its labels or blockers change.

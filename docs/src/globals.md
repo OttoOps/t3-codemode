@@ -418,27 +418,32 @@ GitHub remotes when `flow.repos` is omitted, with `flow.includeRepos` and
 | `free` | `maxTickets` minus the flow tickets running, never below zero. |
 | `running` | The flow tickets: `label`, `repo`, `number`, `url`, and the ticket's `thread` and `link`. `thread` is `null` for a launch that hasn't joined yet. A ticket whose issue has closed isn't listed. |
 | `queue` | The ready issues in launch order. |
-| `blocked` | The matching issues held back by an open blocker or by `blocked: external`, in the same order. |
+| `blocked` | The matching issues held back by an open native or body-parsed blocker, an unresolved blocker reference, a plain `blocked` label, or `blocked: external`, in the same order. |
 | `skipped` | Ready issues kept out of the picks, in the same order: skipped on a launch card, or still open after their own ticket finished. Each comes back once its labels or blockers change. |
 
 Each issue in `queue`, `blocked` and `skipped` has `repo`, `number`, `label`, `url`,
 `title`, `priority`, `milestone`, `createdAt`, `parent` and `unblockedBy`.
 `priority` is `high`, `medium`, `low` or `null`, `milestone` has `title` and
 `dueOn` or is `null`, and `unblockedBy` lists the closed issues that used to
-block it. A `blocked` issue adds `blockers`, the open
-issues that block it, and `external`, which is `true` when it carries
-`blocked: external`. An issue with more blockers than GitHub returned in one
-read stays in `blocked` with `moreBlockers: true`. When `gh` can't read an explicitly configured repo, or cannot read any
-discovered repo, the call throws and names the repo.
+block it. A `blocked` issue adds `blockers`, the open issues that block it,
+and `external`, which is `true` when it carries `blocked: external`. It also
+adds `blockedLabel: true` when held by a plain `blocked` label, and
+`unresolved` for unresolved blocker references from its body. An issue with
+more blockers than GitHub returned in one read stays in `blocked` with
+`moreBlockers: true`. When `gh` can't read an explicitly configured repo, or
+cannot read any discovered repo, the call throws and names the repo.
 
 `wf.flow({ graph: true })` also returns `graph`, the dependency graph the
 board reads from `GET /api/flow`, even when `config.json` has no `flow` block.
-It reads all open issues across covered repos, keeping transitive blocker
-chains intact through unlabelled issues, and uses the batched tickets query for
-any active ticket whose issue was not in that read. `wf.flow()` leaves `graph`
-out by default because it can be large. [The dependency
-graph](board.md#the-dependency-graph) describes its nodes, edges and smart lane
-rules.
+It reads every open issue and its body across covered repos, keeping transitive
+blocker chains intact through unlabelled issues, and uses the batched tickets
+query for any active ticket or body-referenced issue not already in that read.
+Each edge carries `source` as `github`, `body`, `git` or `code`.
+`graph.warnings` and each affected node's `warnings` report cycles, unresolved
+references, and plain `blocked` labels with no linked open blocker. `wf.flow()`
+leaves `graph` out by default because it can be large.
+[The dependency graph](board.md#the-dependency-graph) describes its nodes,
+edges, diagnostics and smart lane rules.
 
 ```js
 async () => {

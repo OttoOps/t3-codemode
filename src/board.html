@@ -1103,16 +1103,29 @@ kbd { font-family: var(--mono); font-size: 12px; }
 .dr-dep .linkish { max-width: 100%; }
 .dr-dep .gone-dep { color: var(--fg-2); }
 .dr-lane { font-size: 13px; line-height: 18px; color: var(--fg-2); overflow-wrap: anywhere; }
+.dr-warns {
+  display: grid; gap: 4px; padding: 8px 10px; border-radius: 4px;
+  background: var(--fail-soft); color: var(--fail); font-size: 12px; line-height: 16px;
+}
+.dr-warns ul { display: grid; gap: 2px; list-style: disc; padding-left: 16px; }
 .gsub {
   flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; min-height: 40px; padding: 8px 16px;
   border-bottom: 1px solid var(--border); background: var(--surface-2); font-size: 12px; line-height: 16px; color: var(--fg-2);
 }
 .gsub .gnote { flex: 1 1 100%; color: var(--fg-2); }
+.gwarn {
+  flex: none; padding: 8px 16px; border-bottom: 1px solid var(--fail);
+  background: var(--fail-soft); color: var(--fail); font-size: 12px; line-height: 16px;
+  display: grid; gap: 4px;
+}
+.gwarn-h { font-weight: 600; }
+.gwarn ul { display: grid; gap: 2px; list-style: disc; padding-left: 16px; }
 .gkey { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .gkey svg { width: 22px; height: 8px; flex: none; }
 .gkey .k-up { stroke: var(--fail); }
 .gkey .k-down { stroke: var(--unlock); }
 .gkey .k-par { stroke: var(--border-strong); stroke-dasharray: 3 3; }
+.gkey .k-body { stroke: var(--pause); stroke-dasharray: 5 3; }
 .gscroll { overflow: auto; overscroll-behavior: contain; }
 #tp-graph > .empty { position: static; }
 .gscroll > svg { display: block; }
@@ -1122,20 +1135,28 @@ kbd { font-family: var(--mono); font-size: 12px; }
 .glb { fill: var(--fg-2); font-size: 12px; font-weight: 500; }
 .ge { fill: none; stroke: var(--border-strong); stroke-width: 1.5; }
 .ge.par { stroke-dasharray: 4 3; }
+.ge.src-body { stroke: var(--pause); stroke-dasharray: 6 3; }
+.ge.par.src-body { stroke: var(--pause); stroke-dasharray: 2 3; }
 .ge.up { stroke: var(--fail); stroke-width: 2.5; }
 .ge.down { stroke: var(--unlock); stroke-width: 2.5; }
 .ge.dim { stroke-opacity: 0.25; }
 .gmk { fill: var(--border-strong); }
+.gmk.body { fill: var(--pause); }
 .gmk.up { fill: var(--fail); }
 .gmk.down { fill: var(--unlock); }
 .gnode {
   display: grid; align-content: center; gap: 0; width: 100%; height: 100%; padding: 4px 8px; margin: 0; text-align: left; cursor: pointer;
   border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--fg); font: inherit;
 }
+.gnode.warn { border-color: var(--fail); }
 .gnode:hover { background: var(--surface-hover); border-color: var(--border-strong); }
 .gnode:focus-visible { outline: 2px solid var(--accent); outline-offset: -5px; }
 .gnode .gl { font-size: 12px; line-height: 16px; font-weight: 600; }
-.gnode .g3 { display: flex; min-width: 0; }
+.gnode .g3 { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.gnode .gw {
+  flex: none; margin-left: auto; padding: 0 4px; border-radius: 3px;
+  font-size: 10px; line-height: 14px; font-weight: 600; background: var(--fail-soft); color: var(--fail);
+}
 .gnode .spill { max-width: 100%; overflow: hidden; }
 .gnode .spill .w { overflow: hidden; text-overflow: ellipsis; }
 .gnode .g2 { font-size: 12px; line-height: 16px; color: var(--fg-2); }
@@ -1357,8 +1378,10 @@ kbd { font-family: var(--mono); font-size: 12px; }
           <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-up" d="M1 4h20" stroke-width="2.5"/></svg>blocks it</span>
           <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-down" d="M1 4h20" stroke-width="2.5"/></svg>it unlocks</span>
           <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-par" d="M1 4h20" stroke-width="1.5"/></svg>parent</span>
+          <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-body" d="M1 4h20" stroke-width="1.5"/></svg>from body</span>
           <span class="gnote" id="graph-note"></span>
         </div>
+        <div class="gwarn" id="graph-warn" role="status" hidden></div>
         <div class="scroll gscroll" id="gscroll" role="group" aria-label="Dependency graph" aria-describedby="graph-note"></div>
         <p class="empty" id="graph-empty" hidden>No open tickets or issues to draw.</p>
       </div>
@@ -4245,10 +4268,21 @@ function flowFacts(i) {
 }
 
 function flowBlockers(b) {
+  const parts = [];
+  if (b.external) parts.push("blocked: external");
   const refs = flowRefs(b.blockers || [], b.repo);
   if (b.moreBlockers) refs.push(refs.length ? ", and more" : "more than GitHub lists");
-  const by = refs.length ? ["blocked by ", ...refs] : null;
-  return b.external ? ["blocked: external", ...(by ? ["; ", ...by] : [])] : by;
+  if (refs.length) parts.push(["blocked by ", ...refs]);
+  if (b.unresolved && b.unresolved.length) parts.push("unresolved: " + b.unresolved.join(", "));
+  if (b.blockedLabel && !b.external && !refs.length) parts.push("labelled blocked (no blocker linked)");
+  if (!parts.length) return null;
+  const out = [];
+  parts.forEach((p, i) => {
+    if (i) out.push("; ");
+    if (Array.isArray(p)) out.push(...p);
+    else out.push(p);
+  });
+  return out;
 }
 
 function flowFold(id) {
@@ -4331,7 +4365,7 @@ function graphData(s) {
     const nodes = (g.nodes || []).filter((n) => n && n.id);
     const open = s.tree.filter((t) => !t.done && t.thread);
     if (nodes.length || !open.length) {
-      return { mode: "flow", nodes, edges: (g.edges || []).filter((e) => e && e.from && e.to) };
+      return { mode: "flow", nodes, edges: (g.edges || []).filter((e) => e && e.from && e.to), warnings: g.warnings || [] };
     }
   }
   const nodes = s.tree.filter((t) => !t.done && t.thread).map((t) => {
@@ -4339,10 +4373,10 @@ function graphData(s) {
     const issue = ids && ids.issue;
     return { id: "t:" + t.thread, repo: t.repo || "", number: null, label: t.label, url: (issue && issue.url) || issueUrl(t.label, t.repo),
       title: titleOf(t), state: "open", tracked: true, track: t.repo || "Tickets", trackBy: t.repo ? "repo" : "none", parent: null, subIssues: [],
-      blockedBy: [], unlocks: [], ticket: { thread: t.thread, link: t.link, status: t.status } };
+      blockedBy: [], unlocks: [], warnings: [], ticket: { thread: t.thread, link: t.link, status: t.status } };
   });
   const mode = flow.failed ? "error" : (g ? "tickets" : "loading");
-  return { mode, nodes, edges: [] };
+  return { mode, nodes, edges: [], warnings: [] };
 }
 
 function graphKey(n) {
@@ -4500,9 +4534,39 @@ function graphSub(n) {
   return { kind: "issue", key: n.id };
 }
 
+function edgeBaseClass(e) {
+  let cls = "ge";
+  if (e.kind !== "blockedBy") cls += " par";
+  if (e.source && e.source !== "github") cls += " src-" + e.source;
+  return cls;
+}
+
+function edgeMarker(e, cls) {
+  if (/ up$/.test(cls)) return "url(#gm-up)";
+  if (/ down$/.test(cls)) return "url(#gm-down)";
+  if (e.source === "body") return "url(#gm-body)";
+  return "url(#gm-base)";
+}
+
 function graphSig(lay, edges) {
   return JSON.stringify([graph.mode, lay.wide, lay.height, lay.lanes.map((l) => [l.name, l.by, l.top, l.h, l.count]),
-    [...lay.pos.entries()].map(([id, p]) => [id, p.x, p.y]), edges.map((e) => [e.from, e.to, e.kind])]);
+    [...lay.pos.entries()].map(([id, p]) => [id, p.x, p.y]), edges.map((e) => [e.from, e.to, e.kind, e.source || "github"])]);
+}
+
+function paintGraphWarn(warnings) {
+  const el = $("graph-warn");
+  const list = warnings || [];
+  el.hidden = !list.length;
+  if (!list.length) { el.replaceChildren(); return; }
+  const cycles = list.filter((w) => w.kind === "cycle").length;
+  const unresolved = list.filter((w) => w.kind === "unresolved").length;
+  const labels = list.filter((w) => w.kind === "blockedLabel").length;
+  const summary = [];
+  if (cycles) summary.push(cycles + " " + (cycles === 1 ? "cycle" : "cycles"));
+  if (unresolved) summary.push(unresolved + " unresolved " + (unresolved === 1 ? "reference" : "references"));
+  if (labels) summary.push(labels + " unlinked blocked " + (labels === 1 ? "label" : "labels"));
+  const head = summary.length ? "Graph diagnostics: " + summary.join(", ") : list.length + " graph warning" + (list.length === 1 ? "" : "s");
+  el.replaceChildren(h("p", { class: "gwarn-h" }, head), h("ul", {}, ...list.map((w) => h("li", { "data-kind": w.kind }, w.message))));
 }
 
 function graphNote(mode, lay) {
@@ -4519,6 +4583,7 @@ function paintGraph() {
   const d = graphData(state);
   graph.mode = d.mode;
   graph.nodes = new Map(d.nodes.map((n) => [n.id, n]));
+  graph.edges = d.edges;
   graph.byThread = new Map(d.nodes.filter((n) => n.ticket && n.ticket.thread).map((n) => [n.ticket.thread, n]));
   const ctx = filterCtx(state);
   const on = filtering();
@@ -4529,6 +4594,7 @@ function paintGraph() {
   const lay = graphLayout(d.nodes, d.edges);
   lay.wide = Math.max(lay.width, $("gscroll").clientWidth || 0);
   setText($("graph-note"), graphNote(d.mode, lay));
+  paintGraphWarn(d.mode === "flow" ? d.warnings : []);
   for (const k of $("graph-key").querySelectorAll(".gkey")) k.hidden = d.mode !== "flow";
   $("graph-empty").hidden = d.nodes.length > 0;
   $("gscroll").hidden = !d.nodes.length;
@@ -4556,7 +4622,7 @@ function graphBuild(box, lay, edges) {
   const marker = (cls) => svgEl("marker", { id: "gm-" + cls, viewBox: "0 0 8 8", refX: "7", refY: "4", markerWidth: "8", markerHeight: "8", orient: "auto-start-reverse", markerUnits: "userSpaceOnUse" },
     svgEl("path", { class: "gmk" + (cls === "base" ? "" : " " + cls), d: "M0 0L8 4L0 8z" }));
   const root = svgEl("svg", { width: lay.width, height: lay.height, viewBox: "0 0 " + lay.width + " " + lay.height },
-    svgEl("defs", {}, marker("base"), marker("up"), marker("down")));
+    svgEl("defs", {}, marker("base"), marker("body"), marker("up"), marker("down")));
   const wide = lay.wide;
   lay.lanes.forEach((l, i) => {
     const words = { label: "track label", epic: "epic", milestone: "milestone", repo: "repository", component: "linked issues", independent: "" }[l.by] || "";
@@ -4582,7 +4648,10 @@ function graphBuild(box, lay, edges) {
       const x = src.x + GEO.W, bend = x + GEO.GAP / 2;
       d = "M" + x + " " + sy + "C" + bend + " " + sy + " " + bend + " " + dy + " " + (dst.x + GEO.W + (blocked ? 2 : 0)) + " " + dy;
     }
-    const p = svgEl("path", { class: "ge" + (blocked ? "" : " par"), d, "marker-end": blocked ? "url(#gm-base)" : null });
+    const cls = edgeBaseClass(e);
+    const source = e.source || "github";
+    const tip = (blocked ? "Blocked by" : "Parent") + (source === "body" ? " (parsed from body)" : source === "github" ? " (GitHub)" : " (" + source + ")");
+    const p = svgEl("path", { class: cls, "data-source": source, d, "marker-end": blocked ? edgeMarker(e, cls) : null }, svgEl("title", {}, tip));
     graph.paths.push({ el: p, e });
     eg.append(p);
   }
@@ -4593,7 +4662,7 @@ function graphBuild(box, lay, edges) {
     const b = h("button", { class: "gnode", type: "button", "data-id": id, tabindex: "-1" },
       h("span", { class: "gl clip", "data-part": "label" }),
       h("span", { class: "g2 clip", "data-part": "title" }),
-      h("span", { class: "g3" }, h("span", { "data-part": "st" })));
+      h("span", { class: "g3" }, h("span", { "data-part": "st" }), h("span", { class: "gw", "data-part": "warn", hidden: true })));
     graph.btns.set(id, b);
     ng.append(svgEl("foreignObject", { x: p.x, y: p.y, width: GEO.W, height: GEO.H }, b));
   }
@@ -4610,14 +4679,29 @@ function graphPatch(b, n, ctx, out) {
   setText(part(b, "label"), n.label || n.id);
   const st = part(b, "st");
   setStatusPill(st, mk, word);
+  const warns = n.warnings || [];
+  const gw = part(b, "warn");
+  b.classList.toggle("warn", warns.length > 0);
+  if (warns.length) {
+    const tag = warns.some((w) => w.kind === "cycle") ? "cycle"
+      : warns.some((w) => w.kind === "unresolved") ? "unresolved" : "warning";
+    gw.hidden = false;
+    setText(gw, tag);
+    setAttr(gw, "title", warns.map((w) => w.message).join("; "));
+  } else {
+    gw.hidden = true;
+    setText(gw, "");
+    setAttr(gw, "title", null);
+  }
   const t = graphTicket(n);
   const title = n.title || (t ? titleOf(t) : "");
   setText(part(b, "title"), title || (n.tracked ? "" : "Not opted into the flow"));
   const said = [n.label || n.id, title, word, n.track ? "lane " + n.track : "",
     (n.blockedBy || []).length ? "blocked by " + n.blockedBy.length : "", (n.unlocks || []).length ? "unlocks " + n.unlocks.length : "",
+    warns.length ? warns.map((w) => w.message).join("; ") : "",
     out ? "outside the filter" : ""].filter(Boolean).join(", ");
   setAttr(b, "aria-label", said);
-  setAttr(b, "title", [n.label || n.id, title].filter(Boolean).join(": "));
+  setAttr(b, "title", [n.label || n.id, title, warns.length ? warns.map((w) => w.message).join("; ") : ""].filter(Boolean).join(": "));
   b.classList.toggle("out", !!out);
 }
 
@@ -4638,7 +4722,7 @@ function graphMark() {
     b.classList.toggle("dim", !!hot && id !== hot && !up.has(id) && !down.has(id) && !kin.has(id));
   }
   for (const { el, e } of graph.paths) {
-    let cls = "ge" + (e.kind === "blockedBy" ? "" : " par");
+    let cls = edgeBaseClass(e);
     if (hot && e.kind === "blockedBy") {
       if ((e.from === hot || up.has(e.from)) && up.has(e.to)) cls += " up";
       else if ((e.to === hot || down.has(e.to)) && down.has(e.from)) cls += " down";
@@ -4646,7 +4730,7 @@ function graphMark() {
     } else if (hot && e.from !== hot && e.to !== hot) cls += " dim";
     if (el.getAttribute("class") !== cls) {
       el.setAttribute("class", cls);
-      if (e.kind === "blockedBy") el.setAttribute("marker-end", "url(#gm-" + (/ up$/.test(cls) ? "up" : / down$/.test(cls) ? "down" : "base") + ")");
+      if (e.kind === "blockedBy") el.setAttribute("marker-end", edgeMarker(e, cls));
     }
   }
 }
@@ -5923,7 +6007,9 @@ function initDrawer() {
       sec("latest", "Latest message", h("div", { class: "dr-text md", "data-part": "latest-b" }), h("p", { class: "meta", "data-part": "latest-m" })),
       sec("note", "Note", h("div", { class: "dr-text md", "data-part": "note-b" }), h("p", { class: "meta", "data-part": "note-m" })),
       sec("workers", "Workers", h("ul", { class: "dr-list", "data-part": "workers-l" })),
-      sec("deps", "Dependencies", h("p", { class: "dr-lane", "data-part": "deps-lane" }), h("div", { class: "dr-deps", "data-part": "deps-l" }))),
+      sec("deps", "Dependencies", h("p", { class: "dr-lane", "data-part": "deps-lane" }),
+        h("div", { class: "dr-warns", "data-part": "deps-w", role: "status", hidden: true }),
+        h("div", { class: "dr-deps", "data-part": "deps-l" }))),
     h("div", { class: "err-strip", id: "dr-err", hidden: true },
       h("span", { id: "dr-err-text" }), h("button", { class: "btn quiet", type: "button", id: "dr-err-close", onclick: () => closeErr("dr-err") }, "Close"))));
   if (window.ResizeObserver) new ResizeObserver(() => { if (dr.open) placeDrawer(); }).observe($("main"));
@@ -6347,6 +6433,17 @@ function drFlowPills(n) {
 const DEP_ROWS = [["blockedBy", "Blocked by"], ["unlocks", "Unlocks"], ["parent", "Parent"], ["subIssues", "Sub-issues"]];
 const LANE_BY = { label: "its track label", epic: "its parent epic", milestone: "its milestone", component: "the issues linked to it", independent: "unlinked issues in its repository" };
 
+function depEdgeSource(n, key, otherId) {
+  const match = (graph.edges || []).find((e) => {
+    if (key === "blockedBy") return e.kind === "blockedBy" && e.from === n.id && e.to === otherId;
+    if (key === "unlocks") return e.kind === "blockedBy" && e.from === otherId && e.to === n.id;
+    if (key === "parent") return e.kind === "parent" && e.from === n.id && e.to === otherId;
+    if (key === "subIssues") return e.kind === "parent" && e.from === otherId && e.to === n.id;
+    return false;
+  });
+  return match && match.source ? match.source : "github";
+}
+
 function drDeps(n) {
   const sec = drPart("deps");
   const on = !!n && graph.mode === "flow";
@@ -6355,10 +6452,16 @@ function drDeps(n) {
   const linked = ["blockedBy", "unlocks", "subIssues"].some((k) => (n[k] || []).length) || !!n.parent;
   const why = n.trackBy === "component" && !linked ? "" : LANE_BY[n.trackBy];
   setText(drPart("deps-lane"), n.track ? "Lane " + n.track + (why ? ", from " + why : "") + "." : "");
+  const warns = n.warnings || [];
+  const wbox = drPart("deps-w");
+  wbox.hidden = !warns.length;
+  if (warns.length) wbox.replaceChildren(h("ul", {}, ...warns.map((w) => h("li", { "data-kind": w.kind }, w.message))));
+  else wbox.replaceChildren();
   const ctx = filterCtx(state);
   const rows = DEP_ROWS.map(([k, name]) => [k, name, [].concat(n[k] || []).filter(Boolean).map((id) => {
     const x = graphNode(id);
-    return x ? [id, x.label || id, x.title || "", ...graphState(x, ctx)] : [id, id, "", null, null];
+    const src = depEdgeSource(n, k, id);
+    return x ? [id, x.label || id, x.title || "", ...graphState(x, ctx), src] : [id, id, "", null, null, src];
   })]);
   const more = (n.moreBlockers ? ["blockedBy"] : []).concat(n.moreSubIssues ? ["subIssues"] : []);
   rows.splice(0, rows.length, ...rows.filter((r) => r[2].length || more.includes(r[0])));
@@ -6369,10 +6472,11 @@ function drDeps(n) {
   const said = (r) => r.length + (r.length === 1 ? " issue" : " issues");
   const kids = rows.map(([k, name, list]) => h("div", { class: "dr-dep", role: "group", "aria-label": name + ", " + said(list) },
     h("span", {}, name),
-    h("ul", {}, ...list.map(([id, label, title, mk, word]) => h("li", {},
+    h("ul", {}, ...list.map(([id, label, title, mk, word, src]) => h("li", {},
       graphNode(id) ? ticketChip(label, { onclick: () => drJump(id), name: "Inspect " + label + (title ? ": " + title : "") + (word ? ", " + word : ""), class: "dep" })
         : h("span", { class: "chip gone-dep", title: label }, label),
-      mk ? statusPill(mk, word) : null)),
+      mk ? statusPill(mk, word) : null,
+      src && src !== "github" ? h("span", { class: "tag", title: src === "body" ? "Parsed from issue body" : "Source: " + src }, src) : null)),
       more.includes(k) && safeUrl(n.url) ? h("li", {}, h("a", { href: safeUrl(n.url), target: "_blank", rel: "noopener noreferrer" }, "and more on GitHub")) : null)));
   l.replaceChildren(...(kids.length ? kids : [h("p", { class: "meta" }, "No blockers, unlocks, parent or sub-issues.")]));
 }
@@ -6384,9 +6488,15 @@ function drJump(id) {
 
 function flowSaid(n) {
   const out = [];
+  const warns = n.warnings || [];
   if (n.state === "closed") out.push("Closed on GitHub.");
   if (n.flowList === "queue") out.push("In the ready queue: opted in, no open blocker and no ticket yet.");
-  else if (n.flowList === "blocked") out.push(n.external ? "Held by blockers outside the covered repos, or labelled blocked: external." : "Held by an open blocker.");
+  else if (n.flowList === "blocked") {
+    if (n.external) out.push("Held by blockers outside the covered repos, or labelled blocked: external.");
+    else if (warns.some((w) => w.kind === "blockedLabel")) out.push("Held by a plain blocked label with no open blocker linked.");
+    else if (warns.some((w) => w.kind === "unresolved")) out.push("Held by an unresolved dependency reference.");
+    else out.push("Held by an open blocker.");
+  }
   else if (n.flowList === "skipped") out.push("Skipped on a launch card. It stays out of the queue until its labels or blockers change.");
   else if (n.ticket) out.push("Its board ticket is " + (n.ticket.status || "open") + ".");
   else if (!n.tracked) out.push("Not opted into the flow. It shows because an issue the board tracks links to it.");

@@ -757,9 +757,10 @@ a skip, raises a card or launches anything.
   blockers that closed (unblocked by #115), and its milestone and due date.
   A blocker in another repository shows as `repo#n`.
 - **Blocked** folds the opted-in issues that still wait on something. Each row
-  names its open blockers, adds "and more" when GitHub lists more than 100,
-  or reads "blocked: external" for an issue with that label. Click Blocked to
-  open or close the list.
+  names its open blockers from GitHub links or parsed issue bodies, adds "and
+  more" when GitHub lists more than 100, notes unresolved dependency references
+  or an unlinked plain `blocked` label, or reads "blocked: external" for an
+  issue with that label. Click Blocked to open or close the list.
 - **Skipped** folds the issues the flow skipped ([skip memory](#the-flow)),
   each with the same details as a ready row.
 
@@ -788,19 +789,42 @@ closed blocker or an open blocker in an uncovered repository, is also a node
 with `tracked: false` and what the link carries: `repo`, `number`, `label`,
 `url`, `title` and `state`.
 
-The graph makes no GitHub call per issue. The repo read asks for each open
-issue's sub-issues next to its blockers and parent, and the batched tickets
-query reads only active board tickets whose issues were not already in that
-read, such as closed issues or tickets in uncovered repositories. Viewing the
-graph never enables auto-launching. Without `flow.maxTickets`, `enabled` stays
-`false` and the Up next panel stays hidden.
+The graph reads each open issue's body and sub-issues alongside its blockers
+and parent, so it makes no GitHub call per issue. The batched tickets query
+reads only active board tickets and body-referenced issues that were not
+already in that read, such as closed blockers or issues in uncovered
+repositories. Viewing the graph never enables auto-launching. Without
+`flow.maxTickets`, `enabled` stays `false` and the Up next panel stays hidden.
 
-`edges` lists each link once, from the issue that has it:
+t3cm parses dependencies from each open issue's body outside fenced code
+blocks, inline code spans and HTML comments:
+
+- A canonical `## Flow` block with `Parent:`, `Blocked by:`, `Track:` and
+  `Touches:`.
+- Standard prose directives: `Depends on #N`, `Blocked by #N`, `After #N`,
+  `Part of #N`, `Phase P<k> of #N` or `Phase <k> of #N`, cross-repo references
+  such as `owner/repo#N` or GitHub issue URLs, and tasklists `- [ ] #N`.
+  Tasklists emit sub-issues by default, or blockers under a `## Dependencies`,
+  `## Blockers` or `## Prerequisites` heading.
+- Sibling title and phase references, such as `Depends on Phase 1` or
+  `Blocked by "Setup auth"`, resolve against open issues in the same epic or
+  repository when unambiguous. t3cm flags unresolved or ambiguous references
+  with a diagnostic, and unresolved blocker references keep the issue out of
+  the ready queue.
+
+`edges` lists each link once, from the issue that has it. Each edge carries
+`source` as `github`, `body`, `git` or `code`, and native `github` wins when
+both a native link and a body directive exist:
 
 | `kind` | From, to | Read the other way |
 |---|---|---|
 | `blockedBy` | the blocked issue, its blocker | the blocker unlocks the issue |
 | `parent` | the sub-issue, its parent | the parent's sub-issue |
+
+`warnings` lists graph-level diagnostics with `kind`, `message`, `nodes` and
+optional `raw`. `kind` is `cycle` for dependency, parent or mixed cycles,
+`unresolved` for unresolved or ambiguous body references, and `blockedLabel`
+for open issues with a plain `blocked` label and no open blocker linked.
 
 Each node's `id` is `owner/name#N`, and its lists use those ids:
 
@@ -812,9 +836,10 @@ Each node's `id` is `owner/name#N`, and its lists use those ids:
 | `labels`, `priority`, `milestone` | As GitHub gives them, with `priority` read from a `priority:` label. |
 | `track`, `trackBy` | The lane it belongs to, by the rules below. |
 | `flowList` | `queue`, `blocked` or `skipped` when it is in that list, else `null`. |
-| `ready` | `true` while it is in the ready queue: opted in when `optIn` is set, no open blocker, no ticket. |
-| `external` | `true` when it is labelled `blocked: external`, or when it has open blockers, GitHub listed all of them, and none is in a covered repo. |
+| `ready` | `true` while it is in the ready queue: opted in when `optIn` is set, no open blocker, no unresolved blocker reference, no `blocked` or `blocked: external` label, and no ticket. |
+| `external` | `true` when it is labelled `blocked: external`, or when it has open blockers, GitHub listed all of them, no blocker reference is unresolved, and none is in a covered repo. |
 | `ticket` | Its board ticket's `thread`, `link` and `status`, or `null`. |
+| `warnings` | Any `cycle`, `unresolved` or `blockedLabel` diagnostics affecting this node. |
 
 `external` here is wider than a `blocked` issue's `external`, which reports
 the label alone.
@@ -822,9 +847,10 @@ the label alone.
 A node's track follows the first rule that applies:
 
 1. An explicit track label, checking `track:<name>` first, then `*-track`, then
-   `area:<name>`. For example, `track: board` maps to `board`, `workflow-track`
-   maps to `workflow`, and `area: api` maps to `api`. Within each form,
-   alphabetical order wins. `trackBy` is `label`.
+   `area:<name>`, then `Track:` in the issue's `## Flow` block. For example,
+   `track: board` maps to `board`, `workflow-track` maps to `workflow`, and
+   `area: api` maps to `api`. Within each label form, alphabetical order wins.
+   `trackBy` is `label`.
 2. Its parent epic. A sub-issue inherits the nearest ancestor's explicit track
    label if one exists; otherwise it and its unlabelled root epic group under
    the root epic's label, such as `widgets#10`. `trackBy` is `epic`.
@@ -861,8 +887,14 @@ the address opens it too.
   the page. Each issue shows its `repo#N`, title and state: a ticket's live
   state, or for an issue with no ticket ready, blocked, external, skipped,
   closed or open. Amber still marks only a ticket with an open card.
-- **Links.** A solid arrow runs from a blocker to the issue it blocks, and a
-  dashed line from a parent to its sub-issue.
+- **Links.** A solid arrow runs from a native GitHub blocker to the issue it
+  blocks, while a dashed purple arrow marks a blocker parsed from an issue
+  body. A dashed line runs from a parent to its sub-issue, or a dotted purple
+  line when parsed from a body.
+- **Diagnostics.** Dependency or parent cycles, unresolved body references, and
+  plain `blocked` labels with no open blocker linked appear in a warning banner
+  above the graph, add a badge on each affected node, and show in the
+  inspector.
 - **Tracing.** Hover or focus an issue, and the chain of issues that block it,
   however far back, turns red, and the chain it unlocks turns blue. Its
   parent and sub-issues keep their look, and everything else turns muted

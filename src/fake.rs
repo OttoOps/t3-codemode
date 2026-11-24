@@ -571,7 +571,7 @@ pub fn check_run(name: &str, conclusion: &str) -> Value {
 
 pub fn github_issue(number: u64, title: &str, labels: &[&str], created_at: &str) -> Value {
     let labels: Vec<Value> = labels.iter().map(|l| json!({"name": l})).collect();
-    json!({"number": number, "title": title, "state": "OPEN", "createdAt": created_at,
+    json!({"number": number, "title": title, "body": "", "state": "OPEN", "createdAt": created_at,
            "labels": {"nodes": labels}, "milestone": null, "blockers": [], "parentRef": null})
 }
 
@@ -714,6 +714,10 @@ impl FakeGitHub {
         self.update_issue(repo, number, json!({"milestone": {"title": title, "dueOn": due_on}}));
     }
 
+    pub fn set_body(&self, repo: &str, number: u64, body: &str) {
+        self.update_issue(repo, number, json!({"body": body}));
+    }
+
     pub fn close_issue(&self, repo: &str, number: u64) {
         self.update_issue(repo, number, json!({"state": "CLOSED"}));
     }
@@ -778,7 +782,8 @@ fn full_issue_node(st: &GhState, i: &Value) -> Value {
     subs.sort_by_key(|c| c["number"].as_u64());
     let subs: Vec<Value> =
         subs.into_iter().map(|c| issue_node(st, &json!([c["nameWithOwner"], c["number"]]))).collect();
-    json!({"number": number, "title": i["title"], "url": format!("https://github.com/{name}/issues/{number}"),
+    json!({"number": number, "title": i["title"], "body": i.get("body").cloned().unwrap_or_else(|| json!("")),
+           "url": format!("https://github.com/{name}/issues/{number}"),
            "createdAt": i["createdAt"], "state": i["state"], "labels": i["labels"], "milestone": i["milestone"],
            "parent": parent, "blockedBy": {"totalCount": blockers.len(), "nodes": blockers},
            "subIssues": {"totalCount": subs.len(), "nodes": subs}})
