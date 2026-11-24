@@ -800,7 +800,9 @@ t3cm parses dependencies from each open issue's body outside fenced code
 blocks, inline code spans and HTML comments:
 
 - A canonical `## Flow` block with `Parent:`, `Blocked by:`, `Track:` and
-  `Touches:`.
+  `Touches:`, or matching GitHub Issue Form sections: `### Parent / Epic`,
+  `### Blocked by`, `### Track` and `### Affected files`. t3cm ignores blank
+  `_No response_` fields.
 - Standard prose directives: `Depends on #N`, `Blocked by #N`, `After #N`,
   `Part of #N`, `Phase P<k> of #N` or `Phase <k> of #N`, cross-repo references
   such as `owner/repo#N` or GitHub issue URLs, and tasklists `- [ ] #N`.
@@ -870,7 +872,7 @@ external, and the inspector shows the same pill.
 ### The Graph tab
 
 The Graph tab in the Tickets pane draws the dependency graph as an SVG
-swimlane view, with no library and no request beyond `GET /api/flow`, even when
+swimlane view, with no library, reading the graph from `GET /api/flow` even when
 `config.json` has no `flow` block. This browser remembers whether you left the
 Tickets pane on Graph, and opens it there after a reload; `#tickets-graph` in
 the address opens it too.
@@ -892,6 +894,14 @@ the address opens it too.
   blocks, while a dashed purple arrow marks a blocker parsed from an issue
   body. A dashed line runs from a parent to its sub-issue, or a dotted purple
   line when parsed from a body.
+- **Sync parsed links.** When the graph holds `blockedBy` or `parent` links
+  with `source: "body"` that are not yet on GitHub, the Graph bar shows
+  **Sync N parsed links to GitHub**. Clicking it calls
+  `POST /api/flow/sync-links`, which writes each parsed link to GitHub through
+  `addBlockedBy` and `addSubIssue` idempotently with `replaceParent: false`.
+  The tab then refreshes the graph so synced edges render with native
+  `source: "github"` styling, and shows a dismissible status strip that lists
+  any per-link permission errors or parent conflicts.
 - **Diagnostics.** Dependency or parent cycles, unresolved body references, and
   plain `blocked` labels with no open blocker linked appear in a warning banner
   above the graph, add a badge on each affected node, and show in the
@@ -1502,6 +1512,7 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `POST /api/asks/{id}/settle`, `/restore` | The same for a closed ask; `id` is `q<n>` |
 | `GET /api/new-issues` | `{issues, dismissed}`, newest first; an issue that has a board ticket is in neither |
 | `GET /api/flow` | What `wf.flow({ graph: true })` returns: `{enabled, launch, maxTickets, free, running, queue, blocked, skipped, graph}`, read-only ([The up-next panel](#the-up-next-panel), [the dependency graph](#the-dependency-graph)); 502 with `error` when GitHub fails |
+| `POST /api/flow/sync-links` | Write every current `source: "body"` `blockedBy` and `parent` edge in the dependency graph to GitHub through `addBlockedBy` and `addSubIssue` idempotently with `replaceParent: false`, refresh the graph, and return `{ok, total, synced, alreadyLinked, failed, results, errors, flow, refreshError?}` with per-link `permission`, `conflict` and `existingParent` fields; 400 on malformed JSON or unknown keys, 502 with `error` when GitHub cannot be read |
 | `POST /api/new-issues/{id}/launch` | Launch a ticket for the entry, as `POST /api/launch` does for one issue; the result adds `id` (404 for no such entry) |
 | `POST /api/new-issues/{id}/dismiss`, `/restore` | Dismiss the entry, or bring a dismissed one back (400 if already dismissed, or not dismissed) |
 | `POST /api/settle-done` | Settle every done ticket and closed ask; returns `{tickets, asks}` counts |

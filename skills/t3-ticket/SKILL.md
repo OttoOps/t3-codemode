@@ -212,6 +212,18 @@ Commits type. The PR title stays plain Conventional Commits: the worker's
 linked issue and the board's chips carry the issue mapping. Keep N small: a
 PR is a unit someone can review and revert alone.
 
+When splitting a GitHub epic into new sub-issues, file the batch in one
+`wf.fileIssues` call with `parent` set to the epic, `blockedBy` linking phases
+in order through symbolic local `id`s, and `track`, `priority` and `touches`
+filled in; `wf.fileIssues` writes the canonical `## Flow` block with real `#N`
+references and wires native GitHub sub-issue and blocked-by links. When filing
+a single follow-up GitHub issue (such as out-of-scope or review follow-up
+work), include the canonical `## Flow` block (`Parent`, `Blocked by`, `Track`,
+`Priority`, `Touches`) in its body and report it with `wf.issue` passing
+`parent`, `blockedBy`, `track` and `priority` so native links and labels wire
+alongside the board entry (see
+[report-filed-issues.md](../t3-workflow/rules/report-filed-issues.md)).
+
 A PR's entry carries a `Passes:` line only when the repo's rules
 (`AGENTS.md`, `docs/agents/`) name passes for its kind of change, such as a
 content audit for changed factual claims. The line names the change that

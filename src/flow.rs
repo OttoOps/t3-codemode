@@ -2391,10 +2391,14 @@ impl Wf {
     }
 
     pub async fn flow(&self, with_graph: bool) -> Result<Value> {
+        Ok(serde_json::to_value(self.flow_view(with_graph).await?)?)
+    }
+
+    pub(crate) async fn flow_view(&self, with_graph: bool) -> Result<FlowView> {
         let cfg = self.config().flow.clone();
         let queue_enabled = cfg.as_ref().is_some_and(FlowConfig::queue_enabled);
         if !queue_enabled && !with_graph {
-            let off = FlowView {
+            return Ok(FlowView {
                 enabled: false,
                 launch: None,
                 max_tickets: 0,
@@ -2404,8 +2408,7 @@ impl Wf {
                 blocked: Vec::new(),
                 skipped: Vec::new(),
                 graph: None,
-            };
-            return Ok(serde_json::to_value(off)?);
+            });
         }
         let mut reads = self.flow_reads(cfg.as_ref(), with_graph).await?;
         let tickets = self.open_tickets()?;
@@ -2432,7 +2435,7 @@ impl Wf {
             },
         };
         if !with_graph {
-            return Ok(serde_json::to_value(view)?);
+            return Ok(view);
         }
         let mut lists: BTreeMap<String, &'static str> = BTreeMap::new();
         for (name, list) in [("queue", &view.queue), ("skipped", &view.skipped)] {
@@ -2440,7 +2443,7 @@ impl Wf {
         }
         lists.extend(view.blocked.iter().map(|b| (node_key(&b.issue.repo, b.issue.number), "blocked")));
         view.graph = Some(graph(&covered, &aliases, all, &tickets, &lists));
-        Ok(serde_json::to_value(view)?)
+        Ok(view)
     }
 
     fn flow_build(

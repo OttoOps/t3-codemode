@@ -1230,6 +1230,25 @@ async fn get_flow(State(web): State<Web>) -> Response {
     }
 }
 
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SyncFlowLinksBody {}
+
+async fn post_flow_sync_links(State(web): State<Web>, raw: Bytes) -> Response {
+    if !raw.is_empty()
+        && let Err(e) = body::<SyncFlowLinksBody>(&raw)
+    {
+        return error(StatusCode::BAD_REQUEST, e);
+    }
+    match web.app.wf.sync_flow_links().await {
+        Ok(res) => match serde_json::to_value(res) {
+            Ok(v) => json_ok(StatusCode::OK, web.app.redact_value(v)),
+            Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, web.app.t3.redact(format!("{e:#}"))),
+        },
+        Err(e) => error(StatusCode::BAD_GATEWAY, web.app.t3.redact(format!("{e:#}"))),
+    }
+}
+
 async fn launch_new_issue(State(web): State<Web>, Path(id): Path<String>) -> Response {
     match web.app.wf.launch_new_issue(&id).await {
         Ok(v) => json_ok(StatusCode::OK, v),
@@ -1436,6 +1455,7 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/new-issues/{id}/dismiss", post(dismiss_new_issue))
         .route("/api/new-issues/{id}/restore", post(restore_new_issue))
         .route("/api/flow", get(get_flow))
+        .route("/api/flow/sync-links", post(post_flow_sync_links))
         .route("/api/open", post(open_link))
         .route("/api/contexts", get(list_contexts))
         .route("/api/contexts/{id}", put(put_context).delete(delete_context))
