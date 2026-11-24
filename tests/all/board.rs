@@ -1729,13 +1729,20 @@ fn page_scenario(html: &str, st: &Value, body: &str) -> Value {
 }
 
 #[tokio::test]
-async fn the_page_is_a_fixed_shell_with_panels_tabs_and_skip_links() {
+async fn the_page_is_a_fixed_shell_with_view_tabs_and_skip_links() {
     let (html, _) = two_gate_page().await;
     for needle in [
         "height: 100dvh",
         "html, body { height: 100%; margin: 0; overflow: hidden; }",
+        "#composer { grid-row: 3; }",
+        ".views-main { grid-row: 4;",
+        r#"role="tablist" aria-label="Board views""#,
+        r#"id="vt-dispatch" aria-controls="view-dispatch""#,
+        r#"id="vt-issues" aria-controls="view-issues""#,
+        r#"id="vt-queue" aria-controls="view-queue""#,
+        r#"id="vt-activity" aria-controls="view-activity""#,
+        r#"role="tabpanel" aria-labelledby="vt-dispatch""#,
         r#"role="tablist" aria-label="Ticket lists""#,
-        r#"id="tab-open""#,
         r#"id="tab-done""#,
         r#"id="tab-settled""#,
         r#"id="new-cards""#,
@@ -1758,7 +1765,7 @@ async fn the_page_is_a_fixed_shell_with_panels_tabs_and_skip_links() {
         assert!(!html.contains(banned), "found {banned}");
     }
     for line in html.lines().filter(|l| l.contains("box-shadow")) {
-        assert!(line.contains("box-shadow: none"), "{line}");
+        assert!(line.contains("box-shadow: none") || line.contains("box-shadow: var(--shadow-pop)"), "{line}");
     }
 }
 
@@ -2106,7 +2113,12 @@ await act(b, "/api/asks/q1/settle");
 b.remove();
 close.focus();
 close.dispatch("click");
-return { shown, back, unfocusable, hidden: err.hidden, fallback: document.activeElement === document.getElementById("issues") };
+const fallback = document.activeElement === document.getElementById("issues");
+const sa = document.createElement("button");
+document.getElementById("p-arch").append(sa);
+await act(sa, "/api/settle-done");
+const arch = [document.getElementById("arch-err").hidden, document.getElementById("arch-err-text").textContent, document.getElementById("act-err-text").textContent];
+return { shown, back, unfocusable, hidden: err.hidden, fallback, arch };
 "##
         ),
     );
@@ -2115,6 +2127,29 @@ return { shown, back, unfocusable, hidden: err.hidden, fallback: document.active
     assert_eq!(r["unfocusable"], true, "{r}");
     assert_eq!(r["hidden"], true, "{r}");
     assert_eq!(r["fallback"], true, "{r}");
+    assert_eq!(r["arch"], json!([false, "settle failed", ""]), "{r}");
+}
+
+#[tokio::test]
+async fn a_merge_gate_reads_as_its_pull_request_and_title_whatever_its_options() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        r##"
+const c0 = base.cards[0];
+const pr = { number: 81, url: "https://github.com/acme/widgets/pull/81", state: "open" };
+const tree = base.tree.map((t) => t.thread === c0.ticket ? { ...t, humanTitle: "Fix the grader", pr } : t);
+const ask = (opts) => {
+  emitState({ ...base, tree, cards: [{ ...c0, options: opts }] });
+  return card(c0.id).querySelector('[data-part="ask"]').textContent;
+};
+return { two: ask(["merge", "merge and deploy"]), one: ask(["merge"]), plain: (emitState({ ...base, cards: [c0] }), card(c0.id).querySelector('[data-part="ask"]').textContent) };
+"##,
+    );
+    assert_eq!(r["two"], "Merge PR #81: Fix the grader", "{r}");
+    assert_eq!(r["one"], "Merge PR #81: Fix the grader", "{r}");
+    assert!(r["plain"].as_str().unwrap().contains("merge #81"), "{r}");
 }
 
 #[tokio::test]
@@ -2607,7 +2642,7 @@ async fn contexts_save_the_execution_statuses() {
     );
 }
 
-const PULSE_TREE: &str = r##"
+const PR_TREE: &str = r##"
 const pr = (n, extra) => ({ number: n, url: "https://github.com/acme/a/pull/" + n, state: "open", ...extra });
 const ready = (o) => ({ isDraft: false, mergeStateStatus: "CLEAN", reviewDecision: "APPROVED", checks: "passing", ...o });
 const tree = [
@@ -2621,110 +2656,80 @@ const tree = [
   T("acme/a#8", { pr: pr(8) }),
   T("acme/a#9", { status: "running", paused: true, pr: pr(90, { readiness: ready({ checks: "failing" }) }), workers: [W("#9 PR 1/2", "idle", { pr: pr(90, { readiness: ready({ checks: "failing" }) }) }), W("#9 PR 2/2", "idle", { pr: pr(91, { readiness: ready() }) })] }),
 ];
-const slot = (k) => q('#pslots [data-slot="' + k + '"]');
-const look = () => Object.fromEntries(["active", "green", "review", "held", "alert"].map((k) =>
-  [k, [slot(k).querySelector(".pn").textContent, slot(k).querySelector(".pd").textContent, slot(k).getAttribute("aria-pressed")]]));
 const open = () => [...document.getElementById("open").children].filter((e) => e.dataset.thread && !e.classList.contains("gone")).map((e) => e.dataset.thread.slice(2));
 const statusBtn = () => q('[data-facet="statuses"] [data-part="fbtn"]').textContent;
 "##;
 
 #[tokio::test]
-async fn the_pulse_strip_counts_execution_states_and_toggles_status_filters() {
+async fn the_route_marks_merge_gates_only_and_keeps_unmerged_finished_workers_grey() {
     let (html, st) = two_gate_page().await;
     let r = page_scenario(
         &html,
         &st,
         &format!(
             r##"{ROWS}
-{PULSE_TREE}
-const facet = (key) => q('[data-facet="' + key + '"]');
-const pick = (key, val) => {{
-  if (facet(key).querySelector('[data-part="fpop"]').hidden) facet(key).querySelector('[data-part="fbtn"]').dispatch("click");
-  const box = facet(key).querySelector('[data-val="' + val + '"] input');
-  box.checked = !box.checked;
-  box.dispatch("change");
-}};
-emitState({{ ...base, cards: [], tree, flowMaxTickets: 6 }});
-const before = look();
-slot("green").dispatch("click");
-const green = {{ open: open(), slots: look(), status: statusBtn() }};
-slot("held").dispatch("click");
-const both = open();
-slot("green").dispatch("click");
-slot("held").dispatch("click");
-const cleared = {{ open: open().length, status: statusBtn(), slots: look() }};
-pick("statuses", "blocked");
-const facetOnly = look().held[2];
-slot("held").dispatch("click");
-const composed = {{ open: open(), held: look().held }};
-slot("held").dispatch("click");
-const off = {{ open: open().length, status: statusBtn() }};
-emitState({{ ...base, cards: [], tree }});
-return {{ before, green, both, cleared, facetOnly, composed, off, uncapped: look().active[1] }};
+{PR_TREE}
+const step = (n) => ({{ n, of: 4 }});
+const rt = [T("acme/r#1", {{ progress: {{ step: 3, of: 4, merged: 1 }}, workers: [
+  W("#1 PR 1/4", "done", {{ step: step(1), pr: pr(11, {{ state: "merged" }}) }}),
+  W("#1 PR 2/4", "done", {{ step: step(2) }}),
+  W("#1 PR 3/4", "idle", {{ step: step(3), pr: pr(13) }}),
+  W("#1 PR 4/4", "idle", {{ step: step(4), pr: pr(14) }}),
+] }})];
+const gate = (id, text) => ({{ ...base.cards[0], id, kind: "gate", ticket: "t-acme/r#1", label: "acme/r#1", text }});
+emitState({{ ...base, tree: rt, cards: [
+  gate("g1", '**ACTION NEEDED:** reply "merge" to merge #13, here: https://github.com/acme/a/pull/13'),
+  gate("g2", "**ACTION NEEDED:** decide each open review finding on #14"),
+] }});
+return [...row("acme/r#1").querySelectorAll(".station")].map((b) => [b.children[0].className, b.children[2].textContent, b.getAttribute("data-seg-r")]);
 "##
         ),
     );
-    assert_eq!(
-        r["before"],
-        json!({
-            "active": ["6", "2 threads running, 9 of 6 tickets, 3 over the cap", "false"],
-            "green": ["3", "#2, #3, #91", "false"],
-            "review": ["1", "#4 CI", "false"],
-            "held": ["3", "2 paused, 1 blocked", "false"],
-            "alert": ["2", "#7, #90 failing after approval", "false"],
-        }),
-        "{r}"
-    );
-    assert_eq!(r["green"]["open"], json!(["acme/a#9", "acme/a#2", "acme/a#3"]), "{r}");
-    assert_eq!(r["green"]["status"], "Status: ready to merge", "{r}");
-    assert_eq!(
-        (&r["green"]["slots"]["green"], &r["green"]["slots"]["active"][0], &r["green"]["slots"]["review"][0]),
-        (&json!(["3/3", "#2, #3, #91", "true"]), &json!("2/6"), &json!("0/1")),
-        "{r}"
-    );
-    assert_eq!(r["both"], json!(["acme/a#6", "acme/a#9", "acme/a#2", "acme/a#3", "acme/a#5"]), "{r}");
-    assert_eq!((&r["cleared"]["open"], &r["cleared"]["status"]), (&json!(9), &json!("Status")), "{r}");
-    assert_eq!(r["cleared"]["slots"], r["before"], "{r}");
-    assert_eq!(r["facetOnly"], "false", "{r}");
-    assert_eq!(r["composed"]["open"], json!(["acme/a#6", "acme/a#9", "acme/a#5"]), "{r}");
-    assert_eq!(r["composed"]["held"][2], "true", "{r}");
-    assert_eq!(r["off"], json!({"open": 9, "status": "Status"}), "{r}");
-    assert_eq!(r["uncapped"], "2 threads running", "{r}");
+    assert_eq!(r[0], json!(["st-dot merged", "merged", null]), "{r}");
+    assert_eq!(r[1], json!(["st-dot done", "done", null]), "{r}");
+    assert_eq!(r[2], json!(["st-dot gate", "merge gate", null]), "{r}");
+    assert_ne!(r[3][1], "merge gate", "{r}");
 }
 
 #[tokio::test]
-async fn the_pulse_strip_folds_on_short_windows_until_the_viewer_picks() {
-    let (html, _) = two_gate_page().await;
-    let look = r##"async () => {
-const q = (sel) => document.querySelector(sel);
-const was = () => ({ folded: q("#pulse").classList.contains("folded"), app: q("#app").classList.contains("pfold"),
-  expanded: q("#pulse-fold").getAttribute("aria-expanded"), saved: localStorage.getItem("t3board.pulse") });
-const before = was();
-q("#pulse-fold").dispatch("click");
-return { before, after: was() };
-}"##;
-    let media = |short: bool| {
-        format!(
-            "globalThis.matchMedia = (q) => ({{ matches: {short} && q === \"(max-height: 999px)\", addEventListener() {{}}, addListener() {{}} }});"
-        )
-    };
-    let short = run_page_async_with(&html, &media(true), look);
-    assert_eq!(
-        short,
-        json!({
-            "before": {"folded": true, "app": true, "expanded": "false", "saved": null},
-            "after": {"folded": false, "app": false, "expanded": "true", "saved": "open"},
-        })
-    );
-    let tall = run_page_async_with(&html, &media(false), look);
-    assert_eq!(tall["before"], json!({"folded": false, "app": false, "expanded": "true", "saved": null}), "{tall}");
-    assert_eq!(tall["after"]["saved"], "folded", "{tall}");
-    let picked = run_page_async_with(
+async fn pr_rows_match_worker_titles_done_rows_wait_behind_a_count_and_ask_flags_an_answer() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
         &html,
-        &format!("{}\nglobalThis.__storage = {{ \"t3board.pulse\": \"folded\" }};", media(false)),
-        look,
+        &st,
+        &format!(
+            r##"{ROWS}
+{PR_TREE}
+const rt = [
+  T("acme/s#1", {{ title: "s#1: Release tooling", humanTitle: "Release tooling", workers: [W("#1 PR 1/2", "running", {{ issueTitle: "Retry indexing", pr: pr(5) }})] }}),
+  T("acme/z#2", {{ title: "z#2: Other work", workers: [W("#2 PR 1/1", "running", {{ pr: pr(6) }})] }}),
+  T("acme/d#3", {{ status: "done", done: true }}),
+];
+emitState({{ ...base, cards: [], tree: rt }});
+setFilter({{ q: "indexing" }});
+const keys = [...document.getElementById("prs").children].filter((e) => !e.classList.contains("gone")).map((e) => e.dataset.key);
+setFilter({{}});
+document.getElementById("p-arch").append(document.getElementById("done"));
+q("#done .tk").focus();
+emitState({{ ...base, cards: [], tree: [...rt, T("acme/d#4", {{ status: "done", done: true }})] }});
+const nd = q("#new-done");
+const held = [nd.classList.contains("off"), nd.textContent, q('#done [data-thread="t-acme/d#4"]') ? true : false];
+nd.dispatch("click");
+const shown = !!q('#done [data-thread="t-acme/d#4"]');
+const ask = (status) => emitState({{ ...base, cards: [], tree: rt, asks: [{{ id: "q1", seq: 1, question: "Which tickets wait?", status, answer: status === "answered" ? "None" : null }}] }});
+ask("running");
+ask("answered");
+const dot = document.getElementById("ask-open").getAttribute("data-unread");
+openComposer("ask");
+return {{ keys, held, shown, dot, cleared: document.getElementById("ask-open").getAttribute("data-unread") }};
+"##
+        ),
     );
-    assert_eq!(picked["before"]["folded"], true, "{picked}");
+    assert_eq!(r["keys"], json!(["pr:https://github.com/acme/a/pull/5"]), "{r}");
+    assert_eq!(r["held"], json!([false, "1 new", false]), "{r}");
+    assert_eq!(r["shown"], true, "{r}");
+    assert_eq!(r["dot"], "", "{r}");
+    assert_eq!(r["cleared"], Value::Null, "{r}");
 }
 
 #[tokio::test]
@@ -2735,7 +2740,7 @@ async fn rows_and_pills_show_pr_readiness_and_the_pause_tone() {
         &st,
         &format!(
             r##"{ROWS}
-{PULSE_TREE}
+{PR_TREE}
 emitState({{ ...base, cards: [], tree }});
 const pill = (label, sel) => {{
   const p = row(label).querySelector(sel || ".side .pr .spill");
@@ -2791,7 +2796,7 @@ const inspected = () => [...document.querySelectorAll("[data-inspected]")].filte
 fn drawer_scenario(html: &str, st: &Value, body: &str) -> Value {
     run_page_async(
         html,
-        &format!("async () => {{\n{PAGE_HELPERS}\nconst base = {st};\n{ROWS}\n{PULSE_TREE}\n{DRAWER}\n{body}\n}}"),
+        &format!("async () => {{\n{PAGE_HELPERS}\nconst base = {st};\n{ROWS}\n{PR_TREE}\n{DRAWER}\n{body}\n}}"),
     )
 }
 
@@ -2836,7 +2841,7 @@ return { before, ticket, live, closed, worker, pill, chipBack, entered, back: do
         r["ticket"],
         json!({"open": true, "id": "acme/a#2", "part": null, "title": "acme/a#2", "st": "idle", "pr": "#2 ready",
                "issue": "https://github.com/acme/a/issues/2", "ghpr": "Open PR #2 on GitHub", "pause": "Pause", "focus": true,
-               "prevented": false, "marked": ["t-acme/a#2"], "scroll": 120}),
+               "prevented": false, "marked": ["t-acme/a#2", "t-acme/a#2"], "scroll": 120}),
         "{r}"
     );
     assert_eq!(
@@ -3795,10 +3800,9 @@ return { search, asked, f, off: document.activeElement !== document.body };
 }
 
 #[tokio::test]
-async fn the_theme_toggle_cycles_persists_and_survives_missing_storage() {
+async fn the_theme_starts_dark_cycles_persists_and_survives_missing_storage() {
     let (html, st) = two_gate_page().await;
     let prelude = r#"
-globalThis.__storage = { "t3board.theme": "dark" };
 globalThis.__dark = false;
 globalThis.__mq = [];
 globalThis.matchMedia = (m) => ({ get matches() { return /prefers-color-scheme: dark/.test(m) && globalThis.__dark; }, addEventListener: (_, f) => globalThis.__mq.push(f) });
@@ -3814,38 +3818,69 @@ const shown = () => btn.querySelectorAll("[data-theme-icon]").filter((s) => !s.h
 const snap = () => ({{ theme: root.getAttribute("data-theme"), stored: localStorage.getItem("t3board.theme"), label: btn.getAttribute("aria-label") }});
 const loaded = snap();
 btn.dispatch("click");
+const light = snap();
+for (const f of document.listeners.keydown) f({{ key: "t", target: document.body, preventDefault() {{}} }});
 const system = snap();
 globalThis.__dark = true;
 for (const f of globalThis.__mq) f();
 const osDark = snap();
-btn.dispatch("click");
-const light = snap();
 for (const k of ["system", "light", "dark"]) btn.append(h("svg", {{ "data-theme-icon": k }}));
-localStorage.setItem = () => {{ throw new Error("blocked"); }};
+localStorage.removeItem = () => {{ throw new Error("blocked"); }};
 btn.dispatch("click");
 const noStore = {{ ...snap(), icons: shown() }};
-return {{ loaded, system, osDark, light, noStore }};
+return {{ loaded, light, system, osDark, noStore }};
 }}"##
     );
     let r = run_page_async_with(&html, prelude, &body);
     assert_eq!(
         r["loaded"],
-        json!({"theme": "dark", "stored": "dark", "label": "Theme: Dark. Switch to System"}),
+        json!({"theme": "dark", "stored": null, "label": "Theme: Dark. Switch to Light"}),
+        "dark is the default even when the OS is light: {r}"
+    );
+    assert_eq!(
+        r["light"],
+        json!({"theme": "light", "stored": "light", "label": "Theme: Light. Switch to System"}),
         "{r}"
     );
     assert_eq!(
         r["system"],
-        json!({"theme": "light", "stored": null, "label": "Theme: System. Switch to Light"}),
-        "{r}"
+        json!({"theme": "light", "stored": "system", "label": "Theme: System. Switch to Dark"}),
+        "t cycles the theme like the button: {r}"
     );
     assert_eq!(r["osDark"]["theme"], json!("dark"), "System follows the OS: {r}");
-    assert_eq!(
-        r["light"],
-        json!({"theme": "light", "stored": "light", "label": "Theme: Light. Switch to Dark"}),
-        "{r}"
-    );
     assert_eq!(r["noStore"]["theme"], json!("dark"), "a storage error still switches the theme: {r}");
     assert_eq!(r["noStore"]["icons"], json!(["dark"]), "{r}");
+    let legacy = run_page_async_with(
+        &html,
+        &format!("{prelude}\nglobalThis.__storage = {{ \"t3board.theme\": \"dark\" }};"),
+        "() => document.documentElement.getAttribute(\"data-theme\")",
+    );
+    assert_eq!(legacy, json!("dark"), "a saved dark choice still loads dark");
+}
+
+#[tokio::test]
+async fn the_density_toggle_compacts_rows_and_is_remembered() {
+    let (html, st) = two_gate_page().await;
+    let body = format!(
+        r##"() => {{
+{PAGE_HELPERS}
+const base = {st};
+emitState(base);
+const root = document.documentElement;
+const btn = document.getElementById("density-btn");
+const snap = () => [root.getAttribute("data-density"), btn.getAttribute("aria-pressed"), localStorage.getItem("t3board.density")];
+const before = snap();
+btn.dispatch("click");
+const compact = snap();
+for (const f of document.listeners.keydown) f({{ key: "d", target: document.body, preventDefault() {{}} }});
+return {{ before, compact, back: snap() }};
+}}"##
+    );
+    let r = run_page_async_with(&html, "", &body);
+    assert_eq!(r["before"], json!([null, "false", null]), "{r}");
+    assert_eq!(r["compact"], json!(["compact", "true", "compact"]), "{r}");
+    assert_eq!(r["back"], json!([null, "false", null]), "d toggles it back: {r}");
+    assert!(html.contains(r#":root[data-density="compact"] { --row-pad: 6px; --gap: 12px; }"#));
 }
 
 #[tokio::test]
@@ -4940,8 +4975,8 @@ return {{
   states: keys.map((k) => q('#open [data-key="' + k + '"]').dataset.state),
   marks: ["acme/a#1", "acme/b#2"].map((l) => row(l).querySelector(".mk .mark").className),
   worker: row("acme/a#1").querySelector(".wi .mark").className,
-  running: q("#counts").children[1].firstChild.textContent,
-  need: q("#counts").children[0].firstChild.textContent,
+  running: String(document.querySelectorAll("#open .stp").filter((p) => p.textContent === "Running").length),
+  need: document.getElementById("vn-dispatch").textContent,
   lead: (() => {{
     emitState({{ ...base, cards: [c1, {{ ...base.cards[1], id: "a9", kind: "blocker", ticket: "t-acme/a#1", label: "acme/a#1" }}], tree, counts: {{ ...base.counts, cards: 2, running: 0 }} }});
     return row("acme/a#1").querySelector('[data-part="needs"]').textContent;
@@ -5279,9 +5314,9 @@ async fn the_event_stream_pushes_an_issue_as_soon_as_a_thread_reports_it() {
 }
 
 #[tokio::test]
-async fn new_issues_sit_above_tickets_with_their_links_and_a_count() {
+async fn new_issues_get_their_own_view_with_their_links_and_a_count() {
     let (html, st) = new_issue_page().await;
-    assert!(html.find(r#"id="p-new""#).unwrap() < html.find(r#"id="p-tix""#).unwrap());
+    assert!(html.find(r#"id="view-issues""#).unwrap() < html.find(r#"id="p-new""#).unwrap());
     let r = new_scenario(
         &html,
         &st,
@@ -5358,13 +5393,13 @@ async fn a_launched_issue_leaves_a_placeholder_while_the_reader_is_in_the_column
         &st,
         r##"
 emitState(base);
-q("#tixcol").dispatch("pointerenter");
+q("#p-new").dispatch("pointerenter");
 fetchReply = answer({ ok: true, label: "widgets#43" });
 btn("n1", "launch").dispatch("click");
 await flush();
 emitState({ ...base, newIssues: base.newIssues.filter((i) => i.id !== "n1") });
 const held = { rows: rows(), note: row("n1").textContent, chip: q("#n-new").textContent };
-q("#tixcol").dispatch("pointerleave");
+q("#p-new").dispatch("pointerleave");
 advance(10);
 return { held, after: rows() };
 "##,
@@ -5374,23 +5409,25 @@ return { held, after: rows() };
 }
 
 #[tokio::test]
-async fn a_new_issue_waits_behind_the_count_while_a_ticket_has_focus() {
+async fn a_new_issue_waits_behind_the_count_while_focus_is_in_new_issues() {
     let (html, st) = new_issue_page().await;
     let r = new_scenario(
         &html,
         &st,
         r##"
-const none = { ...base, newIssues: [], counts: { ...base.counts, newIssues: 0 } };
-document.getElementById("tixcol").append(document.getElementById("open"));
-emitState(none);
-q("#open .tk").focus();
+const one = { ...base, newIssues: base.newIssues.filter((i) => i.id === "n1"), counts: { ...base.counts, newIssues: 1 } };
+sec().append(q("#nis"));
+selectView("issues");
+emitState(one);
+btn("n1", "launch").focus();
 emitState(base);
-const held = { rows: rows(), slot: q("#new-nis").textContent, off: q("#new-nis").classList.contains("off") };
+const held = { rows: rows(), slot: q("#new-nis").textContent, off: q("#new-nis").classList.contains("off"),
+  focus: document.activeElement === btn("n1", "launch") };
 q("#new-nis").dispatch("click");
 return { held, after: rows(), off: q("#new-nis").classList.contains("off") };
 "##,
     );
-    assert_eq!(r["held"], json!({"rows": [], "slot": "2 new", "off": false}), "{r}");
+    assert_eq!(r["held"], json!({"rows": ["n1"], "slot": "1 new", "off": false, "focus": true}), "{r}");
     assert_eq!(r["after"], json!(["n2", "n1"]), "{r}");
     assert_eq!(r["off"], true, "{r}");
 }
@@ -5488,410 +5525,31 @@ async fn the_board_offers_a_newer_release_and_a_reload_after_one() {
     assert_eq!(r["current"], true, "{r}");
 }
 
-const LAYOUT_PRELUDE: &str = r##"
-const __mq = { wide: false, ls: [] };
-globalThis.matchMedia = (query) => ({
-  get matches() { return /min-width: 1200px/.test(query) ? __mq.wide : false; },
-  addEventListener: (_, f) => __mq.ls.push(f),
-});
-"##;
-
-const LAYOUT_HELPERS: &str = r##"
-const setWide = (on) => { __mq.wide = on; for (const f of __mq.ls) f(); };
-const heads = () => {
-  for (const id of ["p-dec", "p-new", "p-tix", "p-act"]) {
-    const ph = document.createElement("div"); ph.className = "ph"; document.getElementById(id).append(ph);
-  }
-  const form = document.getElementById("launch");
-  const ph = document.createElement("div"); ph.className = "ph"; form.append(ph);
-  document.getElementById("composer").append(form);
-};
-const main = () => document.getElementById("main");
-const where = () => main().children.filter((c) => c.classList.contains("lcol")).map((c) => c.children.filter((x) => x.id).map((x) => x.id));
-const grip = (id) => q("#" + id + " .grip");
-const fold = (id) => q("#" + id + " .fold");
-const key = (el, k) => el.dispatch("keydown", { key: k, stopPropagation() {} });
-const saved = () => JSON.parse(localStorage.getItem("t3board.layout") || "null");
-"##;
-
-fn layout_scenario(html: &str, st: &Value, storage: &str, body: &str) -> Value {
-    let prelude = format!("globalThis.__storage = {storage};\n{LAYOUT_PRELUDE}");
-    run_page_async_with(
-        html,
-        &prelude,
-        &format!("async () => {{\n{PAGE_HELPERS}\n{LAYOUT_HELPERS}\nconst base = {st};\nemitState(base);\n{body}\n}}"),
-    )
-}
-
 #[tokio::test]
-async fn panels_move_and_collapse_from_the_keyboard_and_the_layout_is_saved() {
+async fn with_no_new_issues_the_view_says_so() {
     let (html, st) = new_issue_page().await;
-    let r = layout_scenario(
-        &html,
-        &st,
-        "{}",
-        r##"
-heads();
-setWide(true);
-const start = { where: where(), grips: document.querySelectorAll(".grip").length, reset: q("#lay-reset").hidden, saved: saved() };
-grip("p-dec").focus();
-key(grip("p-dec"), "ArrowRight");
-const moved = { where: where(), focus: document.activeElement === grip("p-dec") };
-advance(100);
-moved.said = q("#live").textContent;
-key(grip("p-dec"), "ArrowLeft");
-key(grip("p-dec"), "ArrowLeft");
-advance(100);
-const edge = { where: where(), said: q("#live").textContent };
-key(grip("p-act"), "ArrowUp");
-fold("p-new").dispatch("click");
-advance(100);
-return {
-  start, moved, edge,
-  after: {
-    where: where(), up: where()[2],
-    collapsed: q("#p-new").classList.contains("collapsed"),
-    expanded: fold("p-new").getAttribute("aria-expanded"),
-    label: fold("p-new").getAttribute("aria-label"),
-    said: q("#live").textContent,
-    reset: q("#lay-reset").hidden,
-    saved: saved(),
-  },
-};
-"##,
-    );
-    assert_eq!(
-        r["start"],
-        json!({"where": [["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-route", "p-act"]], "grips": 5, "reset": true, "saved": null}),
-        "{r}"
-    );
-    assert_eq!(
-        r["moved"]["where"],
-        json!([[], ["p-dec", "p-new", "p-flow", "p-tix"], ["composer", "p-route", "p-act"]]),
-        "{r}"
-    );
-    assert_eq!(r["moved"]["focus"], true, "{r}");
-    assert_eq!(r["moved"]["said"], "Needs you moved to column 2, position 1 of 3.", "{r}");
-    assert_eq!(
-        r["edge"]["where"],
-        json!([["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-route", "p-act"]]),
-        "{r}"
-    );
-    assert_eq!(r["edge"]["said"], "Needs you is already at column 1, position 1 of 1.", "{r}");
-    assert_eq!(r["after"]["up"], json!(["p-act", "composer", "p-route"]), "{r}");
-    assert_eq!(r["after"]["collapsed"], true, "{r}");
-    assert_eq!(r["after"]["expanded"], "false", "{r}");
-    assert_eq!(r["after"]["label"], "Expand New issues", "{r}");
-    assert_eq!(r["after"]["said"], "New issues collapsed.", "{r}");
-    assert_eq!(r["after"]["reset"], false, "{r}");
-    assert_eq!(
-        r["after"]["saved"],
-        json!({"cols": [{"w": null, "p": ["dec"]}, {"w": null, "p": ["new", "flow", "tix"]}, {"w": null, "p": ["act", "cmd", "route"]}], "h": {}, "c": {"route": true, "new": true}}),
-        "{r}"
-    );
-}
-
-#[tokio::test]
-async fn dropping_a_panel_where_it_already_shows_leaves_a_hidden_panel_in_place() {
-    let (html, st) = new_issue_page().await;
-    let r = layout_scenario(
-        &html,
-        &st,
-        "{}",
-        r##"
-heads();
-setWide(true);
-const col = main().children.filter((c) => c.classList.contains("lcol"))[1];
-col.rect = { left: 0, right: 500, top: 0, bottom: 800, width: 500, height: 800 };
-q("#p-new").rect = { top: 0, height: 200 };
-q("#p-tix").rect = { top: 200, height: 400 };
-layDragBegin("new", q("#p-new .ph"), { clientX: 10, clientY: 10 });
-layDragTo(10, 300);
-layDragEnd(true);
-return { hidden: q("#p-flow").hidden, where: where()[1], saved: saved() };
-"##,
-    );
-    assert_eq!(r, json!({"hidden": true, "where": ["p-new", "p-flow", "p-tix"], "saved": null}), "{r}");
-}
-
-#[tokio::test]
-async fn a_saved_layout_comes_back_and_a_bad_one_falls_back_to_the_default() {
-    let (html, st) = two_gate_page().await;
-    let good = r#"{"t3board.layout": "{\"cols\":[{\"w\":null,\"p\":[]},{\"w\":900,\"p\":[\"new\",\"dec\",\"tix\"]},{\"w\":400,\"p\":[\"act\",\"cmd\"]}],\"h\":{\"dec\":500,\"bogus\":3},\"c\":{\"act\":true,\"tix\":\"yes\"}}"}"#;
-    let r = layout_scenario(
-        &html,
-        &st,
-        good,
-        r##"
-heads();
-setWide(true);
-const back = {
-  where: where(), act: q("#p-act").classList.contains("collapsed"), tix: q("#p-tix").classList.contains("collapsed"),
-  flex: [q("#p-dec").style.flex, main().children.filter((c) => c.classList.contains("lcol"))[1].style.flex],
-  vacant: main().children.filter((c) => c.classList.contains("lcol"))[0].classList.contains("vacant"),
-  reset: q("#lay-reset").hidden,
-};
-q("#lay-reset").dispatch("click");
-return { back, reset: { where: where(), act: q("#p-act").classList.contains("collapsed"), saved: saved(), hidden: q("#lay-reset").hidden } };
-"##,
-    );
-    assert_eq!(
-        r["back"],
-        json!({"where": [[], ["p-new", "p-dec", "p-flow", "p-tix"], ["p-act", "composer", "p-route"]], "act": true, "tix": false,
-               "flex": ["500 1 0px", "900 1 0px"], "vacant": true, "reset": false}),
-        "{r}"
-    );
-    assert_eq!(
-        r["reset"],
-        json!({"where": [["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-route", "p-act"]], "act": false, "saved": null, "hidden": true}),
-        "{r}"
-    );
-    for bad in [
-        r#"{"t3board.layout": "{\"cols\":[{\"p\":[\"dec\",\"dec\"]},{\"p\":[\"new\",\"tix\"]},{\"p\":[\"cmd\"]}]}"}"#,
-        r#"{"t3board.layout": "{\"cols\":[{\"p\":[\"dec\",\"new\",\"tix\",\"cmd\",\"act\"]}]}"}"#,
-        r#"{"t3board.layout": "not json"}"#,
-    ] {
-        let r = layout_scenario(&html, &st, bad, "heads();\nsetWide(true);\nreturn where();");
-        assert_eq!(r, json!([["p-dec"], ["p-new", "p-flow", "p-tix"], ["composer", "p-route", "p-act"]]), "{bad}");
-    }
-}
-
-#[tokio::test]
-async fn narrow_widths_get_the_fixed_layout_back_and_wide_restores_the_saved_one() {
-    let (html, st) = two_gate_page().await;
-    let r = layout_scenario(
-        &html,
-        &st,
-        "{}",
-        r##"
-heads();
-setWide(true);
-key(grip("p-act"), "ArrowLeft");
-fold("p-tix").dispatch("click");
-const wide = where();
-setWide(false);
-const narrow = {
-  cols: main().children.filter((c) => c.classList.contains("lcol")).length,
-  tixcol: q("#tixcol").children.map((x) => x.id),
-  top: main().children.filter((x) => ["p-dec", "tixcol", "p-act", "composer"].includes(x.id)).map((x) => x.id),
-  collapsed: document.querySelectorAll(".collapsed").length,
-  splits: document.querySelectorAll(".vsplit").length + document.querySelectorAll(".hsplit").length,
-  lay: main().classList.contains("lay"),
-  reset: q("#lay-reset").hidden,
-};
-setWide(true);
-return { wide, narrow, again: where(), tix: q("#p-tix").classList.contains("collapsed") };
-"##,
-    );
-    assert_eq!(r["wide"], json!([["p-dec"], ["p-new", "p-flow", "p-tix", "p-act"], ["composer", "p-route"]]), "{r}");
-    assert_eq!(
-        r["narrow"],
-        json!({"cols": 0, "tixcol": ["p-new", "p-flow", "p-route", "p-tix"], "top": ["p-dec", "tixcol", "p-act", "composer"],
-               "collapsed": 1, "splits": 0, "lay": false, "reset": true}),
-        "{r}"
-    );
-    assert_eq!(r["again"], r["wide"], "{r}");
-    assert_eq!(r["tix"], true, "{r}");
-}
-
-#[tokio::test]
-async fn a_shortcut_to_a_collapsed_panel_expands_it_and_resizing_is_keyboard_driven() {
-    let (html, st) = new_issue_page().await;
-    let r = layout_scenario(
-        &html,
-        &st,
-        "{}",
-        r##"
-heads();
-setWide(true);
-fold("p-act").dispatch("click");
-const shut = q("#p-act").classList.contains("collapsed");
-jump("activity");
-const splits = { v: document.querySelectorAll(".vsplit").map((s) => [s.getAttribute("role"), s.getAttribute("aria-orientation"), s.getAttribute("aria-label")]),
-  h: document.querySelectorAll(".hsplit").filter((s) => !s.classList.contains("fixed")).map((s) => s.getAttribute("aria-label")) };
-const hs = document.querySelectorAll(".hsplit").filter((s) => !s.classList.contains("fixed"))[0];
-key(hs, "ArrowDown");
-const flat = saved();
-q("#p-new").rect = { height: 200 };
-q("#p-tix").rect = { height: 150 };
-key(hs, "ArrowDown");
-const small = saved();
-q("#p-tix").rect = { height: 500 };
-key(hs, "ArrowDown");
-key(hs, "ArrowUp");
-key(hs, "ArrowDown");
-return { shut, open: q("#p-act").classList.contains("collapsed"), splits, flat, small, sized: saved().h, flex: [q("#p-new").style.flex, q("#p-tix").style.flex] };
-"##,
-    );
-    assert_eq!(r["shut"], true, "{r}");
-    assert_eq!(r["open"], false, "{r}");
-    assert_eq!(
-        r["splits"],
-        json!({"v": [["separator", "vertical", "Resize column 1 and column 2"], ["separator", "vertical", "Resize column 2 and column 3"]],
-               "h": ["Resize New issues and Tickets", "Resize Launch and Ask and Activity"]}),
-        "{r}"
-    );
-    assert_eq!(r["flat"], Value::Null, "{r}");
-    assert_eq!(
-        r["small"],
-        json!({"cols": [{"w": null, "p": ["dec"]}, {"w": null, "p": ["new", "flow", "tix"]}, {"w": null, "p": ["cmd", "route", "act"]}], "h": {"new": 224, "tix": 126}, "c": {"route": true}}),
-        "{r}"
-    );
-    assert_eq!(r["sized"], json!({"new": 224, "tix": 476}), "{r}");
-    assert_eq!(r["flex"], json!(["224 1 0px", "476 1 0px"]), "{r}");
-}
-
-#[tokio::test]
-async fn layout_controls_stay_inert_on_narrow_screens_and_keep_columns_usable() {
-    let (html, st) = two_gate_page().await;
-    let r = layout_scenario(
-        &html,
-        &st,
-        "{}",
-        r##"
-heads();
-setWide(true);
-setWide(false);
-q("#p-dec .ph").dispatch("dblclick");
-q("#p-dec .ph").dispatch("pointerdown", { button: 0, isPrimary: true, clientX: 5, clientY: 5 });
-const narrow = { cols: main().children.filter((c) => c.classList.contains("lcol")).length, collapsed: document.querySelectorAll(".collapsed").length };
-setWide(true);
-const cols = main().children.filter((c) => c.classList.contains("lcol"));
-cols[0].rect = { width: 400 }; cols[1].rect = { width: 700 }; cols[2].rect = { width: 340 };
-key(document.querySelectorAll(".vsplit")[0], "ArrowRight");
-key(grip("p-new"), "ArrowLeft");
-key(grip("p-tix"), "ArrowRight");
-const emptied = where()[1];
-key(grip("p-tix"), "ArrowLeft");
-const back = { where: where()[1], flex: cols[1].style.flex, min: cols[1].style.minWidth, w: saved().cols.map((c) => c.w) };
-return { narrow, emptied, back };
-"##,
-    );
-    assert_eq!(html.matches(r#"class="lay-only" hidden"#).count(), 8);
-    assert_eq!(r["narrow"], json!({"cols": 0, "collapsed": 1}), "{r}");
-    assert_eq!(r["emptied"], json!(["p-flow"]), "{r}");
-    assert_eq!(
-        r["back"],
-        json!({"where": ["p-flow", "p-tix"], "flex": "382 1 0px", "min": "320px", "w": [424, 382, 340]}),
-        "{r}"
-    );
-}
-
-#[tokio::test]
-async fn new_issues_hold_follows_their_column_and_jumps_open_collapsed_panels() {
-    let (html, st) = two_gate_page().await;
-    let r = layout_scenario(
-        &html,
-        &st,
-        "{}",
-        r##"
-heads();
-setWide(true);
-key(grip("p-act"), "ArrowLeft");
-const cols = main().children.filter((c) => c.classList.contains("lcol"));
-cols[1].dispatch("pointerenter");
-const inNewColumn = newView.colPointer;
-cols[1].dispatch("pointerleave");
-cols[2].dispatch("pointerenter");
-const elsewhere = newView.colPointer;
-cols[2].dispatch("pointerleave");
-const item = document.createElement("li");
-q("#p-act").append(item);
-item.focus();
-const focusHolds = !newLive(panels.newIssues);
-fold("p-dec").dispatch("click");
-jumpToCard(base.cards[0].id);
-const decOpen = !q("#p-dec").classList.contains("collapsed");
-fold("p-tix").dispatch("click");
-jumpToTicket(base.cards[0].ticket || "nope");
-const tixOpen = !q("#p-tix").classList.contains("collapsed");
-const hs = document.querySelectorAll(".hsplit").filter((s) => !s.classList.contains("fixed"))[0];
-hs.focus();
-hs.dispatch("dblclick");
-return { inNewColumn, elsewhere, focusHolds, decOpen, tixOpen, splitKept: document.activeElement === hs && hs.isConnected };
-"##,
-    );
-    assert_eq!(
-        r,
-        json!({"inNewColumn": true, "elsewhere": false, "focusHolds": true, "decOpen": true, "tixOpen": true, "splitKept": true}),
-        "{r}"
-    );
-}
-
-#[tokio::test]
-async fn collapsing_keeps_scroll_and_focus_and_narrowing_keeps_focus() {
-    let (html, st) = two_gate_page().await;
-    let r = layout_scenario(
-        &html,
-        &st,
-        "{}",
-        r##"
-heads();
-setWide(true);
-const hint = q("#lay-hint").hidden;
-const list = document.createElement("ol"); list.className = "scroll";
-const item = document.createElement("li"); list.append(item);
-const body = document.createElement("div"); body.className = "body"; body.append(list);
-q("#p-act").append(body);
-list.scrollTop = 300;
-item.focus();
-fold("p-act").dispatch("click");
-const shut = { focus: document.activeElement === fold("p-act"), saved: lay.scroll.act };
-list.scrollTop = 0;
-fold("p-act").dispatch("click");
-const open = list.scrollTop;
-key(grip("p-new"), "ArrowRight");
-const cols = main().children.filter((c) => c.classList.contains("lcol"));
-cols[1].dispatch("pointerenter");
-const holdOld = newPointer();
-cols[1].dispatch("pointerleave");
-cols[2].dispatch("pointerenter");
-const holdNew = newPointer();
-const nlist = document.createElement("ol"); nlist.className = "scroll";
-const nbody = document.createElement("div"); nbody.className = "body"; nbody.append(nlist);
-q("#p-new").append(nbody);
-nlist.scrollTop = 120;
-fold("p-new").dispatch("click");
-const heldShut = !newLive(panels.newIssues);
-fold("p-new").dispatch("click");
-nlist.scrollTop = 0;
-const ask = document.getElementById("ask");
-const question = document.getElementById("question");
-ask.append(question);
-q("#composer").append(ask);
-question.focus();
-setWide(false);
-return { hint, shut, open, holdOld, holdNew, heldShut, narrowFocus: document.activeElement === question, mode: q("#composer").getAttribute("data-mode"), narrowHint: q("#lay-hint").hidden };
-"##,
-    );
-    assert_eq!(
-        r,
-        json!({"hint": false, "shut": {"focus": true, "saved": [300]}, "open": 300, "holdOld": false, "holdNew": true, "heldShut": true,
-               "narrowFocus": true, "mode": "ask", "narrowHint": true}),
-        "{r}"
-    );
-}
-
-#[tokio::test]
-async fn with_no_new_issues_nothing_renders_above_tickets() {
-    let (html, st) = new_issue_page().await;
-    assert!(html.contains(r#"data-view="open" data-empty="" hidden>"#));
+    assert!(html.contains(r#"data-view="open" data-empty="">"#));
     let r = new_scenario(
         &html,
         &st,
         r##"
 const none = { ...base, newIssues: [], counts: { ...base.counts, newIssues: 0 } };
+const tab = () => [document.getElementById("vn-issues").textContent, document.getElementById("vt-issues").getAttribute("aria-label")];
 emitState(none);
-const empty = { sec: sec().hidden, route: q("#dismissed-open").hidden };
+const empty = { none: q("#nis-none").hidden, route: q("#dismissed-open").hidden, tab: tab() };
 emitState(base);
-const shown = { sec: sec().hidden, route: q("#dismissed-open").hidden, view: q("#new-view").hidden };
+const shown = { none: q("#nis-none").hidden, route: q("#dismissed-open").hidden, view: q("#new-view").hidden, tab: tab() };
 emitState(none);
-return { empty, shown, again: sec().hidden };
+return { empty, shown, again: q("#nis-none").hidden };
 "##,
     );
-    assert_eq!(r["empty"], json!({"sec": true, "route": true}), "{r}");
-    assert_eq!(r["shown"], json!({"sec": false, "route": true, "view": true}), "{r}");
-    assert_eq!(r["again"], true, "{r}");
+    assert_eq!(r["empty"], json!({"none": false, "route": true, "tab": ["", "New Issues"]}), "{r}");
+    assert_eq!(
+        r["shown"],
+        json!({"none": true, "route": true, "view": true, "tab": ["2", "New Issues, 2 new"]}),
+        "{r}"
+    );
+    assert_eq!(r["again"], false, "{r}");
 }
 
 #[tokio::test]
@@ -5930,7 +5588,7 @@ async fn an_issue_held_behind_the_count_flashes_when_revealed() {
         &st,
         r##"
 emitState(base);
-q("#tixcol").dispatch("pointerenter");
+q("#p-new").dispatch("pointerenter");
 const issue = { ...base.newIssues[0], id: "n9", label: "widgets#49", number: 49 };
 emitState({ ...base, newIssues: [issue, ...base.newIssues] });
 const held = { rows: rows(), slot: q("#new-nis").textContent };
@@ -5976,23 +5634,24 @@ async fn dismissed_issues_stay_reachable_from_settled_while_none_are_new() {
         &st,
         r##"
 emitState(base);
-const hidden = { sec: sec().hidden, route: q("#dismissed-open").hidden, n: q("#n-dismissed-s").textContent,
+const hidden = { none: q("#nis-none").hidden, route: q("#dismissed-open").hidden, n: q("#n-dismissed-s").textContent,
   name: q("#dismissed-open").getAttribute("aria-label") };
 sec().append(q("#new-view"));
+selectView("activity");
 q("#dismissed-open").dispatch("click");
-const view = { sec: sec().hidden, rows: rows(), head: q("#h-new-t").textContent, route: q("#dismissed-open").hidden,
-  focus: document.activeElement === q("#new-view") };
+const view = { none: q("#nis-none").hidden, rows: rows(), head: q("#h-new-t").textContent, route: q("#dismissed-open").hidden,
+  focus: document.activeElement === q("#new-view"), on: q("#app").dataset.view };
 q("#new-view").dispatch("click");
-return { hidden, view, back: sec().hidden, refocus: document.activeElement === q("#dismissed-open") };
+return { hidden, view, back: q("#nis-none").hidden, refocus: document.activeElement === q("#new-view") };
 "##,
     );
-    assert_eq!(r["hidden"], json!({"sec": true, "route": false, "n": "1", "name": "Show 1 dismissed issues"}), "{r}");
+    assert_eq!(r["hidden"], json!({"none": false, "route": false, "n": "1", "name": "Show 1 dismissed issues"}), "{r}");
     assert_eq!(
         r["view"],
-        json!({"sec": false, "rows": ["n1"], "head": "Dismissed issues", "route": true, "focus": true}),
+        json!({"none": true, "rows": ["n1"], "head": "Dismissed issues", "route": true, "focus": true, "on": "issues"}),
         "{r}"
     );
-    assert_eq!((&r["back"], &r["refocus"]), (&json!(true), &json!(true)), "{r}");
+    assert_eq!((&r["back"], &r["refocus"]), (&json!(false), &json!(true)), "{r}");
 }
 
 #[tokio::test]
@@ -6003,7 +5662,7 @@ async fn clearing_the_filter_over_tickets_brings_issues_back_at_once_without_a_f
         &st,
         r##"
 emitState(base);
-q("#tixcol").dispatch("pointerenter");
+q("#p-new").dispatch("pointerenter");
 const box = document.getElementById("filter-q");
 box.focus();
 typeKeys("gadgets");
@@ -6016,34 +5675,6 @@ return { narrowed, rows: rows(), slot: q("#new-nis").textContent, lit: rows().ma
 "##,
     );
     assert_eq!(r, json!({"narrowed": ["n2"], "rows": ["n2", "n1"], "slot": "", "lit": [false, false]}));
-}
-
-#[tokio::test]
-async fn the_wide_layout_drops_the_divider_above_tickets_while_new_issues_hides() {
-    let (html, st) = new_issue_page().await;
-    let none = json!({"newIssues": [], "counts": {"newIssues": 0}});
-    let r = layout_scenario(
-        &html,
-        &st,
-        "{}",
-        &format!(
-            r##"
-const none = {{ ...base, ...{none}, counts: {{ ...base.counts, newIssues: 0 }} }};
-heads();
-setWide(true);
-const col = () => main().children.filter((c) => c.classList.contains("lcol"))[1];
-const kids = () => col().children.map((x) => x.id || x.className);
-const shown = kids();
-emitState(none);
-const hidden = {{ kids: kids(), vacant: col().classList.contains("vacant") }};
-emitState(base);
-return {{ shown, hidden, back: kids() }};
-"##
-        ),
-    );
-    assert_eq!(r["shown"], json!(["p-new", "p-flow", "hsplit", "p-tix"]), "{r}");
-    assert_eq!(r["hidden"], json!({"kids": ["p-new", "p-flow", "p-tix"], "vacant": false}), "{r}");
-    assert_eq!(r["back"], json!(["p-new", "p-flow", "hsplit", "p-tix"]), "{r}");
 }
 
 fn skills_home(h: &H) -> std::path::PathBuf {
@@ -10211,11 +9842,11 @@ fn answers_stored_before_the_cut_flag_infer_it_from_their_shape() {
 }
 
 #[tokio::test]
-async fn without_a_flow_the_graph_tab_draws_open_tickets_one_lane_per_repo_and_is_remembered() {
+async fn without_a_flow_the_graph_view_draws_open_tickets_one_lane_per_repo_and_is_remembered() {
     let (html, st) = two_gate_page().await;
     let r = run_page_async_with(
         &html,
-        r#"globalThis.__storage = { "t3board.graph": "on" };"#,
+        r#"globalThis.__storage = { "t3board.view": "queue" };"#,
         &format!(
             r##"async () => {{
 {PAGE_HELPERS}
@@ -10227,7 +9858,7 @@ const tree = [
   T("loose#3"),
   T("acme/a#4", {{ repo: "acme/a", done: true }}),
 ];
-const restored = document.getElementById("app").getAttribute("data-tab");
+const restored = document.getElementById("app").getAttribute("data-view");
 emitState({{ ...base, cards: [], tree }});
 const btn = (id) => q('.gnode[data-id="' + id + '"]');
 const lanes = document.querySelectorAll(".glt").map((t) => t.childNodes.filter((n) => n.nodeType === 3).map((n) => n.data).join(""));
@@ -10247,14 +9878,14 @@ const tabs = nodes.length && document.querySelectorAll(".gnode").filter((b) => b
 btn("t:t-acme/a#1").dispatch("click");
 const opened = document.getElementById("drawer").getAttribute("data-kind") + " " + q('#drawer [data-part="id"]').textContent;
 const depsHidden = q('#drawer [data-part="deps"]').hidden;
-graphRemember("open");
-const pref = localStorage.getItem("t3board.graph");
+selectView("dispatch");
+const pref = localStorage.getItem("t3board.view");
 return {{ restored, lanes, nodes, moved, end, keysOff, keysOn, tabs, opened, depsHidden, pref, note: q("#graph-note").textContent,
   edges: document.querySelectorAll(".ge").length, flowFetches: fetches.filter((f) => f.url === "/api/flow").length }};
 }}"##
         ),
     );
-    assert_eq!(r["restored"], "graph", "the viewer's last tab comes back from localStorage: {r}");
+    assert_eq!(r["restored"], "queue", "the viewer's last view comes back from localStorage: {r}");
     assert_eq!(r["lanes"], json!(["acme/a", "acme/b", "Tickets"]), "{r}");
     assert_eq!(
         r["nodes"],
@@ -10272,12 +9903,12 @@ return {{ restored, lanes, nodes, moved, end, keysOff, keysOn, tabs, opened, dep
     assert_eq!(r["tabs"], json!(["t:t-acme/b#2"]), "{r}");
     assert_eq!(r["opened"], "ticket acme/a#1", "{r}");
     assert_eq!(r["depsHidden"], true, "{r}");
-    assert_eq!(r["pref"], "off", "{r}");
-    for needle in ["id=\"tab-graph\"", "id=\"tp-graph\"", "t3board.graph", "createElementNS(SVG_NS"] {
+    assert_eq!(r["pref"], "dispatch", "{r}");
+    for needle in ["id=\"vt-queue\"", "id=\"tp-graph\"", "t3board.view", "createElementNS(SVG_NS"] {
         assert!(html.contains(needle), "missing {needle:?}");
     }
     let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/board.md")).unwrap();
-    assert!(doc.contains("### The Graph tab"), "docs/src/board.md documents the Graph tab");
+    assert!(doc.contains("### The Queue & Graph view"), "docs/src/board.md documents the graph view");
 }
 
 #[test]

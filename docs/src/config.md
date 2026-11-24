@@ -489,7 +489,7 @@ loses its card, and a move refuses a thread that is running.
 
 ### Flow
 
-The board's [dependency graph](board.md#the-graph-tab) works with no `flow`
+The board's [dependency graph](board.md#the-queue--graph-view) works with no `flow`
 block. `GET /api/flow` and [`wf.flow({ graph: true })`](globals.md#wfflow)
 discover the GitHub repositories attached to active T3 projects from each
 project's `repositoryIdentity` or git `origin` remote and read their open

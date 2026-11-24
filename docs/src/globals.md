@@ -150,7 +150,7 @@ parent and a child, and the service keeps every link and message in its store.
   the repo lacks them. Existing links and labels succeed as `alreadyLinked` or
   `alreadyApplied`. GitHub and permission errors land in `wiring.errors` and in
   `message`. You can also sync body-parsed links to GitHub from the board's
-  [Graph tab](board.md#the-graph-tab) through `POST /api/flow/sync-links`.
+  [dependency graph](board.md#the-queue--graph-view) through `POST /api/flow/sync-links`.
 - `wf.fileIssues({ repo?, parent?, track?, priority?, labels?, queue?, report?, sync?, issues })`
   creates a batch of GitHub issues forming a dependency DAG in one call. See
   [wf.fileIssues](#wffileissues).

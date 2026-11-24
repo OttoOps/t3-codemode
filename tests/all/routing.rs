@@ -659,62 +659,6 @@ return { week, hour, live, shut, reopened: asked().slice(same + live.asked.lengt
     assert_eq!(r["shut"], json!({"hidden": false, "collapsed": true, "expanded": "false", "asked": 0}), "{r}");
 }
 
-const WIDE: &str = r#"
-globalThis.__storage = { "t3board.layout": JSON.stringify({ cols: [{ w: null, p: ["dec"] }, { w: null, p: ["new", "flow", "tix"] }, { w: null, p: ["act", "cmd"] }], h: {}, c: { act: true } }) };
-const __mq = { wide: false, ls: [] };
-globalThis.matchMedia = (query) => ({
-  get matches() { return /min-width: 1200px/.test(query) ? __mq.wide : false; },
-  addEventListener: (_, f) => __mq.ls.push(f),
-});
-"#;
-
-#[tokio::test]
-async fn in_the_wide_layout_the_routing_panel_starts_collapsed_and_remembers_its_fold() {
-    let r = panel(
-        one_to_three(),
-        WIDE,
-        r##"
-const ph = document.createElement("div"); ph.className = "ph"; q("#p-route").append(ph);
-const saved = () => JSON.parse(localStorage.getItem("t3board.layout") || "null");
-__mq.wide = true; for (const f of __mq.ls) f();
-emitState(base);
-await tick();
-const col = (id) => q("#main").children.filter((c) => c.classList.contains("lcol")).findIndex((c) => c.contains(q("#" + id)));
-const fold = q("#p-route .fold");
-const start = { ...panel(), fold: fold.getAttribute("aria-expanded"), col: col("p-route"), saved: saved(), asked: asked() };
-fold.dispatch("click");
-await tick();
-const open = { ...panel(), fold: fold.getAttribute("aria-expanded"), saved: saved().c, asked: asked(), members: members().length };
-__mq.wide = false; for (const f of __mq.ls) f();
-const narrow = { ...panel(), inTickets: q("#tixcol").contains(q("#p-route")) };
-q("#rp-fold").dispatch("click");
-const folded = { ...panel(), saved: saved().c };
-return { start, open, narrow, folded };
-"##,
-    )
-    .await;
-    assert_eq!(
-        r["start"],
-        json!({"hidden": false, "collapsed": true, "expanded": "false", "fold": "false", "col": 2,
-               "saved": {"cols": [{"w": null, "p": ["dec"]}, {"w": null, "p": ["new", "flow", "tix"]}, {"w": null, "p": ["act", "cmd", "route"]}],
-                         "h": {}, "c": {"act": true, "route": true}},
-               "asked": []}),
-        "{r}"
-    );
-    assert_eq!(
-        r["open"],
-        json!({"hidden": false, "collapsed": false, "expanded": "true", "fold": "true", "saved": {"act": true},
-               "asked": ["/api/usage-stats?window=24h"], "members": 2}),
-        "{r}"
-    );
-    assert_eq!(r["narrow"], json!({"hidden": false, "collapsed": false, "expanded": "true", "inTickets": true}), "{r}");
-    assert_eq!(
-        r["folded"],
-        json!({"hidden": false, "collapsed": true, "expanded": "false", "saved": {"act": true, "route": true}}),
-        "{r}"
-    );
-}
-
 #[tokio::test]
 async fn a_failed_read_shows_under_the_routing_panel_and_retry_reads_again() {
     let r = panel(

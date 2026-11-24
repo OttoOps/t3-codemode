@@ -14,21 +14,41 @@ each new card while the tab is hidden.
 
 ## What the page shows
 
-The page has three panels under a header that counts the cards waiting on you
-and the threads running, and shows where the next ticket launch goes, as
-[Launch routing](#launch-routing) describes. Only the lists scroll.
+The page is a command bar over four views. The bar holds the view tabs, Ask, Launch, and the update,
+skills, notification, density, theme, settings and shortcut buttons. Each tab
+carries one count: Dispatch the cards waiting on you, New Issues the issues
+with no ticket, Queue & Graph the issues ready to launch, and Activity &
+Settled the finished tickets waiting to be settled. A filter never changes the
+tab counts. The tabs follow the WAI-ARIA
+tab pattern, so the arrow keys, Home and End move between them, and the page
+remembers the last view in its address and in this browser. Below 640 px the
+tabs read Dispatch, Issues, Graph and Activity, and below 820 px they move to
+their own row under the bar.
 
-Between the header and the filter bar, the pulse strip counts the open tickets
-in five slots, as [The pulse strip](#the-pulse-strip) describes. Click a slot
-to filter the board to its tickets, and click it again to clear that filter.
+Under the bar, one telemetry line shows the connection, the ticket slots in
+use against the flow's `maxTickets` (click it for Queue & Graph), the pull
+requests merged on open tickets, where the next ticket launch goes, as
+[Launch routing](#launch-routing) describes, and the
+[filter bar](#filtering-the-page) with search. Below 1180 px the line wraps.
+
+**Dispatch** is the first view, with three sections:
 
 - **Needs you.** Gates, blockers, reports and the watcher's escalations each
-  become a card, blockers first. A card opens with the ask itself ("Merge
-  #64"), then the ticket, its issue title and how long the card has waited.
+  become a full-width card, blockers first, with an amber frame for a gate and
+  a red one for a blocker. A card opens with the ask itself. A merge gate whose
+  pull request belongs to a worker on the board reads as that pull request and
+  its title, such as "Merge PR #283: feat: sync parsed links", with the head
+  commit on the line below. Then come the ticket, its issue title and how long
+  the card has waited. When nothing waits, the section shrinks to one green
+  "All clear" line, and when a filter hides every card it says so instead.
   Its answers are the filled buttons, as [Reply buttons](#reply-buttons)
   describes, followed by a link to the PR or issue the message names and the
   quieter Reply, Dismiss and full-message controls. The ticket label jumps to
   the ticket's row.
+  An answer waits 5 seconds before it goes, with an Undo button and a bar
+  that drains as the seconds count down. The countdown changes only the bar
+  and the seconds, so Undo keeps keyboard focus and a reply half typed in
+  another card stays put.
   Answering a card sends the ticket one reply and resolves the card. A ticket
   that clears its gate, or sends a newer `gate` message, resolves its older
   gate cards, and its handoff resolves all of its open cards.
@@ -44,22 +64,28 @@ to filter the board to its tickets, and click it again to clear that filter.
   its pool's [`moveOnLimit`](config.md#moving-a-limited-thread) is `auto`,
   which moves the thread with no card, or `never`, which leaves it. A failed
   automatic move falls back to the card.
-- **New issues,** at the top of the Tickets column: the issues threads have
-  filed and reported with `wf.issue` that have no ticket yet, newest first.
-  Each row shows the issue's `repo#n` linked to GitHub, its title, how long ago
-  it was filed and a link to the thread that filed it, with Launch and Dismiss.
-  A count beside the heading says how many wait, and the section is gone
-  while none do. Show dismissed, beside the heading when any are dismissed,
-  swaps the list for the dismissed issues, each with Restore. [New issues](#new-issues) covers what each button
-  does.
-- **Up next,** under New issues when the config has a [`flow` block](config.md#flow):
-  the flow's ready queue, in the order the board launches it.
-  [The up-next panel](#the-up-next-panel) covers what each row shows.
-- **Tickets,** in Open, Done and Settled tabs, grouped by state, and a
-  [Graph](#the-graph-tab) tab that draws the open tickets and the flow's issues
-  with the links between them. A ticket
-  takes the most urgent state of its own thread and its workers, so a ticket
-  whose worker runs reads running:
+- **Issues in progress.** Each open ticket leads with its human title, the
+  `humanTitle` in `/api/state`, beside its label as a code badge, and a status
+  pill read from its workers: Needs you, Blocked, Paused, Failed, Running,
+  Ready, Attention, In review, Waiting or Idle. Pause and Close sit beside the
+  pill. A ticket split into pull requests shows its route as a line of
+  stations, one per worker in step order and one for the steps not started,
+  with "Step 4 of 10 · 3 merged" and the share landed above it:
+
+  | Station | Means |
+  |---|---|
+  | filled green, joined by a green line | merged |
+  | amber ring | waiting at a merge gate on the board, or a worker that needs you |
+  | green ring | ready to merge or queued |
+  | blue ring | in review or CI, or a worker still building |
+  | red square ring | failing checks, a conflict, changes requested or a failed worker |
+  | filled grey | a finished worker with no pull request |
+  | dashed ring | not started, or the steps left |
+
+  Each station is an equal share of the row, so a ten-step route still fits
+  on a 390 px phone. Selecting a station opens that worker in
+  [the inspector](#the-inspector). Rows group by state, with the most urgent
+  first:
 
   | Mark | State |
   |---|---|
@@ -71,21 +97,12 @@ to filter the board to its tickets, and click it again to clear that filter.
   | two bars, violet | paused ([pausing](#pausing)) |
   | check | done |
 
-  Amber marks only the tickets with an open card. A row shows the ticket label,
-  its issue title (or its gate in words when there is no title), and, for a
-  ticket that needs you, a `Reply "merge"` link to its card. Other rows show
-  the last message, and a gate already answered reads "Answered: ...", or "Dismissed: ..." when you dismissed its card. The
-  workers sit at the end of the row, with finished ones folded into a count
-  that expands. A worker whose link carries an issue identity
-  ([`wf`](globals.md#wf)) shows it as `#115 · PR #136 · of #105`: its
-  sub-issue, its pull request and the parent issue, each a chip that opens on
-  GitHub. The ticket's row shows the same chips after its title for its
-  active worker: of the workers with an identity, the one on the ticket's own
-  pull request, else the last open one, else the last finished one. A ticket
-  with no such worker shows its own issue and parent, and a row with no
-  identity shows no chips.
-  A pull request shows as an outlined pill with its number, and
-  on the ticket's own row its state: open, queued, merged or closed. Once a
+  A ticket that needs you shows a `Reply "merge"` link to its card. Other rows
+  show the last message, and a gate already answered reads "Answered: ...", or
+  "Dismissed: ..." when you dismissed its card. The workers sit at the end of
+  the row, with finished ones folded into a count that expands. A pull request
+  shows as an outlined pill with its number, and on the ticket's own row its
+  state: open, queued, merged or closed. Once a
   [GitHub reconcile](#github-reconcile) has read an open pull request's
   readiness, the pill says where it stands instead:
 
@@ -97,13 +114,51 @@ to filter the board to its tickets, and click it again to clear that filter.
 
   A worker's pill shows only the number, with the same mark and color, and
   its tooltip says the state.
+- **PRs in progress.** One row per pull request on an open ticket, and one per
+  worker still building with no pull request yet, keyed by the pull request's
+  URL so two repositories never share a row. A row shows `PR #283` or
+  `WIP 4/5`, the pull request's title, a pill from its `verdict`, the parent
+  issue and its title, the step, and its age. Gates sort first, then failing,
+  ready, in review and building. Active, Merged and All pick which rows show.
+  Under Active, **Recently merged** lists the last five merged pull requests,
+  each on two lines so the title never cuts mid-word.
+
+**New Issues** lists the issues threads have filed and reported with
+`wf.issue` that have no ticket yet, newest first. Each row shows the issue's
+`repo#n` linked to GitHub, its title, how long ago it was filed and a link to
+the thread that filed it, with Launch and Dismiss. Show dismissed, beside the
+heading when any are dismissed, swaps the list for the dismissed issues, each
+with Restore. [New issues](#new-issues) covers what each button does.
+
+**Queue & Graph** holds three panels:
+
+- **Up next,** when the config has a [`flow` block](config.md#flow): the
+  flow's ready queue, in the order the board launches it.
+  [The up-next panel](#the-up-next-panel) covers what each row shows.
+- **Launch routing,** once the watcher has read the routing, collapsed until
+  you open it: where ticket launches go, over a time range you pick.
+  [The routing panel](#the-routing-panel) covers what it shows.
+- **Dependency graph,** which draws the open tickets and the flow's issues
+  with the links between them, as [The Queue & Graph view](#the-queue--graph-view)
+  describes.
+
+**Activity & Settled** holds the activity feed beside the finished tickets:
+
 - **Activity.** Notes and events from tickets, the latest `board.feed` (50)
   of them, under the ticket and worker that sent them. Runs from the same
   sender fold into one row that expands. The board drops kind prefixes and
   `Publishing:` tails, and shortens hashes to 7 characters and GitHub links to
   `#65`. When a launch picks from a pool in `models.ticket` or `board.pool`,
   each launch adds an entry that names the instance it went to and why.
-- **Launch and Ask,** pinned above Activity. Launch takes GitHub, GitLab, and
+- **Finished,** with Done and Settled tabs. Done holds the tickets that
+  finished and wait for you to settle them, with Settle all done.
+  [Settling](#settling) covers Settled.
+
+**Launch and Ask** open from the command bar, or with `l` and `a`, as a band
+under the telemetry line, and Close or Escape in an empty field puts it away.
+An answer that arrives while Ask is closed puts a green dot on the Ask button
+until you open Ask.
+Launch takes GitHub, GitLab, and
   Jira issue references (`owner/repo#41`, `PROJ-123`, or an issue URL) and
   makes each one a ticket thread. When a non-GitHub reference does not resolve
   to a T3 project through an origin remote or [`trackers`](config.md#trackers)
@@ -128,23 +183,24 @@ to filter the board to its tickets, and click it again to clear that filter.
   for t3-codemode", is not done in the scratch thread: it picks the one
   project the request is about and calls [`wf.dispatch`](#from-a-thread),
   which launches a thread in that project. The launched thread joins the board
-  and shows under Tickets, and the answer names it and its project. When no
+  and shows in Dispatch under Issues in progress, and the answer names it and its project. When no
   project fits, or more than one could, the answer asks which one and nothing
   is launched. The scratch thread writes its answer under Ask, and then gets
-  archived.
-- **Launch routing,** under Launch and Ask, collapsed until you open it: where
-  ticket launches go, over a time range you pick.
-  [The routing panel](#the-routing-panel) covers what it shows.
+archived.
 
 Times show as ages (`36m`, `1h 32m`); hover one for the local time.
 
-The page follows your system's light or dark setting. The theme button in the
-header, a half-filled circle, switches it to Light, then Dark, then back to
-System, and this browser remembers the choice. A browser that blocks storage
-still switches, but goes back to System on reload.
+The page starts dark. The theme button in the command bar, or `t`, switches
+it to Light, then System, which follows your system's setting, then back to
+Dark, and this browser remembers the choice. A browser that blocks storage
+still switches, but goes back to Dark on reload. The density button, or `d`,
+switches the rows between comfortable and compact. Below 640 px the button
+hides and rows stay comfortable.
 
 Single-key shortcuts work while no field has focus: `/` focuses search, `a`
-focuses Ask, `l` focuses Launch, `j` and `k` move between cards and rows, and
+opens Ask, `l` opens Launch, `t` switches the theme, `d` switches the density,
+`g` then `d`, `t`, `i`, `q` or `a` goes to Needs you, Issues in progress, New
+Issues, Queue & Graph or Activity, `j` and `k` move between cards and rows, and
 `?` lists the rest. The list has a switch that turns them off. Enter on a
 focused card or row opens it in [the inspector](#the-inspector).
 
@@ -285,18 +341,18 @@ mismatch with the same command.
 
 ## Launch routing
 
-To the right of the connection status, the header shows where board ticket
-launches go. It follows the ticket model the board resolves: `models.ticket`
+In the telemetry line, after the connection status, the board shows where
+ticket launches go. It follows the ticket model the board resolves: `models.ticket`
 in the user config, else legacy `board.pool` or the board ticket keys, else
 the default.
 
-- **With a pool**, it lists each member with its share of the last 24 hours'
-  picks, largest first, such as `→ claude-b 75% · claude-a 25%`. When the
+- **With a pool**, it names the member with the largest share of the last 24
+  hours' picks, such as `claude-b 75%`. When the
   pool made no picks in that time, the share is the member's configured
   weight. A limited member also shows its reset time, as in
   `claude-a 25% until 21:00`.
-- **Without a pool**, it names the one instance, model and effort launches
-  run on, such as `→ claudeAgent · claude-opus-5-5 · high (no pool)`.
+- **Without a pool**, it names the one instance launches run on, such as
+  `claudeAgent (no pool)`.
 
 A dot before each member shows its state: filled green for ready, amber for
 held at its reserve, a red square for limited, grey for disabled or unable to
@@ -304,10 +360,9 @@ run its model, and a grey ring when T3 did not answer. Hovering over or
 focusing the indicator opens a tooltip with the strategy, what the shares
 count, and each member's state, reason, running threads and limit reset time.
 Escape or a click elsewhere closes it, and clicking or tapping the indicator
-opens the [routing panel](#the-routing-panel). On a narrow screen the
-indicator shrinks to the arrow and the top member, or the
-instance alone without a pool. When the members do not fit in the header,
-the line is cut off at the right, and the tooltip still lists every member.
+opens the [routing panel](#the-routing-panel) in Queue & Graph. The
+tooltip lists every member, and no panel above it clips it, on a desktop or
+on a phone.
 
 The watcher refreshes the indicator on each pass and pushes it to the page
 over `/api/events` when a share, state or running count changes, so it
@@ -317,11 +372,9 @@ updates without a reload. [`wf.usageStats`](globals.md#wf) and
 ### The routing panel
 
 The Launch routing panel shows the same routing over a time range you pick.
-It starts collapsed, and clicking the header indicator opens it. On a wide
-screen it sits under Launch and Ask and moves, collapses and resizes like the
-other panels. On a narrower screen it sits under Up next in the Tickets column
-and has its own Show and Hide button. This browser remembers whether the
-panel is open and which range it shows.
+It sits in Queue & Graph under Up next and starts collapsed. Clicking the
+routing indicator in the telemetry line opens it, and so does its own Show
+button. This browser remembers which range it shows.
 
 - **Time range.** 1h, 24h, 7d or All, with 24h as the default. All covers
   every pick the store keeps.
@@ -447,10 +500,11 @@ records the composable delivery design.
 
 ## Filtering the page
 
-The bar under the header narrows the page to the work you pick. Each filter
-applies to the decision cards, the ticket tree, the activity feed, the
-Settled section, the [Up next](#the-up-next-panel) rows and the
-[Graph](#the-graph-tab) tab at once.
+The filter bar at the end of the telemetry line narrows the page to the work
+you pick. Each filter applies to the decision cards, the ticket tree, the pull
+requests, the activity feed, the Settled section, the
+[Up next](#the-up-next-panel) rows and the
+[dependency graph](#the-queue--graph-view) at once.
 
 - **Project, Status and Card kind** are multi-select dropdowns. Type in one to
   narrow its list, and Enter toggles the first value left. A project shows as
@@ -475,29 +529,6 @@ Settled section, the [Up next](#the-up-next-panel) rows and the
 
 While a filter is on, each count reads visible/total. A new card the filter
 hides shows up as "N hidden", and clicking it clears the filter.
-
-### The pulse strip
-
-Each slot shows a count of open tickets and one line about them. The chevron
-at the strip's end folds it, and this browser remembers that. Until you use the
-chevron, the strip starts folded on a window under 1000 px tall. Folded, it shows
-each slot's mark, a short name and its count, and from 1200 px it moves up
-beside the filter bar, so the panels get its row back. Below 1200 px the strip
-always shows one line per slot, and below 600 px only each slot's mark and
-count. Hover a slot for its full line.
-
-| Slot | Counts tickets that are | Status it filters by |
-|---|---|---|
-| Active | running: open, with no card, not blocked, and not paused itself. The line says how many threads run and, with a [flow](#the-flow), the open tickets against `maxTickets`, how many are over it, and how many issues are ready to launch | running |
-| Ready to merge | holding a pull request that is ready to merge or queued | ready to merge |
-| In review or CI | holding a pull request still in review or CI | in review or CI |
-| Paused or blocked | paused, or with a paused worker, or failed or blocked, or blocked: external. A paused link counts while its thread runs, waits or fails too. The line also counts the Up next issues that are blocked: external | paused, blocked and blocked: external |
-| Alerts | holding an approved pull request with a failing check | alert |
-
-A slot sets its statuses in the Status filter, so it composes with the
-project, card kind and search filters and with the context you are in, and
-**Save filter** keeps it in a context. A slot reads pressed while all of its
-statuses are picked. While a filter is on, each count reads visible/total.
 
 ### Contexts
 
@@ -528,11 +559,12 @@ inside it. A card outside it still counts toward "N hidden".
 
 ## The inspector
 
-Click a ticket row, a worker, a pull request pill, a card's ask or ticket line,
-a New issues row, a Settled ticket or an issue in the [Graph](#the-graph-tab)
-tab, or press Enter on a focused card, row or issue,
+Click a ticket row, a worker, a route station, a pull request row or pill, a
+card's ask or ticket line, a New issues row, a Settled ticket or an issue in
+the [dependency graph](#the-queue--graph-view), or press Enter on a focused
+card, row or issue,
 and the inspector slides in from the right with that item's details. It covers
-the right side of the board under the pulse strip and filter bar. The lists
+the right side of the board under the telemetry line. The lists
 keep their scroll and keep updating, and you can still answer the cards on the
 left. Below 600 px the inspector takes the full width. The row or card it shows
 gets the hover shade, so you can find it on the board.
@@ -678,7 +710,7 @@ owner's repo of the same name counts as having that ticket.
 
 - **Launch** runs `wf.launchTicket` for the entry's issue, with its title as
   the ticket's title. When the launch succeeds, the entry leaves the list and
-  the ticket shows under Tickets. A launch that fails leaves the entry in
+  the ticket shows in Dispatch under Issues in progress. A launch that fails leaves the entry in
   place and an error card, as any failed launch does. Launching the same issue
   from the Launch tickets box also takes its entry off the list.
 - **Dismiss** takes an entry off the list without touching GitHub. Dismissed
@@ -701,15 +733,14 @@ pull request covers nothing. An entry no worker covers has an empty
 `coveredBy`.
 
 The page gets a reported issue within seconds, on the same event stream as
-everything else. While the pointer or focus is in the Tickets column, a new
+everything else. While the pointer or focus is in New Issues, a new
 entry waits behind an "N new" button in the section's heading, and an entry
 that leaves stays as a placeholder ("widgets#43 launched") until you move
 away, so nothing under your pointer shifts.
 
-While no entry waits, nothing shows above Tickets, not even the heading. When
-dismissed entries exist then, the Settled tab carries a Dismissed issues
-button that opens the section on the dismissed list, and Show new closes it
-again.
+While no entry waits, the view says "No new issues." When dismissed entries
+exist then, the Settled tab carries a Dismissed issues button that opens New
+Issues on the dismissed list, and Show new closes it again.
 
 A new-issue row or ticket row that arrives on the event stream gets a green
 tint that fades on its own over about four seconds. An entry held behind "N
@@ -933,13 +964,13 @@ A node's track follows the first rule that applies:
 Ticket rows on the board carry an **external** pill when their node is
 external, and the inspector shows the same pill.
 
-### The Graph tab
+### The Queue & Graph view
 
-The Graph tab in the Tickets pane draws the dependency graph as an SVG
+The Dependency graph panel in Queue & Graph draws the dependency graph as an SVG
 swimlane view, with no library, reading the graph from `GET /api/flow` even when
-`config.json` has no `flow` block. This browser remembers whether you left the
-Tickets pane on Graph, and opens it there after a reload; `#tickets-graph` in
-the address opens it too.
+`config.json` has no `flow` block. This browser remembers the view you left
+the board on and opens it there after a reload; `#queue` in the address opens
+Queue & Graph, and an older `#tickets-graph` link still lands there.
 
 - **Lanes.** Each lane is a track, by the rules in
   [the dependency graph](#the-dependency-graph): a track label, else a parent
@@ -952,7 +983,7 @@ the address opens it too.
   and a parent to the left of its sub-issues, so work flows left to right.
   Advisory `fileConflict` and `codeDep` edges do not constrain column order.
   The same graph always lays out the same way. A wide graph scrolls inside the
-  tab, never the page. Each issue shows its `repo#N`, title and state: a ticket's live
+  panel, never the page. Each issue shows its `repo#N`, title and state: a ticket's live
   state, or for an issue with no ticket ready, blocked, external, skipped,
   closed or open. Amber still marks only a ticket with an open card.
 - **Links.** A solid arrow runs from a native GitHub blocker to the issue it
@@ -965,11 +996,11 @@ the address opens it too.
   part chain for `prStack`, overlapping file paths for `fileConflict`, or the
   module edges and symbols for `codeDep`.
 - **Sync parsed links.** When the graph holds `blockedBy` or `parent` links
-  with `source: "body"` that are not yet on GitHub, the Graph bar shows
+  with `source: "body"` that are not yet on GitHub, the panel heading shows
   **Sync N parsed links to GitHub**. Clicking it calls
   `POST /api/flow/sync-links`, which writes each parsed link to GitHub through
   `addBlockedBy` and `addSubIssue` idempotently with `replaceParent: false`.
-  The tab then refreshes the graph so synced edges render with native
+  The panel then refreshes the graph so synced edges render with native
   `source: "github"` styling, and shows a dismissible status strip that lists
   any per-link permission errors or parent conflicts.
 - **Diagnostics.** Dependency or parent cycles, unresolved body references, and
@@ -984,9 +1015,8 @@ the address opens it too.
   moves out of the graph. The latest hover or focus picks the issue, and with
   the pointer off the graph, the focused issue keeps its trace.
 - **Filters.** The [filter bar](#filtering-the-page), a saved
-  [context](#contexts), search and the [pulse strip](#the-pulse-strip) apply
-  to the graph too. An issue they leave out stays in place with a dashed
-  outline and muted text, so the layout never jumps, and the tab's count
+  [context](#contexts) and search apply to the graph too. An issue they leave out stays in place with a dashed
+  outline and muted text, so the layout never jumps, and the panel's count
   reads visible/total. A ticket matches as its row would; an issue with no
   ticket matches by repo, its ready, blocked, external or closed standing,
   and its label, title, track and milestone.
@@ -1373,9 +1403,10 @@ without changing direct loopback behavior:
   HTTPS board URL and tap **Share** -> **Add to Home Screen**. On Android Chrome
   or desktop Chromium, use the browser's **Install app** or **Add to Home
   screen** menu.
-- **Phone layout and notifications.** Narrow viewports (under 900 px) switch to
-  a single-column view with bottom tabs (**Needs you**, **Tickets**,
-  **Activity**), touch-sized controls, and a collapsible Launch/Ask dock.
+- **Phone layout and notifications.** Narrow viewports (under 820 px) put the
+  view tabs on their own row under the command bar, stack each view into one
+  column, and use touch-sized controls; Launch and Ask open as a band on
+  demand.
   Because the remote board runs over HTTPS, browser notifications (**Notify
   me**) work on browsers that support direct page notifications (`new
   Notification()`, such as desktop browsers). Mobile browsers that require a
