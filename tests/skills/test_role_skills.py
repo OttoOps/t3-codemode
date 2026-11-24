@@ -109,6 +109,7 @@ def section(text, heading):
 
 class MergeRouteTests(unittest.TestCase):
     ticket = (SKILLS / "t3-ticket" / "SKILL.md").read_text()
+    worker = (SKILLS / "t3-worker" / "procedure.md").read_text()
     reconcile = (ROOT / "src" / "reconcile.rs").read_text()
 
     def test_the_ticket_merges_through_wf_merge_and_reports_each_outcome(self):
@@ -186,7 +187,7 @@ class MergeRouteTests(unittest.TestCase):
         self.assertIn('without a second "merge"', word)
         watch = " ".join(section(self.ticket, "#### The merge watch").split())
         self.assertNotIn('"pending"', watch)
-        self.assertIn("The merge watch serves two cases", watch)
+        self.assertIn("The merge watch serves three cases", watch)
         self.assertIn("Approval never carries over to a new head", watch)
 
     def test_the_board_merges_on_the_answer_in_code(self):
@@ -219,6 +220,39 @@ class MergeRouteTests(unittest.TestCase):
         self.assertIn('Before calling `wf.merge` again, repeat "On the user\'s word" item 1\'s check gate', watch)
         self.assertIn("including an optional check that re-ran while `mergeStateStatus` is `CLEAN` or `HAS_HOOKS`", watch)
         self.assertIn("do not call `wf.merge` and end the turn quietly", watch)
+
+    def test_an_untracked_forge_ticket_starts_its_merge_watch_when_the_pr_opens(self):
+        start = " ".join(section(self.ticket, "## 1. Start").split())
+        self.assertIn("on such an untracked forge this thread starts its own merge watch when the PR or MR opens", start)
+        self.assertIn("whether or not it has a parent", start)
+        opened = " ".join(section(self.ticket, "### PR opened").split())
+        self.assertIn("On an untracked forge (step 1 item 3), start the merge watch now", opened)
+        updated = " ".join(section(self.ticket, "### PR updated").split())
+        self.assertIn("On an untracked forge, update the merge watch's prompt with the new head", updated)
+        wait = " ".join(section(self.ticket, "#### The merge wait").split())
+        self.assertIn("The reconcile never reads a PR or MR on an untracked forge", wait)
+        self.assertIn("whether or not it has a parent and whatever `board.reconcileIdleMinutes` says", wait)
+        watch = " ".join(section(self.ticket, "#### The merge watch").split())
+        self.assertIn("the untracked-forge case", watch)
+        self.assertIn("from the moment the PR or MR opens, with or without a parent", watch)
+        self.assertIn("`glab mr view <iid> --output json`", watch)
+        untracked = watch.split('On an untracked forge (the prompt says "Forge: untracked")', 1)[1]
+        self.assertIn("in place of the GitHub query", untracked)
+        for case in ("**Merged:**", "**Closed without merging:**", "**Head moved away from the head the prompt names:**",
+                     "**Still open at the prompt's head:**", "**The status command fails:**"):
+            self.assertIn(case, untracked, case)
+        self.assertIn("approval never carries over to a new head", untracked)
+        self.assertIn("Keep the task", untracked)
+        self.assertIn("keep the task until that succeeds", untracked)
+        self.assertIn("start the merge watch again at its current head", untracked)
+        self.assertIn("clear any merge gate open for it", untracked)
+        self.assertIn('setting "Auth gate sent" back to "no"', untracked)
+        self.assertIn("The approved chain holds only when the merged head is the head it approved", untracked)
+
+    def test_the_worker_does_not_wait_on_t3s_watcher_for_an_untracked_merge(self):
+        open_pr = " ".join(section(self.worker, "## 3. Open the PR and watch it").split())
+        self.assertIn('`wf.send({ kind: "event", body })` (a `note` never wakes it', open_pr)
+        self.assertIn("T3's pull request watcher does not wake you on a merge there", open_pr)
 
     def test_the_root_merge_watch_matches_reconcile_cards_by_approval_id(self):
         watch = " ".join(section(self.ticket, "#### The merge watch").split())
