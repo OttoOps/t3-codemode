@@ -527,13 +527,17 @@ a merge card t3cm opened arrives only when t3cm could not merge on it
 - **Tracked GitLab:** `glab api --hostname <host>
   projects/<enc path>/merge_requests/<iid>` shows `state` `opened`,
   `draft` false, `sha` equal to the head the worker named, and
-  `detailed_merge_status` `mergeable`. In
-  `projects/<enc path>/merge_requests/<iid>/pipelines`, the newest pipeline
-  whose `sha` is that head and whose `ref` is not a merge train's
-  (`refs/merge-requests/<iid>/train`) has `status` `success` (in a repo
-  with no CI there is none, and the brief's checks below stand in), and
-  `projects/<enc path>/repository/commits/<sha>/statuses` holds no status
-  that is pending or failed. The changed files are the `old_path` and
+  `detailed_merge_status` `mergeable`. The MR's pipeline has `status`
+  `success` (in a repo with no CI there is none, and the brief's checks
+  below stand in). That pipeline is the MR's `head_pipeline`, unless its
+  `ref` is a merge train's (`refs/merge-requests/<iid>/train`); then it is
+  the newest non-train pipeline in
+  `projects/<enc path>/merge_requests/<iid>/pipelines` whose `sha` is that
+  head or whose `ref` is `refs/merge-requests/<iid>/merge`, the ref a
+  merged-results pipeline runs on. Every page of
+  `projects/<enc path>/repository/commits/<sha>/statuses?per_page=100`,
+  read until a page holds fewer than 100, holds no status that is pending
+  or failed. The changed files are the `old_path` and
   `new_path` of each entry in
   `projects/<enc path>/merge_requests/<iid>/diffs?per_page=100`, paged with
   `&page=<n>` until a page holds fewer than 100. When the entries cannot
@@ -823,16 +827,16 @@ statusCheckRollup{contexts(first:100){pageInfo{hasNextPage} nodes{__typename
 ... on CheckRun{name status conclusion} ... on StatusContext{context
 state}}}}}}}}}}'`, falling back to `gh pr view <number> -R <repo> --json
 statusCheckRollup` when `hasNextPage` is true). On a tracked GitLab host,
-each run reads the MR (`glab api --hostname <host>
-projects/<enc path>/merge_requests/<iid>`), its train car
-(`projects/<enc path>/merge_trains/merge_requests/<iid>`, where a 404 means
-none), and the pipelines and statuses "Ready to merge" reads, and maps them
-onto the GitHub names below: `state` `merged` is `MERGED`, with the merge
-commit in `merge_commit_sha`, else `squash_commit_sha`; `closed` is
-`CLOSED`; `sha` is `headRefOid`; `draft` is `isDraft`; a car whose `status`
-is `idle`, `fresh` or `stale` is in the queue; `merge_when_pipeline_succeeds`
-true is an `autoMergeRequest`; and `detailed_merge_status` `mergeable` is
-`CLEAN`:
+each run reads the MR (`glab api --hostname <host> projects/<enc
+path>/merge_requests/<iid>`), its train car (`projects/<enc
+path>/merge_trains/merge_requests/<iid>`, where a 404 means none), and the
+pipelines and statuses "Ready to merge" reads, and maps them onto the GitHub
+names below: `state` `merged` is `MERGED`, with the merge commit in
+`merge_commit_sha`, else `squash_commit_sha`; `closed` is `CLOSED`; `opened`
+is `OPEN`; `sha` is `headRefOid`; `draft` is `isDraft`; a car whose `status`
+is `idle`, `fresh` or `stale` is in the queue;
+`merge_when_pipeline_succeeds` true is an `autoMergeRequest`; and
+`detailed_merge_status` `mergeable` is `CLEAN`:
 
 - **`MERGED`:** delete the task with `delete_scheduled_task`, clear
   `wf.gate({ clear: true })` when this thread has a parent, then go on from
