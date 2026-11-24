@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Duration;
@@ -8,8 +9,11 @@ use futures_util::future::{join, join3};
 use serde_json::{Value, json};
 use t3_codemode::board::{BOARD, Card, CardRef};
 use t3_codemode::clock::{Clock, iso, plus_minutes};
-use t3_codemode::fake::{check_run, github_pr, project, pull_request, thread};
-use t3_codemode::reach::ReachSnapshot;
+use t3_codemode::config::Config;
+use t3_codemode::fake::{
+    check_run, github_pr, gitlab_mr, gitlab_pipeline, merge_request, project, pull_request, thread,
+};
+use t3_codemode::reach::{ReachPoint, ReachSnapshot};
 use t3_codemode::sentinels::Sentinel;
 use t3_codemode::store::{MergeWait, WaitStatus};
 use t3_codemode::wf::LAST_PASS;
@@ -35,6 +39,75 @@ fn same_head(a: &str, b: &str) -> bool {
 }
 
 const REPO: &str = "acme/widgets";
+const LAB: &str = "gitlab.acme.example";
+const LAB_KEY: &str = "gitlab.acme.example/acme/widgets";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Forge {
+    Github,
+    Gitlab,
+}
+
+thread_local! {
+    static FORGE: Cell<Forge> = const { Cell::new(Forge::Github) };
+}
+
+struct OnForge(Forge);
+
+impl OnForge {
+    fn set(forge: Forge) -> OnForge {
+        OnForge(FORGE.with(|f| f.replace(forge)))
+    }
+}
+
+impl Drop for OnForge {
+    fn drop(&mut self) {
+        FORGE.with(|f| f.set(self.0));
+    }
+}
+
+fn forge() -> Forge {
+    FORGE.with(Cell::get)
+}
+
+fn repo_key() -> &'static str {
+    match forge() {
+        Forge::Github => REPO,
+        Forge::Gitlab => LAB_KEY,
+    }
+}
+
+fn sender() -> &'static str {
+    match forge() {
+        Forge::Github => "github",
+        Forge::Gitlab => "gitlab",
+    }
+}
+
+fn forge_name() -> &'static str {
+    match forge() {
+        Forge::Github => "GitHub",
+        Forge::Gitlab => "GitLab",
+    }
+}
+
+fn live_pr(number: u64) -> Value {
+    match forge() {
+        Forge::Github => pull_request(REPO, number, "open"),
+        Forge::Gitlab => merge_request(LAB, REPO, number, "open"),
+    }
+}
+
+const GITLAB_UNSUPPORTED: &[OpKind] = &[
+    OpKind::PrOpened,
+    OpKind::PrUpdated,
+    OpKind::PrReady,
+    OpKind::PrFollowup,
+    OpKind::AnswerReadyAndClearGate,
+    OpKind::MergeWaitPut,
+    OpKind::GhQueueDrop,
+    OpKind::GhFilesPaginated,
+];
 const HEADS: &[&str] = &[
     "1111111111111111111111111111111111111111",
     "2222222222222222222222222222222222222222",
@@ -131,6 +204,9 @@ fn advance_mutations(h: &H) -> (usize, usize) {
 }
 
 fn pull_gh_mutations(h: &H, prs: &mut BTreeMap<u64, GhPrModel>) {
+    if forge() == Forge::Gitlab {
+        return;
+    }
     for (&number, m) in prs.iter_mut() {
         if !m.exists {
             continue;
@@ -152,7 +228,11 @@ fn pending_check(name: &str) -> Value {
 }
 
 fn setup_chaos(in_memory: bool) -> (H, BTreeMap<u64, GhPrModel>) {
-    let h = if in_memory { H::new_memory() } else { H::new() };
+    let config = match forge() {
+        Forge::Github => Config::default(),
+        Forge::Gitlab => Config::from_value(json!({"forges": {LAB: {"kind": "gitlab"}}})).unwrap(),
+    };
+    let h = if in_memory { H::new_memory_with(config) } else { H::build(Vec::new(), config) };
     let home = h.dir.path().join("home");
     let repo = h.dir.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
@@ -191,7 +271,71 @@ fn setup_chaos(in_memory: bool) -> (H, BTreeMap<u64, GhPrModel>) {
     (h, prs)
 }
 
+fn sync_lab(h: &H, prs: &BTreeMap<u64, GhPrModel>) {
+    h.gitlab.clear_read_errors();
+    for (&number, m) in prs {
+        if !m.exists {
+            h.gitlab.remove_mr(LAB, REPO, number);
+            continue;
+        }
+        let head = HEADS[m.head_idx];
+        let detailed = match m.merge_state {
+            "CLEAN" => "mergeable",
+            "UNKNOWN" => "checking",
+            "BEHIND" => "need_rebase",
+            "DIRTY" => "conflict",
+            _ => "not_approved",
+        };
+        let mut mr = gitlab_mr(head, detailed);
+        mr["state"] = json!(match m.state {
+            "OPEN" => "opened",
+            "MERGED" => "merged",
+            _ => "closed",
+        });
+        mr["draft"] = json!(m.draft);
+        let status = match m.checks {
+            GhChecks::Pending => Some("running"),
+            GhChecks::Passing => Some("success"),
+            GhChecks::Failing => Some("failed"),
+            GhChecks::Cancelled => Some("manual"),
+            GhChecks::Unread => None,
+        };
+        let own = status.map(|s| gitlab_pipeline(100 + number, head, &format!("refs/merge-requests/{number}/head"), s));
+        let mut pipelines: Vec<Value> = own.clone().into_iter().collect();
+        if m.queued {
+            let train = gitlab_pipeline(
+                900 + number,
+                &"e".repeat(40),
+                &format!("refs/merge-requests/{number}/train"),
+                "running",
+            );
+            pipelines.insert(0, train.clone());
+            mr["train"] = json!({"status": "fresh", "index": 0});
+            mr["head_pipeline"] = train;
+        } else {
+            mr["head_pipeline"] = own.unwrap_or(Value::Null);
+        }
+        mr["pipelines"] = json!(pipelines);
+        if m.state == "MERGED" {
+            let oid = m.merge_commit.as_deref().unwrap_or(HEADS[(m.head_idx + 1) % HEADS.len()]);
+            let squashed = number % 2 == 0;
+            mr["squash_on_merge"] = json!(squashed);
+            mr[if squashed { "squash_commit_sha" } else { "merge_commit_sha" }] = json!(oid);
+            mr["merged_at"] = json!(m.ended_at);
+        } else if m.state == "CLOSED" {
+            mr["closed_at"] = json!(m.ended_at);
+        }
+        h.gitlab.set_mr(LAB, REPO, number, mr);
+        if m.read_err {
+            h.gitlab.fail_read(LAB, REPO, number, "transient chaos read error");
+        }
+    }
+}
+
 fn sync_gh(h: &H, prs: &BTreeMap<u64, GhPrModel>) {
+    if forge() == Forge::Gitlab {
+        return sync_lab(h, prs);
+    }
     h.github.clear_read_errors();
     for (&number, m) in prs {
         if !m.exists {
@@ -453,11 +597,11 @@ fn diff<T: std::fmt::Debug + PartialEq>(what: &str, got: &T, want: &T) -> Option
 fn github_events(lines: Vec<WakeLine>) -> Vec<(String, u64)> {
     lines
         .into_iter()
-        .filter(|w| w.kind == "event" && w.from == "github")
+        .filter(|w| w.kind == "event" && w.from == sender())
         .map(|w| {
             let n = w
                 .subject
-                .strip_prefix(&format!("{REPO}#"))
+                .strip_prefix(&format!("{}#", repo_key()))
                 .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
                 .and_then(|d| d.parse().ok())
                 .unwrap_or_else(|| oracle_fail(format!("github event wake without a PR subject: {:?}", w.subject)));
@@ -1289,17 +1433,17 @@ async fn run_sequential_ops(
                     if !had_err && let Ok(actions) = &rec {
                         healthy_reconcile = true;
                         for (&number, m) in &gh {
-                            let Some(seen) = h.app.store.pr_seen_get(REPO, number).unwrap() else {
+                            let Some(seen) = h.app.store.pr_seen_get(repo_key(), number).unwrap() else {
                                 continue;
                             };
-                            let label = format!("{REPO}#{number}");
+                            let label = format!("{}#{number}", repo_key());
                             if seen.state != "OPEN"
                                 && seen.state == m.state
                                 && let Some(at) = m.ended_at.as_deref()
                             {
                                 let reported = actions.iter().any(|a| {
-                                    a.starts_with(&format!("{label} merged on GitHub"))
-                                        || a.starts_with(&format!("{label} closed on GitHub"))
+                                    a.starts_with(&format!("{label} merged on {}", forge_name()))
+                                        || a.starts_with(&format!("{label} closed on {}", forge_name()))
                                 });
                                 if at < seen.since.as_str() {
                                     oracle_assert!(
@@ -1327,10 +1471,10 @@ async fn run_sequential_ops(
                                 if at.as_str() < after {
                                     let event = format!("removed:{at}");
                                     let newly_marked = |target: &str| {
-                                        h.app.store.pr_event_seen(REPO, number, &event, target).unwrap()
+                                        h.app.store.pr_event_seen(repo_key(), number, &event, target).unwrap()
                                             && !before
                                                 .pr_events
-                                                .contains(&(REPO.into(), number, event.clone(), target.into()))
+                                                .contains(&(repo_key().into(), number, event.clone(), target.into()))
                                     };
                                     let marked = newly_marked(BOARD) || seen.tickets.iter().any(|(t, _)| newly_marked(t));
                                     oracle_assert!(
@@ -1412,7 +1556,7 @@ async fn run_sequential_ops(
                                     || !(c.kind == "report"
                                         && c.pr.as_ref().is_some_and(|p| {
                                             let key = (p.repo.clone(), p.number);
-                                            (c.text.contains("GitHub would not ") && retrying_prs.contains(&key))
+                                            (c.text.contains(&format!("{} would not ", forge_name())) && retrying_prs.contains(&key))
                                                 || (c.text.contains("no reason recorded")
                                                     && retired_sent_prs.contains(&key))
                                         }))
@@ -1728,7 +1872,7 @@ async fn run_sequential_ops(
                         trace.push(format!("#{step} noop (fake.set_prs {worker:?} {pr:?})"));
                         return false;
                     };
-                    h.fake.set_prs(w, vec![pull_request(REPO, pr_num, "open")]);
+                    h.fake.set_prs(w, vec![live_pr(pr_num)]);
                     model.set_prs(w, pr_num);
                     trace.push(format!("#{step} fake.set_prs({w}, #{pr_num})"));
                     true
@@ -1969,7 +2113,10 @@ async fn run_sequential_ops(
                         trace.push(format!("#{step} noop (set_relay already {relay})"));
                         return false;
                     }
-                    let cfg = json!({"roles": {"ticket": {"children": {"worker": {"relay": relay}}}}});
+                    let mut cfg = json!({"roles": {"ticket": {"children": {"worker": {"relay": relay}}}}});
+                    if forge() == Forge::Gitlab {
+                        cfg["forges"] = json!({LAB: {"kind": "gitlab"}});
+                    }
                     std::fs::write(h.dir.path().join("t3cm-config.json"), cfg.to_string()).unwrap();
                     let reloaded = h.app.wf.reload_config().await.unwrap();
                     oracle_assert!(
@@ -2232,6 +2379,45 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
         let ctx = format!("seeded_sequential_chaos ({})", range.describe());
         reach.assert_tier1(&ctx);
         op_stats.assert_all_executed(&ctx);
+    }
+}
+
+fn decode_gitlab_seed_ops(seed: u64) -> Vec<Op> {
+    let mut weights = OpWeights::swarm(seed);
+    for &kind in GITLAB_UNSUPPORTED {
+        weights.set(kind, 0);
+    }
+    if weights.total_weight() == 0 {
+        weights.set(OpKind::Reconcile, 1);
+    }
+    let bytes = seed_bytes(seed);
+    decode_ops(&mut Unstructured::new(&bytes), &weights)
+}
+
+#[tokio::test]
+async fn seeded_sequential_chaos_holds_all_invariants_on_gitlab() {
+    let _gitlab = OnForge::set(Forge::Gitlab);
+    let range = chaos_seed_range(DEFAULT_SEQ_SEEDS);
+    let mut reach = ReachSnapshot::default();
+    let mut op_stats = OpStats::default();
+    for seed in range.seeds() {
+        let ops = decode_gitlab_seed_ops(seed);
+        let (_, snap, stats) = run_sequential_ops(&ops, None, true, &format!("gitlab seed {seed}")).await;
+        reach.merge(&snap);
+        op_stats.merge(&stats);
+    }
+    if range.count >= DEFAULT_SEQ_SEEDS {
+        for &kind in OpKind::ALL.iter().filter(|k| !GITLAB_UNSUPPORTED.contains(k)) {
+            assert!(op_stats.executed(kind) > 0, "the GitLab chaos run never executed {kind:?}\n{op_stats}");
+        }
+        reach.assert_all(
+            &[
+                ReachPoint::FinishedEventReported,
+                ReachPoint::CloseEventPredatesTracking,
+                ReachPoint::ReconcileAdoptedPr,
+            ],
+            "seeded_sequential_chaos_on_gitlab",
+        );
     }
 }
 
