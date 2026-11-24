@@ -94,7 +94,7 @@ impl Event {
             kind: Kind::Ready,
             repo: p.repo.clone(),
             number: p.number,
-            url: host.url(&ChangeRef::github(&p.repo, p.number)),
+            url: host.url(&ChangeRef::of_key(&p.repo, p.number)),
             head: p.head.clone(),
             publishing: String::new(),
             no_ci: false,
@@ -712,7 +712,7 @@ impl Wf {
     }
 
     async fn read_pr(&self, repo: &str, number: u64) -> Result<Detail> {
-        match self.host.view(&ChangeRef::github(repo, number)).await? {
+        match self.host.view(&ChangeRef::of_key(repo, number)).await? {
             Viewed::Found(d) => Ok(*d),
             Viewed::NotFound => bail!("{repo}#{number} is not a pull request"),
             Viewed::Refused(e) => bail!("{e}"),
@@ -1171,7 +1171,7 @@ impl Wf {
             self.store.link_save(&wl)?;
             let body = format!(
                 "The head of {} moved to {} outside this thread, so t3cm dropped its merge card. Send wf.pr updated for the new head, and ready once its checks pass.",
-                self.host.url(&ChangeRef::github(repo, number)),
+                self.host.url(&ChangeRef::of_key(repo, number)),
                 short(head)
             );
             self.queue_worker_reply(&wl.child, &body)?;

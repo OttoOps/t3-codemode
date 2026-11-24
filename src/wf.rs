@@ -349,6 +349,7 @@ impl Wf {
         config: Arc<Config>,
         remotes: Arc<dyn Remotes>,
         github: Arc<dyn GitHub>,
+        gitlab: Arc<dyn crate::gitlab::GitLab>,
     ) -> Wf {
         if store.node_role(BOARD).ok().flatten().as_deref() != Some("overseer") {
             let _ = store.node_set(BOARD, "overseer", &iso(clock.now()));
@@ -357,14 +358,22 @@ impl Wf {
             let _ = store.meta_set(crate::reconcile::SINCE, &iso(clock.now()));
         }
         let rev = crate::board::clock_rev(&*clock);
+        let config = tokio::sync::watch::Sender::new(config);
+        let running = config.subscribe();
+        let cli: crate::gitlab_host::CliFor =
+            Arc::new(move |h: &str| crate::config::gitlab_cli(&running.borrow().forges, h).map(String::from));
+        let host = crate::codehost::Router::new(
+            crate::github_host::github_host(github.clone()),
+            Arc::new(crate::gitlab_host::GitlabHost::new(gitlab, cli)),
+        );
         Wf {
             store,
             t3,
             clock,
-            config: tokio::sync::watch::Sender::new(config),
+            config,
             lock: tokio::sync::Mutex::new(()),
             remotes,
-            host: crate::github_host::github_host(github.clone()),
+            host: Arc::new(host),
             github,
             live: Mutex::new(HashMap::new()),
             live_seq: AtomicU64::new(0),
@@ -923,7 +932,7 @@ impl Wf {
         if a.kind == "gate" {
             let name = gate_name(a.gate.as_deref().unwrap_or("user"));
             ln.gate_pr = if ln.parent == BOARD && name == "merge" {
-                crate::reconcile::card_pr(&a.body).map(|p| (p.repo, p.number))
+                crate::reconcile::card_pr(&a.body, &self.config().forges).map(|p| (p.repo, p.number))
             } else {
                 None
             };
@@ -1352,10 +1361,11 @@ impl Wf {
             }
             if let Some(live) = self.live_of(&ln.child) {
                 let urls = live["prs"].as_array().into_iter().flatten().chain([&live["pr"]["url"]]);
-                for (o, r, n) in urls.filter_map(Value::as_str).flat_map(crate::reconcile::pr_refs) {
-                    let repo = format!("{o}/{r}").to_ascii_lowercase();
-                    if !seen_prs.iter().any(|(er, en)| er == &repo && *en == n) {
-                        seen_prs.push((repo, n));
+                let forges = self.config().forges.clone();
+                for r in urls.filter_map(Value::as_str).flat_map(|u| crate::reconcile::change_refs(u, &forges)) {
+                    let repo = r.key();
+                    if !seen_prs.iter().any(|(er, en)| er == &repo && *en == r.number) {
+                        seen_prs.push((repo, r.number));
                     }
                 }
             }

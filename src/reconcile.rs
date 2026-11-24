@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use crate::board::{BOARD, Card, NewCard, gh_name};
 use crate::clock::{local_clock, parse_ts};
 use crate::codehost::{Change, ChangeRef, CodeHost, Landed, Landing, Read, State};
+use crate::config::{ForgeKind, Forges};
 use crate::merge::{Ready, checks, ready};
 use crate::reach::ReachPoint;
 use crate::sentinels::Sentinel;
@@ -22,8 +23,10 @@ const MAX_FAILURES: u32 = 3;
 const EXIT_WINDOW_MINS: f64 = 30.0;
 const HELD: &str = "has a failing check at its approved head";
 const NO_REASON: &str = "no reason recorded";
-const NO_TICKET: &str =
-    "no ticket tracks it to take a reply, so act on it on GitHub or with wf.merge and then dismiss this card";
+
+fn no_ticket(forge: &str) -> String {
+    format!("no ticket tracks it to take a reply, so act on it on {forge} or with wf.merge and then dismiss this card")
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -67,6 +70,46 @@ pub fn pr_refs(text: &str) -> Vec<(String, String, u64)> {
     out
 }
 
+pub fn change_refs(text: &str, forges: &Forges) -> Vec<ChangeRef> {
+    let mut out: Vec<ChangeRef> = pr_refs(text)
+        .into_iter()
+        .map(|(o, r, n)| ChangeRef::github(&format!("{o}/{r}").to_ascii_lowercase(), n))
+        .collect();
+    for (host, _) in forges.iter().filter(|(_, f)| f.kind == ForgeKind::Gitlab) {
+        merge_request_refs(text, host, &mut out);
+    }
+    out
+}
+
+fn gl_name(s: &str) -> bool {
+    !s.is_empty() && s != "-" && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+fn merge_request_refs(text: &str, host: &str, out: &mut Vec<ChangeRef>) {
+    let lower = text.to_ascii_lowercase();
+    let needle = format!("{}/", host.to_ascii_lowercase());
+    for (i, m) in lower.match_indices(&needle) {
+        if lower[..i].ends_with("www.") || !at_host_start(&lower[..i]) {
+            continue;
+        }
+        let rest = &lower[i + m.len()..];
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.')))
+            .unwrap_or(rest.len());
+        let Some((path, tail)) = rest[..end].split_once("/-/merge_requests/") else { continue };
+        let n = tail.split('/').next().unwrap_or_default().trim_end_matches('.');
+        if path.split('/').count() >= 2
+            && path.split('/').all(gl_name)
+            && let Some(n) = n.parse::<u64>().ok().filter(|n| (1..=i32::MAX as u64).contains(n))
+        {
+            let r = ChangeRef::gitlab(host, path, n);
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+    }
+}
+
 fn at_host_start(before: &str) -> bool {
     let before = before.strip_suffix("www.").unwrap_or(before);
     before.ends_with("://")
@@ -85,20 +128,14 @@ fn approved_head(body: &str) -> Option<String> {
     })
 }
 
-pub fn card_pr(body: &str) -> Option<CardPr> {
+pub fn card_pr(body: &str, forges: &Forges) -> Option<CardPr> {
     let action: Vec<&str> = body.lines().filter(|l| l.contains("ACTION NEEDED")).collect();
-    let mut refs = pr_refs(&action.join("\n"));
+    let mut refs = change_refs(&action.join("\n"), forges);
     if refs.len() != 1 {
-        refs = pr_refs(body);
+        refs = change_refs(body, forges);
     }
-    let [(owner, name, number)] = refs.as_slice() else { return None };
-    Some(CardPr {
-        repo: format!("{owner}/{name}").to_ascii_lowercase(),
-        number: *number,
-        head: approved_head(body),
-        ready: false,
-        after: None,
-    })
+    let [r] = refs.as_slice() else { return None };
+    Some(CardPr { repo: r.key(), number: r.number, head: approved_head(body), ready: false, after: None })
 }
 
 fn readiness(seen: &PrSeen) -> Value {
@@ -148,7 +185,15 @@ impl Tracked {
     }
 
     fn change(&self) -> ChangeRef {
-        ChangeRef::github(&self.repo, self.number)
+        ChangeRef::of_key(&self.repo, self.number)
+    }
+
+    fn forge(&self) -> &'static str {
+        self.change().forge.name()
+    }
+
+    fn sender(&self) -> &'static str {
+        self.change().forge.sender()
     }
 
     fn url(&self, host: &dyn CodeHost) -> String {
@@ -212,8 +257,8 @@ impl Wf {
     fn pr_seen_view(&self, pr: &Value) -> Value {
         let mut pr = pr.clone();
         if pr["state"] == "open"
-            && let Some((o, r, n)) = pr["url"].as_str().and_then(|u| pr_refs(u).into_iter().next())
-            && let Ok(Some(seen)) = self.store.pr_seen_get(&format!("{o}/{r}").to_ascii_lowercase(), n)
+            && let Some(r) = pr["url"].as_str().and_then(|u| change_refs(u, &self.config().forges).into_iter().next())
+            && let Ok(Some(seen)) = self.store.pr_seen_get(&r.key(), r.number)
             && seen.state == "OPEN"
         {
             if seen.queued {
@@ -337,9 +382,9 @@ impl Wf {
         }
         if !failed.is_empty() {
             if !pass.actions.is_empty() {
-                tracing::info!(actions = ?pass.actions, "github reconcile");
+                tracing::info!(actions = ?pass.actions, "pull request reconcile");
             }
-            bail!("GitHub reconcile failed for {}", failed.join("; "));
+            bail!("pull request reconcile failed for {}", failed.join("; "));
         }
         Ok(pass.actions)
     }
@@ -351,7 +396,7 @@ impl Wf {
                 Some(m) => m.body,
                 None => continue,
             };
-            data["pr"] = json!(card_pr(&body));
+            data["pr"] = json!(card_pr(&body, &self.config().forges));
             self.store.waiting_set_data(BOARD, seq, &data)?;
         }
         Ok(())
@@ -359,6 +404,7 @@ impl Wf {
 
     fn tracked(&self, floor: &str) -> Result<BTreeMap<(String, u64), Tracked>> {
         let mut map = BTreeMap::new();
+        let forges = self.config().forges.clone();
         for ln in self.store.links_open()?.into_iter().filter(|l| l.role == "worker") {
             let live = self.live_of(&ln.child);
             let urls: Vec<String> = live
@@ -368,15 +414,18 @@ impl Wf {
                     prs.chain([&l["pr"]["url"]]).filter_map(|u| u.as_str().map(String::from)).collect()
                 })
                 .unwrap_or_default();
-            for (o, r, n) in urls.iter().flat_map(|u| pr_refs(u)) {
-                add(&mut map, &format!("{o}/{r}"), n).add(Some(&ln.parent), &ln.opened);
+            for r in urls.iter().flat_map(|u| change_refs(u, &forges)) {
+                add(&mut map, &r.key(), r.number).add(Some(&ln.parent), &ln.opened);
             }
             if let Some(p) = ln.pr.as_ref().filter(|p| p.waiting) {
                 add(&mut map, &p.repo, p.number).add(Some(&ln.parent), &ln.opened);
             }
-            let shown = live.as_ref().and_then(|l| l["pr"]["url"].as_str()).and_then(|u| pr_refs(u).into_iter().next());
-            if let Some((o, r, n)) = shown.filter(|_| ln.identity.issue.is_none()) {
-                add(&mut map, &format!("{o}/{r}"), n).unnamed.push(ln.child.clone());
+            let shown = live
+                .as_ref()
+                .and_then(|l| l["pr"]["url"].as_str())
+                .and_then(|u| change_refs(u, &forges).into_iter().next());
+            if let Some(r) = shown.filter(|_| ln.identity.issue.is_none()) {
+                add(&mut map, &r.key(), r.number).unnamed.push(ln.child.clone());
             }
         }
         for card in self.cards()?.into_iter().filter(|c| c.worker.is_none()) {
@@ -416,13 +465,15 @@ impl Wf {
     async fn name_workers(&self, t: &Tracked, o: &Change) -> Result<()> {
         let Some(issue) = o.closing_issue.clone().filter(|_| !t.unnamed.is_empty()) else { return Ok(()) };
         let mut named = false;
+        let forges = self.config().forges.clone();
         {
             let _g = self.lock.lock().await;
             for w in &t.unnamed {
                 let live = self.live.lock().unwrap_or_else(|e| e.into_inner());
-                let shown =
-                    live.get(w).and_then(|(_, l)| l["pr"]["url"].as_str().and_then(|u| pr_refs(u).into_iter().next()));
-                if !shown.is_some_and(|(o, r, n)| n == t.number && format!("{o}/{r}").eq_ignore_ascii_case(&t.repo)) {
+                let shown = live.get(w).and_then(|(_, l)| {
+                    l["pr"]["url"].as_str().and_then(|u| change_refs(u, &forges).into_iter().next())
+                });
+                if !shown.is_some_and(|r| r.number == t.number && r.key() == t.repo) {
                     continue;
                 }
                 if let Some(mut ln) = self.store.link_get(w)?.filter(|l| !l.closed && l.identity.issue.is_none()) {
@@ -461,6 +512,7 @@ impl Wf {
         for c in cards {
             add_ticket(c.ticket.as_deref(), &c.at);
         }
+        let forges = self.config().forges.clone();
         if let Some(w) = wait {
             add_ticket(w.thread.as_deref(), &w.at);
         }
@@ -474,8 +526,8 @@ impl Wf {
                     let prs = l["prs"].as_array().into_iter().flatten();
                     prs.chain([&l["pr"]["url"]])
                         .filter_map(Value::as_str)
-                        .flat_map(pr_refs)
-                        .any(|(o, r, n)| n == t.number && format!("{o}/{r}").eq_ignore_ascii_case(&t.repo))
+                        .flat_map(|u| change_refs(u, &forges))
+                        .any(|r| r.number == t.number && r.key() == t.repo)
                 });
             if pr_matches || live_matches {
                 add_ticket(Some(&wl.parent), &wl.opened);
@@ -618,10 +670,11 @@ impl Wf {
         let merged = o.state == State::Merged;
         let end = o.ended.clone().unwrap_or_else(|| self.now());
         let when = local_clock(&end);
+        let forge = t.forge();
         let note = if merged {
-            format!("merged on GitHub at {}, {when}", short(o.commit()))
+            format!("merged on {forge} at {}, {when}", short(o.commit()))
         } else {
-            format!("closed on GitHub without merging, {when}")
+            format!("closed on {forge} without merging, {when}")
         };
         let stale: Vec<&Card> =
             cards.iter().filter(|c| parse_ts(&c.at).zip(parse_ts(&end)).is_none_or(|(a, e)| a <= e)).collect();
@@ -640,14 +693,14 @@ impl Wf {
         };
         let body = if merged {
             format!(
-                "{} merged on GitHub at {}, {when} (merge commit {}). Run your post-merge steps. {}",
+                "{} merged on {forge} at {}, {when} (merge commit {}). Run your post-merge steps. {}",
                 t.label(),
                 short(o.commit()),
                 o.commit(),
                 t.url(&*self.host)
             )
         } else {
-            format!("{} was closed on GitHub without merging, {when}. {}", t.label(), t.url(&*self.host))
+            format!("{} was closed on {forge} without merging, {when}. {}", t.label(), t.url(&*self.host))
         };
         let targets: Vec<&str> = live_tickets.iter().filter(|(_, s)| later(&end, s)).map(|(x, _)| x.as_str()).collect();
         if !later(&end, since) {
@@ -677,10 +730,10 @@ impl Wf {
             self.retire_merge_wait(w)?;
         }
         if on_feed {
-            self.feed_note(None, &body)?;
+            self.feed_note(t, None, &body)?;
         } else if told == 0 && resolved > 0 {
             let who = targets.first().copied().or_else(|| live_tickets.first().map(|(x, _)| x.as_str()));
-            self.feed_note(who, &format!("{}: {note}", t.label()))?;
+            self.feed_note(t, who, &format!("{}: {note}", t.label()))?;
         }
         if told > 0 || on_feed || resolved > 0 || code.is_some() {
             if later(&end, since) {
@@ -753,6 +806,7 @@ impl Wf {
                 self.reach.hit(ReachPoint::ReadyCardDroppedHeadMoved);
                 pass.woken.extend(self.release_ready_worker(ticket, &t.repo, t.number, &o.head)?);
                 self.feed_note(
+                    t,
                     Some(ticket),
                     &format!("{} merge card dropped: the head moved to {}", t.label(), short(&o.head)),
                 )?;
@@ -805,6 +859,7 @@ impl Wf {
                 w.status = WaitStatus::Sent;
                 if self.store.merge_wait_swap(&w)? {
                     self.feed_note(
+                        t,
                         w.thread.as_deref(),
                         &format!("{} is in the merge queue at its approved head", t.label()),
                     )?;
@@ -826,7 +881,8 @@ impl Wf {
                         what: format!("{} is no longer the pull request that was approved", t.label()),
                         reply: "reply \"merge\" to approve it again, or \"hold\" to leave it",
                         context: format!(
-                            "The approval was for GitHub node \"{}\". That number now resolves to \"{}\".",
+                            "The approval was for {} node \"{}\". That number now resolves to \"{}\".",
+                            t.forge(),
                             w.pull_request_id,
                             o.id.as_deref().unwrap_or_default()
                         ),
@@ -844,7 +900,8 @@ impl Wf {
             }
             (WaitStatus::Sent, false) => {
                 let event = left.map(|l| format!("left:{l}"));
-                self.failed(t, w, "it left the merge queue and GitHub recorded no reason", event.as_deref(), pass)?;
+                let why = format!("it left the merge queue and {} recorded no reason", t.forge());
+                self.failed(t, w, &why, event.as_deref(), pass)?;
                 None
             }
             _ => None,
@@ -860,14 +917,18 @@ impl Wf {
         }
         let ask = Ask {
             what: format!("{} {HELD} {}: {why}", t.label(), short(&o.head)),
-            reply: "reply \"fix\" to send it back to the worker, or re-run the check on GitHub",
+            reply: if t.forge() == "GitHub" {
+                "reply \"fix\" to send it back to the worker, or re-run the check on GitHub"
+            } else {
+                "reply \"fix\" to send it back to the worker, or re-run the pipeline on GitLab"
+            },
             context: "The approval stays. The board queues or merges the pull request once every check at this \
 head has passed or ended cancelled, skipped or neutral. A push drops the approval."
                 .into(),
         };
         self.raise(t, ticket, "report", &ask, &o.head, Some(&event), Some(&w.approval), pass)?;
         let text = format!("{} is held: a check failed at its approved head {}", t.label(), short(&o.head));
-        self.feed_note(ticket, &text)?;
+        self.feed_note(t, ticket, &text)?;
         pass.actions.push(text);
         Ok(())
     }
@@ -913,7 +974,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         )? {
             self.reach.hit(ReachPoint::QueueDropReported);
             let this_pr = |c: &Card| c.pr.as_ref().is_some_and(|p| p.repo == t.repo && p.number == t.number);
-            let note = format!("GitHub recorded the reason: {why}");
+            let note = format!("{} recorded the reason: {why}", t.forge());
             self.resolve_cards(|c| c.kind == "report" && this_pr(c) && c.text.contains(NO_REASON), &note)?;
         }
         Ok(true)
@@ -940,7 +1001,8 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
             return Ok(None);
         }
         let what = format!("{} left the merge queue at {}, {NO_REASON}", t.label(), local_clock(left));
-        let context = format!("GitHub still showed no removal reason {EXIT_WINDOW_MINS} minutes after the exit.");
+        let context =
+            format!("{} still showed no removal reason {EXIT_WINDOW_MINS} minutes after the exit.", t.forge());
         self.report_exit(
             t,
             o,
@@ -980,7 +1042,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
             }
             let approval = wait.filter(|w| w.thread.as_deref() == ticket).map(|w| w.approval.as_str());
             self.raise(t, ticket, "report", &ask, &o.head, Some(event), approval, pass)?;
-            self.feed_note(ticket, &format!("{} was dropped from the merge queue: {why}", t.label()))?;
+            self.feed_note(t, ticket, &format!("{} was dropped from the merge queue: {why}", t.label()))?;
             pass.actions.push(format!("{} dropped from the merge queue: {why}", t.label()));
             raised = true;
         }
@@ -1006,7 +1068,11 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
                     short(&o.head),
                     short(base)
                 ),
-                reply: "reply \"ok\" to let it merge at that head, or take it out of the queue on GitHub",
+                reply: if t.forge() == "GitHub" {
+                    "reply \"ok\" to let it merge at that head, or take it out of the queue on GitHub"
+                } else {
+                    "reply \"ok\" to let it merge at that head, or take it out of the merge train on GitLab"
+                },
                 context: format!("The approval was for head {base}. The queued head is {}.", o.head),
             };
             ("report", ask)
@@ -1025,7 +1091,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         let note = format!("head moved to {} after this approval; replaced by a new card", short(&o.head));
         let release = ticket.filter(|_| kind == "report");
         self.resolve_releasing(old, release.as_slice(), &note)?;
-        self.feed_note(ticket, &format!("{label} merge approval replaced: the head moved to {}", short(&o.head)))?;
+        self.feed_note(t, ticket, &format!("{label} merge approval replaced: the head moved to {}", short(&o.head)))?;
         pass.actions.push(format!("{label} merge approval replaced: head moved to {}", short(&o.head)));
         Ok(())
     }
@@ -1069,7 +1135,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
                 format!("{} merged at its approved head {} once it was {}", t.label(), short(&w.head), o.merge_state)
             }
         };
-        self.feed_note(w.thread.as_deref(), &text)?;
+        self.feed_note(t, w.thread.as_deref(), &text)?;
         pass.actions.push(text);
         Ok(())
     }
@@ -1084,21 +1150,26 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         }
         let verb = if w.status == WaitStatus::Sent { "keep" } else { "queue" };
         let ask = Ask {
-            what: format!("GitHub would not {verb} {} ({why})", t.label()),
+            what: format!("{} would not {verb} {} ({why})", t.forge(), t.label()),
             reply: "reply \"merge\" to try again, or \"hold\" to leave it",
-            context: format!("It was approved at head {}. GitHub refused {MAX_FAILURES} checks in a row.", w.head),
+            context: format!(
+                "It was approved at head {}. {} refused {MAX_FAILURES} checks in a row.",
+                w.head,
+                t.forge()
+            ),
         };
         self.raise(t, w.thread.as_deref(), "report", &ask, &w.head, event, Some(&w.approval), pass)?;
         self.retire_merge_wait(&w)?;
-        self.feed_note(w.thread.as_deref(), &format!("{} could not be queued: {why}", t.label()))?;
+        self.feed_note(t, w.thread.as_deref(), &format!("{} could not be queued: {why}", t.label()))?;
         pass.actions.push(format!("{} could not be queued: {why}", t.label()));
         Ok(())
     }
 
     fn wake(&self, t: &Tracked, event: &str, ticket: &str, kind: &str, body: &str, pass: &mut Pass) -> Result<bool> {
         let now = self.now();
-        let wake = Wake { repo: &t.repo, pr: t.number, event: Some(event), ticket, from: GITHUB, kind, body, at: &now };
-        let fresh = self.store.pr_event_wake(&wake, |h| format!("{}\n{body}", header(kind, GITHUB, h, None)))?;
+        let from = t.sender();
+        let wake = Wake { repo: &t.repo, pr: t.number, event: Some(event), ticket, from, kind, body, at: &now };
+        let fresh = self.store.pr_event_wake(&wake, |h| format!("{}\n{body}", header(kind, from, h, None)))?;
         if fresh.is_some() {
             pass.woken.push(ticket.into());
         }
@@ -1118,7 +1189,9 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         pass: &mut Pass,
     ) -> Result<()> {
         let link = ticket.map(|x| self.store.link_get(x)).transpose()?.flatten().filter(|l| !l.closed);
-        let act = if link.is_some() { ask.reply } else { NO_TICKET };
+        let unticketed = no_ticket(t.forge());
+        let act = if link.is_some() { ask.reply } else { &unticketed };
+        let from = t.sender();
         let tail = if ask.context.is_empty() { String::new() } else { format!("\n\n{}", ask.context) };
         let body = format!("**ACTION NEEDED:** {}: {act}, here: {}{tail}", ask.what, t.url(&*self.host));
         let mark = |to: &str| match event {
@@ -1127,7 +1200,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         };
         match link {
             Some(mut l) if l.parent == BOARD => {
-                let handle = self.store.msg_new(GITHUB, &l.child, kind, &body, &self.now())?;
+                let handle = self.store.msg_new(from, &l.child, kind, &body, &self.now())?;
                 self.card_add(NewCard {
                     kind,
                     label: Some(&l.label),
@@ -1156,27 +1229,18 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
             }
             Some(l) => {
                 let now = self.now();
-                let wake = Wake {
-                    repo: &t.repo,
-                    pr: t.number,
-                    event,
-                    ticket: &l.child,
-                    from: GITHUB,
-                    kind,
-                    body: &body,
-                    at: &now,
-                };
-                if self.store.pr_event_wake(&wake, |h| format!("{}\n{body}", header(kind, GITHUB, h, None)))?.is_some()
-                {
+                let wake =
+                    Wake { repo: &t.repo, pr: t.number, event, ticket: &l.child, from, kind, body: &body, at: &now };
+                if self.store.pr_event_wake(&wake, |h| format!("{}\n{body}", header(kind, from, h, None)))?.is_some() {
                     pass.woken.push(l.child.clone());
                 }
                 Ok(())
             }
             None => {
-                let handle = self.store.msg_new(GITHUB, BOARD, "report", &body, &self.now())?;
+                let handle = self.store.msg_new(from, BOARD, "report", &body, &self.now())?;
                 self.card_add(NewCard {
                     kind: "report",
-                    label: Some(GITHUB),
+                    label: Some(from),
                     ticket: None,
                     link: None,
                     body: &body,
@@ -1199,10 +1263,10 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         self.store.waiting_set_data(BOARD, seq, &data)
     }
 
-    fn feed_note(&self, ticket: Option<&str>, text: &str) -> Result<()> {
+    fn feed_note(&self, t: &Tracked, ticket: Option<&str>, text: &str) -> Result<()> {
         let on_board = |t: &&str| self.store.link_get(t).ok().flatten().is_some_and(|l| l.parent == BOARD);
         let to = ticket.filter(on_board).unwrap_or(BOARD);
-        self.store.msg_new(GITHUB, to, "note", text, &self.now())?;
+        self.store.msg_new(t.sender(), to, "note", text, &self.now())?;
         self.changed();
         Ok(())
     }

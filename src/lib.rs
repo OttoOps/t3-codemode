@@ -21,6 +21,8 @@ mod flow_code;
 mod flow_git;
 pub mod github;
 pub mod github_host;
+pub mod gitlab;
+pub mod gitlab_host;
 pub mod issues;
 pub mod js;
 mod json_patch;
