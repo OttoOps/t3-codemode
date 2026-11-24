@@ -864,17 +864,17 @@ worktrees, active ticket links and repository trees:
   default; set [`flow.serializeFileConflicts`](config.md#flow) to `true` to
   hold conflicting issues while a colliding ticket is running and avoid
   launching conflicting issues at the same time.
-- **`codeDep` (`source: "code"`).** Extracts a bounded static dependency graph
-  from the local repository checkout (Cargo workspace crates and Rust
-  `use crate::` / `mod` edges, `package.json` workspaces and JS/TS imports,
-  and Python imports) and maps it against each open issue's resolved target
-  files and symbol references. When issue A touches a lower-level module or
-  defines a unique symbol referenced by issue B's target files or body, t3cm
-  emits an advisory `codeDep` edge from B to A carrying `modules` and/or
-  `symbols`. `codeDep` edges are strictly advisory: they never hold readiness,
-  never enter `blocked`, never hold launches (even when
-  `flow.serializeFileConflicts` is enabled), never raise cycle warnings, and
-  are skipped on queue-only reads.
+- **`codeDep` (`source: "code"`).** Builds a bounded static dependency graph
+  from the local repository checkout across Cargo workspace crates, Rust
+  `use crate::` and `mod` edges, `package.json` workspaces, JavaScript and
+  TypeScript imports, and Python imports, then maps those edges against each
+  open issue's resolved target files and symbol references. When issue A touches
+  a lower-level module or defines a unique symbol referenced by issue B's target
+  files or body, t3cm emits an advisory `codeDep` edge from B to A carrying
+  `modules` or `symbols`. `codeDep` edges are advisory only and never hold
+  readiness, enter `blocked`, hold launches even when
+  `flow.serializeFileConflicts` is enabled, or raise cycle warnings. Queue-only
+  reads skip this pass.
 
 `edges` lists each link once, from the issue that has it. Each edge carries
 `source` as `github`, `body`, `git` or `code`, and native `github` wins when
@@ -950,9 +950,9 @@ the address opens it too.
   and independent lanes, each in name order.
 - **Layout.** A blocker or `prStack` base sits to the left of what it blocks,
   and a parent to the left of its sub-issues, so work flows left to right.
-  Advisory `fileConflict` and `codeDep` edges do not constrain column order. The same graph
-  always lays out the same way. A wide graph scrolls inside the tab, never
-  the page. Each issue shows its `repo#N`, title and state: a ticket's live
+  Advisory `fileConflict` and `codeDep` edges do not constrain column order.
+  The same graph always lays out the same way. A wide graph scrolls inside the
+  tab, never the page. Each issue shows its `repo#N`, title and state: a ticket's live
   state, or for an issue with no ticket ready, blocked, external, skipped,
   closed or open. Amber still marks only a ticket with an open card.
 - **Links.** A solid arrow runs from a native GitHub blocker to the issue it
