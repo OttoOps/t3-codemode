@@ -342,10 +342,7 @@ fn is_distinctive_symbol(sym: &str) -> bool {
         return false;
     }
     let low = sym.to_ascii_lowercase();
-    if COMMON_SYMBOL_STOPWORDS.binary_search(&low.as_str()).is_ok() {
-        return false;
-    }
-    true
+    COMMON_SYMBOL_STOPWORDS.binary_search(&low.as_str()).is_err()
 }
 
 fn is_compound_code_ident(sym: &str) -> bool {
