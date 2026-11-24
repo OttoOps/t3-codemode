@@ -1734,8 +1734,8 @@ async fn the_page_is_a_fixed_shell_with_view_tabs_and_skip_links() {
     for needle in [
         "height: 100dvh",
         "html, body { height: 100%; margin: 0; overflow: hidden; }",
-        "#composer { grid-row: 3; }",
-        ".views-main { grid-row: 4;",
+        "grid-template-rows: 56px auto minmax(0, 1fr);",
+        ".views-main { grid-row: 3;",
         r#"role="tablist" aria-label="Board views""#,
         r#"id="vt-dispatch" aria-controls="view-dispatch""#,
         r#"id="vt-issues" aria-controls="view-issues""#,
@@ -1755,7 +1755,8 @@ async fn the_page_is_a_fixed_shell_with_view_tabs_and_skip_links() {
         "Skip to Ask",
         "Skip to Tickets",
         "Skip to Activity",
-        r#"aria-label="Launch and Ask""#,
+        r#"<aside id="composer" class="drawer cdr" role="dialog" aria-modal="true" aria-labelledby="composer-h""#,
+        r#"<div class="scrim" id="scrim" hidden></div>"#,
     ] {
         assert!(html.contains(needle), "missing {needle}");
     }
@@ -2340,6 +2341,35 @@ async fn the_composer_error_strip_moves_with_the_dock() {
     let err = html.find(r#"id="composer-err""#).unwrap();
     let forms = html.find(r#"class="forms""#).unwrap();
     assert!(dock < err && err < forms);
+}
+
+#[tokio::test]
+async fn the_archive_search_filters_done_and_settled_together() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"{ROWS}
+const tree = [T("acme/widgets#7", {{ done: true, status: "done" }}), T("acme/gadgets#8", {{ done: true, status: "done" }})];
+const settled = {{ tickets: [{{ thread: "th-9", label: "acme/gadgets#9", settledAt: "2026-01-01T00:00:00Z" }}], asks: [] }};
+emitState({{ ...base, cards: [], tree, settled }});
+const keys = (id) => [...document.getElementById(id).children].filter((e) => e.dataset.key && !e.classList.contains("gone")).map((e) => e.dataset.key);
+const before = {{ done: keys("done"), settled: keys("settled") }};
+const find = document.getElementById("settled-filter");
+find.value = "gadgets";
+find.dispatch("input");
+const found = {{ done: keys("done"), settled: keys("settled") }};
+find.value = "nothing";
+find.dispatch("input");
+const none = {{ done: keys("done"), empty: document.getElementById("done-empty").textContent }};
+return {{ before, found, none }};
+"##
+        ),
+    );
+    assert_eq!(r["before"], json!({"done": ["t-acme/widgets#7", "t-acme/gadgets#8"], "settled": ["t:th-9"]}), "{r}");
+    assert_eq!(r["found"], json!({"done": ["t-acme/gadgets#8"], "settled": ["t:th-9"]}), "{r}");
+    assert_eq!(r["none"], json!({"done": [], "empty": "No finished tickets match the search."}), "{r}");
 }
 
 #[tokio::test]
@@ -3093,19 +3123,89 @@ return {{ fromCard, full, jumped, issue, posts: fetches.filter((f) => f.method =
 }
 
 #[tokio::test]
-async fn the_inspector_is_a_non_modal_aside_documented_on_the_board_page() {
+async fn the_inspector_is_a_modal_slide_over_documented_on_the_board_page() {
     let (html, _) = two_gate_page().await;
     for needle in [
         ".drawer {",
-        "width: 400px; max-width: 94vw;",
+        "width: 460px; max-width: 100vw;",
         "transform: translateX(100%); visibility: hidden;",
-        "@media (max-width: 599px) {\n  .drawer { width: 100vw; max-width: none; border-left: 0; }",
+        r#"role: "dialog", "aria-modal": "true", "aria-labelledby": "dr-title""#,
         "<dt>Enter</dt><dd>Open the focused card's or row's details</dd>",
     ] {
         assert!(html.contains(needle), "missing {needle:?}");
     }
     let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/src/board.md")).unwrap();
     assert!(doc.contains("## The inspector"), "docs/src/board.md documents the drawer");
+}
+
+#[tokio::test]
+async fn the_drawers_are_modal_trap_tab_and_hand_focus_back_to_their_trigger() {
+    let (html, st) = two_gate_page().await;
+    let r = drawer_scenario(
+        &html,
+        &st,
+        r##"
+emitState({ ...base, cards: [], tree });
+const scrim = () => !document.getElementById("scrim").hidden;
+const trigger = row("acme/a#2");
+trigger.focus();
+press(trigger, "Enter");
+const opened = { open: dr().classList.contains("open"), scrim: scrim(), modal: dr().getAttribute("aria-modal"), role: dr().getAttribute("role"),
+  focus: document.activeElement === dp("title") };
+const close = dp("close");
+document.getElementById("filter-q").focus();
+press(document.activeElement, "Tab");
+const tabbed = dr().contains(document.activeElement);
+const stops = tabbable(dr());
+const last = stops[stops.length - 1];
+last.focus();
+press(last, "Tab");
+const wrapped = stops.length > 1 && document.activeElement === stops[0] && stops[0] === close;
+const shiftEv = close.dispatch("keydown", { key: "Tab", shiftKey: true });
+for (const f of document.listeners.keydown) f(shiftEv);
+const back = document.activeElement === last;
+press(document.activeElement, "j");
+const kept = dr().contains(document.activeElement);
+close.dispatch("click");
+const closed = { open: dr().classList.contains("open"), scrim: scrim(), back: document.activeElement === trigger };
+const launch = document.getElementById("launch-open");
+launch.focus();
+openComposer("launch");
+const composer = { scrim: scrim(), focus: document.activeElement === document.getElementById("issues"),
+  title: document.getElementById("composer-h").textContent, expanded: launch.getAttribute("aria-expanded") };
+trigger.focus();
+press(trigger, "Enter");
+const swapped = { composer: composerFrom.open, drawer: dr().classList.contains("open") };
+press(document.activeElement, "Escape");
+trigger.focus();
+openComposer("ask");
+press(document.getElementById("question"), "Escape");
+const esc = { open: composerFrom.open, scrim: scrim(), back: document.activeElement === trigger,
+  title: document.getElementById("composer-h").textContent };
+return { opened, tabbed, wrapped, back, kept, closed, composer, swapped, esc };
+"##,
+    );
+    assert_eq!(
+        r["opened"],
+        json!({"open": true, "scrim": true, "modal": "true", "role": "dialog", "focus": true}),
+        "{r}"
+    );
+    assert_eq!(r["tabbed"], true, "Tab from outside a modal drawer lands back inside it: {r}");
+    assert_eq!(r["wrapped"], true, "Tab past the last control wraps to the first: {r}");
+    assert_eq!(r["back"], true, "Shift+Tab from the first control wraps to the last: {r}");
+    assert_eq!(r["kept"], true, "single-key shortcuts do not pull focus out of a modal drawer: {r}");
+    assert_eq!(r["closed"], json!({"open": false, "scrim": false, "back": true}), "{r}");
+    assert_eq!(
+        r["composer"],
+        json!({"scrim": true, "focus": true, "title": "Launch tickets", "expanded": "true"}),
+        "{r}"
+    );
+    assert_eq!(r["swapped"], json!({"composer": false, "drawer": true}), "one drawer at a time: {r}");
+    assert_eq!(
+        r["esc"],
+        json!({"open": false, "scrim": false, "back": true, "title": "Ask your agent"}),
+        "Esc closes the composer and focus returns to what opened it: {r}"
+    );
 }
 
 #[tokio::test]
@@ -5358,6 +5458,66 @@ return { shown, after: { rows: rows(), chip: q("#n-new").textContent, empty: sec
     assert_eq!(r["shown"]["gadget"], "", "{r}");
     assert_eq!(r["shown"]["view"], true, "{r}");
     assert_eq!(r["after"], json!({"rows": [], "chip": "", "empty": true}), "{r}");
+}
+
+#[tokio::test]
+async fn a_covered_new_issue_names_what_covers_it_and_launch_asks_twice() {
+    let (html, st) = new_issue_page().await;
+    let r = new_scenario(
+        &html,
+        &st,
+        r##"
+const pr = (n, state) => ({ repository: "acme/widgets", number: n, url: "https://github.com/acme/widgets/pull/" + n, state });
+const cov = {
+  n1: [{ kind: "merged", ticket: "widgets#50", ticketThread: "t-50", worker: "#50 PR 1/3", thread: "w-1", pr: pr(84, "merged") }],
+  n2: [{ kind: "pr", ticket: "widgets#50", ticketThread: "gone", worker: "#50 PR 2/3", thread: "w-2", pr: pr(83, "open") },
+       { kind: "worker", ticket: "widgets#50", ticketThread: "t-50", worker: "#50 PR 3/3", thread: "w-3", pr: null }],
+};
+const tree = [{ thread: "t-50", ticket: "t-50", label: "widgets#50", status: "running", done: false, workers: [], joined: true, last: null, link: null }];
+emitState({ ...base, tree, newIssues: base.newIssues.map((i) => ({ ...i, coveredBy: cov[i.id] || [] })) });
+const badges = (id) => [...btn(id, "cov").children].map((b) => [b.tagName, b.textContent, b.getAttribute("href")]);
+const shown = { n1: badges("n1"), n2: badges("n2"), hidden: btn("n1", "cov").hidden,
+  launch: [btn("n1", "launch").textContent, btn("n1", "launch").getAttribute("aria-label")], covered: row("n1").classList.contains("covered") };
+btn("n1", "cov").firstChild.dispatch("click");
+const d = document.getElementById("drawer");
+const opened = { open: d.classList.contains("open"), sub: dr.sub && dr.sub.key, worker: dr.sub && dr.sub.worker };
+closeDrawer(false);
+emitState({ ...base, tree, newIssues: base.newIssues.map((i) => ({ ...i, coveredBy: [] })) });
+const plain = { hidden: btn("n1", "cov").hidden, launch: btn("n1", "launch").textContent, covered: row("n1").classList.contains("covered") };
+emitState({ ...base, tree, newIssues: base.newIssues.map((i) => ({ ...i, coveredBy: cov[i.id] || [] })) });
+openDrawer({ kind: "new", key: "n1" });
+const part = (n) => d.querySelector('[data-part="' + n + '"]');
+const drawer = { cover: part("cover").hidden, n: part("cover-n").textContent, launch: part("launch").textContent };
+return { shown, opened, plain, drawer };
+"##,
+    );
+    let s = &r["shown"];
+    assert_eq!(
+        s["n1"],
+        json!([["BUTTON", "Fixed by PR #84", null]]),
+        "a ticket on the board opens in the inspector: {r}"
+    );
+    assert_eq!(
+        s["n2"],
+        json!([
+            ["A", "PR #83 open", "https://github.com/acme/widgets/pull/83"],
+            ["BUTTON", "Running in #50 PR 3/3", null]
+        ]),
+        "{r}"
+    );
+    assert_eq!(s["hidden"], false, "{r}");
+    assert_eq!(
+        s["launch"],
+        json!([
+            "Launch anyway",
+            "Launch another ticket for widgets#43, already covered: Fixed by PR #84 from #50 PR 1/3"
+        ]),
+        "{r}"
+    );
+    assert_eq!(s["covered"], true, "{r}");
+    assert_eq!(r["opened"], json!({"open": true, "sub": "t-50", "worker": "w-1"}), "the badge opens its worker: {r}");
+    assert_eq!(r["plain"], json!({"hidden": true, "launch": "Launch", "covered": false}), "{r}");
+    assert_eq!(r["drawer"], json!({"cover": false, "n": "1", "launch": "Launch anyway"}), "{r}");
 }
 
 #[tokio::test]
