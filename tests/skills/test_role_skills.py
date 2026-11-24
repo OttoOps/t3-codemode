@@ -246,6 +246,7 @@ class MergeRouteTests(unittest.TestCase):
         self.assertIn("keep the task until that succeeds", untracked)
         self.assertIn("start the merge watch again at its current head", untracked)
         self.assertIn("clear any merge gate open for it", untracked)
+        self.assertIn("it deletes the watch before it goes on from \"On the user's word\" item 3, so items 3 and 4 run once", watch)
         self.assertIn('setting "Auth gate sent" back to "no"', untracked)
         self.assertIn("The approved chain holds only when the merged head is the head it approved", untracked)
 

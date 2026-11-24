@@ -809,7 +809,9 @@ statusCheckRollup` when `hasNextPage` is true):
 
 On an untracked forge (the prompt says "Forge: untracked"), each run reads
 the PR or MR with the status command the prompt names, in place of the
-GitHub query, and handles what it finds the same way:
+GitHub query, and handles what it finds the same way. When this thread
+merges the PR or MR itself on the user's word, it deletes the watch before
+it goes on from "On the user's word" item 3, so items 3 and 4 run once:
 
 - **Merged:** confirm the merge with the repo's documented
   merge-verification workflow, and keep the task until that succeeds. Then
