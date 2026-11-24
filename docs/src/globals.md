@@ -255,10 +255,10 @@ parent and a child, and the service keeps every link and message in its store.
   worker reports its pull request: `opened`, `updated` or `ready`. Under a
   board ticket the service checks the description, records the head, or
   opens the merge card itself, with no ticket turn. See [wf.pr](#wfpr).
-- `wf.merge({repo, pr, head, method?})` merges a GitHub pull request at the
-  approved head commit. `repo` is `owner/name`, `head` the full 40-character
-  SHA the user approved, and `method` one of `merge`, `squash` or `rebase`.
-  See [wf.merge](#wfmerge).
+- `wf.merge({repo, pr, head, method?})` merges a GitHub pull request or a
+  GitLab merge request at the approved head commit. `repo` takes the same
+  forms as `wf.pr`, `head` the full 40-character SHA the user approved, and
+  `method` one of `merge`, `squash` or `rebase`. See [wf.merge](#wfmerge).
 
 ```js
 async () => wf.send({ kind: "note", body: "tests green at d4db97c" })
@@ -326,9 +326,8 @@ request with no such pipeline goes to the ticket. A `Refs #<n>` line in its
 description names issue `<n>` of the merge request's own project. Past 100
 changed files, the event goes to the ticket, as it does on GitHub. It also
 goes to the ticket when the diff list holds fewer files than the merge
-request's `changes_count`, or when the head moves while the service reads it. The service
-does not merge a merge request yet, so an answer to its merge card goes to
-the ticket as a reply.
+request's `changes_count`, or when the head moves while the service reads it. An
+answer to its merge card merges it through [wf.merge](#wfmerge), as on GitHub.
 
 Where the service cannot decide, it sends the ticket the message a worker
 sent before `wf.pr`, with a line saying why, and returns `status: "ticket"`
@@ -397,6 +396,49 @@ reaches `gh` or the network itself; see [Security](security.md#github).
 async () => wf.merge({ repo: "acme/widgets", pr: 81, head: "d4db97c0e1f2a3b4c5d6e7f8091a2b3c4d5e6f70" })
 ```
 
+#### GitLab merge requests
+
+`repo` takes `<host>/<group>[/<subgroup>...]/<project>` for a host listed
+under [`forges`](config.md#forges), or the merge request's URL, in which case
+`pr` can be left out. `wf.merge` reads the merge request over REST with
+`glab api`, the same read `wf.pr` makes, plus the project's
+`merge_trains_enabled` and, on a merge train project, the train car's
+position from GraphQL. The table above holds with a merge train in place of
+the merge queue:
+
+- On a merge train project, a mergeable merge request joins the train with
+  `POST /projects/:id/merge_trains/merge_requests/:iid`, with `sha = head`
+  and `auto_merge: true`, and returns `queued`.
+- Elsewhere it merges with `PUT /projects/:id/merge_requests/:iid/merge`,
+  with `sha = head`, `should_remove_source_branch` and `auto_merge: true`,
+  and returns `merged`.
+- `method: "squash"` sends `squash: true`, and `merge` or `rebase` sends
+  `squash: false`. GitLab takes no other method per merge, so the project's
+  merge method applies. With no `method`, the merge request's own squash
+  setting applies.
+
+GitLab's HTTP answers map onto the same results:
+
+| GitLab answers | Meaning | Returns |
+|---|---|---|
+| 405 | It cannot merge the merge request yet | `waiting` with a `reason` |
+| 409 | `sha` is no longer the head | `refused` with "head moved" |
+| 422 | The merge failed | `refused` with the reason |
+| 401 or 403 | The `glab` login has no permission to merge | `refused` with the reason |
+| 400 | The request was refused, as on an instance that requires the `sha` | `refused` with the reason |
+
+GitLab can also take the merge over. It sets its own auto-merge when its
+pipeline state lags the service's read, and it answers 202 when it schedules
+the merge request to join the train once its pipeline passes. In both cases
+the service cancels that with `POST .../cancel_auto_merge`, or
+`.../cancel_merge_when_pipeline_succeeds` on a GitLab without it, and returns
+`waiting`, so the approval stays with the service, as it does on GitHub. When
+the cancel fails, the `reason` says GitLab will merge it on its own. A
+waiting approval stays waiting while GitLab keeps answering 405 to the
+reconcile's merge, with the answer kept as its last error. GitLab
+records no reason when a car leaves a train, so the board reports a dropped
+car as one that left with no reason recorded.
+
 ### The board's merge answer
 
 When the user answers a merge card that [`wf.pr`](#wfpr) `ready` opened
@@ -405,10 +447,12 @@ runs the merge itself, with no ticket turn:
 
 1. It calls `wf.merge` for the ticket at the card's head, with the `method`
    from the worker's `wf.openChild` brief. A `queued` or `waiting` result
-   holds the approval in the merge wait, and GitHub reconcile follows it.
-2. Once GitHub shows the pull request merged, it deletes the head branch
-   through the API, unless GitHub already did, the branch is on a fork, or
-   the branch's tip is no longer the merged head.
+   holds the approval in the merge wait, and PR reconcile follows it.
+2. Once the forge shows the pull request merged, it deletes the head branch
+   through the API, unless the forge already did, the branch is on a fork, or
+   the branch's tip is no longer the merged head. On GitLab that is the merge
+   request's source branch, deleted with
+   `DELETE /projects/:id/repository/branches/:branch`.
 3. It resolves the ticket's merge cards for the pull request.
 4. When no `pr`-scoped delivery stage remains after `merge`, it sends the
    worker `Merged #<n> at <merge commit>. Hand off.`

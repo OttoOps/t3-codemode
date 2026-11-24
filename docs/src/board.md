@@ -1188,9 +1188,11 @@ the target branch. A close wakes it the same way. When `glab` fails, the
 pull requests on GitHub are still checked.
 
 [`wf.pr`](globals.md#wfpr) takes a merge request, so a worker's `ready`
-opens its merge card, naming the merge request's URL. `wf.merge` does not
-take one yet, so the board never merges one, and an answer to that card goes
-to the ticket as a reply.
+opens its merge card, naming the merge request's URL. An answer to that card
+merges it through [`wf.merge`](globals.md#gitlab-merge-requests), which joins
+the merge train on a project that has one. The reconcile then merges a
+waiting merge request, or adds it to the train, once GitLab shows it
+mergeable at the approved head.
 
 ## Settling
 
