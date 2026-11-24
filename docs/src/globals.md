@@ -455,17 +455,17 @@ and names the repo.
 board reads from `GET /api/flow`, even when `config.json` has no `flow` block.
 It reads every open issue, its body and open pull requests across covered
 repos, inspects local worktree branch ancestry, modified files and static
-module/workspace dependencies when a local checkout is attached, keeps
+module or workspace dependencies when a local checkout is attached, keeps
 transitive blocker chains intact through unlabelled issues, and uses the
 batched tickets query for any active ticket or body-referenced issue not
 already in that read. Each edge carries `kind` as `blockedBy`, `parent`,
 `prStack`, `fileConflict` or `codeDep` and `source` as `github`, `body`, `git`
 or `code`. `prStack` edges include optional `branch`, `baseBranch`, `pr`,
 `basePr` and `part` fields; `fileConflict` edges carry `files` listing the
-overlapping repo-relative paths; advisory `codeDep` edges carry `modules`
-and/or `symbols` describing static Cargo/Rust, JS/TS or Python module and
-symbol dependencies without holding readiness, launches or cycle warnings
-(skipped on queue-only reads). `graph.warnings` and each
+overlapping repo-relative paths; advisory `codeDep` edges carry `modules` or
+`symbols` naming static Cargo, Rust, JavaScript, TypeScript or Python module
+and symbol dependencies without holding readiness, launches or cycle warnings.
+Queue-only reads skip `codeDep` analysis. `graph.warnings` and each
 affected node's `warnings` report cycles, unresolved references, and plain
 `blocked` labels with no linked open blocker. `wf.flow()` leaves `graph` out by
 default because it can be large.

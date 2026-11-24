@@ -246,6 +246,7 @@ struct RepoCodeGraph {
     crate_deps: HashMap<String, BTreeSet<String>>,
     crate_dev_deps: HashMap<String, BTreeSet<String>>,
     pkg_dirs: Vec<(String, String)>,
+    pkg_dir_to_name: HashMap<String, String>,
     pkg_deps: HashMap<String, BTreeSet<String>>,
     pkg_dev_deps: HashMap<String, BTreeSet<String>>,
     file_to_unique_symbols: HashMap<String, Vec<String>>,
@@ -1443,12 +1444,52 @@ fn is_js_regex_prefix_kw(ident: &str) -> bool {
     )
 }
 
+struct JsLexState {
+    regex_allowed: bool,
+    stmt_head_kw: bool,
+    paren_opens_stmt: Vec<bool>,
+}
+
+impl JsLexState {
+    fn new() -> Self {
+        Self { regex_allowed: true, stmt_head_kw: false, paren_opens_stmt: Vec::new() }
+    }
+
+    fn on_value(&mut self) {
+        self.regex_allowed = false;
+        self.stmt_head_kw = false;
+    }
+
+    fn on_ident(&mut self, ident: &str, prev_dot: bool) {
+        self.stmt_head_kw = !prev_dot && matches!(ident, "if" | "while" | "for" | "with");
+        self.regex_allowed = !prev_dot && is_js_regex_prefix_kw(ident);
+    }
+
+    fn on_punct(&mut self, b: u8) {
+        match b {
+            b'(' => {
+                self.paren_opens_stmt.push(self.stmt_head_kw);
+                self.stmt_head_kw = false;
+                self.regex_allowed = true;
+            }
+            b')' => {
+                self.regex_allowed = self.paren_opens_stmt.pop().unwrap_or(false);
+                self.stmt_head_kw = false;
+            }
+            _ => {
+                self.stmt_head_kw = false;
+                self.regex_allowed = is_js_regex_prefix_byte(b);
+            }
+        }
+    }
+}
+
 fn strip_js_comments(src: &str, blank_strings: bool) -> String {
     let bytes = src.as_bytes();
     let mut out = String::with_capacity(src.len());
     let mut i = 0usize;
     let mut in_block = false;
-    let mut regex_allowed = true;
+    let mut lex = JsLexState::new();
     while i < bytes.len() {
         if in_block {
             if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
@@ -1478,7 +1519,7 @@ fn strip_js_comments(src: &str, blank_strings: bool) -> String {
             i += 2;
             continue;
         }
-        if regex_allowed
+        if lex.regex_allowed
             && bytes[i] == b'/'
             && let Some(end) = skip_js_regex_literal(src, i)
         {
@@ -1488,7 +1529,7 @@ fn strip_js_comments(src: &str, blank_strings: bool) -> String {
                 out.push_str(&src[i..end]);
             }
             i = end;
-            regex_allowed = false;
+            lex.on_value();
             continue;
         }
         if matches!(bytes[i], b'"' | b'\'' | b'`') {
@@ -1528,22 +1569,31 @@ fn strip_js_comments(src: &str, blank_strings: bool) -> String {
                     i += ch.len_utf8();
                 }
             }
-            regex_allowed = false;
+            lex.on_value();
+            continue;
+        }
+        // `++` and `--` cannot precede a regex literal (e.g. `x++ / require('./a')` is division).
+        if matches!(bytes[i], b'+' | b'-') && bytes.get(i + 1) == Some(&bytes[i]) {
+            out.push(bytes[i] as char);
+            out.push(bytes[i] as char);
+            i += 2;
+            lex.on_value();
             continue;
         }
         if is_ident_start(bytes[i]) {
             let start = i;
+            let prev_dot = start > 0 && bytes[start - 1] == b'.';
             while i < bytes.len() && is_ident_continue(bytes[i]) {
                 i += 1;
             }
             let ident = &src[start..i];
             out.push_str(ident);
-            regex_allowed = is_js_regex_prefix_kw(ident);
+            lex.on_ident(ident, prev_dot);
             continue;
         }
         let b = bytes[i];
         if !b.is_ascii_whitespace() {
-            regex_allowed = is_js_regex_prefix_byte(b);
+            lex.on_punct(b);
         }
         let ch = src[i..].chars().next().expect("valid utf-8");
         out.push(ch);
@@ -1983,15 +2033,15 @@ fn extract_js_export_defs(after_export: &str, defs: &mut Vec<String>) {
 fn scan_js_call_specifiers(src: &str, mut on_spec: impl FnMut(&str)) {
     let bytes = src.as_bytes();
     let mut i = 0usize;
-    let mut regex_allowed = true;
+    let mut lex = JsLexState::new();
     while i < bytes.len() {
         // Skip JS regex literals like `/'/` so quotes inside a regex do not hide later calls
-        if regex_allowed
+        if lex.regex_allowed
             && bytes[i] == b'/'
             && let Some(end) = skip_js_regex_literal(src, i)
         {
             i = end;
-            regex_allowed = false;
+            lex.on_value();
             continue;
         }
         // Skip string and template literals so text like `'require("./storage")'` is ignored
@@ -2015,7 +2065,13 @@ fn scan_js_call_specifiers(src: &str, mut on_spec: impl FnMut(&str)) {
                     i += ch.len_utf8();
                 }
             }
-            regex_allowed = false;
+            lex.on_value();
+            continue;
+        }
+        // `++` and `--` cannot precede a regex literal (e.g. `x++ / require('./a')` is division).
+        if matches!(bytes[i], b'+' | b'-') && bytes.get(i + 1) == Some(&bytes[i]) {
+            i += 2;
+            lex.on_value();
             continue;
         }
         if is_ident_start(bytes[i]) {
@@ -2034,12 +2090,12 @@ fn scan_js_call_specifiers(src: &str, mut on_spec: impl FnMut(&str)) {
                     }
                 }
             }
-            regex_allowed = is_js_regex_prefix_kw(ident);
+            lex.on_ident(ident, prev_dot);
             continue;
         }
         let b = bytes[i];
         if !b.is_ascii_whitespace() {
-            regex_allowed = is_js_regex_prefix_byte(b);
+            lex.on_punct(b);
         }
         let ch = src[i..].chars().next().expect("valid utf-8");
         i += ch.len_utf8();
@@ -2548,6 +2604,8 @@ struct JsWorkspaceData {
     /// Workspace roots (longest dir first) -> member packages for files outside any named package dir.
     ws_root_pkgs: Vec<(String, HashMap<String, JsPackage>)>,
     pkg_dirs: Vec<(String, String)>,
+    pkg_dir_to_name: HashMap<String, String>,
+    /// Keyed by package directory so same-named packages in different workspaces never collide.
     normal_deps: HashMap<String, BTreeSet<String>>,
     dev_deps: HashMap<String, BTreeSet<String>>,
     ts_aliases: Vec<TsAliasRule>,
@@ -2922,46 +2980,46 @@ fn build_js_workspace_graph(root: &Path, tree_files: &HashSet<String>, scanned: 
     let mut direct_normal: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut direct_dev: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut explicit_links_by_dir: HashMap<String, HashMap<String, JsPackage>> = HashMap::new();
-    let resolve_js_dep = |pkg: &RawPkg,
-                          dep_name: &str,
-                          dep_ver: &str,
-                          links: &mut HashMap<String, HashMap<String, JsPackage>>|
+    // Returns target package directory so manifest dependency identities stay isolated across workspaces.
+    let resolve_js_dep_dir = |pkg: &RawPkg,
+                              dep_name: &str,
+                              dep_ver: &str,
+                              links: &mut HashMap<String, HashMap<String, JsPackage>>|
      -> Option<String> {
         if let Some(file_rel) = dep_ver.strip_prefix("file:").or_else(|| dep_ver.strip_prefix("link:"))
             && let Some(target_dir) = join_rel(&pkg.dir, file_rel)
             && let Some(target_pkg) = dir_to_pkg.get(&target_dir)
         {
             links.entry(pkg.dir.clone()).or_default().insert(dep_name.to_string(), target_pkg.clone());
-            return Some(target_pkg.name.clone());
+            return Some(target_dir);
         }
         for cand in &raw_pkgs {
             if cand.name.as_deref() == Some(dep_name)
                 && dir_to_name.contains_key(&cand.dir)
                 && same_workspace(&pkg.dir, &cand.dir)
             {
-                return Some(dep_name.to_string());
+                return Some(cand.dir.clone());
             }
         }
         None
     };
 
     for p in &raw_pkgs {
-        let Some(name) = &p.name else { continue };
         if !dir_to_name.contains_key(&p.dir) {
             continue;
         }
         for (dn, dv) in &p.normal_deps {
-            if let Some(target) = resolve_js_dep(p, dn, dv, &mut explicit_links_by_dir)
-                && target != *name
+            if let Some(target_dir) = resolve_js_dep_dir(p, dn, dv, &mut explicit_links_by_dir)
+                && target_dir != p.dir
             {
-                direct_normal.entry(name.clone()).or_default().insert(target);
+                direct_normal.entry(p.dir.clone()).or_default().insert(target_dir);
             }
         }
         for (dn, dv) in &p.dev_deps {
-            if let Some(target) = resolve_js_dep(p, dn, dv, &mut explicit_links_by_dir)
-                && target != *name
+            if let Some(target_dir) = resolve_js_dep_dir(p, dn, dv, &mut explicit_links_by_dir)
+                && target_dir != p.dir
             {
-                direct_dev.entry(name.clone()).or_default().insert(target);
+                direct_dev.entry(p.dir.clone()).or_default().insert(target_dir);
             }
         }
     }
@@ -3058,6 +3116,7 @@ fn build_js_workspace_graph(root: &Path, tree_files: &HashSet<String>, scanned: 
         visible_by_pkg_dir,
         ws_root_pkgs,
         pkg_dirs,
+        pkg_dir_to_name: dir_to_name,
         normal_deps: closed_normal,
         dev_deps: closed_dev,
         ts_aliases,
@@ -3129,6 +3188,7 @@ fn build_repo_code_graph(local: &LocalRepoInfo, target_files: &HashSet<String>) 
         visible_by_pkg_dir,
         ws_root_pkgs,
         pkg_dirs,
+        pkg_dir_to_name,
         normal_deps: pkg_deps,
         dev_deps: pkg_dev_deps,
         ts_aliases,
@@ -3178,11 +3238,14 @@ fn build_repo_code_graph(local: &LocalRepoInfo, target_files: &HashSet<String>) 
             }
             extract_rust_file_info(f, &raw, krate, &dep_map, tree_files)
         } else if is_js_ts_file(f) {
-            let scoped_pkgs = if let Some((owner_dir, _)) = owner_in(&pkg_dirs, f) {
-                visible_by_pkg_dir.get(owner_dir).unwrap_or(&empty_pkgs)
-            } else {
-                ws_root_pkgs.iter().find(|(ws_dir, _)| path_in_dir(f, ws_dir)).map_or(&empty_pkgs, |(_, map)| map)
-            };
+            // Choose the innermost scope across both named package directories and workspace roots.
+            let scoped_pkgs =
+                match (owner_in(&pkg_dirs, f), ws_root_pkgs.iter().find(|(ws_dir, _)| path_in_dir(f, ws_dir))) {
+                    (Some((pdir, _)), Some((wdir, wmap))) if wdir.len() > pdir.len() => wmap,
+                    (Some((pdir, _)), _) => visible_by_pkg_dir.get(pdir).unwrap_or(&empty_pkgs),
+                    (None, Some((_, wmap))) => wmap,
+                    (None, None) => &empty_pkgs,
+                };
             extract_js_ts_file_info(f, &raw, tree_files, scoped_pkgs, &ts_aliases)
         } else if is_python_file(f) {
             extract_python_file_info(f, &raw, tree_files, &py_mod_to_file)
@@ -3221,6 +3284,7 @@ fn build_repo_code_graph(local: &LocalRepoInfo, target_files: &HashSet<String>) 
         crate_deps,
         crate_dev_deps,
         pkg_dirs,
+        pkg_dir_to_name,
         pkg_deps,
         pkg_dev_deps,
         file_to_unique_symbols,
@@ -3254,7 +3318,7 @@ struct ExpandedIssue {
     files: BTreeSet<String>,
     /// Map of crate name -> `true` if ALL touches in that crate are test/bench/example files.
     crates: BTreeMap<String, bool>,
-    /// Map of JS workspace package name -> `true` if ALL touches in that package are test files.
+    /// Map of JS workspace package dir -> `true` if ALL touches in that package are test files.
     pkgs: BTreeMap<String, bool>,
     defined_symbols: Vec<(String, String)>,
     body_candidates: HashSet<String>,
@@ -3325,8 +3389,8 @@ pub(crate) fn analyze_repo_code_deps(
                     if let Some((cdir, cname)) = owner_in(&graph.crate_dirs, f) {
                         record_unit_touch(&mut crates, cname, is_test_like_rust_path(f, cdir));
                     }
-                    if let Some((pdir, pname)) = owner_in(&graph.pkg_dirs, f) {
-                        record_unit_touch(&mut pkgs, pname, is_test_like_js_path(f, pdir));
+                    if let Some((pdir, _)) = owner_in(&graph.pkg_dirs, f) {
+                        record_unit_touch(&mut pkgs, pdir, is_test_like_js_path(f, pdir));
                     }
                 }
                 TargetPath::Dir(d) => {
@@ -3337,10 +3401,10 @@ pub(crate) fn analyze_repo_code_deps(
                             record_unit_touch(&mut crates, cname, is_test);
                         }
                     }
-                    for (pdir, pname) in &graph.pkg_dirs {
+                    for (pdir, _) in &graph.pkg_dirs {
                         if path_in_dir(d, pdir) || path_in_dir(pdir, d) {
                             let is_test = path_in_dir(d, pdir) && is_test_like_js_path(d, pdir);
-                            record_unit_touch(&mut pkgs, pname, is_test);
+                            record_unit_touch(&mut pkgs, pdir, is_test);
                         }
                     }
                 }
@@ -3434,19 +3498,22 @@ pub(crate) fn analyze_repo_code_deps(
                 }
             }
 
-            // 3. JS/TS package.json workspace dependencies
-            for (bp, &bp_test_only) in &b.pkgs {
-                for ap in a.pkgs.keys() {
-                    if bp == ap {
+            // 3. JS/TS package.json workspace dependencies (keyed by package directory)
+            for (bp_dir, &bp_test_only) in &b.pkgs {
+                for ap_dir in a.pkgs.keys() {
+                    if bp_dir == ap_dir {
                         continue;
                     }
-                    if a.pkgs.contains_key(bp) && b.pkgs.contains_key(ap) {
+                    if a.pkgs.contains_key(bp_dir) && b.pkgs.contains_key(ap_dir) {
                         continue;
                     }
-                    let normal_hit = graph.pkg_deps.get(bp).is_some_and(|set| set.contains(ap));
-                    let dev_hit = bp_test_only && graph.pkg_dev_deps.get(bp).is_some_and(|set| set.contains(ap));
+                    let normal_hit = graph.pkg_deps.get(bp_dir).is_some_and(|set| set.contains(ap_dir));
+                    let dev_hit =
+                        bp_test_only && graph.pkg_dev_deps.get(bp_dir).is_some_and(|set| set.contains(ap_dir));
                     if normal_hit || dev_hit {
-                        modules.insert(format!("workspace {bp} -> {ap}"));
+                        let bp_name = graph.pkg_dir_to_name.get(bp_dir).map_or(bp_dir.as_str(), String::as_str);
+                        let ap_name = graph.pkg_dir_to_name.get(ap_dir).map_or(ap_dir.as_str(), String::as_str);
+                        modules.insert(format!("workspace {bp_name} -> {ap_name}"));
                     }
                 }
             }
@@ -3854,5 +3921,66 @@ mod tests {
                 .contains(&"ws-a/packages/web/src/regex_caller.js -> ws-a/packages/web/src/storage.js".to_string()),
             "{e67:?}"
         );
+    }
+
+    #[test]
+    fn duplicate_pkg_names_nested_unnamed_workspace_and_if_regex_or_postfix_division_work() {
+        let td = tempfile::tempdir().unwrap();
+        let local = make_local_repo(
+            td.path(),
+            &[
+                // S2: Both workspaces define a package named "web"; only ws-b's "web" depends on ws-b's "foo"
+                ("ws-a/package.json", r#"{"private": true, "workspaces": ["packages/*"]}"#),
+                ("ws-a/packages/web/package.json", r#"{"name": "web"}"#),
+                ("ws-a/packages/web/src/index.ts", "export const WS_A_ONLY = 1;\n"),
+                ("ws-b/package.json", r#"{"private": true, "workspaces": ["packages/*"]}"#),
+                ("ws-b/packages/foo/package.json", r#"{"name": "foo"}"#),
+                ("ws-b/packages/foo/src/index.ts", "export const WS_B_FOO = 2;\n"),
+                ("ws-b/packages/web/package.json", r#"{"name": "web", "dependencies": {"foo": "workspace:*"}}"#),
+                ("ws-b/packages/web/src/index.ts", "export const WS_B_WEB = 3;\n"),
+                // S9: Unnamed nested workspace inside a named outer package
+                ("outer/package.json", r#"{"name": "outer-pkg", "main": "index.js"}"#),
+                ("outer/index.js", "export const OUTER_VAL = 1;\n"),
+                ("outer/nested/package.json", r#"{"private": true, "workspaces": ["pkgs/*"]}"#),
+                ("outer/nested/pkgs/core/package.json", r#"{"name": "nested-core", "main": "index.ts"}"#),
+                ("outer/nested/pkgs/core/index.ts", "export function nestedCoreFn() {}\n"),
+                ("outer/nested/run.ts", "import { nestedCoreFn } from 'nested-core';\n"),
+                // S7 & S8: regex after `if (flag)` and division after `x++` before `require('./storage')`
+                ("js/if_regex.js", "if (flag) /'/.test(value); require('./storage');\n"),
+                ("js/postfix_div.js", "const value = x++ / require('./storage');\n"),
+                ("js/storage.js", "module.exports = 42;\n"),
+            ],
+        );
+
+        let issues = vec![
+            issue_input(1, &[TargetPath::File("ws-a/packages/web/src/index.ts".into())], ""),
+            issue_input(2, &[TargetPath::File("ws-b/packages/foo/src/index.ts".into())], ""),
+            issue_input(3, &[TargetPath::File("ws-b/packages/web/src/index.ts".into())], ""),
+            issue_input(4, &[TargetPath::File("outer/nested/run.ts".into())], ""),
+            issue_input(5, &[TargetPath::File("outer/nested/pkgs/core/index.ts".into())], ""),
+            issue_input(6, &[TargetPath::File("js/if_regex.js".into())], ""),
+            issue_input(7, &[TargetPath::File("js/postfix_div.js".into())], ""),
+            issue_input(8, &[TargetPath::File("js/storage.js".into())], ""),
+        ];
+
+        let edges = analyze_repo_code_deps(&local, &issues, &BTreeMap::new());
+        let find = |from: u64, to: u64| edges.iter().find(|e| e.from.1 == from && e.to.1 == to);
+
+        // S2: ws-a's "web" (#1) must NOT inherit ws-b's "web" -> "foo" (#2) dependency, while ws-b's "web" (#3) DOES
+        assert!(find(1, 2).is_none(), "ws-a web must not inherit ws-b web->foo dep: {edges:?}");
+        let e32 = find(3, 2).expect("ws-b web (#3) -> ws-b foo (#2)");
+        assert!(e32.modules.contains(&"workspace web -> foo".to_string()), "{e32:?}");
+
+        // S9: script at unnamed nested workspace root picks nested workspace scope over enclosing outer package
+        let e45 = find(4, 5).expect("nested root script (#4) -> nested-core (#5)");
+        assert!(e45.modules.contains(&"outer/nested/run.ts -> outer/nested/pkgs/core/index.ts".to_string()), "{e45:?}");
+
+        // S7: `if (flag) /'/.test(value); require('./storage');` finds require('./storage')
+        let e68 = find(6, 8).expect("if_regex (#6) -> storage (#8)");
+        assert!(e68.modules.contains(&"js/if_regex.js -> js/storage.js".to_string()), "{e68:?}");
+
+        // S8: `const value = x++ / require('./storage');` treats `/` as division and finds require('./storage')
+        let e78 = find(7, 8).expect("postfix_div (#7) -> storage (#8)");
+        assert!(e78.modules.contains(&"js/postfix_div.js -> js/storage.js".to_string()), "{e78:?}");
     }
 }
