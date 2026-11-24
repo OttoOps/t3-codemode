@@ -145,6 +145,9 @@ three more rules hold:
    and merge-verification workflow in place of the GitHub PR steps in steps 3
    and 4 (including "The handoff" item 1), or, when the repo documents none,
    tell the user under the split (step 2) and stop before launching a worker.
+   t3cm's reconcile follows only GitHub PRs, so on such an untracked forge
+   this thread starts its own merge watch when the PR or MR opens ("The
+   merge watch"), whether or not it has a parent.
 4. Read the repo's `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `README.md`
    (contributing and versioning), and `docs/agents/`. Settle the
    conventions below, from the repo's `## Agent workflow` section when it
@@ -464,6 +467,9 @@ ref>` matching the worker link's `issue` identity with a non-GitHub tracker
 send the worker "Rewrite #<number>'s description through the Publishing
 section of the t3-worker procedure: <what is missing>."
 
+On an untracked forge (step 1 item 3), start the merge watch now, as "The
+merge watch" says for that case, at the head the worker named.
+
 Then tell the user the PR is open, with its URL, so they can review it
 while its checks run. When the worker reported "Checks: none in this repo",
 go straight to "Ready to merge" below. Otherwise end the turn.
@@ -472,7 +478,8 @@ go straight to "Ready to merge" below. Otherwise end the turn.
 
 The worker pushed a new head. Note it: the merge gate and `wf.merge` take
 only the head the worker last named. When a merge gate for an older head is
-still open, clear it (`wf.gate({ clear: true })`). In a repo with no CI, run
+still open, clear it (`wf.gate({ clear: true })`). On an untracked forge,
+update the merge watch's prompt with the new head. In a repo with no CI, run
 "Ready to merge" at the new head, since no "ready to merge" follows.
 Otherwise wait for the worker's "ready to merge" at the new head. End the
 turn.
@@ -708,13 +715,21 @@ the merge watch after `queued` or `waiting` instead when:
   `%LOCALAPPDATA%\t3-codemode\` on Windows). No file or no key means the
   default, 10.
 
+The reconcile never reads a PR or MR on an untracked forge (step 1 item 3),
+so nothing above reaches this thread there. On an untracked forge, this
+ticket starts the merge watch when the PR or MR opens ("PR opened"),
+whether or not it has a parent and whatever `board.reconcileIdleMinutes`
+says.
+
 #### The merge watch
 
-The merge watch serves two cases:
+The merge watch serves three cases:
 
 - the root-ticket case "The merge wait" names, after `queued` or `waiting`,
 - the reconcile-off case "The merge wait" names (`board.reconcileIdleMinutes`
-  `0`), after `queued` or `waiting`.
+  `0`), after `queued` or `waiting`,
+- the untracked-forge case "The merge wait" names, from the moment the PR
+  or MR opens, with or without a parent.
 
 Create it as items 1 and 2 of "The deploy watch" say, with `title` `<worker
 label> merge watch`, and a prompt that names the task id, the PR
@@ -726,8 +741,18 @@ the outcome (`"queued"` or `"waiting"`), the `approval` id returned by
 `board.reconcileIdleMinutes` is not `0`), and the flag "Seen queued: no".
 End it with "Follow 'Each merge-watch run' in the t3-ticket skill."
 
-Each merge-watch run reads the PR state and its head checks in one query
-(`gh api graphql -f
+On an untracked forge, the prompt names instead: the task id, the forge
+host, the PR or MR number and URL, the head SHA the worker last named
+(full 40-character SHA) and branch, the main workspace root, the repo's
+documented status command for one PR or MR (such as `glab mr view <iid>
+--output json` on GitLab), the approved delivery chain and the head it
+approved (`"none yet"` until the user approves a merge, when this thread
+updates the prompt with both),
+the line "Forge: untracked", and the flag "Auth gate sent: no". End it the
+same way.
+
+On GitHub, each merge-watch run reads the PR state and its head checks in
+one query (`gh api graphql -f
 query='query{repository(owner:"<owner>",name:"<name>"){pullRequest(number:<number>){state
 isDraft mergeCommit{oid} headRefOid mergeStateStatus isInMergeQueue
 autoMergeRequest{enabledAt} commits(last:1){nodes{commit{oid
@@ -781,6 +806,34 @@ statusCheckRollup` when `hasNextPage` is true):
   has a parent, and send the gate "reply \"merge\" to queue #<number> again
   at head <sha>, or check why it left the queue, here: <PR URL>". End the
   turn.
+
+On an untracked forge (the prompt says "Forge: untracked"), each run reads
+the PR or MR with the status command the prompt names, in place of the
+GitHub query, and handles what it finds the same way:
+
+- **Merged:** confirm the merge with the repo's documented
+  merge-verification workflow, and keep the task until that succeeds. Then
+  delete the task with `delete_scheduled_task`, clear
+  `wf.gate({ clear: true })` when this thread has a parent, and go on from
+  "On the user's word" item 3, skipping the branch delete when the host
+  already removed it. The approved chain holds only when the merged head is
+  the head it approved; otherwise the merge counts as "merge" alone.
+- **Closed without merging:** delete the task, clear
+  `wf.gate({ clear: true })` when this thread has a parent, and send the
+  gate "reopen #<number>, then reply \"merge\" to merge it at head <sha>,
+  here: <PR or MR URL>". End the turn. When the user's answer arrives,
+  read the status first: once the PR or MR shows open again, start the
+  merge watch again at its current head, then act on the answer.
+- **Head moved away from the head the prompt names:** approval never
+  carries over to a new head. Keep the task, since it is the only thing
+  that sees this merge, and update its prompt with the new head. Drop any
+  approval of the old head and clear any merge gate open for it
+  (`wf.gate({ clear: true })`); the worker's next "ready to merge" starts a
+  new gate. End the turn.
+- **Still open at the prompt's head:** end the turn quietly, after setting
+  "Auth gate sent" back to "no" when it holds a time.
+- **The status command fails:** handle it as "Each deploy-watch run" says
+  for a failing status command.
 
 ### Delivery stages
 

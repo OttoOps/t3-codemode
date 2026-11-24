@@ -186,10 +186,14 @@ does not.
 2. Items 2 to 5 below and the GitHub `gh` / `wf.pr` / `watch_pull_request`
    steps in step 4 apply to a GitHub `origin`. On a non-GitHub git host (such
    as self-hosted GitLab), follow the repo's documented MR/PR, check, and
-   review workflow in place of those GitHub steps, report MR updates and
-   readiness to the orchestrator with `wf.send` (carrying the MR URL, `head
-   <sha>`, and the `Publishing:` line on open), and end the turn. Otherwise
-   push the branch and open the PR against `main` with that description:
+   review workflow in place of those GitHub steps, report the MR's opening,
+   each new head, and readiness to the orchestrator with
+   `wf.send({ kind: "event", body })` (a `note` never wakes it; the body
+   says "PR opened", "PR updated" or "ready to merge" and carries the MR
+   URL, `head <sha>`, and the `Publishing:` line on open), and end the
+   turn. The orchestrator's merge watch follows the MR at the head you last
+   named. T3's pull request watcher does not wake you on a merge there, so
+   the orchestrator messages you when it merges. Otherwise push the branch and open the PR against `main` with that description:
    `gh pr create --base main --head <branch> --title <title> --body-file
    <file>`. The title follows Conventional Commits.
 3. `link_pull_request` with the PR URL.
