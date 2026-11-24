@@ -439,9 +439,16 @@ impl Oracle {
         predicted: &Predicted,
         actual: &BTreeMap<u64, GhPrModel>,
         ok: bool,
+        tried: u64,
         trace: &[String],
         seed: u64,
     ) {
+        assert_eq!(
+            predicted.attempts,
+            tried,
+            "GitHub merge and enqueue attempts in this reconcile diverged from the shadow model\nseed={seed}\ntrace:\n{}",
+            trace.join("\n")
+        );
         assert_eq!(
             predicted.ok,
             ok,
@@ -943,7 +950,7 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                     let rec = h.app.wf.reconcile().await;
                     let predicted = model.reconcile(&gh);
                     pull_gh_mutations(&h, &mut gh);
-                    oracle.mutations(&predicted, &gh, rec.is_ok(), &trace, seed);
+                    oracle.mutations(&predicted, &gh, rec.is_ok(), attempts(&h), &trace, seed);
                     trace.push(format!("#{step} reconcile -> ok={}", rec.is_ok()));
                     if !had_err && let Ok(actions) = &rec {
                         healthy_reconcile = true;
@@ -1002,7 +1009,7 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                             let settle = h.app.wf.reconcile().await;
                             let predicted = model.reconcile(&gh);
                             pull_gh_mutations(&h, &mut gh);
-                            oracle.mutations(&predicted, &gh, settle.is_ok(), &trace, seed);
+                            oracle.mutations(&predicted, &gh, settle.is_ok(), attempts(&h), &trace, seed);
                             assert!(
                                 settle.is_ok(),
                                 "settling reconcile after advance failed: {settle:?}\nseed={seed}\n{}",
@@ -1025,7 +1032,7 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                         let rec2 = h.app.wf.reconcile().await;
                         let predicted = model.reconcile(&gh);
                         pull_gh_mutations(&h, &mut gh);
-                        oracle.mutations(&predicted, &gh, rec2.is_ok(), &trace, seed);
+                        oracle.mutations(&predicted, &gh, rec2.is_ok(), attempts(&h), &trace, seed);
                         assert!(
                             rec2.is_ok(),
                             "second reconcile failed: {rec2:?}\nseed={seed}\n{}",
@@ -1589,7 +1596,7 @@ async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
         assert!(rec.is_ok(), "final reconcile failed: {rec:?}\nseed={seed}\n{}", trace.join("\n"));
         let predicted = model.reconcile(&gh);
         pull_gh_mutations(&h, &mut gh);
-        oracle.mutations(&predicted, &gh, rec.is_ok(), &trace, seed);
+        oracle.mutations(&predicted, &gh, rec.is_ok(), attempts(&h), &trace, seed);
         oracle.check(&h, &mut model, sent_before, &trace, seed);
         if h.snapshot() == before {
             settled = true;

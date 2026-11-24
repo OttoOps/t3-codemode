@@ -187,6 +187,7 @@ pub struct Proj {
 pub struct Predicted {
     pub gh: BTreeMap<u64, GhPrModel>,
     pub ok: bool,
+    pub attempts: u64,
 }
 
 pub fn project(s: &Snapshot) -> Proj {
@@ -1017,7 +1018,7 @@ impl Model {
             }
             self.ready_check(&w, p.number, &p.head, &gh, Src::Reconcile);
         }
-        Predicted { gh, ok: unread.is_empty() }
+        Predicted { gh, ok: unread.is_empty(), attempts: self.merges }
     }
 
     pub fn attempts(&self) -> u64 {
