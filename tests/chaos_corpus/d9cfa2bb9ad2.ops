@@ -1,0 +1,9 @@
+# source: issue #286 (sent wait retired by failed after exit window with two live tickets)
+# failure: reconcile was not idempotent (changed cards)
+{"op":"fake_set_prs","worker":2,"pr":1}
+{"op":"merge_wait_put","pr":1,"ticket":0,"reassigned_id":false}
+{"op":"reconcile"}
+{"op":"gh_queue_config","pr":1,"enabled":false,"queued":false}
+{"op":"reconcile"}
+{"op":"advance_tick","minutes":28}
+{"op":"reconcile"}

@@ -1,0 +1,8 @@
+# source: FakeSetPrs seed 1080 (un-ticked live PR discovered during retry_ready)
+# failure: reconcile was not idempotent (sent extra messages)
+{"op":"gh_finish","pr":0,"state":"merged","predates":false}
+{"op":"gh_status","pr":1,"checks":"pending","merge_state":"clean","draft":false}
+{"op":"pr_ready","worker":1,"short_sha":false}
+{"op":"gh_status","pr":1,"checks":"passing","merge_state":"clean","draft":false}
+{"op":"fake_set_prs","worker":1,"pr":0}
+{"op":"reconcile"}

@@ -16,12 +16,19 @@ use t3_codemode::wf::LAST_PASS;
 
 mod ops;
 mod shadow;
+mod shrink;
 
 use ops::{
     CardKind, CardSym, GhChecks, GhEndState, GhMergeState, Op, OpKind, OpStats, OpWeights, PauseTarget, PrEventKind,
     PrSym, QueueDropReason, SweepTarget, TSym, WSym, decode_ops, deserialize_ops, seed_bytes, serialize_ops,
 };
 use shadow::{AdvanceRace, Model, Predicted, St, WaitM, wakes_of};
+use shrink::{
+    FailureClass, FailureKind, ShrinkOutcome, corpus_dir_from_env, ddmin, default_corpus_dir, display_source_path,
+    env_flag_enabled, failure_summary, format_op_rust, format_ops_file, format_regression_test, format_shrink_report,
+    list_corpus_files, load_ops_file, normalize_failure_signature, ops_content_hash, parse_env_flag, parse_env_path,
+    shrink_ops, write_corpus_file,
+};
 
 fn same_head(a: &str, b: &str) -> bool {
     !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
@@ -860,9 +867,40 @@ fn chaos_seed_range(default: u64) -> SeedRange {
 }
 
 fn has_explicit_seed_env() -> bool {
-    ["CHAOS_SEED", "CHAOS_SEED_START", "CHAOS_SEEDS"]
+    ["CHAOS_SEED", "CHAOS_SEED_START", "CHAOS_SEEDS", "CHAOS_OPS", "CHAOS_SENTINEL"]
         .iter()
         .any(|k| std::env::var(k).ok().is_some_and(|v| !v.trim().is_empty()))
+}
+
+#[cfg(feature = "test-sentinels")]
+fn parse_chaos_sentinel(raw: Option<&str>) -> Result<Option<Sentinel>, String> {
+    let Some(name) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    Sentinel::ALL.iter().copied().find(|s| s.name() == name).map(Some).ok_or_else(|| {
+        let valid: Vec<&str> = Sentinel::ALL.iter().map(|s| s.name()).collect();
+        format!("unknown CHAOS_SENTINEL={name:?}; expected one of: {}", valid.join(", "))
+    })
+}
+
+fn chaos_sentinel_from_env() -> Option<Sentinel> {
+    #[cfg(feature = "test-sentinels")]
+    {
+        let raw = std::env::var("CHAOS_SENTINEL").ok();
+        parse_chaos_sentinel(raw.as_deref()).unwrap_or_else(|e| panic!("{e}"))
+    }
+    #[cfg(not(feature = "test-sentinels"))]
+    {
+        None
+    }
+}
+
+fn chaos_ops_from_env() -> Option<std::path::PathBuf> {
+    parse_env_path(std::env::var("CHAOS_OPS").ok().as_deref())
+}
+
+fn chaos_shrink_enabled() -> bool {
+    env_flag_enabled("CHAOS_SHRINK")
 }
 
 fn enable_sentinel(h: &H, sentinel: Option<Sentinel>) {
@@ -2082,13 +2120,81 @@ async fn run_sequential_ops(
     (trace, h.app.wf.reach().snapshot(), op_stats)
 }
 
+async fn probe_sequential_ops(
+    ops: Vec<Op>,
+    sentinel: Option<Sentinel>,
+    run_id: String,
+) -> ProbeResult<(Vec<String>, ReachSnapshot, OpStats)> {
+    probe_oracle(async move { run_sequential_ops(&ops, sentinel, true, &run_id).await }).await
+}
+
+/// Shrink a failing sequential op list using `run_sequential_ops` as the oracle,
+/// keeping the candidate locked onto the original failure class.
+async fn shrink_sequential_failure(
+    ops: Vec<Op>,
+    sentinel: Option<Sentinel>,
+    class: FailureClass,
+    failure_msg: &str,
+) -> ShrinkOutcome {
+    let target = class.clone();
+    shrink_ops(ops, class, failure_msg, async move |cand: &[Op]| {
+        let res = probe_sequential_ops(cand.to_vec(), sentinel, "shrink".to_string()).await;
+        target.matches(&res)
+    })
+    .await
+}
+
+/// Execute `ops`, running `ddmin` + value simplification and writing `<corpus_dir>/<hash>.ops`
+/// when `shrink` is enabled and execution fails.
+async fn run_sequential_ops_maybe_shrink(
+    ops: &[Op],
+    sentinel: Option<Sentinel>,
+    source: &str,
+    shrink: bool,
+    corpus_dir: &std::path::Path,
+) -> (Vec<String>, ReachSnapshot, OpStats) {
+    if !shrink {
+        return run_sequential_ops(ops, sentinel, true, source).await;
+    }
+    let outcome = probe_sequential_ops(ops.to_vec(), sentinel, source.to_string()).await;
+    let failure_msg = match &outcome {
+        ProbeResult::Ok(res) => return res.clone(),
+        ProbeResult::OracleFailure(msg) | ProbeResult::OtherPanic { message: msg, .. } => msg.clone(),
+    };
+    let class = FailureClass::from_probe(&outcome).expect("non-Ok probe must classify");
+    let shrunk = shrink_sequential_failure(ops.to_vec(), sentinel, class, &failure_msg).await;
+    let written = write_corpus_file(corpus_dir, &shrunk, source)
+        .unwrap_or_else(|e| panic!("CHAOS_SHRINK failed to write corpus file: {e}"));
+    let report = format_shrink_report(&shrunk, source, &written, sentinel.map(Sentinel::name));
+    eprintln!("{report}");
+    panic!("{report}\n\nOriginal failure:\n{failure_msg}");
+}
+
 #[tokio::test]
 async fn seeded_sequential_chaos_holds_all_invariants() {
+    let sentinel = chaos_sentinel_from_env();
+    let shrink = chaos_shrink_enabled();
+    let corpus_dir = corpus_dir_from_env();
+    if let Some(ops_path) = chaos_ops_from_env() {
+        let (resolved, ops) = load_ops_file(&ops_path).unwrap_or_else(|e| panic!("{e}"));
+        let source = format!("ops {}", display_source_path(&resolved));
+        let (_, snap, stats) = run_sequential_ops_maybe_shrink(&ops, sentinel, &source, shrink, &corpus_dir).await;
+        if std::env::var_os("CHAOS_REACH").is_some() {
+            eprintln!("{snap}\n{stats}");
+        }
+        return;
+    }
+
     let range = chaos_seed_range(DEFAULT_SEQ_SEEDS);
     let mut reach = ReachSnapshot::default();
     let mut op_stats = OpStats::default();
     for seed in range.seeds() {
-        let (_, snap, stats) = run_sequential_seed(seed).await;
+        let (_, snap, stats) = if shrink {
+            let ops = decode_seed_ops(seed);
+            run_sequential_ops_maybe_shrink(&ops, sentinel, &format!("seed {seed}"), true, &corpus_dir).await
+        } else {
+            run_sequential_seed_with(seed, sentinel).await
+        };
         reach.merge(&snap);
         op_stats.merge(&stats);
     }
@@ -2099,6 +2205,24 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
         let ctx = format!("seeded_sequential_chaos ({})", range.describe());
         reach.assert_tier1(&ctx);
         op_stats.assert_all_executed(&ctx);
+    }
+}
+
+#[tokio::test]
+async fn chaos_corpus_replays_cleanly() {
+    let dir = default_corpus_dir();
+    let files = list_corpus_files(&dir).unwrap_or_else(|e| panic!("{e}"));
+    assert!(!files.is_empty(), "expected at least one committed .ops file in {}", dir.display());
+    for path in &files {
+        let (_, ops) = load_ops_file(path).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            deserialize_ops(&serialize_ops(&ops)).unwrap(),
+            ops,
+            "corpus file {} did not round-trip through serialize_ops",
+            path.display()
+        );
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("corpus.ops");
+        let _ = run_sequential_ops(&ops, None, true, name).await;
     }
 }
 
@@ -2517,6 +2641,101 @@ async fn sentinel_acceptance() {
     eprintln!("sentinel_acceptance caught all {} sentinels:", caught.len());
     for (s, where_) in &caught {
         eprintln!("  {:<36} -> {where_}", s.name());
+    }
+}
+
+#[cfg(feature = "test-sentinels")]
+#[tokio::test]
+async fn sentinel_acceptance_shrinks_sequential_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut shrunk_rows: Vec<(Sentinel, u64, usize, usize, String)> = Vec::new();
+    let mut concurrent_only: Vec<Sentinel> = Vec::new();
+
+    for &sentinel in Sentinel::ALL {
+        let mut hit: Option<(u64, Vec<Op>, FailureClass, String)> = None;
+        for seed in 0..DEFAULT_SEQ_SEEDS {
+            let ops = decode_seed_ops(seed);
+            let outcome = probe_sequential_ops(ops.clone(), Some(sentinel), format!("seed {seed}")).await;
+            match &outcome {
+                ProbeResult::Ok(_) => continue,
+                ProbeResult::OracleFailure(msg) => {
+                    let class = FailureClass::from_probe(&outcome).expect("oracle failure has class");
+                    hit = Some((seed, ops, class, msg.clone()));
+                    break;
+                }
+                ProbeResult::OtherPanic { message, location } => {
+                    panic!(
+                        "sentinel {} hit non-oracle panic on seed {seed} ({location:?}): {message}",
+                        sentinel.name()
+                    );
+                }
+            }
+        }
+        let Some((seed, orig_ops, class, failure_msg)) = hit else {
+            concurrent_only.push(sentinel);
+            continue;
+        };
+
+        let shrunk = shrink_sequential_failure(orig_ops, Some(sentinel), class.clone(), &failure_msg).await;
+        assert!(
+            shrunk.ops.len() <= 8,
+            "sentinel {} shrunk to {} ops (> 8) from seed {seed}:\n{}",
+            sentinel.name(),
+            shrunk.ops.len(),
+            format_regression_test(&shrunk, &format!("seed {seed}"))
+        );
+
+        // Verify 1-minimality directly: removing any single op must not reproduce the failure class.
+        for skip in 0..shrunk.ops.len() {
+            let mut sub = shrunk.ops.clone();
+            sub.remove(skip);
+            let res = probe_sequential_ops(sub, Some(sentinel), format!("minimality-{skip}")).await;
+            assert!(
+                !class.matches(&res),
+                "sentinel {} shrunk sequence is not 1-minimal: dropping op {skip} still failed with {class:?}",
+                sentinel.name()
+            );
+        }
+
+        // Write through the CHAOS_SHRINK path and reload through the CHAOS_OPS loader.
+        let source = format!("seed {seed} (sentinel {})", sentinel.name());
+        let written = write_corpus_file(dir.path(), &shrunk, &source).unwrap();
+        let (_, reloaded) = load_ops_file(&written).unwrap();
+        assert_eq!(reloaded, shrunk.ops, "reloaded .ops diverged for sentinel {}", sentinel.name());
+
+        // Deterministically replays the exact same failure twice with the sentinel enabled...
+        let first = probe_sequential_ops(reloaded.clone(), Some(sentinel), "replay".into()).await;
+        let second = probe_sequential_ops(reloaded.clone(), Some(sentinel), "replay".into()).await;
+        assert!(class.matches(&first), "first replay of {} did not match {class:?}: {first:?}", sentinel.name());
+        assert_eq!(first, second, "deterministic replay of {} diverged between runs", sentinel.name());
+
+        // ...and passes cleanly on healthy code with all sentinels off.
+        let healthy = probe_sequential_ops(reloaded, None, "healthy".into()).await;
+        assert!(
+            matches!(healthy, ProbeResult::Ok(_)),
+            "shrunk replay for {} unexpectedly failed without sentinel: {healthy:?}",
+            sentinel.name()
+        );
+
+        shrunk_rows.push((sentinel, seed, shrunk.original_len, shrunk.ops.len(), shrunk.class.signature));
+    }
+
+    assert_eq!(
+        concurrent_only,
+        vec![Sentinel::MergeWaitRemoveNotCas, Sentinel::AdvanceIgnoresSwapResult],
+        "expected exactly the two mid-flight CAS sentinels to be concurrent-only, got {concurrent_only:?}"
+    );
+    assert_eq!(shrunk_rows.len(), 5, "expected all 5 sequential sentinels to shrink cleanly");
+    eprintln!(
+        "sentinel_acceptance_shrinks_sequential_failures shrunk {}/{} sentinels:",
+        shrunk_rows.len(),
+        Sentinel::ALL.len()
+    );
+    for (s, seed, orig, len, sig) in &shrunk_rows {
+        eprintln!("  {:<36} seed={:<2}  {orig} -> {len} ops  ({sig})", s.name(), seed);
+    }
+    for s in &concurrent_only {
+        eprintln!("  {:<36} concurrent-only (mid-flight CAS race; out of scope for sequential shrinker)", s.name());
     }
 }
 
@@ -3141,4 +3360,257 @@ async fn sent_wait_retired_after_exit_window_reconciles_idempotently() {
         "pass2 trace:\n{}",
         pass2_trace.join("\n")
     );
+}
+
+#[tokio::test]
+async fn ddmin_finds_one_minimal_subsequences_across_predicates() {
+    // Empty sequence fails -> shrinks to empty.
+    let empty_min = ddmin(vec![1, 2, 3], async |_: &[usize]| true).await;
+    assert!(empty_min.is_empty());
+
+    // Single required element inside 60 distractors.
+    let items: Vec<usize> = (0..60).collect();
+    let single = ddmin(items.clone(), async |cand: &[usize]| cand.contains(&41)).await;
+    assert_eq!(single, vec![41]);
+
+    // Order-dependent 4-element subsequence hidden in 70 items.
+    let need = [3usize, 17, 44, 68];
+    let items70: Vec<usize> = (0..70).collect();
+    let ordered = ddmin(items70, async |cand: &[usize]| {
+        let mut pos = 0;
+        for &x in cand {
+            if pos < need.len() && x == need[pos] {
+                pos += 1;
+            }
+        }
+        pos == need.len()
+    })
+    .await;
+    assert_eq!(ordered, need);
+
+    // Already minimal 2-element sequence stays intact.
+    let minimal = ddmin(vec![10, 20], async |cand: &[usize]| cand.contains(&10) && cand.contains(&20)).await;
+    assert_eq!(minimal, vec![10, 20]);
+}
+
+#[tokio::test]
+async fn shrink_ops_simplifies_ticks_faults_and_pool_indices() {
+    // Synthetic predicate requiring:
+    // - some worker PrReady (index-agnostic, flag-agnostic)
+    // - AdvanceTick with minutes >= 27
+    // - Reconcile after AdvanceTick
+    let noisy = vec![
+        Op::GhReadError { pr: PrSym(2), fail: true },
+        Op::PrReady { worker: WSym(2), short_sha: true },
+        Op::GhClearReadErrors,
+        Op::MergeWaitPut { pr: PrSym(2), ticket: TSym(2), reassigned_id: true },
+        Op::AdvanceTick { minutes: 200 },
+        Op::GhRemovePr { pr: PrSym(1) },
+        Op::Reconcile,
+    ];
+    let class = FailureClass { kind: FailureKind::Oracle, signature: "synthetic".into(), location: None };
+    let shrunk = shrink_ops(noisy, class, "synthetic failure", async |cand: &[Op]| {
+        let mut saw_ready = false;
+        let mut saw_tick = false;
+        let mut saw_rec = false;
+        for op in cand {
+            match *op {
+                Op::PrReady { .. } => saw_ready = true,
+                Op::AdvanceTick { minutes } if saw_ready && minutes >= 27 => saw_tick = true,
+                Op::Reconcile if saw_tick => saw_rec = true,
+                _ => {}
+            }
+        }
+        saw_rec
+    })
+    .await;
+
+    assert_eq!(
+        shrunk.ops,
+        vec![Op::PrReady { worker: WSym(0), short_sha: false }, Op::AdvanceTick { minutes: 27 }, Op::Reconcile,]
+    );
+
+    // Coupled pool-index lowering: requires matching ticket across two ops and drops reassigned_id.
+    let coupled = vec![
+        Op::TicketSendGate { ticket: TSym(2) },
+        Op::MergeWaitPut { pr: PrSym(2), ticket: TSym(2), reassigned_id: true },
+    ];
+    let class2 = FailureClass { kind: FailureKind::Oracle, signature: "coupled".into(), location: None };
+    let shrunk2 = shrink_ops(coupled, class2, "coupled failure", async |cand: &[Op]| {
+        matches!(cand, [Op::TicketSendGate { ticket: t1 }, Op::MergeWaitPut { ticket: t2, .. }] if t1 == t2)
+    })
+    .await;
+    assert_eq!(
+        shrunk2.ops,
+        vec![
+            Op::TicketSendGate { ticket: TSym(0) },
+            Op::MergeWaitPut { pr: PrSym(0), ticket: TSym(0), reassigned_id: false },
+        ]
+    );
+
+    // Out-of-range symbolic indices stay bounded in candidate generation (no OOM on usize::MAX).
+    let huge_noop = vec![
+        Op::PrReady { worker: WSym(usize::MAX), short_sha: false },
+        Op::AnswerCard { card: CardSym { kind: CardKind::Any, nth: usize::MAX } },
+        Op::AnswerReadyAndClearGate { nth: usize::MAX },
+    ];
+    let class3 = FailureClass { kind: FailureKind::Oracle, signature: "bounded".into(), location: None };
+    let shrunk3 = shrink_ops(huge_noop, class3, "bounded", async |cand: &[Op]| cand.len() == 3).await;
+    assert_eq!(
+        shrunk3.ops,
+        vec![
+            Op::PrReady { worker: WSym(0), short_sha: false },
+            Op::AnswerCard { card: CardSym { kind: CardKind::Any, nth: 0 } },
+            Op::AnswerReadyAndClearGate { nth: 0 },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn failure_class_normalizes_entities_and_distinguishes_bug_classes() {
+    let a = FailureClass::from_probe(&ProbeResult::<()>::OracleFailure(
+        "closed worker mcp:w2 kept gate Some(\"review\")\nseed=2\ntrace:\n#0 foo".into(),
+    ))
+    .unwrap();
+    let b = FailureClass::from_probe(&ProbeResult::<()>::OracleFailure(
+        "closed worker mcp:w1 kept gate Some(\"merge\")\nseed=9\ntrace:\n#0 bar".into(),
+    ))
+    .unwrap();
+    assert_eq!(a, b);
+
+    let c = FailureClass::from_probe(&ProbeResult::<()>::OracleFailure(
+        "answering a4 and clearing gate wiped unanswered ready card a1!\nseed=14".into(),
+    ))
+    .unwrap();
+    let d = FailureClass::from_probe(&ProbeResult::<()>::OracleFailure(
+        "answering a2 and clearing gate wiped unanswered ready card a3!\nseed=0".into(),
+    ))
+    .unwrap();
+    assert_eq!(c, d);
+    assert_ne!(a, c);
+
+    let idem_msg = normalize_failure_signature(
+        "assertion `left == right` failed: reconcile was not idempotent (sent extra messages)\nseed=62",
+    );
+    let idem_cards = normalize_failure_signature(
+        "assertion `left == right` failed: reconcile was not idempotent (changed cards outside retrying waits {(\"acme/widgets\", 8)})\nseed=646",
+    );
+    assert_ne!(idem_msg, idem_cards);
+    assert_eq!(idem_cards, "reconcile was not idempotent (changed cards)");
+
+    let closed_ticket = normalize_failure_signature(
+        "assertion `left == right` failed: closed ticket mcp:t1 received a message after closing! messages=[Object {\"threadId\": String(\"mcp:t1\")}]\nseed=1",
+    );
+    let closed_ticket_2 = normalize_failure_signature(
+        "assertion `left == right` failed: closed ticket mcp:t3 received a message after closing! messages=[]\nseed=99",
+    );
+    assert_eq!(closed_ticket, closed_ticket_2);
+
+    let row_key_1 = normalize_failure_signature(
+        "merge wait row key (acme/widgets, 8) disagrees with its payload (acme/widgets, 7)",
+    );
+    let row_key_2 = normalize_failure_signature(
+        "merge wait row key (acme/widgets, 7) disagrees with its payload (acme/widgets, 9)",
+    );
+    assert_eq!(row_key_1, row_key_2);
+    assert_eq!(row_key_1, "merge wait row key disagrees with its payload");
+
+    // Oracle failures and non-oracle panics never collide even with the same text.
+    let oracle = FailureClass::from_probe(&ProbeResult::<()>::OracleFailure("boom".into())).unwrap();
+    let panic =
+        FailureClass::from_probe(&ProbeResult::<()>::OtherPanic { message: "boom".into(), location: None }).unwrap();
+    assert_ne!(oracle, panic);
+    assert_eq!(oracle.kind, FailureKind::Oracle);
+    assert_eq!(panic.kind, FailureKind::Panic);
+
+    // Identical Option::unwrap() payloads at different call sites produce distinct FailureClass values.
+    let site_a1 = probe_oracle(async { std::hint::black_box(Option::<()>::None).unwrap() }).await;
+    let site_b = probe_oracle(async { std::hint::black_box(Option::<()>::None).unwrap() }).await;
+    let class_a1 = FailureClass::from_probe(&site_a1).unwrap();
+    let class_b = FailureClass::from_probe(&site_b).unwrap();
+    assert!(class_a1.location.is_some(), "expected panic location for site_a1: {class_a1:?}");
+    assert!(class_b.location.is_some(), "expected panic location for site_b: {class_b:?}");
+    assert_ne!(class_a1, class_b, "panics at different call sites must not share a failure class");
+
+    async fn unwrap_at_one_site() {
+        std::hint::black_box(Option::<()>::None).unwrap();
+    }
+    let same_1 = FailureClass::from_probe(&probe_oracle(unwrap_at_one_site()).await).unwrap();
+    let same_2 = FailureClass::from_probe(&probe_oracle(unwrap_at_one_site()).await).unwrap();
+    assert_eq!(same_1, same_2, "panics at the same call site must match");
+}
+
+#[test]
+fn shrink_formatting_hashing_and_env_parsing() {
+    let ops = vec![
+        Op::PrOpened { worker: WSym(0), short_sha: true, no_ci: false },
+        Op::GhStatus { pr: PrSym(1), checks: GhChecks::Pending, merge_state: GhMergeState::Unknown, draft: true },
+        Op::AnswerCard { card: CardSym { kind: CardKind::Relayed, nth: 0 } },
+        Op::Pause { target: PauseTarget::WorkerByParent { worker: WSym(1) }, paused: true },
+        Op::Sweep { target: SweepTarget::Ticket { ticket: TSym(0) } },
+        Op::PrFollowup { worker: WSym(0), pr: PrSym(1), event: PrEventKind::Ready, short_sha: false, no_ci: false },
+        Op::GhQueueDrop { pr: PrSym(2), reason: QueueDropReason::MergeConflict, predates: false },
+        Op::GhFinish { pr: PrSym(2), state: GhEndState::Closed, predates: true },
+        Op::Reconcile,
+    ];
+    for op in &ops {
+        let rendered = format_op_rust(op);
+        assert!(rendered.starts_with("Op::"), "rendered op must carry Op:: prefix: {rendered}");
+    }
+    assert!(format_op_rust(&ops[1]).contains("GhChecks::Pending"));
+    assert!(format_op_rust(&ops[1]).contains("GhMergeState::Unknown"));
+    assert!(format_op_rust(&ops[2]).contains("CardKind::Relayed"));
+    assert!(format_op_rust(&ops[3]).contains("PauseTarget::WorkerByParent"));
+    assert!(format_op_rust(&ops[4]).contains("SweepTarget::Ticket"));
+    assert!(format_op_rust(&ops[5]).contains("PrEventKind::Ready"));
+    assert!(format_op_rust(&ops[6]).contains("QueueDropReason::MergeConflict"));
+    assert!(format_op_rust(&ops[7]).contains("GhEndState::Closed"));
+
+    let hash = ops_content_hash(&ops);
+    assert_eq!(hash.len(), 12);
+    assert!(hash.bytes().all(|b| b.is_ascii_hexdigit()));
+
+    // Comments do not change ops round-trip or hash.
+    let file_text = format_ops_file(&ops, "seed 7", "cards diverged\nwith newline");
+    assert!(file_text.starts_with("# source: seed 7\n# failure: cards diverged with newline\n"));
+    assert_eq!(deserialize_ops(&file_text).unwrap(), ops);
+
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = ShrinkOutcome {
+        ops: ops.clone(),
+        original_len: 70,
+        evaluations: 42,
+        hash: hash.clone(),
+        class: FailureClass { kind: FailureKind::Oracle, signature: "cards diverged".into(), location: None },
+        failure_summary: failure_summary("cards diverged from the shadow model\nseed=7"),
+    };
+    let written = write_corpus_file(dir.path(), &outcome, "seed 7").unwrap();
+    assert_eq!(written.file_name().and_then(|s| s.to_str()), Some(format!("{hash}.ops").as_str()));
+    let (_, loaded) = load_ops_file(&written).unwrap();
+    assert_eq!(loaded, ops);
+    assert_eq!(list_corpus_files(dir.path()).unwrap(), vec![written]);
+
+    let snippet = format_regression_test(&outcome, "seed 7");
+    assert!(snippet.contains(&format!("async fn chaos_regression_{hash}()")));
+    assert!(snippet.contains("run_sequential_ops(&ops, None, true"));
+
+    assert!(!parse_env_flag(None));
+    assert!(!parse_env_flag(Some("")));
+    assert!(!parse_env_flag(Some("0")));
+    assert!(!parse_env_flag(Some("false")));
+    assert!(!parse_env_flag(Some("FALSE")));
+    assert!(parse_env_flag(Some("1")));
+    assert!(parse_env_flag(Some("true")));
+    assert_eq!(parse_env_path(Some("  ")), None);
+    assert_eq!(
+        parse_env_path(Some("tests/chaos_corpus/abc.ops")),
+        Some(std::path::PathBuf::from("tests/chaos_corpus/abc.ops"))
+    );
+
+    #[cfg(feature = "test-sentinels")]
+    {
+        assert_eq!(parse_chaos_sentinel(None), Ok(None));
+        assert_eq!(parse_chaos_sentinel(Some("close_keeps_gate")), Ok(Some(Sentinel::CloseKeepsGate)));
+        assert!(parse_chaos_sentinel(Some("not_a_sentinel")).is_err());
+    }
 }

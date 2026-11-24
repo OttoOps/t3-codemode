@@ -158,7 +158,7 @@ pub enum PrEventKind {
 ///
 /// Every subsequence of a `Vec<Op>` is a valid replayable program: any out-of-range
 /// handle, closed worker, non-open PR, or missing card becomes a recorded no-op.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     PrOpened { worker: WSym, short_sha: bool, no_ci: bool },
