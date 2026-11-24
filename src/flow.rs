@@ -1402,7 +1402,7 @@ fn branch_merged_query(asks: &[(String, String)]) -> (String, Value) {
         let (owner, name) = repo.split_once('/').unwrap_or_default();
         params.push(format!("$o{i}: String!, $r{i}: String!, $b{i}: String!"));
         fields.push(format!(
-            "b{i}: repository(owner: $o{i}, name: $r{i}) {{ pullRequests(headRefName: $b{i}, states: MERGED, first: 1, orderBy: {{field: UPDATED_AT, direction: DESC}}) {{ nodes {{ number headRefOid }} }} }}"
+            "b{i}: repository(owner: $o{i}, name: $r{i}) {{ pullRequests(headRefName: $b{i}, states: MERGED, first: 10, orderBy: {{field: UPDATED_AT, direction: DESC}}) {{ nodes {{ number isCrossRepository headRefOid }} }} }}"
         ));
         vars.insert(format!("o{i}"), json!(owner));
         vars.insert(format!("r{i}"), json!(name));
@@ -2746,7 +2746,7 @@ impl Wf {
             let key = (base_repo.to_ascii_lowercase(), branch.to_string());
             branch_asks_map.entry(key).or_insert_with(|| (base_repo, branch.to_string()));
         }
-        let mut merged_branches: BTreeMap<(String, String), String> = BTreeMap::new();
+        let mut merged_branches: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
         let branch_asks: Vec<(String, String)> = branch_asks_map.into_values().collect();
         for chunk in branch_asks.chunks(50) {
             let (query, vars) = branch_merged_query(chunk);
@@ -2758,10 +2758,17 @@ impl Wf {
                 );
             }
             for (i, (repo, branch)) in chunk.iter().enumerate() {
-                let nodes = resp["data"][format!("b{i}")]["pullRequests"]["nodes"].as_array();
-                if let Some(first) = nodes.and_then(|n| n.first()) {
-                    let oid = first["headRefOid"].as_str().unwrap_or_default().to_string();
-                    merged_branches.insert((repo.to_ascii_lowercase(), branch.clone()), oid);
+                let mut oids = Vec::new();
+                for node in resp["data"][format!("b{i}")]["pullRequests"]["nodes"].as_array().into_iter().flatten() {
+                    if node["isCrossRepository"].as_bool().unwrap_or(false) {
+                        continue;
+                    }
+                    if let Some(oid) = node["headRefOid"].as_str().filter(|s| !s.is_empty()) {
+                        oids.push(oid.to_string());
+                    }
+                }
+                if !oids.is_empty() {
+                    merged_branches.insert((repo.to_ascii_lowercase(), branch.clone()), oids);
                 }
             }
         }
@@ -2775,7 +2782,7 @@ impl Wf {
             if kf == kt || missing_refs.contains(&kf) || missing_refs.contains(&kt) {
                 continue;
             }
-            // Local-only worktree or part: n/N bases stop holding once the base issue closes or its PR merges.
+            // Local-only worktree or part: n/N bases stop holding once the base issue closes or a same-repo merged PR covers the local base commit.
             if e.base_pr.is_none() {
                 if closed_issues.contains(&kt) || known_refs.get(&kt).is_some_and(|(_, st)| *st == Some("closed")) {
                     continue;
@@ -2783,14 +2790,20 @@ impl Wf {
                 if let Some(branch) = e.base_branch.as_deref() {
                     let base_repo = canonicalize_repo(aliases, e.base_repo.as_deref().unwrap_or(&e.to.0));
                     let rkey = base_repo.to_ascii_lowercase();
-                    if let Some(merged_oid) = merged_branches.get(&(rkey.clone(), branch.to_string())) {
-                        let ahead_after_merge = match (local_repos.get(&rkey), e.base_oid.as_deref()) {
-                            (Some(l), Some(local_oid)) => {
-                                flow_git::is_local_branch_ahead_of_commit(&l.root, merged_oid, local_oid).await
+                    if let (Some(merged_oids), Some(l), Some(local_oid)) = (
+                        merged_branches.get(&(rkey.clone(), branch.to_string())),
+                        local_repos.get(&rkey),
+                        e.base_oid.as_deref(),
+                    ) {
+                        let mut covered = false;
+                        for merged_oid in merged_oids {
+                            if flow_git::is_local_branch_covered_by_merged_commit(&l.root, local_oid, merged_oid).await
+                            {
+                                covered = true;
+                                break;
                             }
-                            _ => false,
-                        };
-                        if !ahead_after_merge {
+                        }
+                        if covered {
                             continue;
                         }
                     }

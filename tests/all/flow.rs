@@ -4393,6 +4393,23 @@ async fn squash_merged_base_worktree_and_missing_middle_branch_and_paginated_pr_
     // #20 (open unlabelled base) and #21 (tip); #999 does NOT exist on GitHub.
     issue(&h, REPO, 20, &[], 5);
     issue(&h, REPO, 21, &[FLOW], 6);
+    // Add BOTH a merged fork PR (matching branch name + even matching SHA!) and an earlier same-repo merged PR
+    // with an unrelated/absent SHA for feat/20-base: neither may clear #21 -> #20.
+    let wt20_head = String::from_utf8(
+        std::process::Command::new("git").current_dir(&wt20).args(["rev-parse", "HEAD"]).output().unwrap().stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let mut fork_pr = open_pr(201, "main", "feat/20-base", "Fork PR", &[], &[]);
+    fork_pr["state"] = json!("MERGED");
+    fork_pr["isCrossRepository"] = json!(true);
+    fork_pr["headRefOid"] = json!(wt20_head);
+    h.github.set_pr(REPO, 201, fork_pr);
+    let mut unrelated_pr = open_pr(200, "main", "feat/20-base", "Old unrelated PR", &[], &[]);
+    unrelated_pr["state"] = json!("MERGED");
+    unrelated_pr["headRefOid"] = json!("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+    h.github.set_pr(REPO, 200, unrelated_pr);
 
     let f = flow(&h).await;
     assert_eq!(
@@ -4403,7 +4420,7 @@ async fn squash_merged_base_worktree_and_missing_middle_branch_and_paginated_pr_
     assert_eq!(
         labels(&f["blocked"]),
         ["widgets#21"],
-        "missing intermediate #999 must not discard valid #21 -> #20 stack edge: {f}"
+        "fork PR, unrelated merged SHA, and missing intermediate #999 must not discard valid #21 -> #20 stack edge: {f}"
     );
     assert_eq!(f["blocked"][0]["prStack"][0]["label"], "widgets#20", "{f}");
 
