@@ -4300,3 +4300,151 @@ return {{ blockedRows, legend, edgeInfo, hover2Edges, hover2Marks, drawer2, note
         "drawer #1 File conflicts section missing: {d1:?}"
     );
 }
+
+#[tokio::test]
+async fn squash_merged_base_worktree_and_missing_middle_branch_and_paginated_pr_files_work_correctly() {
+    // S1 + S3: real git repo with worktrees to test:
+    // (a) squash-merged base PR with leftover local worktree unblocks dependent (both when base issue stays open and when it closes),
+    // (b) 3-branch stack with nonexistent intermediate issue #999 preserves tip -> base edge after endpoint verification.
+    let td = tempfile::tempdir().unwrap();
+    let repo_dir = td.path().join("repo");
+    std::fs::create_dir_all(repo_dir.join("src")).unwrap();
+    run_git(&repo_dir, &["init", "-b", "main"]);
+    std::fs::write(repo_dir.join("src/a.rs"), "pub fn a() {}\n").unwrap();
+    std::fs::write(repo_dir.join("src/b.rs"), "pub fn b() {}\n").unwrap();
+    std::fs::write(repo_dir.join("src/c.rs"), "pub fn c() {}\n").unwrap();
+    run_git(&repo_dir, &["add", "."]);
+    run_git(&repo_dir, &["commit", "-m", "init"]);
+
+    // Stack 1 (S1): feat/1-base -> feat/2-child.
+    let wt1 = td.path().join("wt-1");
+    run_git(&repo_dir, &["worktree", "add", "-b", "feat/1-base", wt1.to_str().unwrap(), "main"]);
+    std::fs::write(wt1.join("src/a.rs"), "pub fn a() { /* v1 */ }\n").unwrap();
+    run_git(&wt1, &["commit", "-am", "base"]);
+    let wt1_head = String::from_utf8(
+        std::process::Command::new("git").current_dir(&wt1).args(["rev-parse", "HEAD"]).output().unwrap().stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+
+    let wt2 = td.path().join("wt-2");
+    run_git(&repo_dir, &["worktree", "add", "-b", "feat/2-child", wt2.to_str().unwrap(), "feat/1-base"]);
+    std::fs::write(wt2.join("src/b.rs"), "pub fn b() { /* v2 */ }\n").unwrap();
+    run_git(&wt2, &["commit", "-am", "child"]);
+
+    // Squash-merge feat/1-base onto main (creating a NEW commit SHA so git merge-base still sees feat/1-base unmerged),
+    // while leaving wt-1 on disk!
+    run_git(&repo_dir, &["merge", "--squash", "feat/1-base"]);
+    run_git(&repo_dir, &["commit", "-m", "feat: base (#101)"]);
+
+    // Stack 2 (S1 closed-issue local-only base): feat/10-closed -> feat/11-dep (no PR at all; #10 unlabelled & closed).
+    let wt10 = td.path().join("wt-10");
+    run_git(&repo_dir, &["worktree", "add", "-b", "feat/10-closed", wt10.to_str().unwrap(), "main"]);
+    std::fs::write(wt10.join("src/a.rs"), "pub fn a() { /* closed local */ }\n").unwrap();
+    run_git(&wt10, &["commit", "-am", "closed local"]);
+    let wt11 = td.path().join("wt-11");
+    run_git(&repo_dir, &["worktree", "add", "-b", "feat/11-dep", wt11.to_str().unwrap(), "feat/10-closed"]);
+    std::fs::write(wt11.join("src/b.rs"), "pub fn b() { /* dep of closed */ }\n").unwrap();
+    run_git(&wt11, &["commit", "-am", "dep of closed"]);
+
+    // Stack 3 (S3): feat/20-base -> feat/999-missing -> feat/21-tip (#999 does NOT exist on GitHub).
+    let wt20 = td.path().join("wt-20");
+    run_git(&repo_dir, &["worktree", "add", "-b", "feat/20-base", wt20.to_str().unwrap(), "main"]);
+    std::fs::write(wt20.join("src/a.rs"), "pub fn a() { /* 20 */ }\n").unwrap();
+    run_git(&wt20, &["commit", "-am", "base 20"]);
+    let wt999 = td.path().join("wt-999");
+    run_git(&repo_dir, &["worktree", "add", "-b", "feat/999-missing", wt999.to_str().unwrap(), "feat/20-base"]);
+    std::fs::write(wt999.join("src/b.rs"), "pub fn b() { /* 999 */ }\n").unwrap();
+    run_git(&wt999, &["commit", "-am", "mid 999"]);
+    let wt21 = td.path().join("wt-21");
+    run_git(&repo_dir, &["worktree", "add", "-b", "feat/21-tip", wt21.to_str().unwrap(), "feat/999-missing"]);
+    std::fs::write(wt21.join("src/c.rs"), "pub fn c() { /* 21 */ }\n").unwrap();
+    run_git(&wt21, &["commit", "-am", "tip 21"]);
+
+    let cfg = Config::from_value(json!({
+        "flow": {
+            "repos": [REPO],
+            "optIn": {"label": FLOW},
+            "maxTickets": 6,
+            "launch": "auto",
+            "serializeFileConflicts": true
+        }
+    }))
+    .unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.github.add_repo(REPO);
+    h.fake.set_projects(vec![project("p-widgets", repo_dir.to_str().unwrap())]);
+    h.remotes.set(repo_dir.to_str().unwrap(), "git@github.com:acme/widgets.git");
+
+    // #1 stays OPEN (Refs #1) even though PR #101 was squash-merged!
+    issue(&h, REPO, 1, &[], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    let mut pr101 = open_pr(101, "main", "feat/1-base", "Refs #1", &[], &["src/a.rs"]);
+    pr101["state"] = json!("MERGED");
+    pr101["headRefOid"] = json!(wt1_head);
+    h.github.set_pr(REPO, 101, pr101);
+
+    // #10 is unlabelled, has no active ticket, and is CLOSED on GitHub (learned during endpoint verification).
+    issue(&h, REPO, 10, &[], 3);
+    h.github.close_issue(REPO, 10);
+    issue(&h, REPO, 11, &[FLOW], 4);
+
+    // #20 (open unlabelled base) and #21 (tip); #999 does NOT exist on GitHub.
+    issue(&h, REPO, 20, &[], 5);
+    issue(&h, REPO, 21, &[FLOW], 6);
+
+    let f = flow(&h).await;
+    assert_eq!(
+        labels(&f["queue"]),
+        ["widgets#2", "widgets#11"],
+        "squash-merged base PR (#1) and closed local-only base (#10) must not hold #2 or #11: {f}"
+    );
+    assert_eq!(
+        labels(&f["blocked"]),
+        ["widgets#21"],
+        "missing intermediate #999 must not discard valid #21 -> #20 stack edge: {f}"
+    );
+    assert_eq!(f["blocked"][0]["prStack"][0]["label"], "widgets#20", "{f}");
+
+    // S2 + S4: unlabelled running ticket #30 has an EMPTY issue body, and its open PR #300 modifies 3 files
+    // paginated 2 per page with the colliding file on page 2 (`src/c.rs`). Queued #31 touches `src/c.rs`.
+    issue(&h, REPO, 30, &[], 7); // No FLOW label, empty body ""!
+    issue(&h, REPO, 31, &[FLOW], 8);
+    h.github.set_body(REPO, 31, "## Flow\n- Touches: `src/c.rs`\n");
+    h.github.set_pr(
+        REPO,
+        300,
+        open_pr(300, "main", "feat/30-big", "Closes #30", &[(REPO, 30)], &["src/a.rs", "src/b.rs", "src/c.rs"]),
+    );
+    h.github.set_pr_file_page(2);
+    ticket(&h, "mcp:t30", "widgets#30").await;
+
+    let f2 = flow(&h).await;
+    assert!(
+        h.github.operations().iter().any(|op| op == "flowPrFiles"),
+        "expected flowPrFiles pagination query: {:?}",
+        h.github.operations()
+    );
+    let b31 = f2["blocked"].as_array().unwrap().iter().find(|b| b["label"] == "widgets#31").unwrap_or_else(|| {
+        panic!("widgets#31 must be held by running empty-body ticket #30's paginated PR file: {f2}")
+    });
+    assert_eq!(
+        b31["fileConflicts"],
+        json!([{
+            "repo": REPO,
+            "number": 30,
+            "label": "widgets#30",
+            "url": "https://github.com/acme/widgets/issues/30",
+            "files": ["src/c.rs"]
+        }])
+    );
+
+    // Auto-launch must not launch widgets#31 while #30 is running.
+    reconcile(&h).await;
+    let launched: Vec<String> = h.fake.launched().iter().map(|l| l["title"].as_str().unwrap().to_string()).collect();
+    assert!(
+        !launched.iter().any(|t| t.starts_with("widgets#31:")),
+        "auto-launch must hold widgets#31 on paginated PR file conflict with empty-body running ticket: {launched:?}"
+    );
+}

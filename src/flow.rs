@@ -13,7 +13,7 @@ use crate::flow_git::{
     self, ActiveBranchLink, ActivePartLink, FileConflictEdge, IssueFileInput, LocalRepoInfo, OpenPr, PrStackEdge,
     RepoPrs, SourceControlInput,
 };
-use crate::github::{FLOW_OPEN_PRS, errors};
+use crate::github::{FLOW_BRANCH_MERGED, FLOW_OPEN_PRS, FLOW_PR_FILES, errors};
 use crate::wf::Wf;
 
 pub const EXTERNAL: &str = "blocked: external";
@@ -41,7 +41,7 @@ macro_rules! pr_fields {
     () => {
         "number title url body baseRefName headRefName headRefOid isCrossRepository
         closingIssuesReferences(first: 20) { nodes { number repository { nameWithOwner } } }
-        files(first: 100) { nodes { path } }"
+        files(first: 100) { pageInfo { hasNextPage endCursor } nodes { path } }"
     };
 }
 
@@ -1394,6 +1394,23 @@ fn refs_query(asks: &[(String, u64)]) -> (String, Value) {
     (format!("{FLOW_TICKETS}{}) {{ {} }}", params.join(", "), fields.join(" ")), Value::Object(vars))
 }
 
+fn branch_merged_query(asks: &[(String, String)]) -> (String, Value) {
+    let mut params = Vec::new();
+    let mut fields = Vec::new();
+    let mut vars = serde_json::Map::new();
+    for (i, (repo, branch)) in asks.iter().enumerate() {
+        let (owner, name) = repo.split_once('/').unwrap_or_default();
+        params.push(format!("$o{i}: String!, $r{i}: String!, $b{i}: String!"));
+        fields.push(format!(
+            "b{i}: repository(owner: $o{i}, name: $r{i}) {{ pullRequests(headRefName: $b{i}, states: MERGED, first: 1, orderBy: {{field: UPDATED_AT, direction: DESC}}) {{ nodes {{ number headRefOid }} }} }}"
+        ));
+        vars.insert(format!("o{i}"), json!(owner));
+        vars.insert(format!("r{i}"), json!(name));
+        vars.insert(format!("b{i}"), json!(branch));
+    }
+    (format!("{FLOW_BRANCH_MERGED}{}) {{ {} }}", params.join(", "), fields.join(" ")), Value::Object(vars))
+}
+
 fn tickets_query(asks: &[(String, u64)], full: bool) -> (String, Value) {
     let mut params = Vec::new();
     let mut fields = Vec::new();
@@ -2710,6 +2727,45 @@ impl Wf {
         reads.aliases = self.repo_aliases_snapshot();
         let aliases = &reads.aliases;
 
+        // Check merge state for local-only ancestry base branches (e.g. a squash-merged PR whose local worktree remains).
+        let mut branch_asks_map: BTreeMap<(String, String), (String, String)> = BTreeMap::new();
+        for e in &analysis.pr_stacks {
+            if e.base_pr.is_some() {
+                continue;
+            }
+            let Some(branch) = e.base_branch.as_deref() else { continue };
+            let to_repo = canonicalize_repo(aliases, &e.to.0);
+            let kt = node_key(&to_repo, e.to.1);
+            if missing_refs.contains(&kt)
+                || closed_issues.contains(&kt)
+                || known_refs.get(&kt).is_some_and(|(_, st)| *st == Some("closed"))
+            {
+                continue;
+            }
+            let base_repo = canonicalize_repo(aliases, e.base_repo.as_deref().unwrap_or(&to_repo));
+            let key = (base_repo.to_ascii_lowercase(), branch.to_string());
+            branch_asks_map.entry(key).or_insert_with(|| (base_repo, branch.to_string()));
+        }
+        let mut merged_branches: BTreeMap<(String, String), String> = BTreeMap::new();
+        let branch_asks: Vec<(String, String)> = branch_asks_map.into_values().collect();
+        for chunk in branch_asks.chunks(50) {
+            let (query, vars) = branch_merged_query(chunk);
+            let resp = self.github.graphql(&query, vars).await?;
+            if !resp["data"].is_object() {
+                bail!(
+                    "wf.flow: checking merged status for stacked branches failed: {}",
+                    errors(&resp).unwrap_or_else(|| "no data".into())
+                );
+            }
+            for (i, (repo, branch)) in chunk.iter().enumerate() {
+                let nodes = resp["data"][format!("b{i}")]["pullRequests"]["nodes"].as_array();
+                if let Some(first) = nodes.and_then(|n| n.first()) {
+                    let oid = first["headRefOid"].as_str().unwrap_or_default().to_string();
+                    merged_branches.insert((repo.to_ascii_lowercase(), branch.clone()), oid);
+                }
+            }
+        }
+
         let mut pr_stacks = Vec::new();
         for mut e in analysis.pr_stacks {
             e.from.0 = canonicalize_repo(aliases, &e.from.0);
@@ -2719,15 +2775,31 @@ impl Wf {
             if kf == kt || missing_refs.contains(&kf) || missing_refs.contains(&kt) {
                 continue;
             }
-            // Pure part: n/N chain (no open PR or branch) stops holding once the earlier part closes.
-            let is_part_only = e.pr.is_none() && e.base_pr.is_none() && e.branch.is_none() && e.base_branch.is_none();
-            if is_part_only
-                && (closed_issues.contains(&kt) || known_refs.get(&kt).is_some_and(|(_, st)| *st == Some("closed")))
-            {
-                continue;
+            // Local-only worktree or part: n/N bases stop holding once the base issue closes or its PR merges.
+            if e.base_pr.is_none() {
+                if closed_issues.contains(&kt) || known_refs.get(&kt).is_some_and(|(_, st)| *st == Some("closed")) {
+                    continue;
+                }
+                if let Some(branch) = e.base_branch.as_deref() {
+                    let base_repo = canonicalize_repo(aliases, e.base_repo.as_deref().unwrap_or(&e.to.0));
+                    let rkey = base_repo.to_ascii_lowercase();
+                    if let Some(merged_oid) = merged_branches.get(&(rkey.clone(), branch.to_string())) {
+                        let ahead_after_merge = match (local_repos.get(&rkey), e.base_oid.as_deref()) {
+                            (Some(l), Some(local_oid)) => {
+                                flow_git::is_local_branch_ahead_of_commit(&l.root, merged_oid, local_oid).await
+                            }
+                            _ => false,
+                        };
+                        if !ahead_after_merge {
+                            continue;
+                        }
+                    }
+                }
             }
             pr_stacks.push(e);
         }
+        // Run ancestry transitive reduction only after endpoint verification and merged-base filtering.
+        let pr_stacks = flow_git::reduce_ancestry_stacks(pr_stacks);
 
         // Attach active prStack holds onto each dependent Read.
         let mut by_from: BTreeMap<String, Vec<PrStackBlock>> = BTreeMap::new();
@@ -2897,6 +2969,51 @@ impl Wf {
         }
     }
 
+    async fn read_pr_files_tail(&self, repo: &str, pr: &mut OpenPr) -> std::result::Result<(), RepoReadError> {
+        let Some(mut after) = pr.files_next_cursor.take() else {
+            return Ok(());
+        };
+        let (owner, name) =
+            repo.split_once('/').ok_or_else(|| RepoReadError::Graphql(anyhow!("flow: {repo:?} is not owner/name")))?;
+        let mut seen_cursors: HashSet<String> = HashSet::new();
+        seen_cursors.insert(after.clone());
+        loop {
+            let resp = self
+                .github
+                .graphql(FLOW_PR_FILES, json!({"owner": owner, "name": name, "number": pr.number, "after": after}))
+                .await
+                .map_err(RepoReadError::Transport)?;
+            if let Some(e) = errors(&resp) {
+                return Err(RepoReadError::Graphql(anyhow!(
+                    "wf.flow: reading {repo}#{}'s pull request files failed: {e}",
+                    pr.number
+                )));
+            }
+            let files = &resp["data"]["repository"]["pullRequest"]["files"];
+            for f in files["nodes"].as_array().into_iter().flatten() {
+                if let Some(raw) = f["path"].as_str()
+                    && let Some((norm, _)) = flow_git::normalize_repo_path(raw)
+                    && !pr.files.iter().any(|x| x == &norm)
+                {
+                    pr.files.push(norm);
+                }
+            }
+            let page = &files["pageInfo"];
+            match page["endCursor"].as_str() {
+                Some(c) if page["hasNextPage"] == true => {
+                    if !seen_cursors.insert(c.to_string()) {
+                        return Err(RepoReadError::Graphql(anyhow!(
+                            "wf.flow: GitHub repeated PR file cursor {c:?} while reading {repo}#{}",
+                            pr.number
+                        )));
+                    }
+                    after = c.to_string();
+                }
+                _ => return Ok(()),
+            }
+        }
+    }
+
     async fn read_repo(
         &self,
         repo: &str,
@@ -2964,6 +3081,11 @@ impl Wf {
                 _ => {
                     if let Some(pr_cursor) = pr_next_cursor {
                         self.read_open_prs_tail(repo, &full, pr_cursor, &mut prs).await?;
+                    }
+                    for pr in &mut prs {
+                        if pr.files_next_cursor.is_some() {
+                            self.read_pr_files_tail(&full, pr).await?;
+                        }
                     }
                     return Ok((full, out, RepoPrs { default_branch, prs }));
                 }
@@ -3140,14 +3262,9 @@ impl Wf {
                         reads.push(parse_node(final_repo, issue)?);
                     } else {
                         let mut parsed = parse_node(final_repo, issue)?;
-                        if !parsed.body_parsed.sub_issues.is_empty()
-                            || !parsed.body_touches.is_empty()
-                            || !parsed.body_text.trim().is_empty()
-                        {
-                            parsed.body_parsed.blockers.clear();
-                            parsed.body_parsed.parents.clear();
-                            reads.push(parsed);
-                        }
+                        parsed.body_parsed.blockers.clear();
+                        parsed.body_parsed.parents.clear();
+                        reads.push(parsed);
                     }
                 }
             }

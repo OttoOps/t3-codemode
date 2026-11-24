@@ -542,6 +542,7 @@ struct GhState {
     issues: BTreeMap<(String, u64), Value>,
     issue_page: usize,
     pr_page: usize,
+    pr_file_page: usize,
     calls: Vec<Value>,
     errors: BTreeMap<String, (String, String)>,
     fail_after: BTreeMap<String, (usize, String, String)>,
@@ -669,6 +670,10 @@ impl FakeGitHub {
 
     pub fn set_pr_page(&self, size: usize) {
         self.st().pr_page = size;
+    }
+
+    pub fn set_pr_file_page(&self, size: usize) {
+        self.st().pr_file_page = size;
     }
 
     pub fn drop_from_queue(&self, repo: &str, number: u64, reason: &str, at: &str) {
@@ -855,6 +860,12 @@ fn operation(query: &str) -> &'static str {
     if query.starts_with("query FlowOpenPrs(") {
         return "flowOpenPrs";
     }
+    if query.starts_with("query FlowPrFiles(") {
+        return "flowPrFiles";
+    }
+    if query.starts_with("query FlowBranchMerged(") {
+        return "flowBranchMerged";
+    }
     if query.starts_with(crate::flow::FLOW_TICKETS) {
         return "flowTickets";
     }
@@ -911,7 +922,30 @@ fn full_issue_node(st: &GhState, i: &Value) -> Value {
            "subIssues": {"totalCount": subs.len(), "nodes": subs}})
 }
 
-fn full_pr_node(display_repo: &str, number: u64, pr: &Value) -> Value {
+fn pr_file_nodes(pr: &Value) -> Vec<Value> {
+    if let Some(arr) = pr["files"]["nodes"].as_array() {
+        arr.clone()
+    } else if let Some(arr) = pr.get("files").and_then(Value::as_array) {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(|p| json!({"path": p})).or_else(|| v.is_object().then(|| v.clone())))
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+fn pr_files_page(st: &GhState, pr: &Value, after: Option<&str>) -> Value {
+    let all = pr_file_nodes(pr);
+    let start: usize = after.and_then(|c| c.parse().ok()).unwrap_or(0);
+    let size = if st.pr_file_page == 0 { 100 } else { st.pr_file_page };
+    let end = (start + size).min(all.len());
+    json!({
+        "pageInfo": {"hasNextPage": end < all.len(), "endCursor": (end < all.len()).then(|| end.to_string())},
+        "nodes": all[start.min(end)..end],
+    })
+}
+
+fn full_pr_node(st: &GhState, display_repo: &str, number: u64, pr: &Value) -> Value {
     let head_ref = pr["headRefName"].as_str().map(String::from).unwrap_or_else(|| format!("feat/{number}"));
     let base_ref = pr["baseRefName"].as_str().unwrap_or("main");
     let closing = if pr.get("closingIssuesReferences").is_some_and(Value::is_object) {
@@ -919,17 +953,7 @@ fn full_pr_node(display_repo: &str, number: u64, pr: &Value) -> Value {
     } else {
         json!({"nodes": []})
     };
-    let files = if pr.get("files").is_some_and(Value::is_object) {
-        pr["files"].clone()
-    } else if let Some(arr) = pr.get("files").and_then(Value::as_array) {
-        let nodes: Vec<Value> = arr
-            .iter()
-            .filter_map(|v| v.as_str().map(|p| json!({"path": p})).or_else(|| v.is_object().then(|| v.clone())))
-            .collect();
-        json!({"nodes": nodes})
-    } else {
-        json!({"nodes": []})
-    };
+    let files = pr_files_page(st, pr, None);
     json!({
         "number": pr["number"].as_u64().unwrap_or(number),
         "title": pr["title"].as_str().map(String::from).unwrap_or_else(|| format!("PR {number}")),
@@ -955,11 +979,60 @@ fn open_prs_page(st: &GhState, repo: &str, display: &str, after: Option<&str>) -
     let start: usize = after.and_then(|c| c.parse().ok()).unwrap_or(0);
     let size = if st.pr_page == 0 { 100 } else { st.pr_page };
     let end = (start + size).min(matching.len());
-    let nodes: Vec<Value> = matching[start.min(end)..end].iter().map(|(n, p)| full_pr_node(display, *n, p)).collect();
+    let nodes: Vec<Value> =
+        matching[start.min(end)..end].iter().map(|(n, p)| full_pr_node(st, display, *n, p)).collect();
     json!({
         "pageInfo": {"hasNextPage": end < matching.len(), "endCursor": (end < matching.len()).then(|| end.to_string())},
         "nodes": nodes,
     })
+}
+
+fn flow_pr_files(st: &GhState, variables: &Value) -> Value {
+    let raw_repo = format!("{}/{}", variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap())
+        .to_ascii_lowercase();
+    let canonical = st.repo_aliases.get(&raw_repo).cloned();
+    let repo = canonical.as_deref().map(str::to_ascii_lowercase).unwrap_or(raw_repo);
+    if !st.repos.contains_key(&repo) {
+        return gh_error(&format!("Could not resolve to a Repository with the name '{repo}'."));
+    }
+    let number = variables["number"].as_u64().unwrap();
+    let Some(pr) = st.prs.get(&(repo, number)) else {
+        return json!({"data": {"repository": {"pullRequest": null}}});
+    };
+    let files = pr_files_page(st, pr, variables["after"].as_str());
+    json!({"data": {"repository": {"pullRequest": {"files": files}}}})
+}
+
+fn flow_branch_merged(st: &GhState, variables: &Value) -> Value {
+    let mut data = serde_json::Map::new();
+    for i in 0.. {
+        let Some(owner) = variables[format!("o{i}")].as_str() else { break };
+        let raw_repo = format!("{owner}/{}", variables[format!("r{i}")].as_str().unwrap()).to_ascii_lowercase();
+        let canonical = st.repo_aliases.get(&raw_repo).cloned();
+        let repo = canonical.as_deref().map(str::to_ascii_lowercase).unwrap_or(raw_repo);
+        let branch = variables[format!("b{i}")].as_str().unwrap_or_default();
+        let alias = format!("b{i}");
+        if !st.repos.contains_key(&repo) {
+            data.insert(alias, Value::Null);
+            continue;
+        }
+        let mut merged: Vec<(u64, &Value)> = st
+            .prs
+            .iter()
+            .filter(|((r, _), p)| {
+                r.eq_ignore_ascii_case(&repo) && p["state"] == "MERGED" && p["headRefName"].as_str() == Some(branch)
+            })
+            .map(|((_, n), p)| (*n, p))
+            .collect();
+        merged.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
+        let nodes: Vec<Value> = merged
+            .into_iter()
+            .take(1)
+            .map(|(n, p)| json!({"number": n, "headRefOid": p["headRefOid"].as_str().unwrap_or("")}))
+            .collect();
+        data.insert(alias, json!({"pullRequests": {"nodes": nodes}}));
+    }
+    json!({"data": data})
 }
 
 fn flow_open_prs(st: &GhState, variables: &Value) -> Value {
@@ -1507,6 +1580,12 @@ impl crate::github::GitHub for FakeGitHub {
             }
             if op == "flowOpenPrs" {
                 return Ok(flow_open_prs(&st, &variables));
+            }
+            if op == "flowPrFiles" {
+                return Ok(flow_pr_files(&st, &variables));
+            }
+            if op == "flowBranchMerged" {
+                return Ok(flow_branch_merged(&st, &variables));
             }
             if op == "flowTickets" {
                 return Ok(flow_tickets(&st, &variables));
