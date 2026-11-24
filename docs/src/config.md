@@ -489,11 +489,16 @@ loses its card, and a move refuses a thread that is running.
 
 ### Flow
 
-`flow` turns on the project flow, the board's queue of issues that are ready
-to work next. Without a `flow` block the flow is off.
-[`wf.flow()`](globals.md#wfflow) returns the queue, and when a ticket slot
-opens the board offers or launches the next ready issue, as
-[The flow](board.md#the-flow) describes.
+The board's [dependency graph](board.md#the-graph-tab) works with no `flow`
+block. `GET /api/flow` and [`wf.flow({ graph: true })`](globals.md#wfflow)
+discover the GitHub repositories attached to active T3 projects from each
+project's `repositoryIdentity` or git `origin` remote and read their open
+issues. Viewing the graph never enables auto-launching or the Up next queue.
+
+Add a `flow` block when you want to override which repositories are covered, or
+to enable the Up next queue and automatic ticket launches as
+[The flow](board.md#the-flow) describes. Existing `flow` blocks keep working
+unchanged.
 
 ```json
 {
@@ -506,16 +511,36 @@ opens the board offers or launches the next ready issue, as
 }
 ```
 
+To use the discovered T3 project repositories with an override, omit `repos`
+and add `includeRepos` or `excludeRepos`:
+
+```json
+{
+  "flow": {
+    "includeRepos": ["acme/shared"],
+    "excludeRepos": ["acme/archive"],
+    "maxTickets": 2,
+    "launch": "ask"
+  }
+}
+```
+
+A `flow` block without `maxTickets` customizes graph repositories only and
+leaves the Up next queue and launching off.
+
 | Key | Default | Does |
 |---|---|---|
-| `repos` | required | The `owner/name` repositories the flow covers. Two repos can't share a name, because a board ticket's label, such as `widgets#41`, doesn't name the owner. |
-| `optIn.label` | required | The label that puts an issue in the flow. Issues without it are never queued. |
-| `maxTickets` | required | How many flow tickets can be open on the board at once, at least 1. |
-| `launch` | `ask` | How a free slot launches the next ready issue: `ask` raises a launch card, `auto` launches it, and `off` launches nothing. |
+| `repos` | discovered from T3 projects | Explicit `owner/name` repositories to cover instead of discovering active T3 project GitHub remotes. When set, it must name at least one repository, and two entries can't share a short name because an ownerless board ticket label such as `widgets#41` cannot tell them apart. |
+| `includeRepos` | `[]` | Extra `owner/name` repositories added to the covered list after `repos` or T3 project discovery. |
+| `excludeRepos` | `[]` | `owner/name` repositories removed from the covered list, taking precedence over `repos`, discovery and `includeRepos`. |
+| `optIn.label` | unset | Optional label filter for the launch queue. When set, only open issues with this label enter `queue`, `blocked` or `skipped`. Other open issues still appear in the dependency graph so transitive blocker chains stay intact. |
+| `optIn.milestone` | unset | Optional milestone title filter for the launch queue, matched ignoring case. When both `optIn.label` and `optIn.milestone` are set, an issue must match both. When `optIn` is omitted, any open issue in a covered repo can enter the queue. |
+| `maxTickets` | unset | Enables the launch queue and caps how many flow tickets can be open on the board at once, at least 1. Required when `launch` is `ask` or `auto`. Omit it for graph-only repository overrides. |
+| `launch` | `ask` when `maxTickets` is set, else `off` | How a free slot launches the next ready issue: `ask` raises a launch card, `auto` launches it, and `off` launches nothing. |
 
-An issue is ready when all of these hold:
+When `maxTickets` is set, an issue is ready when all of these hold:
 
-- It is open, in a covered repo, and carries the opt-in label.
+- It is open, in a covered repo, and matches `optIn` when `optIn` is set.
 - No open issue blocks it through GitHub's blocked-by links.
 - It is not labelled `blocked: external`.
 - No board ticket is open for it.
@@ -531,11 +556,10 @@ oldest issue.
 
 A flow ticket is an open board ticket, or a launch still waiting to join, for
 an open issue in a covered repo. A ticket whose issue has closed no longer takes
-a slot. Tickets are matched by label, which carries no
-owner, so a ticket for `other/widgets#41` counts as `acme/widgets#41` when
-`acme/widgets` is covered. A ticket takes one slot however many sub-issues or
-workers it runs. The free slots are `maxTickets` minus the flow tickets, and
-never fewer than zero.
+a slot. Tickets without a recorded issue reference or repository are matched by
+short label only when that repository name is unique among covered repos. A
+ticket takes one slot however many sub-issues or workers it runs. The free slots
+are `maxTickets` minus the flow tickets, and never fewer than zero.
 
 ### Trackers
 

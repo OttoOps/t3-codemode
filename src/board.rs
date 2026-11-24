@@ -871,6 +871,71 @@ pub fn identity_repo(project: &Value) -> Option<String> {
     }
 }
 
+enum ProjectGithubRepo {
+    Github(String),
+    NonGithub,
+    Unknown,
+}
+
+fn github_remote_path(url: &str) -> Option<String> {
+    if web_port(url).is_some_and(|p| p != 443) {
+        return None;
+    }
+    let remote = parse_remote(url)?;
+    remote.host.eq_ignore_ascii_case("github.com").then_some(remote.path)
+}
+
+fn classify_github_remote(url: &str) -> ProjectGithubRepo {
+    match github_remote_path(url) {
+        Some(path) => ProjectGithubRepo::Github(path),
+        None if parse_remote(url).is_some() => ProjectGithubRepo::NonGithub,
+        None => ProjectGithubRepo::Unknown,
+    }
+}
+
+fn project_identity_github_repo(project: &Value) -> ProjectGithubRepo {
+    let id = &project["repositoryIdentity"];
+    if !id.is_object() {
+        return ProjectGithubRepo::Unknown;
+    }
+    if let Some(url) = id["locator"]["remoteUrl"].as_str() {
+        match classify_github_remote(url) {
+            ProjectGithubRepo::Github(path) => return ProjectGithubRepo::Github(path),
+            ProjectGithubRepo::NonGithub => return ProjectGithubRepo::NonGithub,
+            ProjectGithubRepo::Unknown => {}
+        }
+    }
+    if let Some(key) = id["canonicalKey"].as_str() {
+        let key = key.trim().trim_matches('/');
+        if let Some(rest) = strip_prefix_ci(key, "github.com/") {
+            let parts: Vec<&str> = rest.split('/').collect();
+            if parts.len() == 2 && gh_name(parts[0]) && gh_name(parts[1]) {
+                return ProjectGithubRepo::Github(format!("{}/{}", parts[0], parts[1]));
+            }
+        } else if let Some((host, _)) = key.split_once('/')
+            && host.contains('.')
+            && is_tracker_host(host)
+        {
+            return ProjectGithubRepo::NonGithub;
+        }
+    }
+    if let Some(web) = id["webUrl"].as_str()
+        && let Ok(url) = reqwest::Url::parse(web)
+        && let Some(host) = url.host_str()
+        && !host.eq_ignore_ascii_case("github.com")
+        && !host.eq_ignore_ascii_case("www.github.com")
+    {
+        return ProjectGithubRepo::NonGithub;
+    }
+    if let (Some(o), Some(n)) = (id["owner"].as_str(), id["name"].as_str())
+        && gh_name(o)
+        && gh_name(n)
+    {
+        return ProjectGithubRepo::Github(format!("{o}/{n}"));
+    }
+    ProjectGithubRepo::Unknown
+}
+
 fn same_issue_slug(a: &str, b: &str) -> bool {
     match (parse_issue_only(a), parse_issue_only(b)) {
         (Some(ia), Some(ib)) if ia.tracker == Tracker::Jira && ib.tracker == Tracker::Jira => {
@@ -1006,6 +1071,41 @@ impl Wf {
     async fn origin_repo(&self, project: &Value) -> Option<String> {
         let root = project["workspaceRoot"].as_str()?;
         self.remotes.origin(root).await.as_deref().and_then(parse_remote).map(|r| r.path)
+    }
+
+    async fn project_github_repo(&self, project: &Value) -> Option<String> {
+        if let Some(root) = project["workspaceRoot"].as_str()
+            && let Some(url) = self.remotes.origin(root).await
+        {
+            match classify_github_remote(&url) {
+                ProjectGithubRepo::Github(r) => return Some(r),
+                ProjectGithubRepo::NonGithub => return None,
+                ProjectGithubRepo::Unknown => {}
+            }
+        }
+        match project_identity_github_repo(project) {
+            ProjectGithubRepo::Github(r) => Some(r),
+            ProjectGithubRepo::NonGithub | ProjectGithubRepo::Unknown => None,
+        }
+    }
+
+    pub(crate) async fn discovered_github_repos(&self) -> Result<Vec<String>> {
+        let projects = self.projects().await?;
+        let resolved = futures_util::future::join_all(projects.iter().map(|p| self.project_github_repo(p))).await;
+        let mut out: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (p, repo) in projects.iter().zip(resolved) {
+            if let Some(repo) = repo {
+                if let Some(id) = p["id"].as_str().filter(|s| !s.is_empty()) {
+                    self.remember_project(id, &p["title"], Some(repo.clone()));
+                }
+                if seen.insert(repo.to_ascii_lowercase()) {
+                    out.push(repo);
+                }
+            }
+        }
+        out.sort_by_key(|r| r.to_ascii_lowercase());
+        Ok(out)
     }
 
     async fn hydrate(&self, ln: &Link) -> Result<Option<String>> {
@@ -1532,19 +1632,40 @@ impl Wf {
             && let Some(host) = issue.host.as_deref()
         {
             let issue_web_port = issue.url().and_then(web_port);
+            let mut parsed_origin = Vec::with_capacity(projects.len());
             for p in &projects {
-                let Some(root) = p["workspaceRoot"].as_str() else { continue };
-                let Some(url) = self.remotes.origin(root).await else { continue };
-                let port_ok = match (issue_web_port, web_port(&url)) {
-                    (Some(a), Some(b)) => a == b,
-                    _ => true,
+                let origin = match p["workspaceRoot"].as_str() {
+                    Some(root) => self.remotes.origin(root).await,
+                    None => None,
                 };
-                if port_ok
-                    && let Some(remote) = parse_remote(&url)
-                    && remote.host.eq_ignore_ascii_case(host)
-                    && remote.path.eq_ignore_ascii_case(&issue.scope)
-                {
-                    return Ok(Some(p.clone()));
+                let parsed = origin.as_deref().and_then(parse_remote);
+                if let (Some(url), Some(remote)) = (origin.as_deref(), parsed.as_ref()) {
+                    let port_ok = match (issue_web_port, web_port(url)) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => true,
+                    };
+                    if port_ok
+                        && remote.host.eq_ignore_ascii_case(host)
+                        && remote.path.eq_ignore_ascii_case(&issue.scope)
+                    {
+                        return Ok(Some(p.clone()));
+                    }
+                }
+                parsed_origin.push(parsed.is_some());
+            }
+            if issue.tracker == Tracker::Github
+                && host.eq_ignore_ascii_case("github.com")
+                && issue_web_port.is_none_or(|p| p == 443)
+            {
+                for (p, has_parsed_origin) in projects.iter().zip(parsed_origin) {
+                    if has_parsed_origin {
+                        continue;
+                    }
+                    if let ProjectGithubRepo::Github(repo) = project_identity_github_repo(p)
+                        && repo.eq_ignore_ascii_case(&issue.scope)
+                    {
+                        return Ok(Some(p.clone()));
+                    }
                 }
             }
         }
@@ -2715,6 +2836,8 @@ impl Wf {
         let (new_issues, dismissed_issues) = self.new_issues()?;
         let open = tree.iter().filter(|t| t["done"] == false).count();
         let running = tree.iter().filter(|t| t["status"] == "running").count();
+        let flow_cfg = self.config().flow.clone();
+        let flow_queue = flow_cfg.as_ref().filter(|f| f.queue_enabled());
         Ok(json!({
             "rev": rev,
             "cards": cards,
@@ -2725,10 +2848,10 @@ impl Wf {
             "contexts": contexts,
             "newIssues": new_issues,
             "dismissedIssues": dismissed_issues,
-            "flow": self.config().flow.is_some(),
+            "flow": flow_queue.is_some(),
             "counts": {"cards": cards.len(), "tickets": open, "running": running, "settled": settled_total,
                        "newIssues": new_issues.len()},
-            "flowMaxTickets": self.config().flow.as_ref().map(|f| f.max_tickets),
+            "flowMaxTickets": flow_queue.and_then(|f| f.max_tickets),
             "service": self.service_view(),
             "routing": self.routing_view(),
         }))

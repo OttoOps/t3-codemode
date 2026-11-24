@@ -764,18 +764,20 @@ fn flow_issues(st: &GhState, variables: &Value) -> Value {
     if !st.repos.contains_key(&repo) {
         return gh_error(&format!("Could not resolve to a Repository with the name '{repo}'."));
     }
-    let label = variables["label"].as_str().unwrap().to_ascii_lowercase();
+    let label = variables["label"].as_str().map(str::to_ascii_lowercase);
     let mut matching: Vec<&Value> = st
         .issues
         .iter()
         .filter(|((r, _), i)| {
             *r == repo
                 && i["state"] == "OPEN"
-                && i["labels"]["nodes"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|l| l["name"].as_str().is_some_and(|n| n.to_ascii_lowercase() == label))
+                && label.as_ref().is_none_or(|want| {
+                    i["labels"]["nodes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|l| l["name"].as_str().is_some_and(|n| n.to_ascii_lowercase() == *want))
+                })
         })
         .map(|(_, i)| i)
         .collect();

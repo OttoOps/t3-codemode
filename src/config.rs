@@ -393,20 +393,30 @@ impl TrackersConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FlowConfig {
-    pub repos: Vec<String>,
-    pub opt_in: OptIn,
-    pub max_tickets: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repos: Option<Vec<String>>,
+    #[serde(default)]
+    pub include_repos: Vec<String>,
+    #[serde(default)]
+    pub exclude_repos: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opt_in: Option<OptIn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tickets: Option<usize>,
     #[serde(default)]
     pub launch: Launch,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OptIn {
-    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -418,34 +428,72 @@ pub enum Launch {
     Off,
 }
 
-impl FlowConfig {
-    fn validate(&self) -> Result<()> {
-        if self.repos.is_empty() {
-            return Err(invalid("repos", "repos must name at least one owner/name repository"));
+impl Launch {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Launch::Ask => "ask",
+            Launch::Auto => "auto",
+            Launch::Off => "off",
         }
-        let mut names: BTreeMap<String, &str> = BTreeMap::new();
-        for (i, repo) in self.repos.iter().enumerate() {
-            let at = format!("repos.{i}");
-            let Some((_, name)) = repo.split_once('/').filter(|(o, n)| gh_name(o) && gh_name(n)) else {
-                return Err(invalid(at, format!("repos: {repo:?} is not an owner/name repository")));
-            };
-            if let Some(other) = names.insert(name.to_ascii_lowercase(), repo) {
-                if other.eq_ignore_ascii_case(repo) {
-                    return Err(invalid(at, format!("repos lists {repo} twice")));
-                }
-                return Err(invalid(
-                    at,
-                    format!(
-                        "repos: {other} and {repo} share the name {name}, and board ticket labels ({name}#41) cannot tell them apart"
-                    ),
-                ));
+    }
+}
+
+fn check_repo_list(field: &str, repos: &[String], forbid_shared_short: bool) -> Result<()> {
+    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+    let mut names: BTreeMap<String, &str> = BTreeMap::new();
+    for (i, repo) in repos.iter().enumerate() {
+        let at = format!("{field}.{i}");
+        let Some((_, name)) = repo.split_once('/').filter(|(o, n)| gh_name(o) && gh_name(n)) else {
+            return Err(invalid(at, format!("{field}: {repo:?} is not an owner/name repository")));
+        };
+        if seen.insert(repo.to_ascii_lowercase(), repo).is_some() {
+            return Err(invalid(at, format!("{field} lists {repo} twice")));
+        }
+        if forbid_shared_short && let Some(other) = names.insert(name.to_ascii_lowercase(), repo) {
+            return Err(invalid(
+                at,
+                format!(
+                    "{field}: {other} and {repo} share the name {name}, and board ticket labels ({name}#41) cannot tell them apart"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+impl FlowConfig {
+    pub fn queue_enabled(&self) -> bool {
+        self.max_tickets.is_some()
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Some(repos) = &self.repos {
+            if repos.is_empty() {
+                return Err(invalid("repos", "repos must name at least one owner/name repository"));
+            }
+            check_repo_list("repos", repos, true)?;
+        }
+        check_repo_list("includeRepos", &self.include_repos, false)?;
+        check_repo_list("excludeRepos", &self.exclude_repos, false)?;
+        if let Some(opt_in) = &self.opt_in {
+            if opt_in.label.as_deref().is_some_and(|l| l.trim().is_empty()) {
+                return Err(invalid("optIn.label", "optIn.label must name a label"));
+            }
+            if opt_in.milestone.as_deref().is_some_and(|m| m.trim().is_empty()) {
+                return Err(invalid("optIn.milestone", "optIn.milestone must name a milestone"));
+            }
+            if opt_in.label.is_none() && opt_in.milestone.is_none() {
+                return Err(invalid("optIn", "optIn must set label or milestone"));
             }
         }
-        if self.opt_in.label.trim().is_empty() {
-            return Err(invalid("optIn.label", "optIn.label must name a label"));
-        }
-        if self.max_tickets == 0 {
+        if self.max_tickets == Some(0) {
             return Err(invalid("maxTickets", "maxTickets must be at least 1"));
+        }
+        if self.max_tickets.is_none() && self.launch != Launch::Off {
+            return Err(invalid(
+                "maxTickets",
+                format!("maxTickets must be at least 1 when launch is {:?}", self.launch.as_str()),
+            ));
         }
         Ok(())
     }
@@ -573,6 +621,8 @@ impl Config {
                 None => false,
             })
         });
+        let flow_launch_explicit =
+            over.get("flow").and_then(Value::as_object).is_some_and(|f| f.contains_key("launch"));
         let v = with_defaults(over);
         if let Some(pools) = v.get("pools") {
             let pools = pools.as_object().ok_or_else(|| invalid("pools", "pools must be an object of named pools"))?;
@@ -586,6 +636,12 @@ impl Config {
         })?;
         cfg.board.legacy_ticket_keys = legacy_ticket_keys;
         cfg.board.ask_configured = ask_configured;
+        if let Some(flow) = &mut cfg.flow
+            && flow.max_tickets.is_none()
+            && !flow_launch_explicit
+        {
+            flow.launch = Launch::Off;
+        }
         cfg.validate()?;
         Ok(cfg)
     }

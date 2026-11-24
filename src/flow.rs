@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::board::{BOARD, Card, LaunchArgs, card_text, chip};
-use crate::config::{FlowConfig, Launch};
+use crate::config::{FlowConfig, Launch, OptIn};
 use crate::github::errors;
 use crate::wf::Wf;
 
@@ -14,7 +14,6 @@ pub const EXTERNAL: &str = "blocked: external";
 pub const LAUNCH: &str = "launch";
 pub const SKIP: &str = "skip";
 const PRIORITIES: [&str; 3] = ["high", "medium", "low"];
-const MAX_PAGES: usize = 10;
 const SKIPPED: &str = "flow_skip:";
 const HELD: &str = "flow_done:";
 
@@ -47,7 +46,25 @@ pub const FLOW_ISSUES: &str = concat!(
 }"
 );
 
+pub const FLOW_OPEN_ISSUES: &str = concat!(
+    "query FlowIssues($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    nameWithOwner
+    issues(states: OPEN, first: 100, after: $after, orderBy: {field: CREATED_AT, direction: ASC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        ",
+    issue_fields!(),
+    "
+      }
+    }
+  }
+}"
+);
+
 const TRACK: &str = "track:";
+const TRACK_SUFFIX: &str = "-track";
+const AREA: &str = "area:";
 pub const BLOCKED_BY: &str = "blockedBy";
 pub const PARENT: &str = "parent";
 
@@ -181,9 +198,45 @@ pub struct GraphNode {
     pub ticket: Option<GraphTicket>,
 }
 
+#[derive(Clone, Default)]
+struct CoveredRepos {
+    all: Vec<String>,
+    by_short: BTreeMap<String, Option<String>>,
+}
+
+impl CoveredRepos {
+    fn insert(&mut self, full: String) {
+        if self.all.iter().any(|r| r.eq_ignore_ascii_case(&full)) {
+            return;
+        }
+        let short = full.rsplit_once('/').map_or(full.as_str(), |(_, n)| n).to_ascii_lowercase();
+        self.by_short
+            .entry(short)
+            .and_modify(|slot| {
+                if slot.as_deref().is_some_and(|prev| !prev.eq_ignore_ascii_case(&full)) {
+                    *slot = None;
+                }
+            })
+            .or_insert_with(|| Some(full.clone()));
+        self.all.push(full);
+    }
+
+    fn contains(&self, repo: &str) -> bool {
+        self.all.iter().any(|c| c.eq_ignore_ascii_case(repo))
+    }
+
+    fn resolve_short(&self, short: &str) -> Option<String> {
+        self.by_short.get(&short.to_ascii_lowercase()).and_then(Clone::clone)
+    }
+
+    fn tracked_set(&self) -> HashSet<String> {
+        self.all.iter().map(|r| r.to_ascii_lowercase()).collect()
+    }
+}
+
 struct Reads {
     reads: Vec<Read>,
-    covered: BTreeMap<String, String>,
+    covered: CoveredRepos,
 }
 
 #[derive(Clone)]
@@ -207,6 +260,7 @@ struct Read {
     issue: FlowIssue,
     state: Option<&'static str>,
     labels: Vec<String>,
+    body_track: Option<String>,
     open_blockers: Vec<IssueRef>,
     more_blockers: bool,
     blockers: Vec<Target>,
@@ -337,6 +391,7 @@ fn parse_node(repo: &str, n: &Value) -> Result<Read> {
         subs,
         more_subs,
         labels,
+        body_track: None,
         issue,
     })
 }
@@ -345,13 +400,13 @@ fn skip_key(repo: &str, number: u64) -> String {
     format!("{SKIPPED}{}#{number}", repo.to_ascii_lowercase())
 }
 
-fn ticket_issue(covered: &BTreeMap<String, String>, label: &str) -> Option<(String, u64)> {
+fn ticket_issue(covered: &CoveredRepos, label: &str) -> Option<(String, u64)> {
     let (name, n) = label.rsplit_once('#')?;
     let number: u64 = n.parse().ok()?;
-    Some((covered.get(&name.to_ascii_lowercase())?.clone(), number))
+    Some((covered.resolve_short(name)?, number))
 }
 
-fn ticket_repo(covered: &BTreeMap<String, String>, t: &Ticket) -> Option<(String, u64)> {
+fn ticket_repo(covered: &CoveredRepos, t: &Ticket) -> Option<(String, u64)> {
     if let Some(issue) = t.issue.as_deref() {
         let parsed = crate::board::parse_github_issue_only(issue)?;
         let (owner, repo, number) = parsed.github_parts()?;
@@ -365,29 +420,87 @@ fn ticket_repo(covered: &BTreeMap<String, String>, t: &Ticket) -> Option<(String
     }
 }
 
-fn covers(covered: &BTreeMap<String, String>, repo: &str) -> bool {
-    covered.values().any(|c| c.eq_ignore_ascii_case(repo))
-}
-
 fn node_key(repo: &str, number: u64) -> String {
     format!("{}#{number}", repo.to_ascii_lowercase())
 }
 
-fn track_label(labels: &[String]) -> Option<String> {
+fn prefix_label(labels: &[String], prefix: &str) -> Option<String> {
     labels
         .iter()
         .filter_map(|l| {
-            let (head, rest) = l.split_at_checked(TRACK.len())?;
+            let (head, rest) = l.split_at_checked(prefix.len())?;
             let rest = rest.trim();
-            (head.eq_ignore_ascii_case(TRACK) && !rest.is_empty()).then(|| rest.to_string())
+            (head.eq_ignore_ascii_case(prefix) && !rest.is_empty()).then(|| rest.to_string())
         })
         .min_by_key(|t| t.to_ascii_lowercase())
+}
+
+fn suffix_track_label(labels: &[String]) -> Option<String> {
+    labels
+        .iter()
+        .filter_map(|l| {
+            let trimmed = l.trim();
+            let split = trimmed.len().checked_sub(TRACK_SUFFIX.len())?;
+            let (stem, tail) = trimmed.split_at_checked(split)?;
+            let stem = stem.trim();
+            (tail.eq_ignore_ascii_case(TRACK_SUFFIX) && !stem.is_empty()).then(|| stem.to_string())
+        })
+        .min_by_key(|t| t.to_ascii_lowercase())
+}
+
+fn explicit_track(labels: &[String], body_track: Option<&str>) -> Option<(String, &'static str)> {
+    if let Some(t) = prefix_label(labels, TRACK) {
+        return Some((t, "label"));
+    }
+    if let Some(t) = suffix_track_label(labels) {
+        return Some((t, "label"));
+    }
+    if let Some(t) = prefix_label(labels, AREA) {
+        return Some((t, "label"));
+    }
+    if let Some(t) = body_track.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some((t.to_string(), "label"));
+    }
+    None
+}
+
+fn resolve_epic(
+    start: &str,
+    parent_of: &BTreeMap<String, String>,
+    explicit: &BTreeMap<String, String>,
+    nodes: &BTreeMap<String, GraphNode>,
+) -> (Option<String>, String) {
+    let mut seen: Vec<String> = vec![start.to_string()];
+    let mut cur = start;
+    let mut inherited_track: Option<String> = None;
+    while let Some(p) = parent_of.get(cur) {
+        if let Some(t) = explicit.get(p)
+            && inherited_track.is_none()
+        {
+            inherited_track = Some(t.clone());
+        }
+        if let Some(pos) = seen.iter().position(|x| x == p) {
+            let root = seen[pos..]
+                .iter()
+                .min_by_key(|k| {
+                    let n = &nodes[*k];
+                    (n.repo.to_ascii_lowercase(), n.number)
+                })
+                .expect("non-empty cycle")
+                .clone();
+            return (inherited_track, root);
+        }
+        seen.push(p.clone());
+        cur = p;
+    }
+    (inherited_track, cur.to_string())
 }
 
 #[derive(Default)]
 struct GraphBuild {
     nodes: BTreeMap<String, GraphNode>,
     edges: std::collections::BTreeSet<(String, &'static str, String)>,
+    body_tracks: BTreeMap<String, String>,
     more_blockers: HashSet<String>,
     more_subs: HashSet<String>,
 }
@@ -453,6 +566,9 @@ impl GraphBuild {
         if r.more_subs {
             self.more_subs.insert(key.clone());
         }
+        if let Some(track) = r.body_track {
+            self.body_tracks.insert(key.clone(), track);
+        }
         let outside = |b: &IssueRef| !tracked.contains(&b.repo.to_ascii_lowercase());
         let external = r.labels.iter().any(|l| l.eq_ignore_ascii_case(EXTERNAL))
             || (!r.open_blockers.is_empty() && !r.more_blockers && r.open_blockers.iter().all(outside));
@@ -514,6 +630,7 @@ impl GraphBuild {
         });
         let sorted: Vec<(String, &'static str, String)> = sorted.into_iter().cloned().collect();
         let mut edges = Vec::new();
+        let mut parent_of: BTreeMap<String, String> = BTreeMap::new();
         for (from, kind, to) in &sorted {
             let (f, t) = (id(&self.nodes, from), id(&self.nodes, to));
             match *kind {
@@ -522,6 +639,9 @@ impl GraphBuild {
                     self.nodes.get_mut(to).expect("edge end").unlocks.push(f.clone());
                 }
                 _ => {
+                    if from != to {
+                        parent_of.entry(from.clone()).or_insert_with(|| to.clone());
+                    }
                     let child = self.nodes.get_mut(from).expect("edge end");
                     child.parent = child.parent.take().or_else(|| Some(t.clone()));
                     self.nodes.get_mut(to).expect("edge end").sub_issues.push(f.clone());
@@ -531,30 +651,130 @@ impl GraphBuild {
         }
         let mut keys: Vec<String> = self.nodes.keys().cloned().collect();
         keys.sort_by_key(|k| order(&self.nodes, k));
-        let mut lanes: BTreeMap<String, String> = BTreeMap::new();
+
+        let mut short_repos: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut repo_names: BTreeMap<String, String> = BTreeMap::new();
         for k in &keys {
-            let comp = root(&mut up, k);
+            let repo = &self.nodes[k].repo;
+            repo_names.entry(repo.to_ascii_lowercase()).or_insert_with(|| repo.clone());
+            let short = repo.rsplit_once('/').map_or(repo.as_str(), |(_, s)| s).to_ascii_lowercase();
+            short_repos
+                .entry(short)
+                .and_modify(|slot| {
+                    if slot.as_deref().is_some_and(|prev| !prev.eq_ignore_ascii_case(repo)) {
+                        *slot = None;
+                    }
+                })
+                .or_insert_with(|| Some(repo.clone()));
+        }
+        let node_lane = |nodes: &BTreeMap<String, GraphNode>, k: &str| -> String {
+            let n = &nodes[k];
+            let short = n.repo.rsplit_once('/').map_or(n.repo.as_str(), |(_, s)| s).to_ascii_lowercase();
+            if short_repos.get(&short).is_some_and(Option::is_none) { n.id.clone() } else { n.label.clone() }
+        };
+
+        // Tier 1: track:<name>, *-track, area:*, or ## Flow Track: hook.
+        let mut explicit: BTreeMap<String, String> = BTreeMap::new();
+        for k in &keys {
+            let body_t = self.body_tracks.get(k).map(String::as_str);
             let n = self.nodes.get_mut(k).expect("listed key");
             n.more_blockers = self.more_blockers.contains(k);
             n.more_sub_issues = self.more_subs.contains(k);
-            let own = match (track_label(&n.labels), &n.milestone) {
-                (Some(t), _) => Some((t, "label")),
-                (None, Some(m)) => Some((m.title.clone(), "milestone")),
-                (None, None) => None,
-            };
-            if let Some((t, by)) = own {
-                lanes.entry(comp).or_insert_with(|| t.clone());
+            if let Some((t, by)) = explicit_track(&n.labels, body_t) {
+                explicit.insert(k.clone(), t.clone());
                 (n.track, n.track_by) = (t, by);
+            }
+        }
+
+        // Tier 2: parent epic (inheriting nearest ancestor's explicit track, else root epic label).
+        let mut claimed_epics: HashSet<String> = HashSet::new();
+        for k in &keys {
+            if !self.nodes[k].track_by.is_empty() || !parent_of.contains_key(k) {
+                continue;
+            }
+            let (inherited, epic_root) = resolve_epic(k, &parent_of, &explicit, &self.nodes);
+            let lane = match inherited {
+                Some(t) => t,
+                None => {
+                    claimed_epics.insert(epic_root.clone());
+                    node_lane(&self.nodes, &epic_root)
+                }
+            };
+            let n = self.nodes.get_mut(k).expect("listed key");
+            (n.track, n.track_by) = (lane, "epic");
+        }
+        for k in &keys {
+            if self.nodes[k].track_by.is_empty() && claimed_epics.contains(k) {
+                let lane = node_lane(&self.nodes, k);
+                let n = self.nodes.get_mut(k).expect("listed key");
+                (n.track, n.track_by) = (lane, "epic");
+            }
+        }
+
+        // Tier 3: milestone.
+        for k in &keys {
+            let n = self.nodes.get_mut(k).expect("listed key");
+            if n.track_by.is_empty()
+                && let Some(m) = &n.milestone
+            {
+                let title = m.title.trim();
+                if !title.is_empty() {
+                    (n.track, n.track_by) = (title.to_string(), "milestone");
+                }
+            }
+        }
+
+        // Tier 4: connected component only when component size >= 2.
+        let mut comp_size: BTreeMap<String, usize> = BTreeMap::new();
+        for k in &keys {
+            let comp = root(&mut up, k);
+            *comp_size.entry(comp).or_insert(0) += 1;
+        }
+        let tier_rank = |by: &str| match by {
+            "label" => 0u8,
+            "epic" => 1,
+            "milestone" => 2,
+            _ => 3,
+        };
+        let mut comp_lanes: BTreeMap<String, (u8, String)> = BTreeMap::new();
+        for k in &keys {
+            let comp = root(&mut up, k);
+            if comp_size[&comp] < 2 {
+                continue;
+            }
+            let n = &self.nodes[k];
+            if !n.track_by.is_empty() {
+                let r = tier_rank(n.track_by);
+                comp_lanes
+                    .entry(comp)
+                    .and_modify(|cur| {
+                        if r < cur.0 {
+                            *cur = (r, n.track.clone());
+                        }
+                    })
+                    .or_insert_with(|| (r, n.track.clone()));
             }
         }
         for k in &keys {
             let comp = root(&mut up, k);
-            let lane = lanes.get(&comp).cloned().unwrap_or_else(|| self.nodes[&comp].label.clone());
+            if comp_size[&comp] < 2 || !self.nodes[k].track_by.is_empty() {
+                continue;
+            }
+            let lane = comp_lanes.get(&comp).map(|(_, t)| t.clone()).unwrap_or_else(|| node_lane(&self.nodes, &comp));
+            let n = self.nodes.get_mut(k).expect("listed key");
+            (n.track, n.track_by) = (lane, "component");
+        }
+
+        // Tier 5: shared per-repo Independent lane for singleton unlinked issues.
+        for k in &keys {
             let n = self.nodes.get_mut(k).expect("listed key");
             if n.track_by.is_empty() {
-                (n.track, n.track_by) = (lane, "component");
+                let repo = repo_names.get(&n.repo.to_ascii_lowercase()).map(String::as_str).unwrap_or(&n.repo);
+                let lane = if repo.is_empty() { "Independent".to_string() } else { format!("{repo}: Independent") };
+                (n.track, n.track_by) = (lane, "independent");
             }
         }
+
         let mut nodes: Vec<GraphNode> = self.nodes.into_values().collect();
         nodes.sort_by(|a, b| {
             a.repo.to_ascii_lowercase().cmp(&b.repo.to_ascii_lowercase()).then(a.number.cmp(&b.number))
@@ -564,12 +784,12 @@ impl GraphBuild {
 }
 
 fn graph(
-    covered: &BTreeMap<String, String>,
+    covered: &CoveredRepos,
     reads: Vec<Read>,
     tickets: &[Ticket],
     lists: &BTreeMap<String, &'static str>,
 ) -> Graph {
-    let tracked: HashSet<String> = covered.values().map(|r| r.to_ascii_lowercase()).collect();
+    let tracked = covered.tracked_set();
     let mut g = GraphBuild::default();
     for r in reads {
         let list = lists.get(&node_key(&r.issue.repo, r.issue.number)).copied();
@@ -626,6 +846,11 @@ fn picked(i: &FlowIssue) -> Value {
     json!({"label": i.label, "url": i.url, "title": i.title, "priority": i.priority, "why": why(i)})
 }
 
+enum RepoReadError {
+    Transport(anyhow::Error),
+    Graphql(anyhow::Error),
+}
+
 enum FlowMetaOp {
     SetSkip(String, String),
     SetHeld(String),
@@ -637,6 +862,25 @@ struct FlowPlan {
     meta_ops: Vec<FlowMetaOp>,
 }
 
+fn matches_opt_in(opt_in: Option<&OptIn>, r: &Read) -> bool {
+    let Some(opt) = opt_in else {
+        return true;
+    };
+    if let Some(label) = opt.label.as_deref() {
+        let want = label.trim();
+        if !r.labels.iter().any(|l| l.eq_ignore_ascii_case(want)) {
+            return false;
+        }
+    }
+    if let Some(milestone) = opt.milestone.as_deref() {
+        let want = milestone.trim();
+        if !r.issue.milestone.as_ref().is_some_and(|m| m.title.eq_ignore_ascii_case(want)) {
+            return false;
+        }
+    }
+    true
+}
+
 fn plan_flow(
     cfg: &FlowConfig,
     r: Reads,
@@ -646,13 +890,14 @@ fn plan_flow(
     mut meta_get: impl FnMut(&str) -> Result<Option<String>>,
     write: bool,
 ) -> Result<FlowPlan> {
+    let max_tickets = cfg.max_tickets.unwrap_or(0);
     let open: HashSet<String> =
         tickets.iter().filter_map(|t| ticket_repo(&r.covered, t)).map(|(repo, n)| node_key(&repo, n)).collect();
     let running: Vec<FlowTicket> = tickets
         .into_iter()
         .filter_map(|t| {
             let (repo, number) = ticket_repo(&r.covered, &t)?;
-            if !covers(&r.covered, &repo) || closed.contains(&node_key(&repo, number)) {
+            if !r.covered.contains(&repo) || closed.contains(&node_key(&repo, number)) {
                 return None;
             }
             Some(FlowTicket {
@@ -665,14 +910,13 @@ fn plan_flow(
             })
         })
         .collect();
-    let opt_in = cfg.opt_in.label.to_ascii_lowercase();
     let (mut queue, mut blocked, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
     let mut meta_ops = Vec::new();
     let mut skip_overlay: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut marked_held = HashSet::new();
     for r in r.reads {
         let has = |want: &str| r.labels.iter().any(|l| l.eq_ignore_ascii_case(want));
-        if !has(&opt_in) || open.contains(&node_key(&r.issue.repo, r.issue.number)) {
+        if !matches_opt_in(cfg.opt_in.as_ref(), &r) || open.contains(&node_key(&r.issue.repo, r.issue.number)) {
             continue;
         }
         if r.issue.parent.as_ref().is_some_and(|p| open.contains(&node_key(&p.repo, p.number))) {
@@ -735,8 +979,8 @@ fn plan_flow(
     let view = FlowView {
         enabled: true,
         launch: Some(cfg.launch),
-        max_tickets: cfg.max_tickets,
-        free: cfg.max_tickets.saturating_sub(running.len()),
+        max_tickets,
+        free: max_tickets.saturating_sub(running.len()),
         running,
         queue,
         blocked,
@@ -818,44 +1062,107 @@ impl Wf {
         Ok(out)
     }
 
-    async fn read_repo(&self, repo: &str, label: &str) -> Result<(String, Vec<Read>)> {
-        let (owner, name) = repo.split_once('/').ok_or_else(|| anyhow!("flow: {repo:?} is not owner/name"))?;
+    async fn read_repo(
+        &self,
+        repo: &str,
+        label: Option<&str>,
+    ) -> std::result::Result<(String, Vec<Read>), RepoReadError> {
+        let (owner, name) =
+            repo.split_once('/').ok_or_else(|| RepoReadError::Graphql(anyhow!("flow: {repo:?} is not owner/name")))?;
         let mut after: Option<String> = None;
+        let mut seen_cursors: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
         let mut full = repo.to_string();
-        for _ in 0..MAX_PAGES {
-            let vars = json!({"owner": owner, "name": name, "label": label, "after": after});
-            let resp = self.github.graphql(FLOW_ISSUES, vars).await?;
+        let query = if label.is_some() { FLOW_ISSUES } else { FLOW_OPEN_ISSUES };
+        loop {
+            let vars = match label {
+                Some(label) => json!({"owner": owner, "name": name, "label": label, "after": after}),
+                None => json!({"owner": owner, "name": name, "after": after}),
+            };
+            let resp = self.github.graphql(query, vars).await.map_err(RepoReadError::Transport)?;
             if let Some(e) = errors(&resp) {
-                bail!("wf.flow: reading {repo}'s issues failed: {e}");
+                return Err(RepoReadError::Graphql(anyhow!("wf.flow: reading {repo}'s issues failed: {e}")));
             }
             let r = &resp["data"]["repository"];
             if r.is_null() {
-                bail!("wf.flow: GitHub returned no repository {repo}");
+                return Err(RepoReadError::Graphql(anyhow!("wf.flow: GitHub returned no repository {repo}")));
             }
             if let Some(n) = r["nameWithOwner"].as_str() {
                 full = n.to_string();
             }
             for n in r["issues"]["nodes"].as_array().into_iter().flatten() {
-                out.push(parse_node(&full, n)?);
+                out.push(parse_node(&full, n).map_err(RepoReadError::Graphql)?);
             }
             let page = &r["issues"]["pageInfo"];
             match page["endCursor"].as_str() {
-                Some(c) if page["hasNextPage"] == true => after = Some(c.to_string()),
+                Some(c) if page["hasNextPage"] == true => {
+                    if !seen_cursors.insert(c.to_string()) {
+                        return Err(RepoReadError::Graphql(anyhow!(
+                            "wf.flow: GitHub repeated page cursor {c:?} while reading {repo}"
+                        )));
+                    }
+                    after = Some(c.to_string());
+                }
                 _ => return Ok((full, out)),
             }
         }
-        bail!("wf.flow: {repo} has more than {} open issues labelled {label:?}", MAX_PAGES * 100)
     }
 
-    async fn flow_reads(&self, cfg: &FlowConfig) -> Result<Reads> {
+    async fn resolve_repos(&self, cfg: Option<&FlowConfig>) -> Result<Vec<(String, bool)>> {
+        let mut list: Vec<(String, bool)> = match cfg.and_then(|c| c.repos.as_ref()) {
+            Some(explicit) => explicit.iter().map(|r| (r.clone(), true)).collect(),
+            None => self.discovered_github_repos().await?.into_iter().map(|r| (r, false)).collect(),
+        };
+        if let Some(cfg) = cfg {
+            for repo in &cfg.include_repos {
+                if let Some((_, explicit)) = list.iter_mut().find(|(r, _)| r.eq_ignore_ascii_case(repo)) {
+                    *explicit = true;
+                } else {
+                    list.push((repo.clone(), true));
+                }
+            }
+            if !cfg.exclude_repos.is_empty() {
+                list.retain(|(r, _)| !cfg.exclude_repos.iter().any(|ex| ex.eq_ignore_ascii_case(r)));
+            }
+        }
+        Ok(list)
+    }
+
+    async fn flow_reads(&self, cfg: Option<&FlowConfig>, all_open: bool) -> Result<Reads> {
+        let label = (!all_open)
+            .then(|| {
+                cfg.and_then(|c| c.opt_in.as_ref())
+                    .and_then(|o| o.label.as_deref())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            })
+            .flatten();
+        let repos = self.resolve_repos(cfg).await?;
         let mut reads = Vec::new();
-        let mut covered: BTreeMap<String, String> = BTreeMap::new();
-        for repo in &cfg.repos {
-            let (full, rs) = self.read_repo(repo, &cfg.opt_in.label).await?;
-            let name = full.rsplit_once('/').map_or(full.as_str(), |(_, n)| n).to_ascii_lowercase();
-            covered.insert(name, full);
-            reads.extend(rs);
+        let mut covered = CoveredRepos::default();
+        let mut succeeded = 0usize;
+        let mut first_discovered_err: Option<anyhow::Error> = None;
+        for (repo, explicit) in repos {
+            match self.read_repo(&repo, label).await {
+                Ok((full, rs)) => {
+                    succeeded += 1;
+                    covered.insert(full);
+                    reads.extend(rs);
+                }
+                Err(RepoReadError::Transport(e)) => return Err(e),
+                Err(RepoReadError::Graphql(e)) if explicit => return Err(e),
+                Err(RepoReadError::Graphql(e)) => {
+                    tracing::warn!("flow: skipping discovered repo {repo}: {e:#}");
+                    if first_discovered_err.is_none() {
+                        first_discovered_err = Some(e);
+                    }
+                }
+            }
+        }
+        if succeeded == 0
+            && let Some(e) = first_discovered_err
+        {
+            return Err(e);
         }
         Ok(Reads { reads, covered })
     }
@@ -865,7 +1172,7 @@ impl Wf {
         let asks: Vec<(String, (String, u64))> = tickets
             .iter()
             .filter_map(|t| ticket_repo(&r.covered, t))
-            .filter(|(repo, _)| full || covers(&r.covered, repo))
+            .filter(|(repo, _)| full || r.covered.contains(repo))
             .map(|(repo, number)| (node_key(&repo, number), (repo, number)))
             .filter(|(key, _)| !open.contains(key))
             .collect();
@@ -896,8 +1203,9 @@ impl Wf {
     }
 
     pub async fn flow(&self, with_graph: bool) -> Result<Value> {
-        let Some(cfg) = self.config().flow.clone() else {
-            let tickets = if with_graph { self.open_tickets()? } else { Vec::new() };
+        let cfg = self.config().flow.clone();
+        let queue_enabled = cfg.as_ref().is_some_and(FlowConfig::queue_enabled);
+        if !queue_enabled && !with_graph {
             let off = FlowView {
                 enabled: false,
                 launch: None,
@@ -907,17 +1215,30 @@ impl Wf {
                 queue: Vec::new(),
                 blocked: Vec::new(),
                 skipped: Vec::new(),
-                graph: with_graph.then(|| graph(&BTreeMap::new(), Vec::new(), &tickets, &BTreeMap::new())),
+                graph: None,
             };
             return Ok(serde_json::to_value(off)?);
-        };
-        let reads = self.flow_reads(&cfg).await?;
+        }
+        let reads = self.flow_reads(cfg.as_ref(), with_graph).await?;
         let tickets = self.open_tickets()?;
         let (closed, extra) = self.ticket_reads(&reads, &tickets, with_graph).await?;
         let covered = reads.covered.clone();
         let mut all = reads.reads.clone();
         all.extend(extra);
-        let mut view = self.flow_build(&cfg, reads, tickets.clone(), &closed, false)?;
+        let mut view = match cfg.as_ref().filter(|c| c.queue_enabled()) {
+            Some(c) => self.flow_build(c, reads, tickets.clone(), &closed, false)?,
+            None => FlowView {
+                enabled: false,
+                launch: None,
+                max_tickets: 0,
+                free: 0,
+                running: Vec::new(),
+                queue: Vec::new(),
+                blocked: Vec::new(),
+                skipped: Vec::new(),
+                graph: None,
+            },
+        };
         if !with_graph {
             return Ok(serde_json::to_value(view)?);
         }
@@ -1017,22 +1338,35 @@ impl Wf {
         self.flow_pick(Some(1)).await
     }
 
+    fn retire_all_flow_cards(&self, note: &str) -> Result<Vec<String>> {
+        let mut retired = Vec::new();
+        for (c, _) in self.flow_cards()? {
+            if self.retire_flow_card(&c, note)? {
+                retired.push(c.id);
+            }
+        }
+        if !retired.is_empty() {
+            self.changed();
+        }
+        Ok(retired)
+    }
+
     pub(crate) async fn flow_pick(&self, most: Option<usize>) -> Result<Value> {
-        let Some(cfg) = self.config().flow.clone() else {
+        let Some(cfg) = self.config().flow.clone().filter(FlowConfig::queue_enabled) else {
+            let _pick = self.flow_lock.lock().await;
+            let _g = self.lock.lock().await;
+            self.retire_all_flow_cards("flow.launch is off")?;
             return Ok(json!({"launch": null, "free": 0, "picked": [], "offered": [],
-                             "reason": "the flow is off: the config has no flow block"}));
+                             "reason": "the flow is off: the config has no flow launch settings"}));
         };
         let _pick = self.flow_lock.lock().await;
         if cfg.launch == Launch::Off {
             let _g = self.lock.lock().await;
-            for (c, _) in self.flow_cards()? {
-                self.retire_flow_card(&c, "flow.launch is off")?;
-            }
-            self.changed();
+            self.retire_all_flow_cards("flow.launch is off")?;
             return Ok(json!({"launch": cfg.launch, "free": 0, "picked": [], "offered": [],
                              "reason": "flow.launch is off, so nothing launches"}));
         }
-        let reads = self.flow_reads(&cfg).await?;
+        let reads = self.flow_reads(Some(&cfg), false).await?;
         let (closed, _) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
         let g = self.lock.lock().await;
         let covered = reads.covered.clone();
@@ -1125,10 +1459,10 @@ impl Wf {
             bail!("card {} takes \"{LAUNCH}\" or \"{SKIP}\"", card.id);
         }
         let held = self.flow_lock.lock().await;
-        let cfg = self.config().flow.clone().filter(|c| c.launch != Launch::Off);
+        let cfg = self.config().flow.clone().filter(|c| c.queue_enabled() && c.launch != Launch::Off);
         let fresh = match &cfg {
             Some(c) => {
-                let reads = self.flow_reads(c).await?;
+                let reads = self.flow_reads(Some(c), false).await?;
                 let (closed, _) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
                 Some((reads, closed))
             }
@@ -1454,7 +1788,7 @@ mod prop_tests {
     #[derive(Clone)]
     struct FlowScenario {
         cfg: FlowConfig,
-        covered: BTreeMap<String, String>,
+        covered: CoveredRepos,
         reads: Vec<Read>,
         tickets: Vec<Ticket>,
         closed: HashSet<String>,
@@ -1465,16 +1799,26 @@ mod prop_tests {
     fn gen_flow_scenario(u: &mut Unstructured<'_>, allow_zero_cap: bool) -> arbitrary::Result<FlowScenario> {
         let repo_count = u.int_in_range(1..=REPOS.len())?;
         let repos: Vec<String> = REPOS[..repo_count].iter().map(|s| (*s).to_string()).collect();
-        let covered: BTreeMap<String, String> = repos
-            .iter()
-            .map(|r| {
-                let short = r.rsplit_once('/').unwrap().1.to_ascii_lowercase();
-                (short, r.clone())
-            })
-            .collect();
+        let mut covered = CoveredRepos::default();
+        for r in &repos {
+            covered.insert(r.clone());
+        }
         let max_tickets = if allow_zero_cap { u.int_in_range(0..=6usize)? } else { u.int_in_range(1..=6usize)? };
         let launch = *u.choose(&[Launch::Ask, Launch::Auto, Launch::Off])?;
-        let cfg = FlowConfig { repos: repos.clone(), opt_in: OptIn { label: "flow".into() }, max_tickets, launch };
+        let opt_in = match u.int_in_range(0..=3u8)? {
+            0 => None,
+            1 => Some(OptIn { label: Some("flow".into()), milestone: None }),
+            2 => Some(OptIn { label: None, milestone: Some("v0.1".into()) }),
+            _ => Some(OptIn { label: Some("flow".into()), milestone: Some("v0.1".into()) }),
+        };
+        let cfg = FlowConfig {
+            repos: Some(repos.clone()),
+            include_repos: Vec::new(),
+            exclude_repos: Vec::new(),
+            opt_in,
+            max_tickets: Some(max_tickets),
+            launch,
+        };
 
         let n = u.int_in_range(0..=16usize)?;
         let mut seen = HashSet::new();
@@ -1578,6 +1922,7 @@ mod prop_tests {
                 issue,
                 state: Some("open"),
                 labels,
+                body_track: None,
                 open_blockers,
                 more_blockers,
                 blockers,
@@ -1701,7 +2046,7 @@ mod prop_tests {
 
             for r in &sc.reads {
                 let nk = node_key(&r.issue.repo, r.issue.number);
-                let has_opt_in = r.labels.iter().any(|l| l.eq_ignore_ascii_case(&sc.cfg.opt_in.label));
+                let has_opt_in = matches_opt_in(sc.cfg.opt_in.as_ref(), r);
                 let in_progress = open_set.contains(&nk);
                 let parent_in_progress =
                     r.issue.parent.as_ref().is_some_and(|p| open_set.contains(&node_key(&p.repo, p.number)));
@@ -1766,7 +2111,7 @@ mod prop_tests {
                 .iter()
                 .filter_map(|t| {
                     let (repo, number) = ticket_repo(&sc.covered, t)?;
-                    if !covers(&sc.covered, &repo) || sc.closed.contains(&node_key(&repo, number)) {
+                    if !sc.covered.contains(&repo) || sc.closed.contains(&node_key(&repo, number)) {
                         return None;
                     }
                     Some((repo, number))
@@ -1777,14 +2122,15 @@ mod prop_tests {
             assert_eq!(actual_running, expected_running);
 
             // Running count and free-slot capacity bounds derived from input tickets.
-            let expected_free = sc.cfg.max_tickets.saturating_sub(expected_running.len());
-            assert_eq!(view.max_tickets, sc.cfg.max_tickets);
+            let max_tickets = sc.cfg.max_tickets.unwrap_or(0);
+            let expected_free = max_tickets.saturating_sub(expected_running.len());
+            assert_eq!(view.max_tickets, max_tickets);
             assert_eq!(view.free, expected_free);
-            assert!(view.free <= sc.cfg.max_tickets);
-            if expected_running.len() >= sc.cfg.max_tickets {
+            assert!(view.free <= max_tickets);
+            if expected_running.len() >= max_tickets {
                 assert_eq!(view.free, 0);
             } else {
-                assert_eq!(expected_running.len() + view.free, sc.cfg.max_tickets);
+                assert_eq!(expected_running.len() + view.free, max_tickets);
             }
 
             // Generate existing flow cards (ready, stale, duplicates, or non-existent).
@@ -1826,11 +2172,11 @@ mod prop_tests {
             // Strict capacity caps anchored to the input-derived free budget.
             assert!(pp.offered.len() <= expected_free);
             assert!(pp.offered.len() + pp.picks.len() <= expected_free);
-            assert!(pp.offered.len() + pp.picks.len() <= sc.cfg.max_tickets);
+            assert!(pp.offered.len() + pp.picks.len() <= max_tickets);
             assert!(pp.picks.len() <= most.unwrap_or(usize::MAX));
             assert!(pp.picks.len() <= view.queue.len());
-            if expected_running.len() <= sc.cfg.max_tickets {
-                assert!(expected_running.len() + pp.offered.len() + pp.picks.len() <= sc.cfg.max_tickets);
+            if expected_running.len() <= max_tickets {
+                assert!(expected_running.len() + pp.offered.len() + pp.picks.len() <= max_tickets);
             }
             if expected_free == 0 {
                 assert!(pp.offered.is_empty() && pp.picks.is_empty());
@@ -1868,5 +2214,46 @@ mod prop_tests {
             }
             Ok(())
         });
+    }
+
+    #[test]
+    fn body_track_hook_and_parent_cycles_resolve_deterministically() {
+        let mut g = GraphBuild::default();
+        let tracked: HashSet<String> = ["acme/widgets".into()].into_iter().collect();
+        let make = |n: u64, labels: &[&str], body_track: Option<&str>, parent: Option<u64>| Read {
+            issue: FlowIssue {
+                repo: "acme/widgets".into(),
+                number: n,
+                label: label_of("acme/widgets", n),
+                url: format!("https://github.com/acme/widgets/issues/{n}"),
+                title: format!("Issue {n}"),
+                priority: None,
+                milestone: None,
+                created_at: "2026-10-01T00:00:00Z".into(),
+                parent: parent.map(|p| issue_ref_for("acme/widgets", p)),
+                unblocked_by: Vec::new(),
+                key: format!("k-{n}"),
+            },
+            state: Some("open"),
+            labels: labels.iter().map(|s| (*s).to_string()).collect(),
+            body_track: body_track.map(String::from),
+            open_blockers: Vec::new(),
+            more_blockers: false,
+            blockers: Vec::new(),
+            parent: parent.map(|p| Target { to: issue_ref_for("acme/widgets", p), state: Some("open") }),
+            subs: Vec::new(),
+            more_subs: false,
+        };
+        g.read(make(1, &[], Some("flow-dag"), None), None, &tracked);
+        g.read(make(2, &["track: explicit"], Some("ignored-body"), None), None, &tracked);
+        // Parent cycle 3 <-> 4 terminates deterministically at lowest issue number.
+        g.read(make(3, &[], None, Some(4)), None, &tracked);
+        g.read(make(4, &[], None, Some(3)), None, &tracked);
+        let built = g.finish();
+        let by_id = |id: &str| built.nodes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!((by_id("acme/widgets#1").track.as_str(), by_id("acme/widgets#1").track_by), ("flow-dag", "label"));
+        assert_eq!((by_id("acme/widgets#2").track.as_str(), by_id("acme/widgets#2").track_by), ("explicit", "label"));
+        assert_eq!((by_id("acme/widgets#3").track.as_str(), by_id("acme/widgets#3").track_by), ("widgets#3", "epic"));
+        assert_eq!((by_id("acme/widgets#4").track.as_str(), by_id("acme/widgets#4").track_by), ("widgets#3", "epic"));
     }
 }
