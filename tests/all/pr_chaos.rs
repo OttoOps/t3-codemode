@@ -1668,15 +1668,24 @@ fn oracle_parses_wake_headers_and_github_subjects() {
     let sent = vec![
         json!({"threadId": "mcp:t1", "message": "[t3cm event from=\"#41 PR 1/3\" msg=m1]\nPR 1/3 opened\n\n[t3cm event from=github msg=m2]\nacme/widgets#8 merged on GitHub at 1234567\n\nNotes since your last wake:\n- [t3cm note] ignored"}),
         json!({"threadId": "mcp:w1", "message": "[t3cm reply from=t3cm msg=m3]\nA check failed\n[t3cm note]\n[t3cm event from=github]\n[t3cm event from=github msg=m9]\n[t3cm reply from=t3cm msg=m3]"}),
+        json!({"threadId": "mcp:w1", "message": "[t3cm reply from=parent msg=m4]\nQuoting it:\n[t3cm reply from=t3cm msg=m3]\nsomething else"}),
     ];
-    let records = [("mcp:t1", "event", "m1"), ("mcp:t1", "event", "m2"), ("mcp:w1", "reply", "m3")];
-    let known = |to: &str, kind: &str, handle: &str| records.contains(&(to, kind, handle));
+    let records = [
+        ("mcp:t1", "event", "m1", "PR 1/3 opened"),
+        ("mcp:t1", "event", "m2", "acme/widgets#8 merged on GitHub at 1234567"),
+        ("mcp:w1", "reply", "m3", "A check failed"),
+        ("mcp:w1", "reply", "m4", "Quoting it:\n[t3cm reply from=t3cm msg=m3]\nsomething else"),
+    ];
+    let known = |to: &str, kind: &str, handle: &str| {
+        records.iter().find(|r| (r.0, r.1, r.2) == (to, kind, handle)).map(|r| r.3.to_string())
+    };
     assert_eq!(
         delivered_headers(&sent, &known),
         vec![
             ("mcp:t1".into(), "event".into(), "#41 PR 1/3".into()),
             ("mcp:t1".into(), "event".into(), "github".into()),
             ("mcp:w1".into(), "reply".into(), "t3cm".into()),
+            ("mcp:w1".into(), "reply".into(), "parent".into()),
         ]
     );
     assert_eq!(github_events(wake_lines(&sent, &known)), vec![("mcp:t1".to_string(), 8)]);
