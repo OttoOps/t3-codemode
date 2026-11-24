@@ -122,8 +122,7 @@ embedded in the page.
 
 ## `t3cm update` rolled back
 
-On Linux, `t3cm update` puts the old binary back when the restarted service
-stops, or does not report the new version on `/healthz` within 45 seconds.
+`t3cm update` puts the old binary back when the restarted service stops, or does not report the new version on `/healthz` within 45 seconds.
 The service log says why the new version did not start. If the release
 changed the systemd unit, the message names the saved copy. Install it as the
 update printed, then run `t3cm update` again. If the rollback fails too, the
@@ -133,9 +132,10 @@ as [Install](getting-started.md#install) shows and run it for that release:
 `bash install.sh --version vX.Y.Z`, or on Windows
 `powershell -ExecutionPolicy Bypass -File install.ps1 -Version vX.Y.Z`.
 
-On macOS and Windows the update restarts nothing, so it has nothing to roll
-back. If the new version misbehaves after you restart the service, run the
-command the update printed to go back to `t3cm.old`.
+After an update with `--no-restart`, or one that found the service stopped,
+nothing was restarted, so there is nothing to roll back. If the new version
+misbehaves after you restart the service, run the command the update printed
+to go back to `t3cm.old`.
 
 `the service runs ..., but this is ...` means you ran a different `t3cm` than
 the one the service runs. Run the installed one, which the message names.
@@ -146,13 +146,27 @@ still going. Let the first one finish, then run it again if you still need to.
 `the service is running but nothing answers on 127.0.0.1:<port>` means the
 service serves another port, or it is up but not answering. Pass its port with
 `--port` (or `T3CM_PORT`) so the update can check the restart. If the port is
-right and the service is stuck, stop it (`systemctl --user stop t3-codemode`)
-and run `t3cm update` again. The update changed nothing.
+right and the service is stuck, stop it with the command the message names
+(`systemctl --user stop t3-codemode.service`, `launchctl kill TERM` on macOS, or
+`schtasks /End` on Windows) and run `t3cm update` again. The update changed nothing.
 
 `a t3cm <version> answers on 127.0.0.1:<port>, but ... is t3cm <other>` means
 the service runs a different version than the binary on disk, usually after an
-update with `--no-restart`. Restart the service so it runs the binary on disk,
-then run the update again. The update changed nothing.
+update with `--no-restart`. Restart the service with the command the message
+names, so it runs the binary on disk, then run the update again. The update
+changed nothing.
+
+`the service on 127.0.0.1:<port> still runs t3cm <old>` comes from an update
+that found t3cm current but the service behind, and could not restart it: you
+passed `--no-restart`, or no systemd unit, launchd agent or scheduled task
+manages the service. Restart it with the command the message names.
+
+`a t3cm <version> answers on 127.0.0.1:<port>, but that listener is not the service`
+(or `could not tell whether that listener is the service`) means an unmanaged
+`t3cm` is listening on that port, or `t3cm update` could not confirm the service
+owns it, so it left the service running. Stop that process, pass the service's
+port with `--port` (or `T3CM_PORT`), or restart the service with the command the
+message names.
 
 ## Still stuck
 

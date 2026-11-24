@@ -281,7 +281,7 @@ async fn an_up_to_date_update_still_repairs_the_skills() {
         install_skills(&env);
         let file = env.dir.path().join(".agents/skills/t3-worker/procedure.md");
         std::fs::remove_file(&file).unwrap();
-        let out = env.t3cm(&["update", "--no-restart", "--version", &current]);
+        let out = env.t3cm(&["update", "--no-restart", "--port", "9", "--version", &current]);
         (out, file.is_file())
     })
     .await
@@ -303,11 +303,11 @@ async fn an_up_to_date_update_waits_for_a_running_update() {
         std::fs::create_dir_all(env.state()).unwrap();
         let lock = std::fs::File::create(env.state().join("update.lock")).unwrap();
         lock.lock().unwrap();
-        let blocked = env.t3cm(&["update", "--no-restart", "--version", &current]);
+        let blocked = env.t3cm(&["update", "--no-restart", "--port", "9", "--version", &current]);
         let back_while_held = file.is_file();
         lock.unlock().unwrap();
         drop(lock);
-        let after = env.t3cm(&["update", "--no-restart", "--version", &current]);
+        let after = env.t3cm(&["update", "--no-restart", "--port", "9", "--version", &current]);
         (blocked, back_while_held, after, file.is_file())
     })
     .await
@@ -369,14 +369,7 @@ esac
         }
 
         fn serves(&self, version: &str) -> bool {
-            let deadline = Instant::now() + Duration::from_secs(30);
-            while Instant::now() < deadline {
-                if healthz(self.port).as_deref() == Some(version) {
-                    return true;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            false
+            wait_for(self.port, version)
         }
 
         fn update(&self) -> Output {
@@ -390,6 +383,17 @@ esac
                 unsafe { libc::kill(pid, libc::SIGKILL) };
             }
         }
+    }
+
+    fn wait_for(port: u16, version: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if healthz(port).as_deref() == Some(version) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
     }
 
     fn healthz(port: u16) -> Option<String> {
@@ -432,7 +436,8 @@ echo "$*" >> "$S/calls"
 case "$2" in
   cat) exit 0 ;;
   is-active) alive ;;
-  show) if alive && [ ! -e "$S/hide-pid" ]; then cat "$S/pid"; else echo 0; fi ;;
+  show) if [ "$4" = ExecStart ]; then echo "{{ path=$(cat "$S/exec" 2>/dev/null || echo '{home}/.local/bin/t3cm') ; argv[]=t3cm serve ; }}";
+        elif alive && [ ! -e "$S/hide-pid" ]; then cat "$S/pid"; else echo 0; fi ;;
   restart)
     if alive; then kill "$(cat "$S/pid")"; while alive; do sleep 0.05; done; fi
     setsid "$S/service" >> "$S/log" 2>&1 < /dev/null &
@@ -524,6 +529,142 @@ esac
         assert!(std::fs::read(&svc.env.bin).unwrap() == before);
     }
 
+    fn serve_old(svc: &Service) -> Vec<u8> {
+        let script = svc.fake().join("service");
+        let normal = std::fs::read(&script).unwrap();
+        t3_codemode::fake::write_executable(
+            &script,
+            &format!("#!/bin/sh\nexec python3 -c '{}' --port {}\n", OLD_SERVER, svc.port),
+        );
+        svc.restart();
+        assert!(svc.serves("0.0.1"));
+        normal
+    }
+
+    fn up_to_date(svc: &Service, extra: &[&str]) -> Output {
+        let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let port = svc.port.to_string();
+        let mut args = vec!["update", "--port", &port, "--version", &current];
+        args.extend_from_slice(extra);
+        svc.env.t3cm(&args)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_up_to_date_update_restarts_a_stale_service() {
+        let svc = installed(STUB, None).await;
+        let normal = serve_old(&svc);
+        std::fs::write(svc.fake().join("service"), normal).unwrap();
+        let (out, svc) = tokio::task::spawn_blocking(move || (up_to_date(&svc, &[]), svc)).await.unwrap();
+        let t = text(&out);
+        assert!(out.status.success(), "{t}");
+        assert!(t.contains("is up to date"), "{t}");
+        assert!(
+            t.contains(&format!("The service still runs t3cm 0.0.1; restarting it on {}", env!("CARGO_PKG_VERSION"))),
+            "{t}"
+        );
+        assert_eq!(healthz(svc.port).as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_up_to_date_update_names_the_restart_for_a_stale_service() {
+        let svc = installed(STUB, None).await;
+        serve_old(&svc);
+        let (out, svc) = tokio::task::spawn_blocking(move || (up_to_date(&svc, &["--no-restart"]), svc)).await.unwrap();
+        let t = text(&out);
+        assert!(!out.status.success(), "{t}");
+        assert!(t.contains("still runs t3cm 0.0.1"), "{t}");
+        assert!(t.contains("systemctl --user restart t3-codemode.service"), "{t}");
+        assert!(!t.contains("is up to date"), "{t}");
+        assert_eq!(healthz(svc.port).as_deref(), Some("0.0.1"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_up_to_date_update_leaves_a_service_on_another_binary_alone() {
+        let svc = installed(STUB, None).await;
+        serve_old(&svc);
+        let other = svc.env.dir.path().join("other/t3cm");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::copy(&svc.env.bin, &other).unwrap();
+        let (out, svc) = tokio::task::spawn_blocking(move || {
+            let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+            let port = svc.port.to_string();
+            let out = Command::new(&other)
+                .args(["update", "--port", &port, "--version", &current])
+                .env_clear()
+                .env("HOME", svc.env.dir.path())
+                .env("PATH", svc.env.path())
+                .env("T3CM_RELEASES_URL", &svc.env.url)
+                .env("T3CM_STATE_DIR", svc.env.state())
+                .env("T3CM_CONFIG", svc.env.dir.path().join("none.json"))
+                .output()
+                .unwrap();
+            (out, svc)
+        })
+        .await
+        .unwrap();
+        let t = text(&out);
+        assert!(!out.status.success(), "{t}");
+        assert!(t.contains("the service runs") && t.contains("but this is"), "{t}");
+        assert!(t.contains("systemctl --user restart t3-codemode.service"), "{t}");
+        assert_eq!(healthz(svc.port).as_deref(), Some("0.0.1"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_up_to_date_update_leaves_a_service_that_starts_another_binary_alone() {
+        let svc = installed(STUB, None).await;
+        serve_old(&svc);
+        let other = svc.env.dir.path().join("other/t3cm");
+        std::fs::write(svc.fake().join("exec"), other.display().to_string()).unwrap();
+        let (out, svc) = tokio::task::spawn_blocking(move || (up_to_date(&svc, &[]), svc)).await.unwrap();
+        let t = text(&out);
+        assert!(!out.status.success(), "{t}");
+        assert!(t.contains(&format!("the service runs {}", other.display())), "{t}");
+        assert!(t.contains("systemctl --user restart t3-codemode.service"), "{t}");
+        assert_eq!(healthz(svc.port).as_deref(), Some("0.0.1"));
+        let calls = std::fs::read_to_string(svc.fake().join("calls")).unwrap();
+        assert_eq!(calls.matches("restart").count(), 2, "{calls}");
+    }
+
+    struct ChildGuard(std::process::Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_up_to_date_update_leaves_the_service_alone_when_another_process_answers_on_port() {
+        let svc = installed(STUB, None).await;
+        let other_port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (out, svc) = tokio::task::spawn_blocking(move || {
+            let _rogue = ChildGuard(
+                Command::new("python3")
+                    .args(["-c", OLD_SERVER, "--port", &other_port.to_string()])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            assert!(wait_for(other_port, "0.0.1"), "the separate listener never served 0.0.1");
+            let current = format!("v{}", env!("CARGO_PKG_VERSION"));
+            let port = other_port.to_string();
+            let out = svc.env.t3cm(&["update", "--port", &port, "--version", &current]);
+            (out, svc)
+        })
+        .await
+        .unwrap();
+        let t = text(&out);
+        assert!(!out.status.success(), "{t}");
+        assert!(t.contains(&format!("127.0.0.1:{other_port}")) && t.contains("not the service"), "{t}");
+        assert!(t.contains("systemctl --user restart t3-codemode.service"), "{t}");
+        let calls = std::fs::read_to_string(svc.fake().join("calls")).unwrap();
+        assert_eq!(calls.matches("restart").count(), 1, "{calls}");
+        assert_eq!(healthz(svc.port).as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    }
+
     const OLD_SERVER: &str = r#"
 import http.server, sys
 port = int(sys.argv[sys.argv.index("--port") + 1])
@@ -545,7 +686,7 @@ async fn up_to_date_update(prepare: fn(&Path)) -> Output {
     let current = format!("v{}", env!("CARGO_PKG_VERSION"));
     tokio::task::spawn_blocking(move || {
         prepare(env.dir.path());
-        env.t3cm(&["update", "--no-restart", "--version", &current])
+        env.t3cm(&["update", "--no-restart", "--port", "9", "--version", &current])
     })
     .await
     .unwrap()
