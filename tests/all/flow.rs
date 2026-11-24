@@ -3260,6 +3260,67 @@ async fn board_sync_links_writes_graph_primary_parent_and_conflicts_lower_preced
     let r10 = raced.results.iter().find(|r| r.to == "acme/widgets#10").unwrap();
     assert_eq!(r10.status, "alreadyLinked");
     assert!(!r10.conflict);
+
+    // When the graph already selected a native parent (#20) and the body mentions a conflicting parent (#10),
+    // sync must never promote #10 even if native parent #20 is removed between the graph snapshot and readIssue.
+    struct NativeParentRemovedRaceGitHub {
+        inner: std::sync::Arc<t3_codemode::fake::FakeGitHub>,
+        triggered: std::sync::atomic::AtomicBool,
+    }
+    impl t3_codemode::github::GitHub for NativeParentRemovedRaceGitHub {
+        fn graphql<'a>(
+            &'a self,
+            query: &'a str,
+            variables: Value,
+        ) -> t3_codemode::t3::BoxFut<'a, anyhow::Result<Value>> {
+            self.graphql_with_headers(query, variables, &[])
+        }
+        fn graphql_with_headers<'a>(
+            &'a self,
+            query: &'a str,
+            variables: Value,
+            headers: &'a [(&'a str, &'a str)],
+        ) -> t3_codemode::t3::BoxFut<'a, anyhow::Result<Value>> {
+            if query.starts_with("query IssueNode(") && !self.triggered.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.inner.update_issue(REPO, 3, json!({"parentRef": Value::Null}));
+            }
+            self.inner.graphql_with_headers(query, variables, headers)
+        }
+    }
+
+    let nh = flowing(4);
+    issue(&nh, REPO, 10, &[], 1);
+    issue(&nh, REPO, 20, &[], 2);
+    issue(&nh, REPO, 3, &[FLOW], 3);
+    nh.github.set_parent(REPO, 3, (REPO, 20));
+    nh.github.set_body(REPO, 3, "## Flow\n- Parent: #10\n");
+    let native_gh = std::sync::Arc::new(NativeParentRemovedRaceGitHub {
+        inner: nh.github.clone(),
+        triggered: std::sync::atomic::AtomicBool::new(false),
+    });
+    let native_app = t3_codemode::app::App::with_host_and_tailscale(
+        nh.config.clone(),
+        std::sync::Arc::new(t3_codemode::store::Store::open(nh.dir.path()).unwrap()),
+        nh.fake.clone(),
+        nh.clock.clone(),
+        nh.remotes.clone(),
+        native_gh,
+        nh.desktop.clone(),
+        nh.tailscale.clone(),
+    );
+    let native_res = native_app.wf.sync_flow_links().await.unwrap();
+    assert!(!native_res.ok);
+    assert_eq!(native_res.synced, 0);
+    assert_eq!(native_res.failed, 1);
+    assert_eq!(native_res.errors[0].to, "acme/widgets#10");
+    assert!(native_res.errors[0].conflict);
+    assert_eq!(nh.github.issue(REPO, 3).unwrap()["parentRef"], Value::Null);
+    assert!(
+        !nh.github.operations().iter().any(|op| op == "addSubIssue"),
+        "sync must never send addSubIssue when graph chose a native parent: {:?}",
+        nh.github.operations()
+    );
 }
 
 #[tokio::test]

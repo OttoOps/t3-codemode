@@ -212,16 +212,14 @@ Commits type. The PR title stays plain Conventional Commits: the worker's
 linked issue and the board's chips carry the issue mapping. Keep N small: a
 PR is a unit someone can review and revert alone.
 
-When splitting a GitHub epic into new sub-issues, file the batch in one
-`wf.fileIssues` call with `parent` set to the epic, `blockedBy` linking phases
-in order through symbolic local `id`s, and `track`, `priority` and `touches`
-filled in; `wf.fileIssues` writes the canonical `## Flow` block with real `#N`
-references and wires native GitHub sub-issue and blocked-by links. When filing
-a single follow-up GitHub issue (such as out-of-scope or review follow-up
-work), include the canonical `## Flow` block (`Parent`, `Blocked by`, `Track`,
-`Priority`, `Touches`) in its body and report it with `wf.issue` passing
-`parent`, `blockedBy`, `track` and `priority` so native links and labels wire
-alongside the board entry (see
+When splitting a GitHub epic into new sub-issues, list the proposed sub-issues
+in the split (with their `## Flow` metadata: `Parent`, `Blocked by`, `Track`,
+`Priority`, `Touches`) and file them only after the user approves the split
+(step 1 below). When filing a single follow-up GitHub issue (such as
+out-of-scope or review follow-up work), include the canonical `## Flow` block
+(`Parent`, `Blocked by`, `Track`, `Priority`, `Touches`) in its body and report
+it with `wf.issue` passing `parent`, `blockedBy`, `track` and `priority` so
+native links and labels wire alongside the board entry (see
 [report-filed-issues.md](../t3-workflow/rules/report-filed-issues.md)).
 
 A PR's entry carries a `Passes:` line only when the repo's rules
@@ -252,16 +250,23 @@ and for a deploy skill with tag families, the family its rules pick for the
 expected paths), each `Passes:` line (approval runs the passes,
 but anything they lead to that the repo's rules reserve for a person, and
 any GPU use, still comes back as a gate), and, with tracker `github-issues`,
-what approval also does to the issue: the split posted as a comment, the
+what approval also does to the issue: any new sub-issues the split proposes to
+create, the split posted as a comment, the
 issue assigned to the user when it has no assignee, and the in-progress label
 added when the repo has one. The approval is the user's confirmation of those
 writes. Then, with tracker `github-issues`:
 
-1. Post the split as an issue comment through the Publishing section
+1. When the split proposes new sub-issues for an epic, file the batch in one
+   `wf.fileIssues` call with `parent` set to the epic, `blockedBy` linking
+   phases in order through symbolic local `id`s, and `track`, `priority` and
+   `touches` filled in; `wf.fileIssues` writes the canonical `## Flow` block
+   with real `#N` references and wires native GitHub sub-issue and blocked-by
+   links.
+2. Post the split as an issue comment through the Publishing section
    (`gh issue comment <n> -R <repo> --body-file <file>`).
-2. When the issue has no assignee: `gh issue edit <n> -R <repo>
+3. When the issue has no assignee: `gh issue edit <n> -R <repo>
    --add-assignee @me`. Leave an existing assignee alone.
-3. When the repo has an in-progress label: `gh issue edit <n> -R <repo>
+4. When the repo has an in-progress label: `gh issue edit <n> -R <repo>
    --add-label <label>`, and remove any not-started label the repo's
    conventions replace it with.
 

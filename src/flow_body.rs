@@ -1709,6 +1709,8 @@ pub(crate) fn inspect_flow_body(body: &str) -> FlowBodyLayout {
 
 pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
     let mut parsed = ParsedBody::default();
+    let mut canonical_parents: Vec<BodyRef> = Vec::new();
+    let mut canonical_track: Option<String> = None;
     let mut containers: Vec<Container> = Vec::new();
     let mut fence: Option<ActiveFence> = None;
     let mut in_comment = false;
@@ -1776,9 +1778,7 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
             {
                 flow_level = None;
             }
-            if level <= 3 {
-                flow_form_section = None;
-            }
+            flow_form_section = None;
             if (level == 2 || level == 3) && heading.eq_ignore_ascii_case("flow") {
                 flow_level = Some(level);
                 section_role = None;
@@ -1862,7 +1862,7 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
                             flow_list_key = Some(FlowListKey::Parent);
                         } else {
                             for r in parse_ref_list(default_repo, val, true) {
-                                push_unique_ref(&mut parsed.parents, r);
+                                push_unique_ref(&mut canonical_parents, r);
                             }
                         }
                     }
@@ -1877,8 +1877,8 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
                     }
                     "track" => {
                         let t = strip_wrappers(val).trim();
-                        if !t.is_empty() && !is_placeholder(t) && parsed.track.is_none() {
-                            parsed.track = Some(t.to_string());
+                        if !t.is_empty() && !is_placeholder(t) && canonical_track.is_none() {
+                            canonical_track = Some(t.to_string());
                         }
                     }
                     "touches" => {
@@ -1899,7 +1899,7 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
                 match active {
                     FlowListKey::Parent => {
                         for r in parse_ref_list(default_repo, stripped, true) {
-                            push_unique_ref(&mut parsed.parents, r);
+                            push_unique_ref(&mut canonical_parents, r);
                         }
                     }
                     FlowListKey::BlockedBy => {
@@ -1974,6 +1974,17 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
             continue;
         }
         pending_prose_role = scan_prose_segment(default_repo, stripped, true, &mut parsed);
+    }
+
+    if !canonical_parents.is_empty() {
+        let mut merged = canonical_parents;
+        for r in parsed.parents {
+            push_unique_ref(&mut merged, r);
+        }
+        parsed.parents = merged;
+    }
+    if canonical_track.is_some() {
+        parsed.track = canonical_track;
     }
 
     parsed
@@ -2818,5 +2829,41 @@ Part of:
             "{mixed_parsed:?}"
         );
         assert_eq!(mixed_parsed.declared_phase, Some(1));
+
+        // Any subsequent heading (including #### Notes) closes the form section.
+        let subsection = "\
+### Blocked by
+
+#12
+
+#### Notes
+
+Mentioned in #40
+";
+        let sub_parsed = parse_body(REPO, subsection);
+        assert_eq!(sub_parsed.blockers, vec![BodyRef::Issue { repo: REPO.into(), number: 12 }], "{sub_parsed:?}");
+
+        // Canonical ## Flow Parent and Track take priority over earlier Issue Form values.
+        let canonical_wins = "\
+### Parent / Epic
+
+#10
+
+### Track
+
+old-track
+
+## Flow
+
+- Parent: #20
+- Track: new-track
+";
+        let cw_parsed = parse_body(REPO, canonical_wins);
+        assert_eq!(
+            cw_parsed.parents,
+            vec![BodyRef::Issue { repo: REPO.into(), number: 20 }, BodyRef::Issue { repo: REPO.into(), number: 10 },],
+            "{cw_parsed:?}"
+        );
+        assert_eq!(cw_parsed.track.as_deref(), Some("new-track"));
     }
 }

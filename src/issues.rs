@@ -1265,22 +1265,32 @@ impl Wf {
             .map(|g| {
                 g.nodes
                     .iter()
-                    .filter_map(|n| n.parent.as_ref().map(|p| (n.id.to_ascii_lowercase(), p.to_ascii_lowercase())))
+                    .filter_map(|n| n.parent.as_ref().map(|p| (n.id.to_ascii_lowercase(), p.clone())))
                     .collect()
             })
             .unwrap_or_default();
 
         let mut caches = WireCaches::new();
         for mut group in groups {
-            if let Some(primary) = primary_parent_of.get(&group.from_id.to_ascii_lowercase())
-                && let Some(pos) = group.parents.iter().position(|(_, r, n, to_id)| {
-                    to_id.eq_ignore_ascii_case(primary) || ref_slug(r, *n).eq_ignore_ascii_case(primary)
-                })
-                && pos > 0
-            {
-                let primary_edge = group.parents.remove(pos);
-                group.parents.insert(0, primary_edge);
-            }
+            let graph_primary = primary_parent_of.get(&group.from_id.to_ascii_lowercase()).cloned();
+            let has_primary_write = match &graph_primary {
+                Some(primary) => {
+                    if let Some(pos) = group.parents.iter().position(|(_, r, n, to_id)| {
+                        to_id.eq_ignore_ascii_case(primary) || ref_slug(r, *n).eq_ignore_ascii_case(primary)
+                    }) {
+                        if pos > 0 {
+                            let primary_edge = group.parents.remove(pos);
+                            group.parents.insert(0, primary_edge);
+                        }
+                        true
+                    } else {
+                        // The graph's primary parent is already native on GitHub (or not among the body edges);
+                        // never promote a conflicting body candidate into a write.
+                        false
+                    }
+                }
+                None => !group.parents.is_empty(),
+            };
 
             let mut from_node = match self.resolve_issue_cached(&mut caches, &group.repo, group.number).await {
                 Ok(n) => n,
@@ -1320,15 +1330,17 @@ impl Wf {
             };
 
             let from_canon = ref_slug(&from_node.repo, from_node.number);
+            let (primary_parents, secondary_parents) =
+                if has_primary_write { group.parents.split_at(1) } else { (&[][..], &group.parents[..]) };
             let plan = WiringPlan {
                 blocked_by: group.blockers.iter().map(|(_, r, n, _)| (r.clone(), *n)).collect(),
-                parent: group.parents.first().map(|(_, r, n, _)| (r.clone(), *n)),
+                parent: primary_parents.first().map(|(_, r, n, _)| (r.clone(), *n)),
                 labels: Vec::new(),
             };
             let report = self.wire_issue_node(&from_node, &plan, &mut caches).await;
 
-            let mut primary_target = None;
-            if let (Some((idx, p_repo, p_num, _)), Some(lr)) = (group.parents.first(), report.parent) {
+            let mut primary_target = graph_primary;
+            if let (Some((idx, p_repo, p_num, _)), Some(lr)) = (primary_parents.first(), report.parent) {
                 primary_target = Some(lr.reference.clone());
                 if lr.status == "error" {
                     let msg = lr.error.unwrap_or_else(|| "GitHub returned an error".to_string());
@@ -1369,7 +1381,7 @@ impl Wf {
 
             // Secondary parent candidates conflict with the node's existing or primary parent and are never written,
             // unless GitHub already acquired that candidate as the native parent before we read the issue.
-            for (idx, p_repo, p_num, _) in group.parents.iter().skip(1) {
+            for (idx, p_repo, p_num, _) in secondary_parents {
                 if let Some(p) =
                     from_node.parent.as_ref().filter(|p| p.number == *p_num && p.repo.eq_ignore_ascii_case(p_repo))
                 {
