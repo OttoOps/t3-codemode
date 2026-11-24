@@ -23,11 +23,11 @@ the root and talks to the user itself.
 - This thread edits no code and makes no commits. All repo changes happen in
   a worker's worktree. Merging a PR and pushing a deploy tag are this
   thread's, and only on the user's word (Gates).
-- Never merge through `gh pr merge` or T3's own merge button or its PR
-  action. On a repo with a merge queue, T3 turns on auto-merge, and a PR
-  whose checks have already passed then never joins the queue. This thread
-  does not need to know which repos have a queue: it merges every PR with
-  `wf.merge`, which finds out per PR.
+- Never merge through `gh pr merge`, `glab mr merge`, or T3's own merge
+  button or its PR action. On a repo with a merge queue, T3 turns on
+  auto-merge, and a PR whose checks have already passed then never joins the
+  queue. This thread does not need to know which repos have a queue: it
+  merges every PR with `wf.merge`, which finds out per PR.
 - Invoking this skill, or a repo rule that routes issue work to it, is the
   user's request to launch one new thread per PR with `t3_thread_launch`.
   Do not stop to ask for a new thread at step 3.
@@ -64,7 +64,8 @@ the root and talks to the user itself.
 - Text published under the user's name (the split comment, issue comments)
   follows the Publishing section of the `t3-worker` procedure, at
   `../t3-worker/procedure.md` relative to this skill's base directory.
-- Check a worker's claims on GitHub before acting on them.
+- Check a worker's claims on its forge (GitHub or GitLab) before acting on
+  them.
 - Never `sleep` or poll in the shell. Waiting is ending the turn; a
   worker's message, the link watcher, or a scheduled run wakes this thread.
 - Every message to a worker goes through `wf.reply({ to: "<worker id or label>", body })`.
@@ -99,6 +100,14 @@ For example:
   delivery stage (`watch: true`, such as a deploy) runs, check
   `list_scheduled_tasks` for its deploy watch; when it is missing, create
   it again as "The deploy watch" says, with the original `Started` time.
+  On an untracked forge (step 1 item 3), once a worker's PR or MR has opened
+  and before its worker has been sent "Merged" or "Delivered", read it with
+  the repo's documented status command when `list_scheduled_tasks` shows no
+  merge watch for it. Merged: confirm it as the watch's **Merged:** case
+  says and go on from "On the user's word" item 3, which a stop between
+  deleting the watch and item 3 would otherwise skip. Closed: run the
+  watch's **Closed without merging:** case. Open: create the merge watch
+  again at the head the worker last named.
 
 Progress to a parent that needs no action goes up as
 `wf.send({ kind: "note", body })`. With a parent (the board or an overseer),
@@ -108,7 +117,7 @@ three more rules hold:
   `wf.send({ kind: "gate", gate: "<phase>", body: "<action line>", options })`,
   which opens the gate on the parent link, and `wf.gate({ clear: true })`
   once the user acts. For delivery gates, keep `gate: "merge"` for the
-  builtin merge stage (GitHub reconcile relies on it) and use
+  builtin merge stage (the reconcile relies on it) and use
   `gate: "delivery:<id>"` for every later stage. Always pass explicit
   `options` listing the answers the user can click, such as
   `["merge, deploy and verify", "merge and deploy", "merge"]` or
@@ -139,15 +148,31 @@ three more rules hold:
 3. `t3_worktree_status`: note the main workspace root and the repo
    (`gh repo view --json nameWithOwner,url` on a GitHub repo, else
    `git -C <main workspace root> remote get-url origin`). Worktree removal
-   and branch cleanup run there. `gh pr`, `wf.pr`, `wf.merge`, and
-   `watch_pull_request` apply only to a GitHub `origin`: on another git host
-   (such as self-hosted GitLab), follow the repo's documented MR/PR, merge,
-   and merge-verification workflow in place of the GitHub PR steps in steps 3
-   and 4 (including "The handoff" item 1), or, when the repo documents none,
-   tell the user under the split (step 2) and stop before launching a worker.
-   t3cm's reconcile follows only GitHub PRs, so on such an untracked forge
-   this thread starts its own merge watch when the PR or MR opens ("The
-   merge watch"), whether or not it has a parent.
+   and branch cleanup run there. Then note the **forge**, which picks the
+   commands in steps 2 to 5:
+   - **GitHub:** `origin` is on github.com. The repo is `<owner>/<name>`,
+     and the steps' `gh` commands apply.
+   - **Tracked GitLab:** `origin` is on a host that `t3cm config get forges`
+     lists with `kind: "gitlab"`. The repo is `<host>/<full path>` (such as
+     `gitlab.acme.example/group/sub/widgets`), a PR is a merge request
+     (MR), and its number is the MR's `iid`. `wf.pr`, `wf.merge`,
+     `watch_pull_request` and t3cm's reconcile cover it as they cover a
+     GitHub PR, so run steps 3 and 4 as on GitHub, with the `glab` command
+     each step gives for GitLab in place of its `gh` command. Below,
+     `<enc path>` is the full path URL-encoded (`group%2Fsub%2Fwidgets`),
+     and `glab api` runs with `--hostname <host>`.
+   - **Untracked forge:** any other host, GitLab ones `forges` does not list
+     included. Follow the repo's documented MR/PR, merge, and
+     merge-verification workflow in place of the PR steps in steps 3 and 4
+     (including "The handoff" item 1), or, when the repo documents none,
+     tell the user under the split (step 2) and stop before launching a
+     worker. t3cm's reconcile never reads its PRs, so on such an untracked
+     forge this thread starts its own merge watch when the PR or MR opens
+     ("The merge watch"), whether or not it has a parent. For a GitLab host,
+     say under the split that listing it under `forges` lets t3cm follow its
+     merge requests: `t3cm config set 'forges."<host>"' '{"kind": "gitlab",
+     "cli": "glab"}'`, with `glab auth login --hostname <host>` signed in as
+     the user the service runs as.
 4. Read the repo's `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `README.md`
    (contributing and versioning), and `docs/agents/`. Settle the
    conventions below, from the repo's `## Agent workflow` section when it
@@ -240,7 +265,9 @@ these finds it:
 
 - `git -C <main workspace root> branch --list <name>`
 - `git -C <main workspace root> ls-remote --heads origin <name>`
-- `gh pr list -R <repo> --state all --head <name>` (on a GitHub repo; omit on other git hosts)
+- `gh pr list -R <repo> --state all --head <name>` on GitHub, or
+  `glab mr list -R https://<repo> --source-branch <name> --all` on a GitLab
+  host (tracked or not); omit it on other git hosts
 
 Give a taken name a numeric suffix (`-2`, `-3`) until every check comes back
 empty.
@@ -418,11 +445,11 @@ On the board, a worker reports its PR with `wf.pr`, and t3cm runs those
 three sections in code. It checks an opened PR's Publishing line and
 description and sends the worker any rewrite request. It records an updated
 head and drops the merge card for the old one. On ready to merge, it
-verifies the PR on GitHub and opens the merge card with the answers the
-delivery slot calls for. Each shows up as a "handled for you" line in the
-digest, and none wakes this thread. A worker's PR message reaches this
-thread only when t3cm could not decide: it ends with "t3cm left this to the
-ticket: <why>". Then run its section below.
+verifies the PR on its forge, GitHub or a tracked GitLab host, and opens the
+merge card with the answers the delivery slot calls for. Each shows up as a
+"handled for you" line in the digest, and none wakes this thread. A worker's
+PR message reaches this thread only when t3cm could not decide: it ends with
+"t3cm left this to the ticket: <why>". Then run its section below.
 
 On the board, t3cm handles a worker's blocker, and every gate it opens
 other than `merge` and `delivery:<id>`, without this thread. It puts each
@@ -452,9 +479,10 @@ to the worker, then end the turn.
 ### PR opened
 
 This runs when an opened PR reaches this thread (above). First check two
-things. (a) The worker's message carries a `Publishing:`
-line that names the brief's format and each pass. (b) The published
-description (`gh pr view <number> -R <repo> --json body`) has every
+things. (a) The worker's message carries a `Publishing:` line that names the
+brief's format and each pass. (b) The published description (`gh pr view
+<number> -R <repo> --json body` on GitHub, or `glab mr view <iid> -R
+https://<repo> --output json`, its `description`, on GitLab) has every
 section and required element the format sets (for the `pr` skill: the
 Summary, Evidence and Merge Danger headings, a fenced block under Summary,
 `Before:` and `After:` under Evidence, and `Door:` and `Blast Radius:` under
@@ -462,10 +490,10 @@ Merge Danger), plus the issue reference line: `Refs #<n>` (and `Refs #<s>`
 when the PR has a sub-issue) with tracker `github-issues`, or `Refs <ticket
 ref>` matching the worker link's `issue` identity with a non-GitHub tracker
 (`Refs PROJ-123` for a bare Jira key, `Refs PROJ-123 (<browse URL>)` or
-`Refs <host>/PROJ-123` for a hosted Jira URL, or `Refs <issue URL>` /
-`Refs <host>/<scope>#<n>` for GitLab). When either fails,
-send the worker "Rewrite #<number>'s description through the Publishing
-section of the t3-worker procedure: <what is missing>."
+`Refs <host>/PROJ-123` for a hosted Jira URL, or `Refs <issue URL>` / `Refs
+<host>/<scope>#<n>` for GitLab). When either fails, send the worker "Rewrite
+#<number>'s description through the Publishing section of the t3-worker
+procedure: <what is missing>."
 
 On an untracked forge (step 1 item 3), start the merge watch now, as "The
 merge watch" says for that case, at the head the worker named.
@@ -489,16 +517,28 @@ turn.
 A worker's "ready to merge" message that reaches this thread (above), or
 "opened" in a repo with no CI, starts the merge gate. The user's answer to
 a merge card t3cm opened arrives only when t3cm could not merge on it
-("On the user's word"); go straight there. Verify on GitHub first:
+("On the user's word"); go straight there. Verify on the forge first.
 
-`gh pr view <number> -R <repo> --json state,isDraft,headRefOid,mergeStateStatus,statusCheckRollup,files`
+- **GitHub:** `gh pr view <number> -R <repo> --json state,isDraft,headRefOid,mergeStateStatus,statusCheckRollup,files`.
+  The PR is open and not a draft, `headRefOid` equals the head the worker
+  named, every check passed, and `mergeStateStatus` is `CLEAN`.
+- **Tracked GitLab:** `glab api --hostname <host>
+  projects/<enc path>/merge_requests/<iid>` shows `state` `opened`,
+  `draft` false, `sha` equal to the head the worker named, and
+  `detailed_merge_status` `mergeable`. In
+  `projects/<enc path>/merge_requests/<iid>/pipelines`, the newest pipeline
+  whose `sha` is that head and whose `ref` is not a merge train's
+  (`refs/merge-requests/<iid>/train`) has `status` `success`, and
+  `projects/<enc path>/repository/commits/<sha>/statuses` holds no status
+  that is pending or failed. The changed files are the `new_path` of each
+  entry in `projects/<enc path>/merge_requests/<iid>/diffs?per_page=100`.
+- **Untracked forge:** the repo's documented status command shows the same
+  facts.
 
-The PR is open and not a draft, `headRefOid` equals the head the worker
-named, every check passed, and `mergeStateStatus` is `CLEAN`. Every check
-means every check on the head, CodeRabbit's and any other bot reviewer's
-included, even where the repo does not require it. A pending check is
-waited out (end the turn; the worker reports again). A failing one goes
-back to the worker. In a repo with no CI, run the brief's checks on the
+Every check means every check on the head, CodeRabbit's and any other bot
+reviewer's included, even where the repo does not require it. A pending
+check is waited out (end the turn; the worker reports again). A failing one
+goes back to the worker. In a repo with no CI, run the brief's checks on the
 PR head yourself, in a detached temporary worktree that you remove
 afterwards (`git -C <main workspace root> worktree add --detach <tmp path>
 <head sha>`, run, `git -C <main workspace root> worktree remove <tmp
@@ -509,22 +549,22 @@ For a targeted fix PR launched to recover a failed `ticket`-scoped or
 (`options: ["merge"]`) so the fix PR does not re-run the repo's PR stages
 or chain the failed stage onto its merge gate.
 
-Otherwise, collect the PR's changed repo-relative paths from `files` and
-look up `await wf.slot("delivery", { files })` to filter steps with `paths`
-globs. For a follow-up PR fixing a failed `pr`-scoped delivery stage (step
-5), pass the union of the original PR's `files` and all follow-up PRs'
-`files` in that recovery run (and retain the failed stage and any remaining
-`pr`-scoped stages from the recovery run) so a fix touching only workflow
-or config files never drops the failed stage or earlier follow-up paths.
-Send a note for any stage in `skipped` (paths unmatched) or any `skill`
-step whose skill is `status: "missing"`, and omit those stages from the
-active list for this PR. On the last PR of the ticket (`n === N`), also
-compute `await wf.slot("delivery", { files: combinedFiles })` across all
-PRs of the ticket so `ticket`-scoped stages with `paths` are filtered on
-the combined change.
+Otherwise, collect the PR's changed repo-relative paths (`files`, or the
+GitLab diffs' `new_path`) and look up `await wf.slot("delivery", { files })`
+to filter steps with `paths` globs. For a follow-up PR fixing a failed
+`pr`-scoped delivery stage (step 5), pass the union of the original PR's
+`files` and all follow-up PRs' `files` in that recovery run (and retain the
+failed stage and any remaining `pr`-scoped stages from the recovery run) so
+a fix touching only workflow or config files never drops the failed stage or
+earlier follow-up paths. Send a note for any stage in `skipped` (paths
+unmatched) or any `skill` step whose skill is `status: "missing"`, and omit
+those stages from the active list for this PR. On the last PR of the ticket
+(`n === N`), also compute `await wf.slot("delivery", { files: combinedFiles
+})` across all PRs of the ticket so `ticket`-scoped stages with `paths` are
+filtered on the combined change.
 
 Build the merge gate from the active steps starting at `merge` (keeping
-`gate: "merge"` so GitHub reconcile tracks the PR and holds approval to
+`gate: "merge"` so the reconcile tracks the PR and holds approval to
 `head <sha>`). Gather the maximal consecutive run of active non-manual
 `gate: "chain"` stages immediately following `merge` that will run now: on
 an earlier PR (`n < N`), stop at `scope: "pr"`; on the last PR (`n === N`),
@@ -561,10 +601,13 @@ first; otherwise send `gate: "merge"` with `options: ["merged"]` asking the
 user to merge the PR externally at `head <sha>` and reply `"merged"` (on a
 linked ticket with reconcile on, the board's merged event also wakes this
 thread; on a root ticket or when `board.reconcileIdleMinutes` is `0`, the
-user's `"merged"` reply wakes it). In both cases, verify `state ===
-"MERGED"` on GitHub (`gh pr view <number> -R <repo> --json
-state,mergeCommit`) before deleting the remote branch, running post-merge
-stages, or releasing the worker.
+user's `"merged"` reply wakes it). In both cases, verify the merge on the
+forge before deleting the remote branch, running post-merge stages, or
+releasing the worker: `state === "MERGED"` on GitHub (`gh pr view <number>
+-R <repo> --json state,mergeCommit`), `state` `merged` on a tracked GitLab
+host (`glab api --hostname <host> projects/<enc path>/merge_requests/<iid>`,
+with the merge commit in `merge_commit_sha`, else `squash_commit_sha`), or
+the repo's documented merge-verification workflow on an untracked forge.
 
 The action line names the head the user approves as `head <sha>`, with
 the SHA at least 7 characters long. The board holds the approval to that
@@ -579,7 +622,7 @@ On the board, t3cm runs this section in code when the user answers a merge
 card it opened with one of its buttons, and the worker's brief gave
 `method`. It calls `wf.merge` at the card's head, holds a running check, a
 queue or a review block in the merge wait, deletes the remote branch once
-GitHub shows the PR merged, and sends the worker "Merged #<number> at
+the forge shows the PR merged, and sends the worker "Merged #<number> at
 <merge commit sha>. Hand off." when no `pr`-scoped stage remains. Each step
 shows up as a "handled for you" line in the digest. This thread wakes only
 when stages remain, with a `[t3cm event from=t3cm]` that says the PR is
@@ -597,40 +640,43 @@ stages in that prefix run without a second gate.
 
 1. Check the PR against the head the answered gate names: it is open, not a
    draft, and at that head, and no check failed, and take the full SHA from
-   its `headRefOid`. A failing check goes back to the worker, even when
-   GitHub would merge the PR anyway (`UNSTABLE`). A check still running
-   needs nothing from this thread: `wf.merge` holds the approval as
-   `waiting` until it finishes, so the approved merge proceeds without a
-   second "merge". `wf.merge` handles the merge state. A head that moved
-   since that gate gets a new gate, not a merge.
-2. Merge at that head with `wf.merge`. Never use `gh pr merge` or T3's
-   merge button or PR action (Hard rules). Call
-   `wf.merge({ repo: "<owner>/<name>", pr: <number>, head: "<sha>",
-   method: "<merge method>" })`. It reads per PR whether the repo has a
-   merge queue. It queues the PR where there is one, merges it directly
+   its `headRefOid` (`sha` on GitLab). A failing check goes back to the
+   worker, even when the forge would merge the PR anyway (`UNSTABLE`). A
+   check still running needs nothing from this thread: `wf.merge` holds the
+   approval as `waiting` until it finishes, so the approved merge proceeds
+   without a second "merge". `wf.merge` handles the merge state. A head that
+   moved since that gate gets a new gate, not a merge.
+2. Merge at that head with `wf.merge`. Never use `gh pr merge`,
+   `glab mr merge`, or T3's merge button or PR action (Hard rules). Call
+   `wf.merge({ repo: "<repo>", pr: <number>, head: "<sha>",
+   method: "<merge method>" })`, with `repo` and `pr` as step 1 item 3
+   notes them (`<host>/<full path>` and the `iid` on a tracked GitLab
+   host). It reads per PR whether the repo has a merge queue (a merge
+   train on GitLab). It queues the PR where there is one, merges it directly
    where there is none, and never turns on auto-merge. Tell the user the
    outcome in one line with the PR URL, and send it to the parent as a
    note. Then act on its `status`:
    - `merged`: go on to item 3 with its `commit`.
    - `queued`: name its `position`, and keep its `approval` id if starting
      a merge watch. End the turn and wait as "The merge wait" says.
-   - `waiting`: GitHub does not show the PR mergeable yet, because a check
-     is still running, GitHub has not computed the merge state, or a rule
-     such as a review blocks it; name its `mergeState`, and keep its
-     `approval` id if starting a merge watch. The board queues or merges it
-     once GitHub shows it mergeable at this head. A review block that the
-     user merges over as an admin on GitHub counts as the merge. End the
+   - `waiting`: the forge does not show the PR mergeable yet, because a
+     check is still running, the forge has not computed the merge state, or
+     a rule such as a review blocks it; name its `mergeState` (or its
+     `reason` on GitLab), and keep its `approval` id if starting a merge
+     watch. The board queues or merges it once the forge shows it
+     mergeable at this head. A review block that the user merges over as
+     an admin on the forge counts as the merge. End the
      turn and wait as "The merge wait" says.
    - `refused`: name its `reason`. A moved head goes through "Ready to
      merge" again for a new gate. A draft, or a PR that is not mergeable
      yet, goes back to the worker. A closed PR gets the gate "reopen
      #<number>, then reply \"merge\" to queue it again at head <sha>, here:
      <PR URL>". End the turn.
-   - The call throws: the service's `gh` cannot reach GitHub. Tell the
-     user what it says and end the turn. Their next "merge" runs this
-     step again.
-3. Only now that GitHub shows it merged, delete its branch, unless
-   GitHub already did: `git -C <main workspace root> push origin --delete
+   - The call throws: the service's `gh` cannot reach GitHub, or its `glab`
+     cannot reach the GitLab host. Tell the user what it says and end the
+     turn. Their next "merge" runs this step again.
+3. Only now that the forge shows it merged, delete its branch, unless
+   the forge already did: `git -C <main workspace root> push origin --delete
    <branch>`. Deleting
    the head branch of an open PR closes the PR. The worker's worktree still
    has the branch checked out, so the local branch waits for The handoff.
@@ -646,9 +692,10 @@ stages in that prefix run without a second gate.
    covering its composable prefixes plus `"skip <id>"`, such as
    `["deploy", "skip deploy"]`).
 
-A user who merged the PR on GitHub themselves counts as `"merge"` alone: the
-board's merged event (below), or the user's `"merged"` reply on an external
-merge gate, tells this thread; verify `state === "MERGED"` on GitHub and
+A user who merged the PR on the forge themselves counts as `"merge"`
+alone: the board's merged event (below), or the user's `"merged"` reply on
+an external merge gate, tells this thread; verify the merge on the forge as
+"Ready to merge" says for a delivery with no builtin `merge` stage, and
 continue from item 3.
 
 **Answering `gate: "delivery:<id>"`** (for a later `pr`, `ticket`, or
@@ -667,26 +714,31 @@ from the user's reply and run `<id>` as "Delivery stages" says.
 
 #### The merge wait
 
-The board's GitHub reconcile follows the PR after `wf.merge`. It reads
-every PR of an open worker link, every PR `wf.merge` queued or holds
-waiting, and every PR an open gate card names: by default every 2 minutes
-while one is queued or waiting, every 10 minutes otherwise. It wakes this
-thread once per event, so this thread starts no merge watch and does not
-poll GitHub. Hold `wf.gate({ open: "merge" })` while it waits, so the
-watcher does not nudge it, and clear it (`wf.gate({ clear: true })`) when
-the merged or closed event or the user's answer arrives. What reaches this
-thread:
+The board's reconcile follows the PR after `wf.merge`, on GitHub and on a
+tracked GitLab host (step 1 item 3). It reads every PR of an open worker
+link, every PR `wf.merge` queued or holds waiting, and every PR an open gate
+card names: by default every 2 minutes while one is queued or waiting,
+every 10 minutes otherwise. It wakes this thread once per event, so this
+thread starts no merge watch and does not poll GitHub or GitLab. Hold
+`wf.gate({ open: "merge" })` while it waits, so the watcher does not nudge
+it, and clear it (`wf.gate({ clear: true })`) when the merged or closed
+event or the user's answer arrives. What reaches this thread, from `github`
+or `gitlab` and naming GitHub or GitLab:
 
-- **Merged:** an `event` from `github`, "<repo>#<number> merged on GitHub
-  at <sha>, <time> (merge commit <sha>). Run your post-merge steps.". The
-  board has resolved the merge card. Confirm on GitHub (`gh pr view
-  <number> -R <repo> --json state,mergeCommit`), then go on from item 3.
-- **Closed without merging:** an `event` from `github`, "<repo>#<number>
-  was closed on GitHub without merging". Send the gate "reopen #<number>,
-  then reply \"merge\" to queue it again at head <sha>, here: <PR URL>".
-- **Dropped from the queue, moved to a new head, or refused by GitHub 3
-  checks in a row:** the board opens a card for this thread itself, with
-  the reason and the answers the user can give. The answer arrives as a
+- **Merged:** an `event`, "<repo>#<number> merged on GitHub at <sha>,
+  <time> (merge commit <sha>). Run your post-merge steps.". The board has
+  resolved the merge card. Confirm the merge on the forge (`gh pr view
+  <number> -R <repo> --json state,mergeCommit` on GitHub, or the GitLab read
+  "Ready to merge" gives for a delivery with no builtin `merge` stage), then
+  go on from item 3.
+- **Closed without merging:** an `event`, "<repo>#<number> was closed on
+  GitHub without merging". Send the gate "reopen #<number>, then reply
+  \"merge\" to queue it again at head <sha>, here: <PR URL>".
+- **Dropped from the queue (a merge train on GitLab), moved to a new head,
+  or refused by the forge 3 checks in a row:** the board opens a card for
+  this thread itself, with the reason and the answers the user can give.
+  GitLab records no reason when a car leaves a train, so its card says none
+  was recorded. The answer arrives as a
   `[t3cm reply]`, "The user says \"<answer>\" about <card>: <card
   text>". Under a thread parent (an overseer thread) there is no card:
   the board wakes this thread with the action line itself, as a `gate` or
@@ -698,7 +750,7 @@ thread:
     head the card names, else at the head this thread last passed to
     `wf.merge`. With neither, run "Ready to merge" for the PR's current
     head, which sends a new gate.
-  - "ok" (GitHub queued the PR at a head other than the approved one):
+  - "ok" (the forge queued the PR at a head other than the approved one):
     the user accepts that head. Keep waiting.
   - "hold": nothing merges the PR now. End the turn. The worker's next
     "ready to merge" starts a new gate.
@@ -715,7 +767,8 @@ the merge watch after `queued` or `waiting` instead when:
   `%LOCALAPPDATA%\t3-codemode\` on Windows). No file or no key means the
   default, 10.
 
-The reconcile never reads a PR or MR on an untracked forge (step 1 item 3),
+The reconcile never reads a PR or MR on an untracked forge (step 1 item 3:
+a host `forges` does not list, or one that is neither GitHub nor GitLab),
 so nothing above reaches this thread there. On an untracked forge, this
 ticket starts the merge watch when the PR or MR opens ("PR opened"),
 whether or not it has a parent and whatever `board.reconcileIdleMinutes`
@@ -732,7 +785,8 @@ The merge watch serves three cases:
   or MR opens, with or without a parent.
 
 Create it as items 1 and 2 of "The deploy watch" say, with `title` `<worker
-label> merge watch`, and a prompt that names the task id, the PR
+label> merge watch`, and a prompt that names the task id, the forge
+(GitHub, or the tracked GitLab host and the MR's full path), the PR
 number and URL, its approved head SHA (full 40-character SHA) and branch,
 the main workspace root, the approved delivery chain from the user's reply
 (such as `"merge"`, `"merge and deploy"`, or `"merge, deploy and verify"`),
@@ -759,7 +813,17 @@ autoMergeRequest{enabledAt} commits(last:1){nodes{commit{oid
 statusCheckRollup{contexts(first:100){pageInfo{hasNextPage} nodes{__typename
 ... on CheckRun{name status conclusion} ... on StatusContext{context
 state}}}}}}}}}}'`, falling back to `gh pr view <number> -R <repo> --json
-statusCheckRollup` when `hasNextPage` is true):
+statusCheckRollup` when `hasNextPage` is true). On a tracked GitLab host,
+each run reads the MR (`glab api --hostname <host>
+projects/<enc path>/merge_requests/<iid>`), its train car
+(`projects/<enc path>/merge_trains/merge_requests/<iid>`, where a 404 means
+none), and the pipelines and statuses "Ready to merge" reads, and maps them
+onto the GitHub names below: `state` `merged` is `MERGED`, with the merge
+commit in `merge_commit_sha`, else `squash_commit_sha`; `closed` is
+`CLOSED`; `sha` is `headRefOid`; `draft` is `isDraft`; a car whose `status`
+is `idle`, `fresh` or `stale` is in the queue; `merge_when_pipeline_succeeds`
+true is an `autoMergeRequest`; and `detailed_merge_status` `mergeable` is
+`CLEAN`:
 
 - **`MERGED`:** delete the task with `delete_scheduled_task`, clear
   `wf.gate({ clear: true })` when this thread has a parent, then go on from
@@ -771,8 +835,8 @@ statusCheckRollup` when `hasNextPage` is true):
   approved head SHA):** delete the task and clear `wf.gate({ clear: true })`
   when this thread has a parent. Approval never carries over to a new head:
   when the PR is `OPEN` and out of the queue, run "Ready to merge" for the
-  new head; when GitHub already has the new head queued, tell the user and
-  send a gate naming the new head. End the turn.
+  new head; when the forge already has the new head queued, tell the user
+  and send a gate naming the new head. End the turn.
 - **Still queued, or waiting on auto-merge (at the approved head):** when
   the flag says "Seen queued: no", update it to "yes". End the turn quietly.
 - **`OPEN` and out of the queue, after a `waiting` outcome, at the
@@ -809,9 +873,10 @@ statusCheckRollup` when `hasNextPage` is true):
 
 On an untracked forge (the prompt says "Forge: untracked"), each run reads
 the PR or MR with the status command the prompt names, in place of the
-GitHub query, and handles what it finds the same way. When this thread
-merges the PR or MR itself on the user's word, it deletes the watch before
-it goes on from "On the user's word" item 3, so items 3 and 4 run once:
+GitHub or GitLab reads, and handles what it finds the same way. When this
+thread merges the PR or MR itself on the user's word, it deletes the watch
+before it goes on from "On the user's word" item 3, so items 3 and 4 run
+once:
 
 - **Merged:** confirm the merge with the repo's documented
   merge-verification workflow, and keep the task until that succeeds. Then
@@ -828,7 +893,8 @@ it goes on from "On the user's word" item 3, so items 3 and 4 run once:
   merge watch again at its current head, then act on the answer.
 - **Head moved away from the head the prompt names:** approval never
   carries over to a new head. Keep the task, since it is the only thing
-  that sees this merge, and update its prompt with the new head. Drop any
+  that sees this merge, and update its prompt with the new head, setting
+  "Auth gate sent" back to "no" when it holds a time. Drop any
   approval of the old head and clear any merge gate open for it
   (`wf.gate({ clear: true })`); the worker's next "ready to merge" starts a
   new gate. End the turn.
@@ -1013,10 +1079,12 @@ The worker hands off only after "Merged" or "Delivered" (when its last
 `pr`-scoped stage finished). Check its result; do not detect it here for
 the first time. The handoff has already closed the worker's link.
 
-1. Confirm the PR is merged on GitHub: `gh pr view <number> -R <repo>
-   --json state,mergeCommit`, and the same for any follow-up PR (on a
-   non-GitHub git host, confirm the merge using the repo's documented MR/PR
-   workflow before removing the worktree or branches).
+1. Confirm the PR is merged on its forge, and the same for any follow-up
+   PR: `gh pr view <number> -R <repo> --json state,mergeCommit` on GitHub,
+   `glab api --hostname <host> projects/<enc path>/merge_requests/<iid>`
+   showing `state` `merged` on a tracked GitLab host, or, on an untracked
+   forge, the repo's documented MR/PR workflow, before removing the
+   worktree or branches.
 2. For any `pr`-scoped stage that ran after merge (such as a tag deploy):
    confirm its artifact matches the merge commit (for a tag deploy:
    `git -C <main workspace root> fetch origin --tags`, then
@@ -1031,13 +1099,13 @@ the first time. The handoff has already closed the worker's link.
    `gh issue close <s> -R <repo> --comment "<text>"`. Its work is this PR
    alone, so it closes now, not in step 5. With a non-GitHub tracker, skip
    `gh issue` comments and closes.
-4. Remove the worker's worktree from the main workspace root once GitHub
-   shows the PR merged: `git -C <main workspace root> worktree remove
+4. Remove the worker's worktree from the main workspace root once the
+   forge shows the PR merged: `git -C <main workspace root> worktree remove
    <worktree path>`. The path is in `t3_worktree_list`. When git refuses
    because the worktree has changes, leave it and tell the user what is in
    it. Then delete the PR's local branches (the follow-up's too):
    `git -C <main workspace root> branch -D <branch>`. `-D` is safe because
-   GitHub's merged state, checked in item 1, says the work landed; a squash
+   the forge's merged state, checked in item 1, says the work landed; a squash
    merge would make `-d` refuse. Delete a branch only after its worktree is
    gone. Then sweep the review clones the reviewer left behind. They sit on
    `t3/*` branches, so find them by thread, not branch name:
