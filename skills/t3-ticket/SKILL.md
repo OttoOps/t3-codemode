@@ -23,8 +23,9 @@ the root and talks to the user itself.
 - This thread edits no code and makes no commits. All repo changes happen in
   a worker's worktree. Merging a PR and pushing a deploy tag are this
   thread's, and only on the user's word (Gates).
-- Never merge through `gh pr merge`, `glab mr merge`, or T3's own merge
-  button or its PR action. On a repo with a merge queue, T3 turns on
+- On GitHub or a tracked GitLab host (step 1 item 3), never merge through
+  `gh pr merge`, `glab mr merge`, or T3's own merge button or its PR
+  action. On a repo with a merge queue, T3 turns on
   auto-merge, and a PR whose checks have already passed then never joins the
   queue. This thread does not need to know which repos have a queue: it
   merges every PR with `wf.merge`, which finds out per PR.
@@ -101,7 +102,8 @@ For example:
   `list_scheduled_tasks` for its deploy watch; when it is missing, create
   it again as "The deploy watch" says, with the original `Started` time.
   On an untracked forge (step 1 item 3), once a worker's PR or MR has opened
-  and before its worker has been sent "Merged" or "Delivered", read it with
+  and before this thread has gone on from "On the user's word" item 3 for
+  it, read it with
   the repo's documented status command when `list_scheduled_tasks` shows no
   merge watch for it. Merged: confirm it as the watch's **Merged:** case
   says and go on from "On the user's word" item 3, which a stop between
@@ -147,9 +149,9 @@ three more rules hold:
 2. `t3_thread_organize` with action `pin`.
 3. `t3_worktree_status`: note the main workspace root and the repo
    (`gh repo view --json nameWithOwner,url` on a GitHub repo, else
-   `git -C <main workspace root> remote get-url origin`). Worktree removal
-   and branch cleanup run there. Then note the **forge**, which picks the
-   commands in steps 2 to 5:
+   `git -C <main workspace root> config --get remote.origin.url`). Worktree
+   removal and branch cleanup run there. Then note the **forge**, which
+   picks the commands in steps 2 to 5:
    - **GitHub:** `origin` is on github.com. The repo is `<owner>/<name>`,
      and the steps' `gh` commands apply.
    - **Tracked GitLab:** `origin` is on a host that `t3cm config get forges`
@@ -528,10 +530,17 @@ a merge card t3cm opened arrives only when t3cm could not merge on it
   `detailed_merge_status` `mergeable`. In
   `projects/<enc path>/merge_requests/<iid>/pipelines`, the newest pipeline
   whose `sha` is that head and whose `ref` is not a merge train's
-  (`refs/merge-requests/<iid>/train`) has `status` `success`, and
+  (`refs/merge-requests/<iid>/train`) has `status` `success` (in a repo
+  with no CI there is none, and the brief's checks below stand in), and
   `projects/<enc path>/repository/commits/<sha>/statuses` holds no status
-  that is pending or failed. The changed files are the `new_path` of each
-  entry in `projects/<enc path>/merge_requests/<iid>/diffs?per_page=100`.
+  that is pending or failed. The changed files are the `old_path` and
+  `new_path` of each entry in
+  `projects/<enc path>/merge_requests/<iid>/diffs?per_page=100`, paged with
+  `&page=<n>` until a page holds fewer than 100. When the entries cannot
+  prove the list complete (fewer than the MR's `changes_count`, or a
+  `changes_count` that is not a plain number, such as `1000+`), read the
+  files from `git diff --no-renames --name-only <base sha>...<head sha>`
+  after a fetch, with the base from the MR's `diff_refs.base_sha`.
 - **Untracked forge:** the repo's documented status command shows the same
   facts.
 
@@ -549,8 +558,8 @@ For a targeted fix PR launched to recover a failed `ticket`-scoped or
 (`options: ["merge"]`) so the fix PR does not re-run the repo's PR stages
 or chain the failed stage onto its merge gate.
 
-Otherwise, collect the PR's changed repo-relative paths (`files`, or the
-GitLab diffs' `new_path`) and look up `await wf.slot("delivery", { files })`
+Otherwise, collect the PR's changed repo-relative paths (`files` on GitHub,
+or the GitLab path set above) and look up `await wf.slot("delivery", { files })`
 to filter steps with `paths` globs. For a follow-up PR fixing a failed
 `pr`-scoped delivery stage (step 5), pass the union of the original PR's
 `files` and all follow-up PRs' `files` in that recovery run (and retain the

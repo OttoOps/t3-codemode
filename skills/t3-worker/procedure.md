@@ -46,8 +46,11 @@ orchestrator: built, review started, checks green, a skipped slot), `event`
   watched, call `watch_pull_request` on it again. Then check the PR's state
   and act on any wake you missed (step 4): `gh pr view <number> --json
   state,headRefOid,statusCheckRollup` on GitHub, or on GitLab
-  `glab mr view <iid> --output json` (its `state` and `sha`) and
-  `glab ci list --branch <branch>` for its pipelines. On an untracked forge,
+  `glab mr view <iid> --output json` (its `state` and `sha`) and, from
+  `glab api --hostname <host> projects/<enc path>/merge_requests/<iid>/pipelines`
+  (`<enc path>` is the full path URL-encoded), the newest
+  pipeline at that `sha` whose `ref` is not
+  `refs/merge-requests/<iid>/train`. On an untracked forge,
   check the MR/PR state with the repo's documented workflow instead of
   `watch_pull_request`, `gh pr view` and `glab`. Then carry on from that
   step.
@@ -187,7 +190,7 @@ does not.
      `Refs PROJ-123 (<browse URL>)` or `Refs <host>/PROJ-123` for a hosted
      Jira URL, or `Refs <issue URL>` / `Refs <host>/<scope>#<n>` for GitLab,
      matching the worker link's `issue` identity so `wf.pr` accepts it).
-2. Find the forge from `git remote get-url origin`:
+2. Find the forge from `git config --get remote.origin.url`:
    - **GitHub** (github.com): `repo` below is `<owner>/<name>`.
    - **Tracked GitLab:** a host that `t3cm config get forges` lists with
      `kind: "gitlab"`. `wf.pr` and t3cm's reconcile cover its merge
