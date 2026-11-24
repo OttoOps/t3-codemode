@@ -389,6 +389,30 @@ pub(crate) fn render_flow_block(meta: &FlowMeta) -> String {
     lines.join("\n")
 }
 
+fn remaining_body_outside_replaced_flow(raw: &str, will_write_flow: bool) -> String {
+    if !will_write_flow {
+        return raw.to_string();
+    }
+    let trimmed = raw.trim_end();
+    if let Some((start, end)) = flow_body::inspect_flow_body(trimmed).section {
+        let lines: Vec<&str> = trimmed.lines().collect();
+        let prefix = lines[..start].join("\n");
+        let suffix = lines[end..].join("\n");
+        let mut out = String::new();
+        if !prefix.trim().is_empty() {
+            out.push_str(prefix.trim_end());
+        }
+        if !suffix.trim().is_empty() {
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(suffix.trim_start_matches(['\n', '\r']));
+        }
+        return out;
+    }
+    trimmed.to_string()
+}
+
 pub(crate) fn merge_flow_body(body: Option<&str>, meta: &FlowMeta) -> String {
     let raw = body.unwrap_or_default();
     if meta.is_empty() {
@@ -1142,6 +1166,8 @@ impl Wf {
         let mut caches = WireCaches::new();
         for &idx in &order {
             let item = &planned[idx];
+            let item_label =
+                item.id.as_ref().map_or_else(|| format!("issues[{}]", item.input_index), |s| format!("item {s:?}"));
             let ext_refs = item.parent.iter().chain(&item.blocked_by).filter_map(|r| match r {
                 BatchRef::External(repo, num) => Some((repo.as_str(), *num)),
                 BatchRef::Local(_) => None,
@@ -1152,6 +1178,41 @@ impl Wf {
                         "wf.fileIssues: external issue reference {ext_repo}#{ext_num} does not exist or cannot be read ({}); use a local id for issues created in this batch; no issues were created",
                         e.message
                     );
+                }
+            }
+            if let Some(raw_body) = item.body.as_deref()
+                && !raw_body.trim().is_empty()
+            {
+                let will_write_flow = item.parent.is_some()
+                    || !item.blocked_by.is_empty()
+                    || item.track.is_some()
+                    || item.priority.is_some()
+                    || !item.touches.is_empty();
+                let remaining = remaining_body_outside_replaced_flow(raw_body, will_write_flow);
+                let repo_name = &repos[&item.repo.to_ascii_lowercase()].name_with_owner;
+                let parsed = flow_body::parse_body(repo_name, &remaining);
+                for body_ref in parsed.parents.iter().chain(&parsed.blockers).chain(&parsed.sub_issues) {
+                    match body_ref {
+                        flow_body::BodyRef::Issue { repo, number } => {
+                            if let Err(e) = self.resolve_issue_cached(&mut caches, repo, *number).await {
+                                bail!(
+                                    "wf.fileIssues: {item_label} body references nonexistent or unreadable issue {repo}#{number} ({}); declare batch dependencies in parent and blockedBy; no issues were created",
+                                    e.message
+                                );
+                            }
+                        }
+                        flow_body::BodyRef::Symbolic(raw) => {
+                            bail!(
+                                "wf.fileIssues: {item_label} body contains symbolic dependency {raw:?}; declare dependencies in parent and blockedBy instead; no issues were created"
+                            );
+                        }
+                        flow_body::BodyRef::Malformed(raw) => {
+                            bail!(
+                                "wf.fileIssues: {item_label} body contains malformed dependency {raw:?}; declare dependencies in parent and blockedBy instead; no issues were created"
+                            );
+                        }
+                        flow_body::BodyRef::OptionalSymbolic(_) => {}
+                    }
                 }
             }
         }
@@ -1225,14 +1286,14 @@ impl Wf {
                             e.message
                         );
                     }
-                    let prior: Vec<String> =
-                        out_issues.iter().filter_map(|v| v["url"].as_str().map(String::from)).collect();
-                    bail!(
-                        "wf.fileIssues: creating {item_name:?} in {} failed: {} (already created: {})",
-                        repo_node.name_with_owner,
-                        e.message,
-                        prior.join(", ")
-                    );
+                    all_errors.push(json!({
+                        "issue": item_name,
+                        "op": "createIssue",
+                        "target": repo_node.name_with_owner,
+                        "message": e.message,
+                        "permission": e.permission,
+                    }));
+                    break;
                 }
             };
 
@@ -1284,16 +1345,29 @@ impl Wf {
                 && let Some(me) = caller
                 && let Some(parsed_issue) = parse_github_issue_only(&created.url)
             {
-                Some(
-                    self.record_board_issue(
+                match self
+                    .record_board_issue(
                         me,
                         &parsed_issue,
                         Some(created.title.clone()),
                         item.note.clone(),
                         cached_thread_meta.as_ref(),
                     )
-                    .await?,
-                )
+                    .await
+                {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        let msg = e.to_string();
+                        all_errors.push(json!({
+                            "issue": ref_slug(&created.repo, created.number),
+                            "op": "reportBoard",
+                            "target": created.url,
+                            "message": msg,
+                            "permission": false,
+                        }));
+                        Some(json!({"added": false, "error": msg}))
+                    }
+                }
             } else {
                 None
             };
@@ -1486,6 +1560,15 @@ mod tests {
         let parsed_nbsp = parse_body("Acme/widgets", &fixed_nbsp);
         assert_eq!(parsed_nbsp.parents, vec![BodyRef::Issue { repo: "Acme/widgets".into(), number: 10 }]);
         assert_eq!(parsed_nbsp.blockers, vec![BodyRef::Issue { repo: "Acme/widgets".into(), number: 11 }]);
+
+        // A ## Flow heading inside a list item is NOT treated as a top-level Flow section, so
+        // trailing prose outside the list is preserved instead of overwritten.
+        let list_heading = "- Example\n  ## Flow\n  example metadata\n\nOutside description";
+        let merged_list = merge_flow_body(Some(list_heading), &meta);
+        assert!(merged_list.contains("Outside description"), "prose after list heading must stay:\n{merged_list}");
+        let parsed_list = parse_body("Acme/widgets", &merged_list);
+        assert_eq!(parsed_list.parents, vec![BodyRef::Issue { repo: "Acme/widgets".into(), number: 10 }]);
+        assert_eq!(parsed_list.blockers, vec![BodyRef::Issue { repo: "Acme/widgets".into(), number: 11 }]);
     }
 
     #[test]

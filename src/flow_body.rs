@@ -1561,7 +1561,8 @@ pub(crate) fn inspect_flow_body(body: &str) -> FlowBodyLayout {
                 continue;
             }
         }
-        if section.is_none()
+        if containers.is_empty()
+            && section.is_none()
             && let Some((level, heading)) = parse_heading(&line)
         {
             if let Some((start_idx, start_level)) = flow_start {

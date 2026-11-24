@@ -690,6 +690,24 @@ async fn wf_file_issues_rejects_cycles_and_bad_plans_with_zero_partial_writes() 
             ]})"##,
             "external issue reference Acme/widgets#999 does not exist",
         ),
+        (
+            r###"async () => wf.fileIssues({ repo: "Acme/widgets", issues: [
+                { id: "A", title: "Body-only self blocker", body: "## Flow\n- Blocked by: #1" }
+            ]})"###,
+            "body references nonexistent or unreadable issue Acme/widgets#1",
+        ),
+        (
+            r###"async () => wf.fileIssues({ repo: "Acme/widgets", issues: [
+                { id: "A", title: "Body prose blocker", body: "Depends on #1", track: "core" }
+            ]})"###,
+            "body references nonexistent or unreadable issue Acme/widgets#1",
+        ),
+        (
+            r###"async () => wf.fileIssues({ repo: "Acme/widgets", issues: [
+                { id: "A", title: "Body symbolic blocker", body: "## Flow\n- Blocked by: P0" }
+            ]})"###,
+            "body contains symbolic dependency",
+        ),
     ];
 
     for (code, want) in cases {
@@ -803,4 +821,89 @@ fn catalog_exposes_extended_wf_issue_and_wf_file_issues() {
             file_issues.signature
         );
     }
+}
+
+#[tokio::test]
+async fn wf_file_issues_returns_completed_results_when_a_later_create_issue_fails() {
+    let h = H::new();
+    h.github.add_repo("Acme/widgets");
+    h.github.set_issue("Acme/widgets", github_issue(10, "Existing prereq", &[], T0));
+    h.github.fail_operation_with_type("addBlockedBy", "FORBIDDEN", "No permission for blockedBy");
+    h.github.fail_operation_after("createIssue", 1, "FORBIDDEN", "Secondary rate limit");
+
+    let r = result(
+        &h.exec_as(
+            WORKER,
+            r##"async () => wf.fileIssues({
+                repo: "Acme/widgets",
+                issues: [
+                    { id: "A", title: "First issue", blockedBy: ["#10"] },
+                    { id: "B", title: "Second issue", blockedBy: ["A"] },
+                    { id: "C", title: "Third issue", blockedBy: ["B"] },
+                ],
+            })"##,
+        )
+        .await,
+    );
+
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(r["order"], json!(["A"]));
+    assert_eq!(r["issues"].as_array().unwrap().len(), 1);
+    assert_eq!(r["issues"][0]["url"], "https://github.com/Acme/widgets/issues/11");
+    assert_eq!(r["issues"][0]["wiring"]["ok"], false);
+    assert_eq!(r["issues"][0]["wiring"]["blockedBy"][0]["status"], "error");
+    assert_eq!(r["issues"][0]["reported"]["added"], true);
+    assert_eq!(r["byId"]["A"]["number"], 11);
+    assert!(r["byId"].get("B").is_none());
+    let errs = r["errors"].as_array().unwrap();
+    assert_eq!(errs.len(), 2, "{errs:?}");
+    assert!(
+        errs.iter().any(|e| e["op"] == "addBlockedBy" && e["issue"] == "Acme/widgets#11" && e["permission"] == true)
+    );
+    assert!(errs.iter().any(|e| e["op"] == "createIssue" && e["issue"] == "B" && e["permission"] == true));
+    assert!(h.github.issue("Acme/widgets", 12).is_none(), "C must not be created after B failed");
+}
+
+#[tokio::test]
+async fn wf_file_issues_reports_board_store_failure_without_hiding_created_github_issues() {
+    let h = H::new();
+    h.github.add_repo("Acme/widgets");
+    {
+        let db = rusqlite::Connection::open(h.app.store.path()).unwrap();
+        db.execute(
+            "CREATE TRIGGER fail_second_issue BEFORE INSERT ON new_issues \
+             WHEN NEW.key = 'acme/widgets#2' \
+             BEGIN SELECT RAISE(ABORT, 'simulated store failure'); END;",
+            [],
+        )
+        .unwrap();
+    }
+
+    let r = result(
+        &h.exec_as(
+            WORKER,
+            r#"async () => wf.fileIssues({
+                repo: "Acme/widgets",
+                issues: [
+                    { id: "A", title: "First issue" },
+                    { id: "B", title: "Second issue", blockedBy: ["A"] },
+                    { id: "C", title: "Third issue", blockedBy: ["B"] },
+                ],
+            })"#,
+        )
+        .await,
+    );
+
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(r["order"], json!(["A", "B", "C"]));
+    assert_eq!(r["issues"].as_array().unwrap().len(), 3);
+    assert_eq!(r["issues"][0]["reported"]["added"], true);
+    assert_eq!(r["issues"][1]["url"], "https://github.com/Acme/widgets/issues/2");
+    assert_eq!(r["issues"][1]["reported"]["added"], false);
+    assert!(r["issues"][1]["reported"]["error"].as_str().unwrap().contains("simulated store failure"), "{r}");
+    assert_eq!(r["issues"][2]["url"], "https://github.com/Acme/widgets/issues/3");
+    assert_eq!(r["issues"][2]["reported"]["added"], true);
+    assert_eq!(r["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(r["errors"][0]["op"], "reportBoard");
+    assert_eq!(r["errors"][0]["issue"], "Acme/widgets#2");
 }
