@@ -593,6 +593,13 @@ fn orders(n: usize) -> Vec<Vec<usize>> {
     out
 }
 
+type Candidate = (Vec<usize>, Model, BTreeMap<u64, GhPrModel>, BTreeSet<(String, u64)>, BTreeSet<String>);
+
+fn boundary(m: &Model) -> (BTreeSet<(String, u64)>, BTreeSet<String>) {
+    let closed = m.links.iter().filter(|(_, l)| !l.open).map(|(id, _)| id.clone()).collect();
+    (m.clone().forbidden_github(), closed)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_raced(
     h: &H,
@@ -609,18 +616,15 @@ fn resolve_raced(
     let snap = h.snapshot();
     let got = shadow::project(&snap);
     let observed = wakes_of(&h.delivered(&h.sent()[sent_before..]));
+    let (_, closed_before) = boundary(model);
     for (to, kind, from) in observed.keys() {
-        assert!(
-            snap.links.get(to).is_none_or(|l| !l.closed),
-            "forbidden wake: {kind} from {from} reached closed link {to}\n{}",
-            ctx()
-        );
+        assert!(!closed_before.contains(to), "forbidden wake: {kind} from {from} reached closed link {to}\n{}", ctx());
     }
     let maybe: Vec<usize> = (0..ops.len())
         .filter(|&i| statuses[i].as_deref() == Some("superseded"))
         .filter(|&i| ops[i].worker().is_some_and(|w| ops.iter().enumerate().any(|(j, o)| j != i && o.can_supersede(w))))
         .collect();
-    let mut candidates: Vec<(Vec<usize>, Model, BTreeMap<u64, GhPrModel>)> = Vec::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
     for order in orders(ops.len()) {
         for mask in 0..(1usize << maybe.len()) {
             let skipped: Vec<usize> =
@@ -632,13 +636,17 @@ fn resolve_raced(
             let mut m = model.clone();
             let mut g = gh.clone();
             let mut agrees = true;
+            let (mut forbid, mut closed) = boundary(&m);
             for &i in &order {
                 let (next, status) = ops[i].apply(&mut m, g);
                 g = next;
                 agrees &= status.is_none() || status == statuses[i];
+                let (f, c) = boundary(&m);
+                forbid.retain(|w| f.contains(w));
+                closed.retain(|l| c.contains(l));
             }
             if agrees {
-                candidates.push((order, m, g));
+                candidates.push((order, m, g, forbid, closed));
             }
         }
     }
@@ -647,7 +655,7 @@ fn resolve_raced(
         "raced round {ops:?} returned statuses {statuses:?} that no serial order predicts\n{}",
         ctx()
     );
-    let counts: Vec<BTreeMap<shadow::Wake, usize>> = candidates.iter().map(|(_, m, _)| wakes_of(&m.wakes)).collect();
+    let counts: Vec<BTreeMap<shadow::Wake, usize>> = candidates.iter().map(|(_, m, ..)| wakes_of(&m.wakes)).collect();
     let tried = attempts(h);
     for (w, n) in &observed {
         let may = counts.iter().map(|c| c.get(w).copied().unwrap_or(0)).max().unwrap_or(0);
@@ -664,18 +672,35 @@ fn resolve_raced(
             );
         }
     }
-    let hit = candidates.iter().zip(&counts).find(|((_, m, g), c)| {
+    let hit = candidates.iter().zip(&counts).find(|((_, m, g, ..), c)| {
         m.proj() == got && **c == observed && mutation_diff(g, actual_gh).is_none() && m.attempts() == tried
     });
     match hit {
-        Some(((_, m, _), _)) => {
+        Some(((_, m, _, forbid, closed), _)) => {
             *model = m.clone();
-            assert_forbidden(h, model, sent_before, &ctx);
+            model.forbidden_github();
+            let sent = &h.sent()[sent_before..];
+            for (to, kind, from) in h.delivered(sent) {
+                assert!(
+                    !closed.contains(&to),
+                    "forbidden wake: {kind} from {from} reached {to}, closed throughout the round\n{}",
+                    ctx()
+                );
+            }
+            for w in github_events(h.wake_lines(sent)) {
+                assert!(
+                    !forbid.contains(&w),
+                    "forbidden wake: GitHub told {} about #{}, which it let go of before the round and never regained\n{}",
+                    w.0,
+                    w.1,
+                    ctx()
+                );
+            }
         }
         None => {
             let misses: Vec<String> = candidates
                 .iter()
-                .map(|(order, m, g)| {
+                .map(|(order, m, g, ..)| {
                     let want = m.proj();
                     let parts: Vec<String> = [
                         diff("links", &got.links, &want.links),
