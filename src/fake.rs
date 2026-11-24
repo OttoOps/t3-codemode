@@ -540,6 +540,7 @@ struct GhState {
     issue_page: usize,
     calls: Vec<Value>,
     errors: BTreeMap<String, String>,
+    unlabelled_open_error: Option<String>,
     read_errors: BTreeMap<(String, u64), String>,
     field_errors: BTreeMap<(String, u64), (String, String)>,
     down: bool,
@@ -653,6 +654,10 @@ impl FakeGitHub {
 
     pub fn fail_operation(&self, operation: &str, message: &str) {
         self.st().errors.insert(operation.into(), message.into());
+    }
+
+    pub fn fail_unlabelled_open_issues(&self, message: Option<&str>) {
+        self.st().unlabelled_open_error = message.map(String::from);
     }
 
     pub fn fail_read(&self, repo: &str, number: u64, message: &str) {
@@ -799,6 +804,12 @@ fn flow_issues(st: &GhState, query: &str, variables: &Value) -> Value {
     }
     let want_state = if query.contains("states: CLOSED") { "CLOSED" } else { "OPEN" };
     let label = variables["label"].as_str().map(str::to_ascii_lowercase);
+    if want_state == "OPEN"
+        && label.is_none()
+        && let Some(msg) = &st.unlabelled_open_error
+    {
+        return gh_error(msg);
+    }
     let mut matching: Vec<&Value> = st
         .issues
         .iter()
@@ -864,6 +875,9 @@ fn flow_tickets(st: &GhState, variables: &Value) -> Value {
         let canonical = st.repo_aliases.get(&raw_key).cloned();
         let repo = canonical.as_deref().map(str::to_ascii_lowercase).unwrap_or(raw_key);
         let number = variables[format!("n{i}")].as_u64().unwrap();
+        if number > i32::MAX as u64 {
+            return gh_error(&format!("Variable $n{i} of type Int! was provided invalid value {number}"));
+        }
         let alias = format!("t{i}");
         let issue = st.issues.get(&issue_key(&repo, number)).map(|i| full_issue_node(st, i));
         if issue.is_none() {
