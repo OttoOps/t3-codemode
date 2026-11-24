@@ -19,6 +19,7 @@ pub mod flow;
 mod flow_body;
 mod flow_code;
 mod flow_git;
+pub mod flow_triage;
 pub mod github;
 pub mod github_host;
 pub mod gitlab;

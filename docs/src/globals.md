@@ -149,8 +149,11 @@ parent and a child, and the service keeps every link and message in its store.
   and `priority: <priority>` labels idempotently, creating missing labels when
   the repo lacks them. Existing links and labels succeed as `alreadyLinked` or
   `alreadyApplied`. GitHub and permission errors land in `wiring.errors` and in
-  `message`. You can also sync body-parsed links to GitHub from the board's
-  [dependency graph](board.md#the-queue--graph-view) through `POST /api/flow/sync-links`.
+  `message`. From the board's [dependency graph](board.md#the-queue--graph-view)
+  you can also sync body-parsed links (`POST /api/flow/sync-links`), edit edges
+  and tracks directly from the inspector (`POST /api/flow/edge`,
+  `POST /api/flow/issue`), or run read-only **Triage DAG** proposals
+  (`POST /api/flow/triage`) before confirming writes.
 - `wf.fileIssues({ repo?, parent?, track?, priority?, labels?, queue?, report?, sync?, issues })`
   creates a batch of GitHub issues forming a dependency DAG in one call. See
   [wf.fileIssues](#wffileissues).
@@ -523,7 +526,12 @@ or `code`. `prStack` edges include optional `branch`, `baseBranch`, `pr`,
 overlapping repo-relative paths; advisory `codeDep` edges carry `modules` or
 `symbols` naming static Cargo, Rust, JavaScript, TypeScript or Python module
 and symbol dependencies without holding readiness, launches or cycle warnings.
-Queue-only reads skip `codeDep` analysis. `graph.warnings` and each
+Queue-only reads skip `codeDep` analysis. Inferred `body` edges and advisory
+`fileConflict` or `codeDep` edges dismissed from the board's inspector are
+stored in `store.db` (`flow_dismissed_edges`), omitted from `graph.edges`,
+excluded from readiness and `flow.serializeFileConflicts` checks, and returned
+in `graph.dismissedEdges` (`{ from, to, kind, at }`) so they can be restored
+(native `source: "github"` edges are never suppressed). `graph.warnings` and each
 affected node's `warnings` report cycles, unresolved references, and plain
 `blocked` labels with no linked open blocker. `wf.flow()` leaves `graph` out by
 default because it can be large.

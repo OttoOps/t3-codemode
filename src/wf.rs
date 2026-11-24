@@ -213,7 +213,7 @@ fn parse<T: DeserializeOwned>(method: &str, args: Value) -> Result<T> {
     serde_json::from_value(args).map_err(|e| anyhow!("wf.{method}: {e}"))
 }
 
-fn truthy(v: &Value) -> bool {
+pub(crate) fn truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
         Value::Bool(b) => *b,
@@ -222,6 +222,27 @@ fn truthy(v: &Value) -> bool {
         Value::Array(a) => !a.is_empty(),
         Value::Object(o) => !o.is_empty(),
     }
+}
+
+pub(crate) fn thread_is_busy(th: &Value) -> bool {
+    let status = th["status"].as_str().unwrap_or("");
+    ACTIVE.contains(&status)
+        || status == "waiting"
+        || truthy(&th["blockedOnThreadWait"])
+        || truthy(&th["pendingBackgroundTasks"])
+        || truthy(&th["pendingRequestCount"])
+}
+
+pub(crate) fn thread_is_stopped(th: &Value) -> bool {
+    const TERMINAL: &[&str] = &["idle", "completed", "interrupted", "failed", "cancelled", "rolled_back"];
+    let Some(obj) = th.as_object() else {
+        return false;
+    };
+    let status = obj.get("status").and_then(Value::as_str).unwrap_or("");
+    TERMINAL.contains(&status)
+        && !truthy(&th["blockedOnThreadWait"])
+        && !truthy(&th["pendingBackgroundTasks"])
+        && !truthy(&th["pendingRequestCount"])
 }
 
 pub(crate) fn count(v: &Value) -> i64 {
@@ -309,6 +330,7 @@ pub struct Wf {
     pub(crate) pool_lock: tokio::sync::Mutex<()>,
     pub(crate) reconcile_lock: tokio::sync::Mutex<()>,
     pub(crate) flow_lock: tokio::sync::Mutex<()>,
+    pub(crate) triage_lock: tokio::sync::Mutex<()>,
     pub(crate) flow_due: std::sync::atomic::AtomicBool,
     pub(crate) usage: Mutex<Option<Arc<dyn UsageSource>>>,
     pub(crate) tokens: Mutex<Arc<dyn TokenSource>>,
@@ -387,6 +409,7 @@ impl Wf {
             pool_lock: tokio::sync::Mutex::new(()),
             reconcile_lock: tokio::sync::Mutex::new(()),
             flow_lock: tokio::sync::Mutex::new(()),
+            triage_lock: tokio::sync::Mutex::new(()),
             flow_due: std::sync::atomic::AtomicBool::new(false),
             usage: Mutex::new(None),
             tokens: Mutex::new(Arc::new(T3Tokens)),

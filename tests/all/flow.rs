@@ -5340,3 +5340,997 @@ return {{ legend, edgeInfo, hover2Edges, hover2Marks, drawer2, drawer1 }};
         "drawer #1 Code used by detail missing: {d1:?}"
     );
 }
+
+#[tokio::test]
+async fn board_flow_edge_edits_confirm_dismiss_restore_add_remove_and_persist() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("widgets");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    run_git(&repo, &["init", "-b", "main"]);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test"]);
+    std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"widgets\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+        .unwrap();
+    std::fs::write(repo.join("src/lib.rs"), "pub mod core;\npub mod api;\npub mod shared;\n").unwrap();
+    std::fs::write(repo.join("src/core.rs"), "pub struct Core;\n").unwrap();
+    std::fs::write(repo.join("src/api.rs"), "use crate::core::Core;\n").unwrap();
+    std::fs::write(repo.join("src/shared.rs"), "pub fn shared() {}\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+
+    let cfg = Config::from_value(json!({
+        "flow": {
+            "repos": [REPO],
+            "optIn": {"label": FLOW},
+            "maxTickets": 4,
+            "launch": "ask",
+            "serializeFileConflicts": true
+        }
+    }))
+    .unwrap();
+    let h = H::build(Vec::new(), cfg);
+    let store_dir = h.app.store.path().parent().unwrap().to_path_buf();
+    h.github.add_repo(REPO);
+    h.fake.set_projects(vec![project("p-widgets", repo.to_str().unwrap())]);
+    h.remotes.set(repo.to_str().unwrap(), "git@github.com:acme/widgets.git");
+
+    // #10 epic, #11 second epic, #1 core, #2 api (body blockedBy #1, body parent #10, codeDep #1),
+    // #3 touches shared.rs, #4 touches shared.rs (fileConflict with #3).
+    issue(&h, REPO, 10, &[], 1);
+    issue(&h, REPO, 11, &[], 2);
+    issue(&h, REPO, 1, &[FLOW], 3);
+    issue(&h, REPO, 2, &[FLOW], 4);
+    issue(&h, REPO, 3, &[FLOW], 5);
+    issue(&h, REPO, 4, &[FLOW], 6);
+    h.github.set_body(REPO, 1, "## Flow\n- Touches: `src/core.rs`\n");
+    h.github.set_body(REPO, 2, "## Flow\n- Parent: #10\n- Blocked by: #1\n- Touches: `src/api.rs`\n");
+    h.github.set_body(REPO, 3, "## Flow\n- Touches: `src/shared.rs`\n");
+    h.github.set_body(REPO, 4, "## Flow\n- Touches: `src/shared.rs`\n");
+    // Open a running board ticket on #3 so serializeFileConflicts blocks #4 until dismissed.
+    h.fake.put(t3_codemode::fake::thread("t-3", "running", "2026-10-18T10:00:00Z"));
+    h.wf("t-3", "join", json!({"parent": BOARD, "label": "widgets#3", "role": "ticket", "issue": "acme/widgets#3"}))
+        .await;
+
+    let s = crate::board::start(h).await;
+    let post_edge = |body: Value| {
+        let http = s.http.clone();
+        let url = format!("{}/api/flow/edge", s.base);
+        let origin = s.base.clone();
+        let csrf = s.csrf().to_string();
+        async move {
+            let r =
+                http.post(url).header("Origin", origin).header("X-T3CM-CSRF", csrf).json(&body).send().await.unwrap();
+            let st = r.status().as_u16();
+            let v: Value = r.json().await.unwrap();
+            (st, v)
+        }
+    };
+
+    // Guard & validation checks.
+    let no_csrf = s
+        .http
+        .post(format!("{}/api/flow/edge", s.base))
+        .header("Origin", &s.base)
+        .json(&json!({"action": "add", "from": "acme/widgets#2", "to": "#1", "kind": "blockedBy"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf.status(), 403);
+    assert_eq!(
+        post_edge(json!({"action": "add", "from": "acme/widgets#2", "to": "#1", "kind": "blockedBy", "extra": 1}))
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        post_edge(json!({"action": "add", "from": "acme/widgets#2", "to": "#2", "kind": "blockedBy"})).await.0,
+        400
+    );
+    assert_eq!(
+        post_edge(json!({"action": "remove", "from": "acme/widgets#2", "to": "#1", "kind": "codeDep"})).await.0,
+        400
+    );
+
+    // Initially #4 is blocked by fileConflict with running #3.
+    let initial = s.get("/api/flow").await;
+    assert!(
+        initial["blocked"].as_array().unwrap().iter().any(|b| b["number"] == 4),
+        "fileConflict with running #3 blocks #4: {initial}"
+    );
+    assert!(
+        initial["graph"]["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "codeDep" && e["from"] == "acme/widgets#2" && e["to"] == "acme/widgets#1"),
+        "{initial}"
+    );
+
+    // 1. Confirm body blockedBy (#2 -> #1) writes natively and refreshes graph to source: "github".
+    let (st, res) =
+        post_edge(json!({"action": "confirm", "from": "acme/widgets#2", "to": "#1", "kind": "blockedBy"})).await;
+    assert_eq!(st, 200, "{res}");
+    assert_eq!(res["ok"], true, "{res}");
+    assert_eq!(res["status"], "linked", "{res}");
+    assert!(
+        res["flow"]["graph"]["edges"].as_array().unwrap().iter().any(|e| {
+            e["kind"] == "blockedBy"
+                && e["source"] == "github"
+                && e["from"] == "acme/widgets#2"
+                && e["to"] == "acme/widgets#1"
+        }),
+        "refreshed graph should show native github edge: {res}"
+    );
+
+    // 2. Confirm body parent (#2 -> #10) writes addSubIssue; trying to add parent #11 without replaceParent conflicts.
+    let (st, res) =
+        post_edge(json!({"action": "confirm", "from": "acme/widgets#2", "to": "#10", "kind": "parent"})).await;
+    assert_eq!(st, 200, "{res}");
+    assert_eq!(res["ok"], true, "{res}");
+    assert_eq!(res["status"], "linked", "{res}");
+    let (st, conflict) =
+        post_edge(json!({"action": "add", "from": "acme/widgets#2", "to": "#11", "kind": "parent"})).await;
+    assert_eq!(st, 200, "{conflict}");
+    assert_eq!(conflict["ok"], false, "{conflict}");
+    assert_eq!(conflict["conflict"], true, "{conflict}");
+    assert_eq!(conflict["existingParent"], "acme/widgets#10", "{conflict}");
+
+    // Retrying with replaceParent: true succeeds and refreshes parent to #11.
+    let (st, replaced) = post_edge(
+        json!({"action": "add", "from": "acme/widgets#2", "to": "#11", "kind": "parent", "replaceParent": true}),
+    )
+    .await;
+    assert_eq!(st, 200, "{replaced}");
+    assert_eq!(replaced["ok"], true, "{replaced}");
+    assert_eq!(
+        replaced["flow"]["graph"]["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "acme/widgets#2").unwrap()["parent"],
+        "acme/widgets#11",
+        "{replaced}"
+    );
+
+    // 3. Remove native parent (#2 -> #11) and native blockedBy (#2 -> #1).
+    let (st, rm_par) =
+        post_edge(json!({"action": "remove", "from": "acme/widgets#2", "to": "#11", "kind": "parent"})).await;
+    assert_eq!(st, 200, "{rm_par}");
+    assert_eq!(rm_par["ok"], true, "{rm_par}");
+    assert_eq!(rm_par["status"], "removed", "{rm_par}");
+    let (st, rm_blk) =
+        post_edge(json!({"action": "remove", "from": "acme/widgets#2", "to": "#1", "kind": "blockedBy"})).await;
+    assert_eq!(st, 200, "{rm_blk}");
+    assert_eq!(rm_blk["ok"], true, "{rm_blk}");
+    assert_eq!(rm_blk["status"], "removed", "{rm_blk}");
+
+    // 4. Dismiss inferred body blockedBy (#2 -> #1) and fileConflict (#4 <-> #3, reversed endpoint order!).
+    let (st, dis_body) =
+        post_edge(json!({"action": "dismiss", "from": "acme/widgets#2", "to": "#1", "kind": "blockedBy"})).await;
+    assert_eq!(st, 200, "{dis_body}");
+    assert_eq!(dis_body["status"], "dismissed", "{dis_body}");
+    assert!(
+        !dis_body["flow"]["graph"]["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "blockedBy" && e["from"] == "acme/widgets#2" && e["to"] == "acme/widgets#1"),
+        "dismissed body blockedBy must vanish from graph: {dis_body}"
+    );
+    assert!(
+        dis_body["flow"]["graph"]["dismissedEdges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "blockedBy" && e["from"] == "acme/widgets#2" && e["to"] == "acme/widgets#1"),
+        "dismissedEdges should record dismissed body edge: {dis_body}"
+    );
+
+    // Dismissing fileConflict (#4, #3) removes the conflict edge AND unblocks #4 into queue!
+    let (st, dis_fc) =
+        post_edge(json!({"action": "dismiss", "from": "acme/widgets#4", "to": "#3", "kind": "fileConflict"})).await;
+    assert_eq!(st, 200, "{dis_fc}");
+    assert_eq!(dis_fc["status"], "dismissed", "{dis_fc}");
+    assert!(
+        !dis_fc["flow"]["graph"]["edges"].as_array().unwrap().iter().any(|e| e["kind"] == "fileConflict"),
+        "dismissed fileConflict must vanish: {dis_fc}"
+    );
+    assert!(
+        dis_fc["flow"]["queue"].as_array().unwrap().iter().any(|i| i["number"] == 4),
+        "dismissing fileConflict unblocks #4 into ready queue: {dis_fc}"
+    );
+
+    // sync-links skips the dismissed body blockedBy (#2 -> #1) and only syncs non-dismissed body parent (#2 -> #10).
+    let synced: Value = s
+        .http
+        .post(format!("{}/api/flow/sync-links", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(synced["total"], 1, "only non-dismissed body parent should sync: {synced}");
+    assert_eq!(synced["results"][0]["kind"], "parent", "{synced}");
+
+    // 5. Confirming codeDep with permission error does NOT dismiss the advisory edge; clearing error promotes it.
+    s.h.github.fail_operation_with_type("addBlockedBy", "FORBIDDEN", "Resource not accessible by integration");
+    let (st, perm_err) =
+        post_edge(json!({"action": "confirm", "from": "acme/widgets#2", "to": "#1", "kind": "codeDep"})).await;
+    assert_eq!(st, 200, "{perm_err}");
+    assert_eq!(perm_err["ok"], false, "{perm_err}");
+    assert_eq!(perm_err["permission"], true, "{perm_err}");
+    assert!(
+        perm_err["flow"]["graph"]["edges"].as_array().unwrap().iter().any(|e| e["kind"] == "codeDep"),
+        "failed confirm must keep codeDep visible: {perm_err}"
+    );
+    s.h.github.clear_operation_errors();
+
+    let (st, conf_cd) =
+        post_edge(json!({"action": "confirm", "from": "acme/widgets#2", "to": "#1", "kind": "codeDep"})).await;
+    assert_eq!(st, 200, "{conf_cd}");
+    assert_eq!(conf_cd["ok"], true, "{conf_cd}");
+    assert_eq!(conf_cd["status"], "linked", "{conf_cd}");
+    assert!(
+        conf_cd["flow"]["graph"]["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "blockedBy" && e["source"] == "github" && e["from"] == "acme/widgets#2"),
+        "confirming codeDep creates native blockedBy: {conf_cd}"
+    );
+    assert!(
+        !conf_cd["flow"]["graph"]["edges"].as_array().unwrap().iter().any(|e| e["kind"] == "codeDep"),
+        "confirming codeDep suppresses duplicate advisory edge: {conf_cd}"
+    );
+
+    // 6. Durable persistence: reopening store.db still holds the dismissed fileConflict edge.
+    let reopened = t3_codemode::store::Store::open(&store_dir).unwrap();
+    let persisted = reopened.flow_dismissed_edges().unwrap();
+    assert!(
+        persisted
+            .iter()
+            .any(|r| r.kind == "fileConflict" && r.from_key == "acme/widgets#3" && r.to_key == "acme/widgets#4"),
+        "fileConflict dismissal must persist canonically in store.db: {persisted:?}"
+    );
+
+    // 7. Restoring fileConflict brings it back on the graph immediately.
+    let (st, restored) =
+        post_edge(json!({"action": "restore", "from": "acme/widgets#3", "to": "#4", "kind": "fileConflict"})).await;
+    assert_eq!(st, 200, "{restored}");
+    assert_eq!(restored["status"], "restored", "{restored}");
+    assert!(
+        restored["flow"]["graph"]["edges"].as_array().unwrap().iter().any(|e| e["kind"] == "fileConflict"),
+        "restoring fileConflict brings edge back: {restored}"
+    );
+}
+
+#[tokio::test]
+async fn board_flow_issue_updates_track_and_priority_labels_preserving_unrelated_labels() {
+    let h = flowing(4);
+    issue(&h, REPO, 5, &[FLOW, "workflow-track", "track: old-track", "priority: low", "area: core"], 1);
+    issue(&h, REPO, 6, &[FLOW, "track: keep-me", "priority: medium"], 2);
+    let s = crate::board::start(h).await;
+    let post_issue = |body: Value| {
+        let http = s.http.clone();
+        let url = format!("{}/api/flow/issue", s.base);
+        let origin = s.base.clone();
+        let csrf = s.csrf().to_string();
+        async move {
+            let r =
+                http.post(url).header("Origin", origin).header("X-T3CM-CSRF", csrf).json(&body).send().await.unwrap();
+            let st = r.status().as_u16();
+            let v: Value = r.json().await.unwrap();
+            (st, v)
+        }
+    };
+
+    // Validation & CSRF.
+    let no_csrf = s
+        .http
+        .post(format!("{}/api/flow/issue", s.base))
+        .header("Origin", &s.base)
+        .json(&json!({"issue": "acme/widgets#5", "track": "auth"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf.status(), 403);
+    assert_eq!(post_issue(json!({"issue": "acme/widgets#5"})).await.0, 400);
+    assert_eq!(post_issue(json!({"issue": "acme/widgets#5", "priority": "urgent"})).await.0, 400);
+    assert_eq!(post_issue(json!({"issue": "acme/widgets#5", "track": "auth", "unknown": 1})).await.0, 400);
+
+    // Replace track and priority -> removes old track:/priority: labels while preserving workflow-track & area: core!
+    let (st, res) = post_issue(json!({"issue": "acme/widgets#5", "track": "flow-dag", "priority": "high"})).await;
+    assert_eq!(st, 200, "{res}");
+    assert_eq!(res["ok"], true, "{res}");
+    assert_eq!(res["track"], "flow-dag", "{res}");
+    assert_eq!(res["priority"], "high", "{res}");
+    let node = res["flow"]["graph"]["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "acme/widgets#5").unwrap();
+    assert_eq!(node["track"], "flow-dag", "{node}");
+    assert_eq!(node["priority"], "high", "{node}");
+    let labels: Vec<&str> = node["labels"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(labels.contains(&"track: flow-dag"), "{labels:?}");
+    assert!(labels.contains(&"priority: high"), "{labels:?}");
+    assert!(labels.contains(&"workflow-track"), "must not remove *-track labels: {labels:?}");
+    assert!(labels.contains(&"area: core"), "must not remove area: labels: {labels:?}");
+    assert!(!labels.contains(&"track: old-track"), "old track: label removed: {labels:?}");
+    assert!(!labels.contains(&"priority: low"), "old priority: label removed: {labels:?}");
+
+    // Clearing track and priority via null removes only track:* and priority:* labels.
+    let (st, cleared) = post_issue(json!({"issue": "acme/widgets#5", "track": null, "priority": null})).await;
+    assert_eq!(st, 200, "{cleared}");
+    assert_eq!(cleared["ok"], true, "{cleared}");
+    assert_eq!(cleared["track"], Value::Null, "{cleared}");
+    assert_eq!(cleared["priority"], Value::Null, "{cleared}");
+    let node2 =
+        cleared["flow"]["graph"]["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "acme/widgets#5").unwrap();
+    let labels2: Vec<&str> = node2["labels"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(!labels2.iter().any(|l| l.starts_with("track:")), "{labels2:?}");
+    assert!(!labels2.iter().any(|l| l.starts_with("priority:")), "{labels2:?}");
+    assert!(labels2.contains(&"workflow-track"), "{labels2:?}");
+    assert!(labels2.contains(&"area: core"), "{labels2:?}");
+
+    // Failed replacement attach must preserve existing track and priority labels (attach before remove).
+    s.h.github.fail_operation("addLabelsToLabelable", "label attach refused");
+    let (st, failed_rep) =
+        post_issue(json!({"issue": "acme/widgets#6", "track": "new-track", "priority": "high"})).await;
+    assert_eq!(st, 200, "{failed_rep}");
+    assert_eq!(failed_rep["ok"], false, "{failed_rep}");
+    let node6 =
+        failed_rep["flow"]["graph"]["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "acme/widgets#6").unwrap();
+    let labels6: Vec<&str> = node6["labels"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(labels6.contains(&"track: keep-me"), "existing track must survive add failure: {labels6:?}");
+    assert!(labels6.contains(&"priority: medium"), "existing priority must survive add failure: {labels6:?}");
+}
+
+#[tokio::test]
+async fn board_triage_dag_proposes_read_only_and_writes_only_after_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("widgets");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    run_git(&repo, &["init", "-b", "main"]);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test"]);
+    std::fs::write(repo.join("src/auth.rs"), "pub fn login() {}\n").unwrap();
+    std::fs::write(repo.join("src/ui.rs"), "pub fn form() {}\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+
+    let cfg = Config::from_value(json!({
+        "board": {"runtimeMode": "full-access"},
+        "flow": {
+            "repos": [REPO],
+            "optIn": {"label": FLOW},
+            "maxTickets": 4,
+            "launch": "ask"
+        }
+    }))
+    .unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.github.add_repo(REPO);
+    h.fake.set_projects(vec![project("p-widgets", repo.to_str().unwrap())]);
+    h.remotes.set(repo.to_str().unwrap(), "git@github.com:acme/widgets.git");
+
+    issue(&h, REPO, 1, &[], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    issue(&h, REPO, 3, &[FLOW], 3);
+    h.github.set_body(REPO, 1, "Auth overhaul epic");
+    h.github.set_body(REPO, 2, "Build login API in src/auth.rs");
+    h.github.set_body(REPO, 3, "Build login screen in src/ui.rs");
+
+    let s = crate::board::start(h).await;
+    let mutations = || -> Vec<String> {
+        s.h.github
+            .operations()
+            .into_iter()
+            .filter(|op| {
+                matches!(
+                    op.as_str(),
+                    "addBlockedBy"
+                        | "removeBlockedBy"
+                        | "addSubIssue"
+                        | "removeSubIssue"
+                        | "createLabel"
+                        | "addLabelsToLabelable"
+                        | "removeLabelsFromLabelable"
+                )
+            })
+            .collect()
+    };
+
+    // Start triage via POST /api/flow/triage (read-only).
+    let resp = s
+        .http
+        .post(format!("{}/api/flow/triage", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let started: Value = resp.json().await.unwrap();
+    let tid = started["id"].as_str().unwrap().to_string();
+    assert_eq!(tid, "t1");
+    assert_eq!(started["status"], "running");
+    assert_eq!(started["issueCount"], 3);
+
+    // Scratch thread launches idle + read-only (approval-required + plan, never board.runtimeMode),
+    // registers in store.db BEFORE t3_thread_send delivers the brief, and blocks both identified triage
+    // thread calls and unidentified tool/write execute calls while open.
+    let launched = s.h.fake.launched();
+    assert_eq!(launched.len(), 1);
+    assert_eq!(launched[0]["scratch"], true);
+    assert_eq!(launched[0]["runtimeMode"], "approval-required");
+    assert_eq!(launched[0]["interactionMode"], "plan");
+    assert!(
+        launched[0].get("message").is_none(),
+        "triage thread must launch idle before registration: {}",
+        launched[0]
+    );
+    let sent = s.h.fake.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["threadId"], "launch:1");
+    let prompt = sent[0]["message"].as_str().unwrap();
+    assert!(prompt.contains("STRICT READ-ONLY RULE"), "{prompt}");
+    assert!(prompt.contains("src/auth.rs") && prompt.contains("src/ui.rs"), "{prompt}");
+    assert!(prompt.contains("acme/widgets#3"), "{prompt}");
+    let blocked_exec = s.h.exec_as("launch:1", "async () => wf.issue({ url: 'acme/widgets#3', track: 'pwn' })").await;
+    assert!(blocked_exec.is_error, "triage scratch thread must not run t3cm execute ops: {}", blocked_exec.text);
+    assert!(blocked_exec.text.contains("read-only"), "{}", blocked_exec.text);
+    let blocked_anon =
+        s.h.exec("async () => wf.fileIssues({ repo: 'acme/widgets', issues: [{ title: 'pwn' }] })").await;
+    assert!(blocked_anon.is_error, "unidentified write must be blocked while triage is open: {}", blocked_anon.text);
+    assert!(blocked_anon.text.contains("caller thread id is required"), "{}", blocked_anon.text);
+    let blocked_anon_tool = s.h.exec("async () => tools.call('t3.t3_thread_list', {})").await;
+    assert!(
+        blocked_anon_tool.is_error,
+        "unidentified tool call must be blocked while triage is open: {}",
+        blocked_anon_tool.text
+    );
+    assert!(blocked_anon_tool.text.contains("caller thread id is required"), "{}", blocked_anon_tool.text);
+    let other_ok = s.h.exec_as("t-other", "async () => { await mem.set('k', 1); return mem.get('k'); }").await;
+    assert!(!other_ok.is_error, "identified non-triage threads must keep working: {}", other_ok.text);
+    assert!(mutations().is_empty(), "starting triage must not write to GitHub: {:?}", mutations());
+
+    // Starting a second triage while one is running returns 409 Conflict.
+    let conflict = s
+        .http
+        .post(format!("{}/api/flow/triage", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), 409);
+
+    // Triage does not pollute regular asks, and is exposed on /api/state as flowTriage.
+    let st_running = s.get("/api/state").await;
+    assert_eq!(st_running["asks"], json!([]));
+    assert_eq!(st_running["flowTriage"]["id"], "t1");
+    assert_eq!(st_running["flowTriage"]["status"], "running");
+
+    // Complete the scratch thread with a fenced JSON proposal.
+    let proposal = r##"```json
+{
+  "summary": "Wire UI under auth epic, block #3 on #2, and set track/priority.",
+  "changes": [
+    {"kind": "blockedBy", "issue": "acme/widgets#3", "target": "#2", "reason": "UI calls login API"},
+    {"kind": "parent", "issue": "#3", "target": "#1", "reason": "Part of auth epic"},
+    {"kind": "track", "issue": "#3", "value": "auth", "reason": "Auth feature lane"},
+    {"kind": "priority", "issue": "#2", "value": "high", "reason": "Unblocks #3"}
+  ]
+}
+```"##;
+    s.h.fake.update("launch:1", json!({"status": "completed"}));
+    s.h.fake.set_items("launch:1", vec![json!({"type": "assistant_message", "position": 1, "text": proposal})]);
+    assert!(!s.h.app.wf.check_asks(None).await.unwrap());
+
+    // Scratch thread is archived, proposals are ready, and STILL zero writes hit GitHub!
+    assert_eq!(s.h.fake.organized(), vec![json!({"threadId": "launch:1", "action": "archive"})]);
+    assert!(mutations().is_empty(), "completing triage must not write to GitHub: {:?}", mutations());
+    let st_ready = s.get("/api/state").await;
+    assert_eq!(st_ready["flowTriage"]["status"], "ready");
+    assert_eq!(st_ready["flowTriage"]["counts"]["pending"], 4);
+
+    // Skip c3 (track) -> still zero GitHub writes.
+    let skip_resp = s
+        .http
+        .post(format!("{}/api/flow/triage/{tid}/dismiss", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({"changeIds": ["c3"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(skip_resp.status(), 200);
+    assert!(mutations().is_empty(), "skipping a change must not write to GitHub");
+
+    // Confirm c1 (blockedBy #3 -> #2) alone.
+    let apply1: Value = s
+        .http
+        .post(format!("{}/api/flow/triage/{tid}/apply", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({"changeIds": ["c1"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(apply1["ok"], true, "{apply1}");
+    assert_eq!(apply1["applied"], 1, "{apply1}");
+    assert_eq!(mutations(), vec!["addBlockedBy"], "only confirmed change writes to GitHub");
+
+    // Confirm all remaining pending changes (c2 parent, c4 priority; c3 stays skipped).
+    let apply_rest: Value = s
+        .http
+        .post(format!("{}/api/flow/triage/{tid}/apply", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({"all": true}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(apply_rest["ok"], true, "{apply_rest}");
+    assert_eq!(apply_rest["applied"], 2, "{apply_rest}");
+    assert_eq!(apply_rest["triage"]["counts"]["pending"], 0, "{apply_rest}");
+    assert_eq!(apply_rest["triage"]["counts"]["dismissed"], 1, "{apply_rest}");
+    let nodes = apply_rest["flow"]["graph"]["nodes"].as_array().unwrap();
+    let n3 = nodes.iter().find(|n| n["id"] == "acme/widgets#3").unwrap();
+    let n2 = nodes.iter().find(|n| n["id"] == "acme/widgets#2").unwrap();
+    assert_eq!(n3["parent"], "acme/widgets#1", "{n3}");
+    assert_eq!(n3["blockedBy"], json!(["acme/widgets#2"]), "{n3}");
+    assert!(
+        !n3["labels"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().starts_with("track:")),
+        "skipped track change must never be written: {n3}"
+    );
+    assert_eq!(n2["priority"], "high", "{n2}");
+
+    // Dismiss the triage panel -> flowTriage clears to null; unknown id returns 404.
+    let dis_all = s
+        .http
+        .post(format!("{}/api/flow/triage/{tid}/dismiss", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({"all": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dis_all.status(), 200);
+    assert_eq!(s.get("/api/state").await["flowTriage"], Value::Null);
+
+    let missing = s
+        .http
+        .post(format!("{}/api/flow/triage/t999/dismiss", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({"all": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
+
+    // Partial mutation refresh: if attaching a replacement label succeeds but removing the old one fails,
+    // apply_flow_triage still refreshes and returns the updated graph.
+    let start2: Value = s
+        .http
+        .post(format!("{}/api/flow/triage", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(start2["id"], "t2");
+    s.h.fake.update("launch:2", json!({"status": "completed"}));
+    s.h.fake.set_items(
+        "launch:2",
+        vec![json!({
+            "type": "assistant_message",
+            "position": 1,
+            "text": r#"{"summary":"Adjust priority","changes":[{"kind":"priority","issue":"acme/widgets#2","value":"low","reason":"Lower urgency"}]}"#
+        })],
+    );
+    assert!(!s.h.app.wf.check_asks(None).await.unwrap());
+    s.h.github.fail_operation("removeLabelsFromLabelable", "remove refused");
+    let partial: Value = s
+        .http
+        .post(format!("{}/api/flow/triage/t2/apply", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({"all": true}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(partial["ok"], false, "{partial}");
+    assert_eq!(partial["failed"], 1, "{partial}");
+    assert!(partial["flow"]["graph"]["nodes"].is_array(), "partial mutation must still refresh graph: {partial}");
+    let n2_partial =
+        partial["flow"]["graph"]["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "acme/widgets#2").unwrap();
+    assert!(
+        n2_partial["labels"].as_array().unwrap().iter().any(|l| l == "priority: low"),
+        "attached label should appear in refreshed graph: {n2_partial}"
+    );
+
+    // Dismissing a running triage while check_asks awaits t3_thread_read must not resurrect the canceled run.
+    let start3: Value = s
+        .http
+        .post(format!("{}/api/flow/triage", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(start3["id"], "t3");
+    s.h.fake.update("launch:3", json!({"status": "completed"}));
+    s.h.fake.set_items(
+        "launch:3",
+        vec![json!({"type": "assistant_message", "position": 1, "text": r#"{"summary":"Should stay dismissed","changes":[]}"#})],
+    );
+    s.h.fake.set_delay(std::time::Duration::from_millis(60));
+    let http = s.http.clone();
+    let dismiss_url = format!("{}/api/flow/triage/t3/dismiss", s.base);
+    let origin = s.base.clone();
+    let csrf = s.csrf().to_string();
+    let (poll_res, dismiss_res) = tokio::join!(s.h.app.wf.check_asks(None), async move {
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        http.post(dismiss_url)
+            .header("Origin", origin)
+            .header("X-T3CM-CSRF", csrf)
+            .json(&json!({"all": true}))
+            .send()
+            .await
+            .unwrap()
+    });
+    poll_res.unwrap();
+    assert_eq!(dismiss_res.status(), 200);
+    s.h.fake.set_delay(std::time::Duration::ZERO);
+    assert_eq!(
+        s.get("/api/state").await["flowTriage"],
+        Value::Null,
+        "canceled triage must not reappear after in-flight poll"
+    );
+    let (open3, data3) = s.h.app.store.triage_get(3).unwrap().unwrap();
+    assert!(!open3, "{data3}");
+    assert_eq!(data3["status"], "dismissed", "{data3}");
+    assert!(data3["settledAt"].is_string(), "{data3}");
+
+    // Timeout while scratch thread is still running: interrupt fails -> row closes as timed out
+    // with threadStopped=false, anonymous write/tool guard STAYS active, and the next poll retries
+    // t3_thread_interrupt until confirmed stopped (then unlocks anonymous calls).
+    let start4: Value = s
+        .http
+        .post(format!("{}/api/flow/triage", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(start4["id"], "t4");
+    s.h.fake.fail_interrupt(true);
+    s.h.clock.set(&at(120));
+    assert!(s.h.app.wf.check_asks(None).await.unwrap(), "unstopped timed-out triage must keep polling");
+    let (open4, data4) = s.h.app.store.triage_get(4).unwrap().unwrap();
+    assert!(!open4, "{data4}");
+    assert_eq!(data4["status"], "timed out", "{data4}");
+    assert_eq!(data4["threadStopped"], false, "{data4}");
+    let still_blocked = s.h.exec("async () => tools.call('t3.t3_thread_list', {})").await;
+    assert!(
+        still_blocked.is_error,
+        "anonymous tool call must stay blocked after timeout until scratch thread is stopped: {}",
+        still_blocked.text
+    );
+    assert!(still_blocked.text.contains("caller thread id is required"), "{}", still_blocked.text);
+    s.h.fake.fail_interrupt(false);
+    assert!(!s.h.app.wf.check_asks(None).await.unwrap(), "retry should stop thread and finish polling");
+    assert!(
+        s.h.fake.interrupted().iter().any(|v| v["threadId"] == "launch:4" && v["stop"] == true),
+        "timed-out scratch thread must be interrupted: {:?}",
+        s.h.fake.interrupted()
+    );
+    let (_, data4_after) = s.h.app.store.triage_get(4).unwrap().unwrap();
+    assert_eq!(data4_after["threadStopped"], true, "{data4_after}");
+    let unlocked = s.h.exec("async () => tools.call('t3.t3_thread_list', {})").await;
+    assert!(!unlocked.is_error, "anonymous calls unlock once thread is confirmed stopped: {}", unlocked.text);
+
+    // Pending background tasks on a "completed" triage thread keep the row open and the guard active
+    // until T3 reports no pending background tasks or thread waits.
+    let start5: Value = s
+        .http
+        .post(format!("{}/api/flow/triage", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(start5["id"], "t5");
+    s.h.fake.update("launch:5", json!({"status": "completed", "pendingBackgroundTasks": ["bg-1"]}));
+    s.h.fake.set_items(
+        "launch:5",
+        vec![json!({"type": "assistant_message", "position": 1, "text": r#"{"summary":"Done","changes":[]}"#})],
+    );
+    assert!(s.h.app.wf.check_asks(None).await.unwrap(), "pendingBackgroundTasks must keep triage open");
+    let (open5, data5) = s.h.app.store.triage_get(5).unwrap().unwrap();
+    assert!(open5, "{data5}");
+    assert_eq!(data5["threadStopped"], false, "{data5}");
+    let bg_blocked = s.h.exec("async () => tools.call('t3.t3_thread_list', {})").await;
+    assert!(bg_blocked.is_error && bg_blocked.text.contains("caller thread id is required"), "{}", bg_blocked.text);
+    // An unrecognized status also keeps the triage row open and the anonymous write guard active.
+    s.h.fake.update("launch:5", json!({"status": "streaming", "pendingBackgroundTasks": []}));
+    assert!(s.h.app.wf.check_asks(None).await.unwrap(), "unrecognized status must keep triage open");
+    let (open5_unk, data5_unk) = s.h.app.store.triage_get(5).unwrap().unwrap();
+    assert!(open5_unk, "{data5_unk}");
+    assert_eq!(data5_unk["threadStopped"], false, "{data5_unk}");
+    let unk_blocked = s.h.exec("async () => tools.call('t3.t3_thread_list', {})").await;
+    assert!(unk_blocked.is_error && unk_blocked.text.contains("caller thread id is required"), "{}", unk_blocked.text);
+    s.h.fake.update("launch:5", json!({"status": "completed", "pendingBackgroundTasks": []}));
+    assert!(!s.h.app.wf.check_asks(None).await.unwrap());
+    let (open5_after, data5_after) = s.h.app.store.triage_get(5).unwrap().unwrap();
+    assert!(!open5_after, "{data5_after}");
+    assert_eq!(data5_after["threadStopped"], true, "{data5_after}");
+    assert!(!s.h.exec("async () => tools.call('t3.t3_thread_list', {})").await.is_error);
+}
+
+#[tokio::test]
+async fn board_inspector_dag_editing_and_triage_dag_ui_flow() {
+    let h = flowing(4);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    issue(&h, REPO, 3, &[FLOW], 3);
+    h.github.set_body(REPO, 2, "## Flow\n- Blocked by: #1\n");
+    let (html, st, mut before_view) = panel_page(h).await;
+    before_view["graph"]["edges"].as_array_mut().unwrap().push(json!({
+        "from": "acme/widgets#2",
+        "to": "acme/widgets#3",
+        "kind": "fileConflict",
+        "source": "code",
+        "files": ["src/shared.rs"]
+    }));
+
+    let mut after_fc_confirm = before_view.clone();
+    after_fc_confirm["graph"]["edges"] = json!([
+        {"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy", "source": "body"},
+        {"from": "acme/widgets#3", "to": "acme/widgets#2", "kind": "blockedBy", "source": "github"}
+    ]);
+    let mut after_confirm = before_view.clone();
+    after_confirm["graph"]["edges"] = json!([
+        {"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy", "source": "github"},
+        {"from": "acme/widgets#3", "to": "acme/widgets#2", "kind": "blockedBy", "source": "github"}
+    ]);
+    let mut after_dismiss = before_view.clone();
+    after_dismiss["graph"]["edges"] = json!([
+        {"from": "acme/widgets#3", "to": "acme/widgets#2", "kind": "blockedBy", "source": "github"}
+    ]);
+    after_dismiss["graph"]["dismissedEdges"] = json!([
+        {"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy", "at": "2026-10-18T10:00:00Z"}
+    ]);
+    let mut after_track = after_confirm.clone();
+    after_track["graph"]["nodes"][1]["track"] = json!("auth");
+    after_track["graph"]["nodes"][1]["trackBy"] = json!("label");
+    after_track["graph"]["nodes"][1]["labels"] = json!(["flow", "track: auth"]);
+    after_track["graph"]["nodes"][2]["priority"] = json!("medium");
+    after_track["graph"]["nodes"][2]["labels"] = json!(["flow", "priority: medium"]);
+    let mut after_prio = after_track.clone();
+    after_prio["graph"]["nodes"][1]["priority"] = json!("high");
+    after_prio["graph"]["nodes"][1]["labels"] = json!(["flow", "track: auth", "priority: high"]);
+
+    let triage_running = json!({
+        "id": "t1", "seq": 1, "status": "running", "issueCount": 3, "repos": [REPO],
+        "changes": [], "counts": {"total": 0, "pending": 0, "applied": 0, "dismissed": 0, "failed": 0}
+    });
+    let triage_ready = json!({
+        "id": "t1", "seq": 1, "status": "ready", "issueCount": 3, "repos": [REPO],
+        "summary": "Link #3 to #2 and tag track.",
+        "changes": [
+            {"id": "c1", "kind": "blockedBy", "issue": "acme/widgets#3", "issueLabel": "widgets#3",
+             "target": "acme/widgets#2", "targetLabel": "widgets#2", "reason": "UI needs API", "status": "pending"},
+            {"id": "c2", "kind": "track", "issue": "acme/widgets#3", "issueLabel": "widgets#3",
+             "value": "auth", "reason": "Auth lane", "status": "pending"}
+        ],
+        "counts": {"total": 2, "pending": 2, "applied": 0, "dismissed": 0, "failed": 0}
+    });
+    let triage_applied = json!({
+        "id": "t1", "seq": 1, "status": "ready", "issueCount": 3, "repos": [REPO],
+        "summary": "Link #3 to #2 and tag track.",
+        "changes": [
+            {"id": "c1", "kind": "blockedBy", "issue": "acme/widgets#3", "issueLabel": "widgets#3",
+             "target": "acme/widgets#2", "targetLabel": "widgets#2", "reason": "UI needs API", "status": "applied"},
+            {"id": "c2", "kind": "track", "issue": "acme/widgets#3", "issueLabel": "widgets#3",
+             "value": "auth", "reason": "Auth lane", "status": "dismissed"}
+        ],
+        "counts": {"total": 2, "pending": 0, "applied": 1, "dismissed": 1, "failed": 0}
+    });
+
+    let r = panel(
+        &html,
+        &st,
+        &before_view,
+        &format!(
+            r##"{GRAPH}
+const afterConfirm = {after_confirm};
+const afterFcConfirm = {after_fc_confirm};
+const afterDismiss = {after_dismiss};
+const afterTrack = {after_track};
+const afterPrio = {after_prio};
+const triageRunning = {triage_running};
+const triageReady = {triage_ready};
+const triageApplied = {triage_applied};
+const reqs = [];
+let resolveClearPrio = null;
+fetchReply = (url, opts) => {{
+  const payload = opts && opts.body ? JSON.parse(opts.body) : null;
+  if (url !== "/api/flow") reqs.push({{ url, method: opts && opts.method, payload }});
+  if (url === "/api/flow") return reply(200, view);
+  if (url === "/api/flow/edge") {{
+    if (payload.action === "dismiss") return reply(200, {{ ok: true, action: "dismiss", from: payload.from, to: payload.to, kind: payload.kind, status: "dismissed", flow: afterDismiss }});
+    if (payload.action === "restore") return reply(200, {{ ok: true, action: "restore", from: payload.from, to: payload.to, kind: payload.kind, status: "restored", flow: afterFcConfirm }});
+    if (payload.action === "confirm" && payload.kind === "fileConflict") return reply(200, {{ ok: true, action: "confirm", from: payload.from, to: payload.to, kind: payload.kind, status: "linked", flow: afterFcConfirm }});
+    if (payload.action === "confirm") return reply(200, {{ ok: true, action: "confirm", from: payload.from, to: payload.to, kind: payload.kind, status: "linked", flow: afterConfirm }});
+    if (payload.action === "add" && payload.kind === "parent" && !payload.replaceParent) {{
+      return reply(200, {{ ok: false, action: "add", from: payload.from, to: payload.to, kind: "parent", status: "error", conflict: true, existingParent: "acme/widgets#1", error: "already has a parent", flow: afterConfirm }});
+    }}
+    return reply(200, {{ ok: true, action: payload.action, from: payload.from, to: payload.to, kind: payload.kind, status: "linked", flow: afterConfirm }});
+  }}
+  if (url === "/api/flow/issue") {{
+    const nextFlow = "priority" in payload ? (payload.priority ? afterPrio : afterTrack) : afterTrack;
+    const body = {{ ok: true, issue: payload.issue, track: payload.track, priority: payload.priority, labels: [], errors: [], flow: nextFlow }};
+    if ("priority" in payload && payload.priority === null) {{
+      return new Promise((res) => {{ resolveClearPrio = () => res(reply(200, body)); }});
+    }}
+    return reply(200, body);
+  }}
+  if (url === "/api/flow/triage") return reply(200, triageRunning);
+  if (url === "/api/flow/triage/t1/dismiss") return reply(200, {{ ok: true, dismissed: !!payload.all, id: "t1", triage: payload.all ? null : triageReady }});
+  if (url === "/api/flow/triage/t1/apply") return reply(200, {{ ok: true, applied: 1, alreadySet: 0, failed: 0, results: [], triage: triageApplied, flow: afterTrack }});
+  return new Promise(() => {{}});
+}};
+emitState(base);
+await tick();
+selectTab("graph");
+
+// Open inspector on #2: confirm icon-only actions don't pollute .dr-dep textContent!
+btn("acme/widgets#2").dispatch("click");
+const depTextBefore = deps();
+const fcFrom2 = [q('#drawer [data-edge-act="confirm"][data-kind="fileConflict"]').dataset.from, q('#drawer [data-edge-act="confirm"][data-kind="fileConflict"]').dataset.to];
+// Open #3 and confirm fileConflict proposes the exact same blocker direction before mutation.
+btn("acme/widgets#3").dispatch("click");
+const fcFrom3 = [q('#drawer [data-edge-act="confirm"][data-kind="fileConflict"]').dataset.from, q('#drawer [data-edge-act="confirm"][data-kind="fileConflict"]').dataset.to];
+const reqsBeforeFcPreview = reqs.length;
+q('#drawer [data-edge-act="confirm"][data-kind="fileConflict"]').dispatch("click");
+const reqsAfterFcPreview = reqs.length;
+const fcPreviewText = dp("deps-msg").textContent;
+q('#drawer [data-edit-btn="flip-fc"]').dispatch("click");
+const fcFlippedText = dp("deps-msg").textContent;
+q('#drawer [data-edit-btn="flip-fc"]').dispatch("click");
+q('#drawer [data-edit-btn="confirm-fc"]').dispatch("click");
+await tick();
+
+// Switch back to #2 for body edge dismiss/restore/confirm, parent conflict, track & priority editing.
+btn("acme/widgets#2").dispatch("click");
+q('#drawer [data-edge-act="dismiss"][data-kind="blockedBy"]').dispatch("click");
+await tick();
+const hasRestore = !!q('#drawer [data-edge-act="restore"]');
+q('#drawer [data-edge-act="restore"]').dispatch("click");
+await tick();
+// Confirm body edge -> native github edge with Remove button.
+q('#drawer [data-edge-act="confirm"][data-kind="blockedBy"]').dispatch("click");
+await tick();
+const hasRemove = !!q('#drawer [data-edge-act="remove"]');
+// Parent conflict -> Replace parent retry button.
+q('#drawer [data-edit="parent"]').value = "#3";
+q('#drawer [data-edit-form="parent"]').dispatch("submit");
+await tick();
+const hasReplace = !!q('#drawer [data-edit-btn="replace-parent"]');
+q('#drawer [data-edit-btn="replace-parent"]').dispatch("click");
+await tick();
+// Track and priority controls save and clear through /api/flow/issue.
+q('#drawer [data-edit="track"]').value = "auth";
+q('#drawer [data-edit-form="track"]').dispatch("submit");
+await tick();
+const laneAfterTrack = dp("deps-lane").textContent;
+q('#drawer [data-edit="priority"]').value = "high";
+q('#drawer [data-edit-form="priority"]').dispatch("submit");
+await tick();
+const prioAfterSet = dp("prio").textContent;
+// Clear priority on #2, switch to #3 BEFORE response arrives: #3's priority select must stay "medium"!
+q('#drawer [data-edit-btn="priority-clear"]').dispatch("click");
+btn("acme/widgets#3").dispatch("click");
+resolveClearPrio();
+await tick();
+const prioOn3AfterClear2 = q('#drawer [data-edit="priority"]').value;
+btn("acme/widgets#2").dispatch("click");
+const prioHiddenAfterClear = dp("prio").hidden;
+
+// Triage DAG button -> running -> SSE ready -> Skip c2 -> Confirm all (only writes after click!).
+q("#graph-triage").dispatch("click");
+await tick();
+const runningTitle = q("#graph-triage-box .gtriage-title").textContent;
+const reqCountBeforeReady = reqs.length;
+emitState({{ ...base, flowTriage: triageReady }});
+await tick();
+const readyRows = document.querySelectorAll("#graph-triage-box .gtriage-row").length;
+const reqCountAfterReady = reqs.length;
+q('#graph-triage-box [data-triage-act="dismiss"][data-change-id="c2"]').dispatch("click");
+await tick();
+q("#graph-triage-apply-all").dispatch("click");
+await tick();
+const finalStatuses = document.querySelectorAll("#graph-triage-box .gtriage-row").map((el) => el.dataset.status);
+return {{ depTextBefore, fcFrom2, fcFrom3, reqsBeforeFcPreview, reqsAfterFcPreview, fcPreviewText, fcFlippedText, hasRestore, hasRemove, hasReplace, laneAfterTrack, prioAfterSet, prioOn3AfterClear2, prioHiddenAfterClear, runningTitle, reqCountBeforeReady, reqCountAfterReady, readyRows, finalStatuses, reqs }};
+"##
+        ),
+    );
+
+    assert_eq!(
+        r["depTextBefore"][0],
+        json!("Blocked bywidgets#1readybody"),
+        "icon buttons must keep .dr-dep text clean: {r}"
+    );
+    assert_eq!(r["fcFrom2"], json!(["acme/widgets#3", "acme/widgets#2"]), "{r}");
+    assert_eq!(r["fcFrom3"], r["fcFrom2"], "fileConflict direction must match from both endpoints: {r}");
+    assert_eq!(
+        r["reqsBeforeFcPreview"], r["reqsAfterFcPreview"],
+        "clicking fileConflict confirm must preview direction first: {r}"
+    );
+    assert!(r["fcPreviewText"].as_str().unwrap().contains("acme/widgets#3 blocked by acme/widgets#2"), "{r}");
+    assert!(r["fcFlippedText"].as_str().unwrap().contains("acme/widgets#2 blocked by acme/widgets#3"), "{r}");
+    assert_eq!(r["hasRestore"], true, "{r}");
+    assert_eq!(r["hasRemove"], true, "{r}");
+    assert_eq!(r["hasReplace"], true, "{r}");
+    assert!(r["laneAfterTrack"].as_str().unwrap().contains("Lane auth"), "{r}");
+    assert_eq!(r["prioAfterSet"], "priority: high", "{r}");
+    assert_eq!(
+        r["prioOn3AfterClear2"], "medium",
+        "clearing #2 priority then switching to #3 must not blank #3 select: {r}"
+    );
+    assert_eq!(r["prioHiddenAfterClear"], true, "{r}");
+    assert!(r["runningTitle"].as_str().unwrap().contains("Triaging DAG (3 open issues)"), "{r}");
+    assert_eq!(r["readyRows"], 2, "{r}");
+    assert_eq!(
+        r["reqCountBeforeReady"], r["reqCountAfterReady"],
+        "receiving ready triage proposals must not trigger any write request: {r}"
+    );
+    assert_eq!(r["finalStatuses"], json!(["applied", "dismissed"]), "{r}");
+    let reqs = r["reqs"].as_array().unwrap();
+    assert!(reqs.iter().any(|x| x["url"] == "/api/flow/edge"
+        && x["payload"]["action"] == "confirm"
+        && x["payload"]["kind"] == "fileConflict"
+        && x["payload"]["from"] == "acme/widgets#3"
+        && x["payload"]["to"] == "acme/widgets#2"));
+    assert!(reqs.iter().any(|x| x["url"] == "/api/flow/edge" && x["payload"]["action"] == "dismiss"));
+    assert!(reqs.iter().any(|x| x["url"] == "/api/flow/edge" && x["payload"]["action"] == "restore"));
+    assert!(reqs.iter().any(|x| x["url"] == "/api/flow/edge"
+        && x["payload"]["action"] == "confirm"
+        && x["payload"]["kind"] == "blockedBy"));
+    assert!(reqs.iter().any(|x| x["url"] == "/api/flow/edge" && x["payload"]["replaceParent"] == true));
+    assert!(reqs.iter().any(|x| x["url"] == "/api/flow/issue" && x["payload"]["track"] == "auth"));
+    assert!(reqs.iter().any(|x| x["url"] == "/api/flow/issue" && x["payload"]["priority"] == "high"));
+    assert!(reqs.iter().any(|x| x["url"] == "/api/flow/issue" && x["payload"]["priority"].is_null()));
+    assert!(reqs.iter().any(|x| x["url"] == "/api/flow/triage"));
+    assert!(
+        reqs.iter().any(|x| x["url"] == "/api/flow/triage/t1/dismiss" && x["payload"]["changeIds"] == json!(["c2"]))
+    );
+    assert!(reqs.iter().any(|x| x["url"] == "/api/flow/triage/t1/apply" && x["payload"]["all"] == true));
+}

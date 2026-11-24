@@ -1150,6 +1150,38 @@ kbd { font-family: var(--mono); font-size: 12px; }
 .dr-dep .linkish { max-width: 100%; }
 .dr-dep .gone-dep { color: var(--fg-2); }
 .dr-dep .dep-detail { color: var(--fg-2); font-size: 11px; line-height: 15px; overflow-wrap: anywhere; }
+.dr-dep .dep-act {
+  flex: none; width: 20px; height: 20px; min-height: 20px; padding: 0; border-radius: 3px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.dr-dep .dep-act::before {
+  content: ""; width: 12px; height: 12px; background: currentColor;
+  -webkit-mask: var(--ic) center / contain no-repeat; mask: var(--ic) center / contain no-repeat;
+}
+.dr-dep .dep-act-confirm { color: var(--done); --ic: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5l3.2 3.2L13 4.8' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+.dr-dep .dep-act-dismiss, .dr-dep .dep-act-remove { color: var(--fg-2); --ic: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 4l8 8M12 4l-8 8' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.dr-dep .dep-act-dismiss:hover, .dr-dep .dep-act-remove:hover { color: var(--fail); }
+.dr-edit { display: grid; gap: 8px; padding-top: 8px; border-top: 1px solid var(--border); min-width: 0; }
+.dr-edit-row { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 4px 8px; align-items: center; font-size: 12px; line-height: 16px; }
+.dr-edit-row label { color: var(--fg-2); }
+.dr-edit-ctl { display: flex; gap: 4px; min-width: 0; align-items: center; }
+.dr-edit-ctl input, .dr-edit-ctl select {
+  flex: 1 1 auto; min-width: 0; height: 26px; padding: 0 8px; border: 1px solid var(--border-strong);
+  border-radius: 4px; background: var(--surface-2); color: var(--fg); font: inherit; font-size: 12px;
+}
+.dr-edit-ctl .btn { flex: none; height: 26px; min-height: 26px; padding: 0 8px; font-size: 12px; line-height: 16px; }
+.dr-edit-msg {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 4px;
+  font-size: 12px; line-height: 16px;
+}
+.dr-edit-msg.ok { background: var(--surface-2); color: var(--done); border: 1px solid var(--border); }
+.dr-edit-msg.err { background: var(--fail-soft); color: var(--fail); border: 1px solid var(--fail); }
+.dr-edit-msg .btn { height: 22px; min-height: 22px; padding: 0 8px; font-size: 11px; line-height: 15px; }
+.dr-dismissed { display: grid; gap: 4px; padding-top: 6px; border-top: 1px dashed var(--border); font-size: 12px; line-height: 16px; }
+.dr-dismissed-h { color: var(--fg-2); font-weight: 600; }
+.dr-dismissed ul { display: grid; gap: 4px; }
+.dr-dismissed li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--fg-2); }
+.dr-dismissed .btn { height: 22px; min-height: 22px; padding: 0 8px; font-size: 11px; line-height: 15px; }
 .dr-lane { font-size: 13px; line-height: 18px; color: var(--fg-2); overflow-wrap: anywhere; }
 .dr-warns {
   display: grid; gap: 4px; padding: 8px 10px; border-radius: 4px;
@@ -1161,9 +1193,32 @@ kbd { font-family: var(--mono); font-size: 12px; }
   border-bottom: 1px solid var(--border); background: var(--surface-2); font-size: 12px; line-height: 16px; color: var(--fg-2);
 }
 .gsub .gnote { flex: 1 1 100%; color: var(--fg-2); }
-.gsync { margin-left: auto; height: 24px; padding: 0 10px; font-size: 12px; line-height: 16px; }
-.gclear { margin-left: auto; height: 24px; font-size: 12px; line-height: 16px; }
-.gclear + .gsync { margin-left: 0; }
+.gacts { margin-left: auto; display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.gclear { height: 24px; font-size: 12px; line-height: 16px; }
+.gsync, .gtriage { height: 24px; padding: 0 10px; font-size: 12px; line-height: 16px; }
+.gtriage-box {
+  flex: none; padding: 10px 16px; border-bottom: 1px solid var(--border-strong); background: var(--surface-2);
+  font-size: 12px; line-height: 16px; display: grid; gap: 8px;
+}
+.gtriage-box.err { border-bottom-color: var(--fail); background: var(--fail-soft); color: var(--fail); }
+.gtriage-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.gtriage-title { font-weight: 600; color: var(--fg); }
+.gtriage-box.err .gtriage-title { color: var(--fail); }
+.gtriage-acts { margin-left: auto; display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.gtriage-acts .btn, .gtriage-row .btn { height: 24px; min-height: 24px; padding: 0 8px; font-size: 12px; line-height: 16px; }
+.gtriage-summary { color: var(--fg-2); overflow-wrap: anywhere; }
+.gtriage-list { display: grid; gap: 6px; max-height: 280px; overflow-y: auto; }
+.gtriage-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--surface);
+}
+.gtriage-row[data-status="applied"], .gtriage-row[data-status="alreadySet"] { opacity: 0.78; }
+.gtriage-row[data-status="dismissed"] { opacity: 0.6; }
+.gtriage-row[data-status="error"] { border-color: var(--fail); background: var(--fail-soft); }
+.gtriage-diff { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; color: var(--fg); }
+.gtriage-reason { flex: 1 1 180px; color: var(--fg-2); overflow-wrap: anywhere; }
+.gtriage-err { flex: 1 1 100%; color: var(--fail); overflow-wrap: anywhere; }
+.gtriage-row-acts { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; }
 .gwarn {
   flex: none; padding: 8px 16px; border-bottom: 1px solid var(--fail);
   background: var(--fail-soft); color: var(--fail); font-size: 12px; line-height: 16px;
@@ -1526,12 +1581,16 @@ kbd { font-family: var(--mono); font-size: 12px; }
             <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-stack" d="M1 4h20" stroke-width="2"/></svg>PR stack</span>
             <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-conflict" d="M1 4h20" stroke-width="1.75"/></svg>file conflict</span>
             <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-codedep" d="M1 4h20" stroke-width="1.75"/></svg>code dep</span>
-            <button class="btn quiet gclear" type="button" id="graph-clear" hidden>Clear trace</button>
-            <button class="btn gsync" type="button" id="graph-sync" hidden></button>
+            <span class="gacts">
+              <button class="btn quiet gclear" type="button" id="graph-clear" hidden>Clear trace</button>
+              <button class="btn gsync" type="button" id="graph-sync" hidden></button>
+              <button class="btn gtriage" type="button" id="graph-triage" hidden>Triage DAG</button>
+            </span>
             <span class="gnote" id="graph-note"></span>
           </div>
           <div class="gwarn" id="graph-warn" role="status" hidden></div>
           <div class="gsync-res" id="graph-sync-res" role="status" hidden></div>
+          <section class="gtriage-box" id="graph-triage-box" aria-label="DAG triage proposals" hidden></section>
           <div class="scroll gscroll" id="gscroll" role="group" aria-label="Dependency graph" aria-describedby="graph-note"></div>
           <p class="empty" id="graph-empty" hidden>No open tickets or issues to draw.</p>
         </div>
@@ -4610,7 +4669,7 @@ function flowDue(s) {
 
 async function loadFlow() {
   if (!state || !flowNeeded(state)) return;
-  if (flow.busy || graph.syncing) { flow.again = true; return; }
+  if (flow.busy || graph.syncing || graph.editing) { flow.again = true; return; }
   flow.busy = true;
   const seq = ++flow.seq;
   const btn = $("flow-refresh");
@@ -4620,7 +4679,7 @@ async function loadFlow() {
     let data = null;
     try { data = await r.json(); } catch (_) { data = null; }
     if (handleAuthFailure(r.status, data, false)) return;
-    if (seq !== flow.seq || graph.syncing) return;
+    if (seq !== flow.seq || graph.syncing || graph.editing) return;
     if (!r.ok || !data) throw new Error((data && data.error) || "HTTP " + r.status);
     if (!state || !flowNeeded(state)) return;
     $("flow-err").hidden = true;
@@ -4628,7 +4687,7 @@ async function loadFlow() {
     paintFlow(data);
     paintGraph();
   } catch (e) {
-    if (seq !== flow.seq || graph.syncing) return;
+    if (seq !== flow.seq || graph.syncing || graph.editing) return;
     if (!state || !flowNeeded(state)) return;
     if (state.flow) {
       errFrom.set("flow-err", btn);
@@ -4641,7 +4700,7 @@ async function loadFlow() {
   } finally {
     flow.busy = false;
     setAttr(btn, "aria-disabled", null);
-    if (flow.again && !graph.syncing) { flow.again = false; loadFlow(); }
+    if (flow.again && !graph.syncing && !graph.editing) { flow.again = false; loadFlow(); }
   }
 }
 
@@ -4805,9 +4864,9 @@ function paintFlow(v) {
 const SVG_NS = "http://www.w3.org/2000/svg";
 const GEO = { W: 168, H: 62, GAP: 32, ROW: 10, PAD: 10, HEAD: 28, LANE_GAP: 8 };
 const TRACK_RANK = { label: 0, epic: 1, milestone: 2, repo: 2, component: 3, independent: 4, none: 5 };
-const graph = { mode: "tickets", pin: null, nodes: new Map(), byThread: new Map(), edges: [], order: [], sig: null, held: false,
+const graph = { mode: "tickets", pin: null, nodes: new Map(), byThread: new Map(), edges: [], dismissed: [], order: [], sig: null, held: false,
   pointer: false, hot: null, hover: null, focus: null, lead: null, active: null, btns: new Map(), paths: [], marks: null, lay: null,
-  syncing: false, syncCount: 0 };
+  syncing: false, syncCount: 0, editing: false, editFeedback: null, pendingConfirm: null, triageStarting: false, triageBusy: false, triageErr: null, triageLocal: null };
 
 function svgEl(tag, attrs, ...kids) {
   const el = document.createElementNS(SVG_NS, tag);
@@ -4829,7 +4888,7 @@ function graphData(s) {
     const nodes = (g.nodes || []).filter((n) => n && n.id);
     const open = s.tree.filter((t) => !t.done && t.thread);
     if (nodes.length || !open.length) {
-      return { mode: "flow", nodes, edges: (g.edges || []).filter((e) => e && e.from && e.to), warnings: g.warnings || [] };
+      return { mode: "flow", nodes, edges: (g.edges || []).filter((e) => e && e.from && e.to), warnings: g.warnings || [], dismissedEdges: g.dismissedEdges || [] };
     }
   }
   const nodes = s.tree.filter((t) => !t.done && t.thread).map((t) => {
@@ -4840,7 +4899,7 @@ function graphData(s) {
       blockedBy: [], unlocks: [], warnings: [], ticket: { thread: t.thread, link: t.link, status: t.status } };
   });
   const mode = flow.failed ? "error" : (g ? "tickets" : "loading");
-  return { mode, nodes, edges: [], warnings: [] };
+  return { mode, nodes, edges: [], warnings: [], dismissedEdges: [] };
 }
 
 function graphKey(n) {
@@ -5224,6 +5283,239 @@ function paintGraphSyncResult(res, errMsg) {
   announce(summary, hasErr);
 }
 
+function applyFlowRefresh(flowView) {
+  if (!flowView) return;
+  ++flow.seq;
+  flow.failed = false;
+  flow.shown = null;
+  graph.held = false;
+  graph.sig = null;
+  paintFlow(flowView);
+  if (state) { paintGraph(); if (dr.open) paintDrawer(); }
+}
+
+function activeTriage() {
+  if (state && state.flowTriage) return state.flowTriage;
+  return graph.triageLocal || null;
+}
+
+function paintGraphTriageBtn() {
+  const b = $("graph-triage");
+  if (!b) return;
+  const t = activeTriage();
+  const running = graph.triageStarting || (t && (t.status === "running" || t.status === "waiting"));
+  const show = graph.mode === "flow" && (graph.nodes.size > 0 || !!t);
+  b.hidden = !show;
+  if (!show) return;
+  setAttr(b, "aria-disabled", running ? "true" : null);
+  setText(b, running ? "Triaging DAG..." : "Triage DAG");
+}
+
+function triageChip(id, fallbackLabel) {
+  const n = graphNode(id);
+  const label = (n && n.label) || fallbackLabel || id;
+  if (n) {
+    return ticketChip(label, { onclick: () => drJump(id), name: "Inspect " + label + (n.title ? ": " + n.title : ""), class: "dep" });
+  }
+  return h("span", { class: "chip gone-dep", title: id }, label);
+}
+
+function triageChangeDiff(c) {
+  if (c.kind === "blockedBy") {
+    return h("span", { class: "gtriage-diff" }, triageChip(c.issue, c.issueLabel), " blocked by ", triageChip(c.target, c.targetLabel));
+  }
+  if (c.kind === "parent") {
+    const bits = [triageChip(c.issue, c.issueLabel), " parent: "];
+    if (c.current) bits.push(h("span", { class: "meta" }, graphEdgeLabel(c.current) + " -> "));
+    bits.push(triageChip(c.target, c.targetLabel));
+    return h("span", { class: "gtriage-diff" }, ...bits);
+  }
+  const label = c.kind === "priority" ? "priority" : "track";
+  const from = c.current ? c.current + " -> " : "";
+  return h("span", { class: "gtriage-diff" }, triageChip(c.issue, c.issueLabel), " " + label + ": " + from, h("code", {}, c.value || ""));
+}
+
+function paintGraphTriage() {
+  paintGraphTriageBtn();
+  const box = $("graph-triage-box");
+  if (!box) return;
+  const t = activeTriage();
+  if (!t && !graph.triageErr) {
+    box.hidden = true;
+    box.classList.remove("err");
+    box.replaceChildren();
+    return;
+  }
+  box.hidden = false;
+  if (!t && graph.triageErr) {
+    box.classList.add("err");
+    const closeBtn = h("button", { class: "btn quiet", type: "button", id: "graph-triage-dismiss" }, "Close");
+    closeBtn.addEventListener("click", () => { graph.triageErr = null; paintGraphTriage(); });
+    box.replaceChildren(h("div", { class: "gtriage-head" },
+      h("span", { class: "gtriage-title" }, "Could not start DAG triage: " + graph.triageErr),
+      h("span", { class: "gtriage-acts" }, closeBtn)));
+    return;
+  }
+  const isErr = t.status === "failed" || t.status === "gone" || t.status === "timed out" || t.status === "no answer" || !!graph.triageErr;
+  box.classList.toggle("err", isErr);
+  const busy = graph.triageBusy;
+  if (t.status === "running" || t.status === "waiting") {
+    const acts = [];
+    if (safeUrl(t.link)) {
+      acts.push(h("a", { class: "btn quiet", href: safeUrl(t.link), target: "_blank", rel: "noopener noreferrer" }, "Open thread"));
+    }
+    const cancel = h("button", { class: "btn quiet", type: "button", id: "graph-triage-cancel", "aria-disabled": busy ? "true" : null }, "Cancel");
+    cancel.addEventListener("click", () => dismissGraphTriage(t.id, { all: true }));
+    acts.push(cancel);
+    const n = t.issueCount || 0;
+    box.replaceChildren(
+      h("div", { class: "gtriage-head" },
+        h("span", { class: "gtriage-title" }, "Triaging DAG (" + n + " open " + (n === 1 ? "issue" : "issues") + ")..."),
+        h("span", { class: "gtriage-acts" }, ...acts)),
+      h("p", { class: "gtriage-summary" }, "Read-only analysis in progress. Nothing is written to GitHub until you confirm."));
+    return;
+  }
+  if (t.status !== "ready") {
+    const dismissBtn = h("button", { class: "btn quiet", type: "button", id: "graph-triage-dismiss", "aria-disabled": busy ? "true" : null }, "Dismiss");
+    dismissBtn.addEventListener("click", () => dismissGraphTriage(t.id, { all: true }));
+    box.replaceChildren(
+      h("div", { class: "gtriage-head" },
+        h("span", { class: "gtriage-title" }, "DAG triage " + (t.status || "failed")),
+        h("span", { class: "gtriage-acts" }, dismissBtn)),
+      h("p", { class: "gtriage-summary" }, t.error || "Triage did not produce reviewable proposals."));
+    return;
+  }
+  const changes = t.changes || [];
+  const counts = t.counts || {};
+  const pendingCount = counts.pending ?? changes.filter((c) => c.status === "pending").length;
+  const appliedCount = counts.applied ?? changes.filter((c) => c.status === "applied" || c.status === "alreadySet").length;
+  const acts = [];
+  if (pendingCount > 0) {
+    const applyAll = h("button", { class: "btn go", type: "button", id: "graph-triage-apply-all", "aria-disabled": busy ? "true" : null },
+      "Confirm all (" + pendingCount + ")");
+    applyAll.addEventListener("click", () => applyGraphTriage(t.id, { all: true }));
+    acts.push(applyAll);
+  }
+  const dismissBtn = h("button", { class: "btn quiet", type: "button", id: "graph-triage-dismiss", "aria-disabled": busy ? "true" : null }, "Dismiss");
+  dismissBtn.addEventListener("click", () => dismissGraphTriage(t.id, { all: true }));
+  acts.push(dismissBtn);
+
+  const metaParts = [];
+  if (pendingCount) metaParts.push(pendingCount + " pending");
+  if (appliedCount) metaParts.push(appliedCount + " confirmed");
+  const titleText = "Triage DAG proposals" + (metaParts.length ? " (" + metaParts.join(", ") + ")" : "");
+  const kids = [h("div", { class: "gtriage-head" }, h("span", { class: "gtriage-title" }, titleText), h("span", { class: "gtriage-acts" }, ...acts))];
+  if (t.summary) kids.push(h("p", { class: "gtriage-summary" }, t.summary));
+  if (graph.triageErr) kids.push(h("p", { class: "gtriage-err" }, graph.triageErr));
+  if (!changes.length) {
+    kids.push(h("p", { class: "meta" }, "No missing DAG links, tracks, or priorities proposed."));
+  } else {
+    if (pendingCount > 0) {
+      kids.push(h("p", { class: "meta" }, "Review each proposed change below. Nothing is written to GitHub until you confirm."));
+    }
+    const items = changes.map((c) => {
+      const rowActs = [];
+      if (c.status === "pending" || c.status === "error") {
+        if (c.conflict) {
+          const rep = h("button", { class: "btn", type: "button", "data-triage-act": "replace", "data-change-id": c.id, "aria-disabled": busy ? "true" : null }, "Replace parent");
+          rep.addEventListener("click", () => applyGraphTriage(t.id, { changeIds: [c.id], replaceParent: true }));
+          rowActs.push(rep);
+        }
+        const okBtn = h("button", { class: "btn", type: "button", "data-triage-act": "apply", "data-change-id": c.id, "aria-disabled": busy ? "true" : null }, "Confirm");
+        okBtn.addEventListener("click", () => applyGraphTriage(t.id, { changeIds: [c.id] }));
+        const skipBtn = h("button", { class: "btn quiet", type: "button", "data-triage-act": "dismiss", "data-change-id": c.id, "aria-disabled": busy ? "true" : null }, "Skip");
+        skipBtn.addEventListener("click", () => dismissGraphTriage(t.id, { changeIds: [c.id] }));
+        rowActs.push(okBtn, skipBtn);
+      } else if (c.status === "applied") {
+        rowActs.push(statusPill("done", "applied"));
+      } else if (c.status === "alreadySet") {
+        rowActs.push(statusPill("idle", "already set"));
+      } else if (c.status === "dismissed") {
+        rowActs.push(h("span", { class: "tag" }, "skipped"));
+      }
+      return h("li", { class: "gtriage-row", "data-change-id": c.id, "data-kind": c.kind, "data-status": c.status },
+        triageChangeDiff(c),
+        c.reason ? h("span", { class: "gtriage-reason" }, c.reason) : null,
+        h("span", { class: "gtriage-row-acts" }, ...rowActs),
+        c.error ? h("span", { class: "gtriage-err" },
+          (c.permission ? "[permission] " : c.conflict && c.existingParent ? "[conflict: parent " + graphEdgeLabel(c.existingParent) + "] " : "") + c.error) : null);
+    });
+    kids.push(h("ul", { class: "gtriage-list" }, ...items));
+  }
+  box.replaceChildren(...kids);
+}
+
+async function startGraphTriage() {
+  const b = $("graph-triage");
+  if (graph.triageStarting || !b || b.hidden || b.getAttribute("aria-disabled") === "true") return;
+  graph.triageStarting = true;
+  graph.triageErr = null;
+  paintGraphTriage();
+  try {
+    const res = await post("/api/flow/triage", {});
+    graph.triageLocal = res;
+    if (state) state.flowTriage = res;
+    announce("Started read-only DAG triage.");
+  } catch (e) {
+    graph.triageErr = e.message;
+    announce("Could not start DAG triage: " + e.message, true);
+  } finally {
+    graph.triageStarting = false;
+    paintGraphTriage();
+  }
+}
+
+async function applyGraphTriage(id, payload) {
+  if (graph.triageBusy) return;
+  graph.triageBusy = true;
+  graph.editing = true;
+  graph.triageErr = null;
+  ++flow.seq;
+  paintGraphTriage();
+  try {
+    const res = await post("/api/flow/triage/" + encodeURIComponent(id) + "/apply", payload);
+    if (res && res.triage) {
+      graph.triageLocal = res.triage;
+      if (state) state.flowTriage = res.triage;
+    }
+    graph.editing = false;
+    if (res && res.flow) applyFlowRefresh(res.flow);
+    if (res && res.refreshError) graph.triageErr = "Applied, but refreshing the graph failed: " + res.refreshError;
+    const msg = res && res.ok
+      ? "Confirmed " + ((res.applied || 0) + (res.alreadySet || 0)) + " triage " + (((res.applied || 0) + (res.alreadySet || 0)) === 1 ? "change" : "changes") + "."
+      : "Triage apply finished with " + ((res && res.failed) || 0) + " failed.";
+    announce(msg, !(res && res.ok));
+  } catch (e) {
+    graph.triageErr = e.message;
+    announce("Could not apply triage change: " + e.message, true);
+  } finally {
+    graph.triageBusy = false;
+    graph.editing = false;
+    paintGraphTriage();
+    if (!flow.busy && flow.again && !graph.syncing) { flow.again = false; loadFlow(); }
+  }
+}
+
+async function dismissGraphTriage(id, payload) {
+  if (graph.triageBusy) return;
+  graph.triageBusy = true;
+  graph.triageErr = null;
+  paintGraphTriage();
+  try {
+    const res = await post("/api/flow/triage/" + encodeURIComponent(id) + "/dismiss", payload);
+    const next = res && res.dismissed ? null : (res && res.triage) || null;
+    graph.triageLocal = next;
+    if (state) state.flowTriage = next;
+    announce(res && res.dismissed ? "Dismissed DAG triage." : "Skipped triage change.");
+  } catch (e) {
+    graph.triageErr = e.message;
+    announce("Could not dismiss triage: " + e.message, true);
+  } finally {
+    graph.triageBusy = false;
+    paintGraphTriage();
+  }
+}
+
 async function syncGraphLinks() {
   const b = $("graph-sync");
   if (graph.syncing || b.hidden || b.getAttribute("aria-disabled") === "true") return;
@@ -5237,13 +5529,7 @@ async function syncGraphLinks() {
     graph.syncing = false;
     graph.syncCount = 0;
     if (res && res.flow) {
-      ++flow.seq;
-      flow.failed = false;
-      flow.shown = null;
-      graph.held = false;
-      graph.sig = null;
-      paintFlow(res.flow);
-      if (state) { paintGraph(); if (dr.open) paintDrawer(); }
+      applyFlowRefresh(res.flow);
     } else {
       paintGraphSync(graph.edges);
     }
@@ -5256,7 +5542,7 @@ async function syncGraphLinks() {
   } finally {
     graph.syncing = false;
     graph.syncCount = 0;
-    if (!flow.busy && flow.again) { flow.again = false; loadFlow(); }
+    if (!flow.busy && flow.again && !graph.editing) { flow.again = false; loadFlow(); }
   }
 }
 
@@ -5266,6 +5552,7 @@ function paintGraph() {
   graph.mode = d.mode;
   graph.nodes = new Map(d.nodes.map((n) => [n.id, n]));
   graph.edges = d.edges;
+  graph.dismissed = d.dismissedEdges || [];
   graph.byThread = new Map(d.nodes.filter((n) => n.ticket && n.ticket.thread).map((n) => [n.ticket.thread, n]));
   const ctx = filterCtx(state);
   const on = filtering();
@@ -5278,6 +5565,7 @@ function paintGraph() {
   setText($("graph-note"), graphNote(d.mode, lay));
   paintGraphWarn(d.mode === "flow" ? d.warnings : []);
   paintGraphSync(d.mode === "flow" ? d.edges : []);
+  paintGraphTriage();
   for (const k of $("graph-key").querySelectorAll(".gkey")) k.hidden = d.mode !== "flow";
   $("graph-empty").hidden = d.nodes.length > 0;
   $("gscroll").hidden = !d.nodes.length;
@@ -5523,7 +5811,10 @@ function initGraph() {
   });
   const syncBtn = $("graph-sync");
   if (syncBtn) syncBtn.addEventListener("click", syncGraphLinks);
+  const triageBtn = $("graph-triage");
+  if (triageBtn) triageBtn.addEventListener("click", startGraphTriage);
   paintGraphSyncResult(null, null);
+  paintGraphTriage();
   const nodeOf = (e) => e.target && e.target.closest ? e.target.closest(".gnode") : null;
   box.addEventListener("click", (e) => { const b = nodeOf(e); if (b) graphOpen(b); });
   box.addEventListener("pointerover", (e) => { const b = nodeOf(e); const id = b ? b.dataset.id : null; if (id !== graph.hover) graphHover(id); });
@@ -6288,9 +6579,11 @@ function render(s) {
   syncAsks(s.asks);
   syncSettled(s);
   syncNew(s);
+  if ("flowTriage" in s) graph.triageLocal = s.flowTriage || null;
   flowDue(s);
   if (flowNeeded(s) && flow.view) paintFlow(flow.view);
   paintGraph();
+  if (viewIs("queue")) paintGraphTriage();
   syncFeed(v.feed, s.feed);
   showTicketsHeld();
   const seen = new Set(v.cards.map((c) => c.id));
@@ -6813,7 +7106,8 @@ function initDrawer() {
       sec("workers", "Workers", h("ul", { class: "dr-list", "data-part": "workers-l" })),
       sec("deps", "Dependencies", h("p", { class: "dr-lane", "data-part": "deps-lane" }),
         h("div", { class: "dr-warns", "data-part": "deps-w", role: "status", hidden: true }),
-        h("div", { class: "dr-deps", "data-part": "deps-l" }))),
+        h("div", { class: "dr-deps", "data-part": "deps-l" }),
+        h("div", { class: "dr-edit", "data-part": "deps-edit", hidden: true }))),
     h("div", { class: "err-strip", id: "dr-err", hidden: true },
       h("span", { id: "dr-err-text" }), h("button", { class: "btn quiet", type: "button", id: "dr-err-close", onclick: () => closeErr("dr-err") }, "Close"))));
 }
@@ -7252,6 +7546,371 @@ function depEdgeSource(n, key, otherId) {
   return match && match.source ? match.source : "github";
 }
 
+function cmpIssueId(a, b) {
+  const split = (id) => {
+    const s = String(id || "");
+    const i = s.lastIndexOf("#");
+    return i >= 0 ? [s.slice(0, i).toLowerCase(), Number(s.slice(i + 1)) || 0] : [s.toLowerCase(), 0];
+  };
+  const [ar, an] = split(a);
+  const [br, bn] = split(b);
+  if (ar !== br) return ar < br ? -1 : 1;
+  return an - bn;
+}
+
+function proposedFileConflictOrder(aId, bId) {
+  const na = graphNode(aId);
+  const nb = graphNode(bId);
+  const aLive = !!(na && na.ticket && !na.ticket.done);
+  const bLive = !!(nb && nb.ticket && !nb.ticket.done);
+  if (aLive !== bLive) return aLive ? { from: bId, to: aId } : { from: aId, to: bId };
+  return cmpIssueId(aId, bId) <= 0 ? { from: bId, to: aId } : { from: aId, to: bId };
+}
+
+function drEdgeTuple(nodeId, rowKey, otherId) {
+  if (rowKey === "blockedBy") return { from: nodeId, to: otherId, kind: "blockedBy" };
+  if (rowKey === "unlocks") return { from: otherId, to: nodeId, kind: "blockedBy" };
+  if (rowKey === "parent") return { from: nodeId, to: otherId, kind: "parent" };
+  if (rowKey === "subIssues") return { from: otherId, to: nodeId, kind: "parent" };
+  if (rowKey === "fileConflict") {
+    const ord = proposedFileConflictOrder(nodeId, otherId);
+    return { from: ord.from, to: ord.to, kind: "fileConflict" };
+  }
+  if (rowKey === "codeDep") return { from: nodeId, to: otherId, kind: "codeDep" };
+  if (rowKey === "codeDepBy") return { from: otherId, to: nodeId, kind: "codeDep" };
+  return null;
+}
+
+function setDrEditFeedback(nodeId, ok, text, conflictRetry) {
+  graph.pendingConfirm = null;
+  graph.editFeedback = text ? { nodeId, ok, text, conflictRetry: conflictRetry || null } : null;
+  if (dr.open) paintDrawer();
+}
+
+async function editGraphEdge(nodeId, payload) {
+  if (graph.editing) return;
+  graph.editing = true;
+  graph.pendingConfirm = null;
+  ++flow.seq;
+  setDrEditFeedback(nodeId, true, "Updating...");
+  try {
+    const res = await post("/api/flow/edge", payload);
+    graph.editing = false;
+    if (res && res.flow) applyFlowRefresh(res.flow);
+    if (res && res.ok) {
+      const verb = { add: "Linked", confirm: "Confirmed", remove: "Removed", dismiss: "Dismissed", restore: "Restored" }[res.action] || "Updated";
+      const note = res.refreshError ? verb + ", but refreshing graph failed: " + res.refreshError : verb + " " + res.kind + " link.";
+      setDrEditFeedback(nodeId, !res.refreshError, note);
+      announce(note, !!res.refreshError);
+    } else {
+      const msg = (res && res.error) || "Could not update edge";
+      const retry = res && res.conflict && payload.kind === "parent"
+        ? { ...payload, replaceParent: true }
+        : null;
+      const prefix = res && res.permission ? "[permission] "
+        : res && res.conflict && res.existingParent ? "Already has parent " + graphEdgeLabel(res.existingParent) + ": " : "";
+      setDrEditFeedback(nodeId, false, prefix + msg, retry);
+      announce(prefix + msg, true);
+    }
+    return res;
+  } catch (e) {
+    graph.editing = false;
+    setDrEditFeedback(nodeId, false, e.message);
+    announce(e.message, true);
+    return null;
+  } finally {
+    graph.editing = false;
+    if (!flow.busy && flow.again && !graph.syncing) { flow.again = false; loadFlow(); }
+  }
+}
+
+async function editGraphIssue(nodeId, payload) {
+  if (graph.editing) return;
+  graph.editing = true;
+  graph.pendingConfirm = null;
+  ++flow.seq;
+  setDrEditFeedback(nodeId, true, "Updating issue...");
+  try {
+    const res = await post("/api/flow/issue", payload);
+    graph.editing = false;
+    if (res && res.flow) applyFlowRefresh(res.flow);
+    if (res && res.ok) {
+      const parts = [];
+      if ("track" in payload) parts.push(payload.track === null ? "cleared track" : "set track to " + (res.track || payload.track));
+      if ("priority" in payload) parts.push(payload.priority === null ? "cleared priority" : "set priority to " + (res.priority || payload.priority));
+      const summary = parts.length ? parts.join(" and ") : "updated issue";
+      const note = res.refreshError
+        ? "Updated issue, but refreshing graph failed: " + res.refreshError
+        : summary.charAt(0).toUpperCase() + summary.slice(1) + ".";
+      setDrEditFeedback(nodeId, !res.refreshError, note);
+      announce(note, !!res.refreshError);
+    } else {
+      const err = (res && res.errors && res.errors[0] && res.errors[0].message) || "Could not update issue";
+      setDrEditFeedback(nodeId, false, err);
+      announce(err, true);
+    }
+    return res;
+  } catch (e) {
+    graph.editing = false;
+    setDrEditFeedback(nodeId, false, e.message);
+    announce(e.message, true);
+    return null;
+  } finally {
+    graph.editing = false;
+    if (!flow.busy && flow.again && !graph.syncing) { flow.again = false; loadFlow(); }
+  }
+}
+
+function drEdgeActions(nodeId, rowKey, otherId, src, label) {
+  const tup = drEdgeTuple(nodeId, rowKey, otherId);
+  if (!tup) return [];
+  const fromLbl = graphEdgeLabel(tup.from);
+  const toLbl = graphEdgeLabel(tup.to);
+  const mkBtn = (act, aria, title, onClick) => {
+    const b = h("button", {
+      class: "btn quiet dep-act dep-act-" + act,
+      type: "button",
+      "aria-label": aria,
+      title,
+      "data-edge-act": act,
+      "data-from": tup.from,
+      "data-to": tup.to,
+      "data-kind": tup.kind,
+      "aria-disabled": graph.editing ? "true" : null,
+    });
+    b.addEventListener("click", () => {
+      if (b.getAttribute("aria-disabled") === "true") return;
+      if (onClick) onClick();
+      else editGraphEdge(nodeId, { action: act, from: tup.from, to: tup.to, kind: tup.kind });
+    });
+    return b;
+  };
+  if (src === "body") {
+    const dir = tup.kind === "parent" ? "set " + toLbl + " as parent of " + fromLbl : "mark " + fromLbl + " blocked by " + toLbl;
+    return [
+      mkBtn("confirm", "Confirm inferred " + tup.kind + " link: " + dir, "Confirm: " + dir + " on GitHub"),
+      mkBtn("dismiss", "Dismiss inferred " + tup.kind + " link with " + label, "Dismiss inferred edge"),
+    ];
+  }
+  if (src === "code" && tup.kind === "fileConflict") {
+    const dir = "mark " + tup.from + " blocked by " + tup.to;
+    return [
+      mkBtn("confirm", "Confirm fileConflict: " + dir, "Review and confirm: " + dir + " on GitHub", () => {
+        graph.editFeedback = null;
+        graph.pendingConfirm = { nodeId, from: tup.from, to: tup.to, kind: "fileConflict" };
+        if (dr.open) paintDrawer();
+      }),
+      mkBtn("dismiss", "Dismiss advisory fileConflict with " + label, "Dismiss advisory edge"),
+    ];
+  }
+  if (src === "code" && tup.kind === "codeDep") {
+    const dir = "mark " + fromLbl + " blocked by " + toLbl;
+    return [
+      mkBtn("confirm", "Confirm codeDep: " + dir, "Confirm: " + dir + " on GitHub"),
+      mkBtn("dismiss", "Dismiss advisory codeDep with " + label, "Dismiss advisory edge"),
+    ];
+  }
+  if (src === "github" && (tup.kind === "blockedBy" || tup.kind === "parent")) {
+    return [mkBtn("remove", "Remove GitHub " + tup.kind + " link with " + label, "Remove native GitHub link")];
+  }
+  return [];
+}
+
+function drHasExplicitTrackLabel(n) {
+  return (n.labels || []).some((l) => /^track:/i.test(l) && l.slice(6).trim().length > 0);
+}
+
+function drEdit(n) {
+  const box = drPart("deps-edit");
+  const canEdit = !!n && graph.mode === "flow" && !!n.repo && typeof n.number === "number";
+  box.hidden = !canEdit;
+  if (!canEdit) return;
+  if (!box._built) {
+    box._built = true;
+    const issueList = h("datalist", { id: "dr-issue-opts" });
+    const trackList = h("datalist", { id: "dr-track-opts" });
+    const mkRow = (id, label, placeholder, listId, btnText, extraBtn) => {
+      const inp = h("input", { type: "text", id: "dr-ed-" + id, "data-edit": id, placeholder, list: listId, autocomplete: "off" });
+      const go = h("button", { class: "btn", type: "submit", "data-edit-btn": id }, btnText);
+      const ctl = h("span", { class: "dr-edit-ctl" }, inp, go, extraBtn || null);
+      const form = h("form", { class: "dr-edit-row", "data-edit-form": id }, h("label", { for: "dr-ed-" + id }, label), ctl);
+      return { form, inp, go };
+    };
+    const parentClear = h("button", { class: "btn quiet", type: "button", "data-edit-btn": "parent-clear", hidden: true }, "Clear");
+    const trackClear = h("button", { class: "btn quiet", type: "button", "data-edit-btn": "track-clear", hidden: true }, "Clear");
+    const prioSel = h("select", { id: "dr-ed-priority", "data-edit": "priority", "aria-label": "Priority" },
+      h("option", { value: "" }, "None"),
+      h("option", { value: "high" }, "high"),
+      h("option", { value: "medium" }, "medium"),
+      h("option", { value: "low" }, "low"));
+    const prioGo = h("button", { class: "btn", type: "submit", "data-edit-btn": "priority" }, "Save");
+    const prioClear = h("button", { class: "btn quiet", type: "button", "data-edit-btn": "priority-clear", hidden: true }, "Clear");
+    const prioForm = h("form", { class: "dr-edit-row", "data-edit-form": "priority" },
+      h("label", { for: "dr-ed-priority" }, "Priority"),
+      h("span", { class: "dr-edit-ctl" }, prioSel, prioGo, prioClear));
+    const blocker = mkRow("blocker", "Add blocker", "#42 or owner/repo#42", "dr-issue-opts", "Add");
+    const parent = mkRow("parent", "Parent", "#10 or owner/repo#10", "dr-issue-opts", "Set", parentClear);
+    const track = mkRow("track", "Track", "track slug", "dr-track-opts", "Save", trackClear);
+    const msg = h("div", { class: "dr-edit-msg", "data-part": "deps-msg", role: "status", hidden: true });
+    const dis = h("div", { class: "dr-dismissed", "data-part": "deps-dismissed", hidden: true });
+
+    blocker.form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const val = blocker.inp.value.trim();
+      const id = box._nodeId;
+      if (!val || !id) return;
+      const res = await editGraphEdge(id, { action: "add", from: id, to: val, kind: "blockedBy" });
+      if (res && res.ok && box._nodeId === id) blocker.inp.value = "";
+    });
+    parent.form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const val = parent.inp.value.trim();
+      const id = box._nodeId;
+      if (!val || !id) return;
+      const res = await editGraphEdge(id, { action: "add", from: id, to: val, kind: "parent" });
+      if (res && res.ok && box._nodeId === id) parent.inp.value = "";
+    });
+    parentClear.addEventListener("click", async () => {
+      if (!box._nodeId || !box._parentId || parentClear.getAttribute("aria-disabled") === "true") return;
+      await editGraphEdge(box._nodeId, { action: "remove", from: box._nodeId, to: box._parentId, kind: "parent" });
+    });
+    track.form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const val = track.inp.value.trim();
+      if (!box._nodeId) return;
+      await editGraphIssue(box._nodeId, { issue: box._nodeId, track: val || null });
+    });
+    trackClear.addEventListener("click", async () => {
+      if (!box._nodeId || trackClear.getAttribute("aria-disabled") === "true") return;
+      await editGraphIssue(box._nodeId, { issue: box._nodeId, track: null });
+    });
+    prioForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (!box._nodeId) return;
+      await editGraphIssue(box._nodeId, { issue: box._nodeId, priority: prioSel.value || null });
+    });
+    prioClear.addEventListener("click", async () => {
+      if (!box._nodeId || prioClear.getAttribute("aria-disabled") === "true") return;
+      await editGraphIssue(box._nodeId, { issue: box._nodeId, priority: null });
+    });
+
+    box._ctl = { issueList, trackList, blocker, parent, parentClear, track, trackClear, prioSel, prioGo, prioClear, prioForm, msg, dis };
+    box.replaceChildren(issueList, trackList, blocker.form, parent.form, track.form, prioForm, msg, dis);
+  }
+  const c = box._ctl;
+  const switched = box._nodeId !== n.id;
+  box._nodeId = n.id;
+  const nativeParent = n.parent && depEdgeSource(n, "parent", n.parent) === "github" ? n.parent : null;
+  box._parentId = nativeParent;
+  c.parentClear.hidden = !nativeParent;
+  c.trackClear.hidden = !drHasExplicitTrackLabel(n);
+  c.prioClear.hidden = !n.priority;
+  if (switched) {
+    c.blocker.inp.value = "";
+    c.parent.inp.value = "";
+    c.track.inp.value = drHasExplicitTrackLabel(n) ? (n.track || "") : "";
+    c.prioSel.value = n.priority || "";
+    if (graph.editFeedback && graph.editFeedback.nodeId !== n.id) graph.editFeedback = null;
+    if (graph.pendingConfirm && graph.pendingConfirm.nodeId !== n.id) graph.pendingConfirm = null;
+  } else {
+    if (document.activeElement !== c.track.inp) c.track.inp.value = drHasExplicitTrackLabel(n) ? (n.track || "") : "";
+    if (document.activeElement !== c.prioSel) c.prioSel.value = n.priority || "";
+  }
+  c.prioSel.disabled = !!graph.editing;
+  for (const b of [c.blocker.go, c.parent.go, c.parentClear, c.track.go, c.trackClear, c.prioGo, c.prioClear]) {
+    setAttr(b, "aria-disabled", graph.editing ? "true" : null);
+  }
+  const optsSig = JSON.stringify([n.id, [...graph.nodes.keys()]]);
+  if (box._optsSig !== optsSig) {
+    box._optsSig = optsSig;
+    const issueOpts = [];
+    const tracks = new Set();
+    for (const x of graph.nodes.values()) {
+      if (x.id !== n.id && x.repo && typeof x.number === "number") {
+        issueOpts.push(h("option", { value: x.id }, (x.label || x.id) + (x.title ? ": " + x.title : "")));
+      }
+      if (x.trackBy === "label" && x.track) tracks.add(x.track);
+    }
+    c.issueList.replaceChildren(...issueOpts);
+    c.trackList.replaceChildren(...[...tracks].sort().map((t) => h("option", { value: t })));
+  }
+  const pc = graph.pendingConfirm && graph.pendingConfirm.nodeId === n.id ? graph.pendingConfirm : null;
+  const fb = !pc && graph.editFeedback && graph.editFeedback.nodeId === n.id ? graph.editFeedback : null;
+  c.msg.hidden = !pc && !fb;
+  if (pc) {
+    c.msg.classList.add("ok");
+    c.msg.classList.remove("err");
+    const confirmBtn = h("button", {
+      class: "btn", type: "button",
+      "data-edit-btn": "confirm-fc", "data-from": pc.from, "data-to": pc.to,
+      "aria-disabled": graph.editing ? "true" : null,
+    }, "Confirm");
+    confirmBtn.addEventListener("click", () => {
+      if (confirmBtn.getAttribute("aria-disabled") !== "true") {
+        editGraphEdge(n.id, { action: "confirm", from: pc.from, to: pc.to, kind: "fileConflict" });
+      }
+    });
+    const flipBtn = h("button", {
+      class: "btn quiet", type: "button",
+      "data-edit-btn": "flip-fc",
+      "aria-disabled": graph.editing ? "true" : null,
+    }, "Flip");
+    flipBtn.addEventListener("click", () => {
+      if (flipBtn.getAttribute("aria-disabled") !== "true" && graph.pendingConfirm) {
+        graph.pendingConfirm = { ...graph.pendingConfirm, from: graph.pendingConfirm.to, to: graph.pendingConfirm.from };
+        paintDrawer();
+      }
+    });
+    const cancelBtn = h("button", { class: "btn quiet", type: "button", "data-edit-btn": "cancel-fc" }, "Cancel");
+    cancelBtn.addEventListener("click", () => {
+      graph.pendingConfirm = null;
+      paintDrawer();
+    });
+    c.msg.replaceChildren(
+      h("span", {}, "Confirm fileConflict: " + pc.from + " blocked by " + pc.to),
+      confirmBtn, flipBtn, cancelBtn);
+  } else if (fb) {
+    c.msg.classList.toggle("ok", !!fb.ok);
+    c.msg.classList.toggle("err", !fb.ok);
+    const kids = [h("span", {}, fb.text)];
+    if (fb.conflictRetry) {
+      const rep = h("button", { class: "btn", type: "button", "data-edit-btn": "replace-parent", "aria-disabled": graph.editing ? "true" : null }, "Replace parent");
+      rep.addEventListener("click", () => editGraphEdge(n.id, fb.conflictRetry));
+      kids.push(rep);
+    }
+    c.msg.replaceChildren(...kids);
+  } else {
+    c.msg.replaceChildren();
+  }
+  const nidLow = n.id.toLowerCase();
+  const dismissed = (graph.dismissed || []).filter((e) =>
+    String(e.from || "").toLowerCase() === nidLow || String(e.to || "").toLowerCase() === nidLow);
+  const disSig = JSON.stringify([n.id, graph.editing, dismissed]);
+  if (c.dis._sig !== disSig) {
+    c.dis._sig = disSig;
+    c.dis.hidden = !dismissed.length;
+    if (dismissed.length) {
+      const items = dismissed.map((e) => {
+        const other = String(e.from || "").toLowerCase() === nidLow ? e.to : e.from;
+        const restore = h("button", {
+          class: "btn quiet", type: "button",
+          "data-edge-act": "restore", "data-from": e.from, "data-to": e.to, "data-kind": e.kind,
+          "aria-disabled": graph.editing ? "true" : null,
+        }, "Restore");
+        restore.addEventListener("click", () => {
+          if (restore.getAttribute("aria-disabled") !== "true") {
+            editGraphEdge(n.id, { action: "restore", from: e.from, to: e.to, kind: e.kind });
+          }
+        });
+        return h("li", {}, h("span", {}, e.kind + " " + graphEdgeLabel(other)), restore);
+      });
+      c.dis.replaceChildren(h("span", { class: "dr-dismissed-h" }, "Dismissed edges"), h("ul", {}, ...items));
+    } else {
+      c.dis.replaceChildren();
+    }
+  }
+}
+
 function drDeps(n) {
   const sec = drPart("deps");
   const on = !!n && graph.mode === "flow";
@@ -7314,26 +7973,29 @@ function drDeps(n) {
   const more = (n.moreBlockers ? ["blockedBy"] : []).concat(n.moreSubIssues ? ["subIssues"] : []);
   rows.splice(0, rows.length, ...rows.filter((r) => r[2].length || more.includes(r[0])));
   const l = drPart("deps-l");
-  const sig = JSON.stringify([n.id, n.url, rows, more]);
-  if (l._sig === sig) return;
-  l._sig = sig;
-  const said = (r) => r.length + (r.length === 1 ? " issue" : " issues");
-  const srcTitle = (src, kind) => src === "body" ? "Parsed from issue body"
-    : src === "git" ? "Inferred from git / PR stack"
-    : src === "code" ? ((kind === "codeDep" || kind === "codeDepBy")
-      ? "Advisory hint from static module/symbol dependencies"
-      : "Inferred from overlapping files")
-    : "Source: " + src;
-  const kids = rows.map(([k, name, list]) => h("div", { class: "dr-dep", "data-dep": k, role: "group", "aria-label": name + ", " + said(list) },
-    h("span", {}, name),
-    h("ul", {}, ...list.map(([id, label, title, mk, word, src, detail, detailTitle]) => h("li", {},
-      graphNode(id) ? ticketChip(label, { onclick: () => drJump(id), name: "Inspect " + label + (title ? ": " + title : "") + (word ? ", " + word : ""), class: "dep" })
-        : h("span", { class: "chip gone-dep", title: label }, label),
-      mk ? statusPill(mk, word) : null,
-      src && src !== "github" ? h("span", { class: "tag", title: srcTitle(src, k) }, src) : null,
-      detail ? h("span", { class: "dep-detail mono", title: detailTitle || detail }, detail) : null)),
-      more.includes(k) && safeUrl(n.url) ? h("li", {}, h("a", { href: safeUrl(n.url), target: "_blank", rel: "noopener noreferrer" }, "and more on GitHub")) : null)));
-  l.replaceChildren(...(kids.length ? kids : [h("p", { class: "meta" }, "No blockers, unlocks, parent or sub-issues.")]));
+  const sig = JSON.stringify([n.id, n.url, graph.editing, rows, more]);
+  if (l._sig !== sig) {
+    l._sig = sig;
+    const said = (r) => r.length + (r.length === 1 ? " issue" : " issues");
+    const srcTitle = (src, kind) => src === "body" ? "Parsed from issue body"
+      : src === "git" ? "Inferred from git / PR stack"
+      : src === "code" ? ((kind === "codeDep" || kind === "codeDepBy")
+        ? "Advisory hint from static module/symbol dependencies"
+        : "Inferred from overlapping files")
+      : "Source: " + src;
+    const kids = rows.map(([k, name, list]) => h("div", { class: "dr-dep", "data-dep": k, role: "group", "aria-label": name + ", " + said(list) },
+      h("span", {}, name),
+      h("ul", {}, ...list.map(([id, label, title, mk, word, src, detail, detailTitle]) => h("li", {},
+        graphNode(id) ? ticketChip(label, { onclick: () => drJump(id), name: "Inspect " + label + (title ? ": " + title : "") + (word ? ", " + word : ""), class: "dep" })
+          : h("span", { class: "chip gone-dep", title: label }, label),
+        mk ? statusPill(mk, word) : null,
+        src && src !== "github" ? h("span", { class: "tag", title: srcTitle(src, k) }, src) : null,
+        detail ? h("span", { class: "dep-detail mono", title: detailTitle || detail }, detail) : null,
+        ...drEdgeActions(n.id, k, id, src, label))),
+        more.includes(k) && safeUrl(n.url) ? h("li", {}, h("a", { href: safeUrl(n.url), target: "_blank", rel: "noopener noreferrer" }, "and more on GitHub")) : null)));
+    l.replaceChildren(...(kids.length ? kids : [h("p", { class: "meta" }, "No blockers, unlocks, parent or sub-issues.")]));
+  }
+  drEdit(n);
 }
 
 function drJump(id) {
@@ -8665,8 +9327,15 @@ function confUnset(path) {
     let start = Math.min(last, path.length - 1);
     if (path[0] === "flow" && path[1] === "optIn" && path.length === 3 && isObj(parent)
       && Object.keys(parent).every((k) => (k === "label" || k === "milestone") && parent[k] === null)) {
-      delete getAt(conf.draft, ["flow"]).optIn;
-      start = 1;
+      const flowObj = getAt(conf.draft, ["flow"]);
+      delete flowObj.optIn;
+      const baseFlow = getAt(conf.base, ["flow"]);
+      if (isObj(flowObj) && !Object.keys(flowObj).length && !(isObj(baseFlow) && !Object.keys(baseFlow).length)) {
+        delete conf.draft.flow;
+        start = 0;
+      } else {
+        start = 1;
+      }
     }
     for (let n = start; n > 0; n--) {
       const at = path.slice(0, n);

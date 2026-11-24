@@ -511,9 +511,7 @@ impl App {
         ToolOutput { text: self.redact(output.text), ..output }
     }
 
-    pub async fn ask(self: &Arc<Self>, question: &str) -> anyhow::Result<Value> {
-        let v = self.wf.ask(question).await?;
-        let seq = v["seq"].as_i64().unwrap_or_default();
+    fn spawn_ask_poll(self: &Arc<Self>, seq: i64) {
         let app = self.clone();
         let every = Duration::from_secs(self.config().board.ask_poll_secs.max(1));
         let asked = tokio::time::Instant::now();
@@ -527,6 +525,20 @@ impl App {
                 }
             }
         });
+    }
+
+    pub async fn ask(self: &Arc<Self>, question: &str) -> anyhow::Result<Value> {
+        let v = self.wf.ask(question).await?;
+        let seq = v["seq"].as_i64().unwrap_or_default();
+        self.spawn_ask_poll(seq);
+        Ok(v)
+    }
+
+    pub async fn start_flow_triage(self: &Arc<Self>) -> anyhow::Result<Value> {
+        let v = self.wf.start_flow_triage().await?;
+        if let Some(seq) = v["seq"].as_i64() {
+            self.spawn_ask_poll(seq);
+        }
         Ok(v)
     }
 
@@ -705,6 +717,38 @@ impl App {
         ns: &str,
         catalog: &Catalog,
     ) -> Result<Value, String> {
+        let store_err = |e: anyhow::Error| format!("store: {e}");
+        const TRIAGE_ANON_READ_ONLY: &[&str] = &[
+            "mem.get",
+            "mem.list",
+            "wf.flow",
+            "wf.board",
+            "wf.cards",
+            "wf.feed",
+            "wf.show",
+            "wf.slot",
+            "wf.slots",
+            "wf.usageStats",
+            "wf.limits",
+            "wf.status",
+        ];
+        match caller.filter(|c| !c.is_empty()) {
+            Some(c) => {
+                if self.store.triage_thread(c).map_err(store_err)? {
+                    return Err(
+                        "triage scratch threads are read-only; no t3cm tool or wf operations are allowed".into()
+                    );
+                }
+            }
+            None => {
+                if !TRIAGE_ANON_READ_ONLY.contains(&op) && self.store.triage_live().map_err(store_err)? {
+                    return Err(
+                        "caller thread id is required for tool and write operations while a read-only DAG triage is running"
+                            .into(),
+                    );
+                }
+            }
+        }
         let pick_ns = |args: &Value| -> Result<String, String> {
             match &args["ns"] {
                 Value::Null => Ok(ns.to_string()),
@@ -718,7 +762,6 @@ impl App {
                 _ => Err(format!("mem.{method}(key): key must be a non-empty string of at most 512 chars")),
             }
         };
-        let store_err = |e: anyhow::Error| format!("store: {e}");
         match op {
             "call" => {
                 let (ns, tool) = match args["qualified"].as_str() {

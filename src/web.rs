@@ -21,6 +21,8 @@ use crate::clock::iso;
 use crate::config::{BoardRemoteConfig, RemoteMode, RemoteOrigin};
 use crate::config_edit::{Rejected, Stale};
 use crate::contexts::{ContextBody, ContextError};
+use crate::flow_triage::{TriageApplyArgs, TriageDismissArgs, TriageRunning};
+use crate::issues::{FlowEdgeArgs, FlowIssueUpdateArgs};
 use crate::pairing::{self, CookieExtract};
 use crate::server::{RequestKind, SingleHeader, classify_request, is_own_loopback_host_str, single_header};
 use crate::settings::SettingsBody;
@@ -736,8 +738,9 @@ fn body<T: DeserializeOwned>(raw: &Bytes) -> Result<T, String> {
 
 fn failed(app: &App, e: anyhow::Error) -> Response {
     let msg = app.t3.redact(format!("{e:#}"));
-    let missing =
-        ["no open board card", "no board ticket", "no ask", "no new issue"].iter().any(|p| msg.starts_with(p));
+    let missing = ["no open board card", "no board ticket", "no ask", "no new issue", "no triage"]
+        .iter()
+        .any(|p| msg.starts_with(p));
     let status = if missing { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
     error(status, msg)
 }
@@ -1249,6 +1252,80 @@ async fn post_flow_sync_links(State(web): State<Web>, raw: Bytes) -> Response {
     }
 }
 
+async fn post_flow_edge(State(web): State<Web>, raw: Bytes) -> Response {
+    let b: FlowEdgeArgs = match body(&raw) {
+        Ok(b) => b,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    match web.app.wf.edit_flow_edge(b).await {
+        Ok(res) => match serde_json::to_value(res) {
+            Ok(v) => json_ok(StatusCode::OK, web.app.redact_value(v)),
+            Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, web.app.t3.redact(format!("{e:#}"))),
+        },
+        Err(e) => failed(&web.app, e),
+    }
+}
+
+async fn post_flow_issue(State(web): State<Web>, raw: Bytes) -> Response {
+    let b: FlowIssueUpdateArgs = match body(&raw) {
+        Ok(b) => b,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    match web.app.wf.update_flow_issue(b).await {
+        Ok(res) => match serde_json::to_value(res) {
+            Ok(v) => json_ok(StatusCode::OK, web.app.redact_value(v)),
+            Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, web.app.t3.redact(format!("{e:#}"))),
+        },
+        Err(e) => failed(&web.app, e),
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct TriageStartBody {}
+
+async fn post_flow_triage(State(web): State<Web>, raw: Bytes) -> Response {
+    if !raw.is_empty()
+        && let Err(e) = body::<TriageStartBody>(&raw)
+    {
+        return error(StatusCode::BAD_REQUEST, e);
+    }
+    match web.app.start_flow_triage().await {
+        Ok(v) => json_ok(StatusCode::OK, web.app.redact_value(v)),
+        Err(e) if e.is::<TriageRunning>() => error(StatusCode::CONFLICT, web.app.t3.redact(format!("{e:#}"))),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
+async fn post_flow_triage_apply(State(web): State<Web>, Path(id): Path<String>, raw: Bytes) -> Response {
+    let b: TriageApplyArgs = match body(&raw) {
+        Ok(b) => b,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    match web.app.wf.apply_flow_triage(&id, b).await {
+        Ok(res) => match serde_json::to_value(res) {
+            Ok(v) => json_ok(StatusCode::OK, web.app.redact_value(v)),
+            Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, web.app.t3.redact(format!("{e:#}"))),
+        },
+        Err(e) => failed(&web.app, e),
+    }
+}
+
+async fn post_flow_triage_dismiss(State(web): State<Web>, Path(id): Path<String>, raw: Bytes) -> Response {
+    let b: TriageDismissArgs = if raw.is_empty() {
+        TriageDismissArgs { change_ids: Vec::new(), all: true }
+    } else {
+        match body(&raw) {
+            Ok(b) => b,
+            Err(e) => return error(StatusCode::BAD_REQUEST, e),
+        }
+    };
+    match web.app.wf.dismiss_flow_triage(&id, b).await {
+        Ok(v) => json_ok(StatusCode::OK, web.app.redact_value(v)),
+        Err(e) => failed(&web.app, e),
+    }
+}
+
 async fn launch_new_issue(State(web): State<Web>, Path(id): Path<String>) -> Response {
     match web.app.wf.launch_new_issue(&id).await {
         Ok(v) => json_ok(StatusCode::OK, v),
@@ -1456,6 +1533,11 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/new-issues/{id}/restore", post(restore_new_issue))
         .route("/api/flow", get(get_flow))
         .route("/api/flow/sync-links", post(post_flow_sync_links))
+        .route("/api/flow/edge", post(post_flow_edge))
+        .route("/api/flow/issue", post(post_flow_issue))
+        .route("/api/flow/triage", post(post_flow_triage))
+        .route("/api/flow/triage/{id}/apply", post(post_flow_triage_apply))
+        .route("/api/flow/triage/{id}/dismiss", post(post_flow_triage_dismiss))
         .route("/api/open", post(open_link))
         .route("/api/contexts", get(list_contexts))
         .route("/api/contexts/{id}", put(put_context).delete(delete_context))

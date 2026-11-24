@@ -19,6 +19,7 @@ struct State {
     providers: Vec<Value>,
     launched: Vec<Value>,
     organized: Vec<Value>,
+    interrupted: Vec<Value>,
     configured: Vec<Value>,
     forks: u64,
     sent: Vec<Value>,
@@ -33,6 +34,7 @@ struct State {
     pr_page: usize,
     short_list: usize,
     organize_fails: bool,
+    interrupt_fails: bool,
     launch_fails: bool,
     delay: Duration,
 }
@@ -326,6 +328,14 @@ impl FakeT3 {
         self.st().organized.clone()
     }
 
+    pub fn interrupted(&self) -> Vec<Value> {
+        self.st().interrupted.clone()
+    }
+
+    pub fn fail_interrupt(&self, fail: bool) {
+        self.st().interrupt_fails = fail;
+    }
+
     pub fn sent(&self) -> Vec<Value> {
         self.st().sent.clone()
     }
@@ -372,6 +382,14 @@ impl FakeT3 {
                     return Err(T3Error::Unavailable("T3 unreachable (fake)".into()));
                 }
                 st.sent.push(args.clone());
+                if let Some(id) = args["threadId"].as_str()
+                    && let Some(th) = st.threads.get_mut(id)
+                    && th["status"] == "idle"
+                    && th["latestRunId"].is_null()
+                {
+                    th["status"] = json!("running");
+                    th["latestRunId"] = json!(format!("run:{id}:1"));
+                }
                 let n = st.sent.len();
                 Ok(json!({"threadId": args["threadId"], "messageId": format!("msg:{n}"),
                           "runId": format!("run:{n}"), "status": "queued", "delivery": "queued"}))
@@ -451,7 +469,12 @@ impl FakeT3 {
             "t3_thread_launch" => {
                 st.launched.push(args.clone());
                 let id = format!("launch:{}", st.launched.len());
-                let mut th = thread(&id, "running", "2026-11-17T12:00:00Z");
+                let has_msg = args.get("message").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
+                let init_status = if has_msg { "running" } else { "idle" };
+                let mut th = thread(&id, init_status, "2026-11-17T12:00:00Z");
+                if !has_msg {
+                    th["latestRunId"] = Value::Null;
+                }
                 th["title"] = args["title"].clone();
                 if let Some(p) = args.get("projectId").filter(|v| !v.is_null()) {
                     th["projectId"] = p.clone();
@@ -459,8 +482,9 @@ impl FakeT3 {
                 th["providerInstanceId"] = args["modelSelection"]["instanceId"].clone();
                 th["model"] = args["modelSelection"]["model"].clone();
                 st.threads.insert(id.clone(), th);
+                let run_id = if has_msg { json!(format!("run:{id}:1")) } else { Value::Null };
                 Ok(json!({"threadId": id, "link": format!("https://t3/{id}"), "projectId": args["projectId"],
-                          "modelSelection": args["modelSelection"], "runId": format!("run:{id}:1"), "status": "running"}))
+                          "modelSelection": args["modelSelection"], "runId": run_id, "status": init_status}))
             }
             "t3_thread_transfer" if args["action"] == "fork" => {
                 let id = args["threadId"].as_str().unwrap_or_default();
@@ -491,6 +515,18 @@ impl FakeT3 {
                     th["model"] = m["model"].clone();
                 }
                 Ok(json!({"sequence": 1}))
+            }
+            "t3_thread_interrupt" => {
+                if st.interrupt_fails {
+                    return Err(T3Error::Unavailable("T3 unreachable (fake)".into()));
+                }
+                st.interrupted.push(args.clone());
+                let id = args["threadId"].as_str().unwrap_or_default().to_string();
+                let Some(th) = st.threads.get_mut(&id) else {
+                    return Err(T3Error::Tool(format!("t3_thread_interrupt: thread {id} not found")));
+                };
+                th["status"] = json!("interrupted");
+                Ok(json!({"threadId": id, "interrupted": true}))
             }
             "t3_thread_organize" => {
                 if st.organize_fails {
@@ -885,6 +921,7 @@ fn operation(query: &str) -> &'static str {
         "deleteRef",
         "createLabel",
         "addLabelsToLabelable",
+        "removeLabelsFromLabelable",
         "addBlockedBy",
         "removeBlockedBy",
         "addSubIssue",
@@ -1353,6 +1390,29 @@ fn add_labels_mut(st: &mut GhState, variables: &Value) -> Value {
     json!({"data": {"addLabelsToLabelable": {"labelable": {"__typename": "Issue"}}}})
 }
 
+fn remove_labels_mut(st: &mut GhState, variables: &Value) -> Value {
+    let labelable_id = variables["labelableId"].as_str().unwrap_or_default();
+    let Some((repo, num)) = parse_issue_node_id(labelable_id) else {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to a node");
+    };
+    if !st.issues.contains_key(&(repo.clone(), num)) {
+        return gh_typed_error("NOT_FOUND", "Could not resolve to an Issue");
+    }
+    let ids: Vec<&str> = variables["labelIds"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let mut resolved = Vec::new();
+    for lid in ids {
+        let Some((_, lname, _)) = st.repo_labels.get(&repo).and_then(|list| list.iter().find(|(id, _, _)| id == lid))
+        else {
+            return gh_typed_error("NOT_FOUND", &format!("Could not resolve to a Label {lid}"));
+        };
+        resolved.push(lname.clone());
+    }
+    let issue = st.issues.get_mut(&(repo, num)).expect("issue exists");
+    let nodes = issue["labels"]["nodes"].as_array_mut().expect("labels.nodes array");
+    nodes.retain(|n| !n["name"].as_str().is_some_and(|s| resolved.iter().any(|r| r.eq_ignore_ascii_case(s))));
+    json!({"data": {"removeLabelsFromLabelable": {"labelable": {"__typename": "Issue"}}}})
+}
+
 fn add_blocked_by_mut(st: &mut GhState, variables: &Value) -> Value {
     let issue_id = variables["issueId"].as_str().unwrap_or_default();
     let blocker_id = variables["blockingIssueId"].as_str().unwrap_or_default();
@@ -1578,6 +1638,9 @@ impl crate::github::GitHub for FakeGitHub {
             }
             if op == "addLabelsToLabelable" {
                 return Ok(add_labels_mut(&mut st, &variables));
+            }
+            if op == "removeLabelsFromLabelable" {
+                return Ok(remove_labels_mut(&mut st, &variables));
             }
             if op == "addBlockedBy" {
                 return Ok(add_blocked_by_mut(&mut st, &variables));

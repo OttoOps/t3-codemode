@@ -59,6 +59,12 @@ pub const ADD_LABELS: &str = "mutation AddLabelsToLabelable($labelableId: ID!, $
   }
 }";
 
+pub const REMOVE_LABELS: &str = "mutation RemoveLabelsFromLabelable($labelableId: ID!, $labelIds: [ID!]!) {
+  removeLabelsFromLabelable(input: { labelableId: $labelableId, labelIds: $labelIds }) {
+    labelable { __typename }
+  }
+}";
+
 pub const ADD_BLOCKED_BY: &str = "mutation AddBlockedBy($issueId: ID!, $blockingIssueId: ID!) {
   addBlockedBy(input: { issueId: $issueId, blockingIssueId: $blockingIssueId }) {
     issue { id number }
@@ -525,6 +531,24 @@ pub async fn add_labels(
     }
     let resp = gh
         .graphql(ADD_LABELS, json!({"labelableId": labelable_id, "labelIds": label_ids}))
+        .await
+        .map_err(GraphQlError::from_transport)?;
+    if let Some(err) = graphql_error(&resp) {
+        return Err(err);
+    }
+    Ok(())
+}
+
+pub async fn remove_labels(
+    gh: &dyn GitHub,
+    labelable_id: &str,
+    label_ids: &[String],
+) -> std::result::Result<(), GraphQlError> {
+    if label_ids.is_empty() {
+        return Ok(());
+    }
+    let resp = gh
+        .graphql(REMOVE_LABELS, json!({"labelableId": labelable_id, "labelIds": label_ids}))
         .await
         .map_err(GraphQlError::from_transport)?;
     if let Some(err) = graphql_error(&resp) {
