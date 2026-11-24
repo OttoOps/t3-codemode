@@ -64,6 +64,21 @@ pub const FLOW_OPEN_ISSUES: &str = concat!(
 }"
 );
 
+pub const FLOW_CLOSED_ISSUES: &str = concat!(
+    "query FlowIssues($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    nameWithOwner
+    issues(states: CLOSED, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        ",
+    issue_fields!(),
+    "
+      }
+    }
+  }
+}"
+);
+
 const TRACK: &str = "track:";
 const TRACK_SUFFIX: &str = "-track";
 const AREA: &str = "area:";
@@ -1127,7 +1142,9 @@ fn tickets_query(asks: &[(String, u64)], full: bool) -> (String, Value) {
                 issue_fields!()
             )
         } else {
-            format!("t{i}: repository(owner: $o{i}, name: $r{i}) {{ nameWithOwner issue(number: $n{i}) {{ state }} }}")
+            format!(
+                "t{i}: repository(owner: $o{i}, name: $r{i}) {{ nameWithOwner issue(number: $n{i}) {{ number title url body state }} }}"
+            )
         });
         vars.insert(format!("o{i}"), json!(owner));
         vars.insert(format!("r{i}"), json!(name));
@@ -1441,9 +1458,6 @@ fn build_candidates(
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for r in all_reads {
-        if r.state == Some("closed") {
-            continue;
-        }
         let k = node_key(&r.issue.repo, r.issue.number);
         if !seen.insert(k) {
             continue;
@@ -1456,6 +1470,26 @@ fn build_candidates(
             parent_key: read_primary_parent_key(r, aliases, inferred_parents),
             declared_phase: r.body_parsed.declared_phase,
         });
+    }
+    // Include native GitHub subIssues (which already carry open and closed children with titles).
+    for r in all_reads {
+        let p_key = node_key(&canonicalize_repo(aliases, &r.issue.repo), r.issue.number);
+        for s in &r.subs {
+            let repo = canonicalize_repo(aliases, &s.to.repo);
+            let k = node_key(&repo, s.to.number);
+            if !seen.insert(k) {
+                continue;
+            }
+            let Some(title) = s.to.title.clone() else { continue };
+            out.push(Candidate {
+                repo,
+                number: s.to.number,
+                label: s.to.label.clone(),
+                title,
+                parent_key: Some(p_key.clone()),
+                declared_phase: None,
+            });
+        }
     }
     out
 }
@@ -1471,17 +1505,18 @@ impl Wf {
             return Ok(());
         }
 
-        // If we read only optIn-labelled issues (all_open == false) and any issue has a symbolic
-        // sibling reference, fetch open issues for those repos so symbolic matching sees unlabelled siblings.
+        // For repos with any symbolic sibling reference, fetch unlabelled open siblings (when
+        // `all_open` is false) and recent closed siblings so identity resolution stays stable
+        // after a blocker closes instead of dropping to unresolved or rebinding to another issue.
         let mut symbolic_pool: Vec<Read> = Vec::new();
-        if !all_open {
-            let mut need_repos: Vec<String> = Vec::new();
-            for r in reads.reads.iter().chain(extra.iter()) {
-                if r.body_parsed.has_symbolic() && !need_repos.iter().any(|x| x.eq_ignore_ascii_case(&r.issue.repo)) {
-                    need_repos.push(r.issue.repo.clone());
-                }
+        let mut need_repos: Vec<String> = Vec::new();
+        for r in reads.reads.iter().chain(extra.iter()) {
+            if r.body_parsed.has_symbolic() && !need_repos.iter().any(|x| x.eq_ignore_ascii_case(&r.issue.repo)) {
+                need_repos.push(r.issue.repo.clone());
             }
-            for repo in need_repos {
+        }
+        for repo in need_repos {
+            if !all_open {
                 match self.read_repo(&repo, None).await {
                     Ok((full, rs)) => {
                         self.record_github_repo_alias(&repo, &full);
@@ -1493,8 +1528,18 @@ impl Wf {
                     }
                 }
             }
-            reads.aliases = self.repo_aliases_snapshot();
+            match self.read_closed_repo(&repo).await {
+                Ok((full, rs)) => {
+                    self.record_github_repo_alias(&repo, &full);
+                    symbolic_pool.extend(rs);
+                }
+                Err(RepoReadError::Transport(e)) => return Err(e),
+                Err(RepoReadError::Graphql(e)) => {
+                    tracing::warn!("flow: could not read closed siblings in {repo} for body resolution: {e:#}");
+                }
+            }
         }
+        reads.aliases = self.repo_aliases_snapshot();
 
         let aliases = reads.aliases.clone();
         let mut known: BTreeMap<String, (IssueRef, Option<&'static str>)> = BTreeMap::new();
@@ -1610,6 +1655,30 @@ impl Wf {
                 }
             }
         }
+        // Also resolve symbolic parents for pool-only siblings (such as closed siblings) so Pass 2
+        // keeps their epic membership intact.
+        for r in &symbolic_pool {
+            let me_key = node_key(&r.issue.repo, r.issue.number);
+            if resolved_parent_keys.contains_key(&me_key) || r.parent.is_some() {
+                continue;
+            }
+            for pref in &r.body_parsed.parents {
+                if let BodyRef::Symbolic(raw) = pref
+                    && let ResolveOutcome::Resolved(repo, number) = flow_body::resolve_symbolic(
+                        raw,
+                        RefRole::Parent,
+                        &r.issue.repo,
+                        r.issue.number,
+                        None,
+                        &initial_candidates,
+                    )
+                {
+                    let canon = canonicalize_repo(&aliases, &repo);
+                    resolved_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
+                    break;
+                }
+            }
+        }
         inferred_parent_keys.extend(resolved_parent_keys);
 
         // Pass 2: resolve blocker refs (explicit + symbolic) with full epic membership.
@@ -1671,7 +1740,12 @@ impl Wf {
 
         // Pass 3: batch-fetch any referenced numeric issues whose state/title isn't already known.
         let mut asks_map: BTreeMap<String, (String, u64)> = BTreeMap::new();
-        for res in &resolved {
+        for (idx, res) in resolved.iter().enumerate() {
+            // On queue-only reads (`!all_open`), `extra` holds active parent tickets only for
+            // tasklist parent propagation onto `reads.reads`; skip unrelated missing sub-issues.
+            if !all_open && idx >= reads.reads.len() {
+                continue;
+            }
             for (repo, number) in res.blockers.iter().chain(&res.parents).chain(&res.subs) {
                 let k = node_key(repo, *number);
                 if known.get(&k).is_none_or(|(_, st)| st.is_none()) {
@@ -1916,6 +1990,29 @@ impl Wf {
         Ok(out)
     }
 
+    async fn read_closed_repo(&self, repo: &str) -> std::result::Result<(String, Vec<Read>), RepoReadError> {
+        let (owner, name) =
+            repo.split_once('/').ok_or_else(|| RepoReadError::Graphql(anyhow!("flow: {repo:?} is not owner/name")))?;
+        let resp = self
+            .github
+            .graphql(FLOW_CLOSED_ISSUES, json!({"owner": owner, "name": name}))
+            .await
+            .map_err(RepoReadError::Transport)?;
+        if let Some(e) = errors(&resp) {
+            return Err(RepoReadError::Graphql(anyhow!("wf.flow: reading {repo}'s closed issues failed: {e}")));
+        }
+        let r = &resp["data"]["repository"];
+        if r.is_null() {
+            return Err(RepoReadError::Graphql(anyhow!("wf.flow: GitHub returned no repository {repo}")));
+        }
+        let full = r["nameWithOwner"].as_str().unwrap_or(repo).to_string();
+        let mut out = Vec::new();
+        for n in r["issues"]["nodes"].as_array().into_iter().flatten() {
+            out.push(parse_node(&full, n).map_err(RepoReadError::Graphql)?);
+        }
+        Ok((full, out))
+    }
+
     async fn read_repo(
         &self,
         repo: &str,
@@ -2109,8 +2206,17 @@ impl Wf {
                 if issue["state"] == "CLOSED" {
                     closed.insert(node_key(final_repo, *number));
                 }
-                if full && issue.is_object() {
-                    reads.push(parse_node(final_repo, issue)?);
+                if issue.is_object() {
+                    if full {
+                        reads.push(parse_node(final_repo, issue)?);
+                    } else if issue["state"] != "CLOSED" {
+                        let mut parsed = parse_node(final_repo, issue)?;
+                        if !parsed.body_parsed.sub_issues.is_empty() {
+                            parsed.body_parsed.blockers.clear();
+                            parsed.body_parsed.parents.clear();
+                            reads.push(parsed);
+                        }
+                    }
                 }
             }
         }
@@ -2287,9 +2393,9 @@ impl Wf {
                              "reason": "flow.launch is off, so nothing launches"}));
         }
         let mut reads = self.flow_reads(Some(&cfg), false).await?;
-        let (closed, _) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
+        let (closed, mut extra) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
         reads.aliases = self.repo_aliases_snapshot();
-        self.resolve_body_dependencies(&mut reads, &mut [], false).await?;
+        self.resolve_body_dependencies(&mut reads, &mut extra, false).await?;
         let aliases = reads.aliases.clone();
         let g = self.lock.lock().await;
         let covered = reads.capacity_repos();
@@ -2395,9 +2501,9 @@ impl Wf {
         let fresh = match &cfg {
             Some(c) => {
                 let mut reads = self.flow_reads(Some(c), false).await?;
-                let (closed, _) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
+                let (closed, mut extra) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
                 reads.aliases = self.repo_aliases_snapshot();
-                self.resolve_body_dependencies(&mut reads, &mut [], false).await?;
+                self.resolve_body_dependencies(&mut reads, &mut extra, false).await?;
                 Some((reads, closed))
             }
             None => None,

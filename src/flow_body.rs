@@ -66,44 +66,62 @@ enum FlowListKey {
     Touches,
 }
 
-fn fence_open(line: &str) -> Option<(u8, usize)> {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && i < 3 && bytes[i] == b' ' {
-        i += 1;
+fn strip_quote_prefix(line: &str) -> (usize, &str) {
+    let mut depth = 0usize;
+    let mut s = line;
+    loop {
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() && i < 3 && bytes[i] == b' ' {
+            i += 1;
+        }
+        if bytes.get(i) == Some(&b'>') {
+            depth += 1;
+            s = &s[i + 1..];
+            if let Some(after_sp) = s.strip_prefix(' ') {
+                s = after_sp;
+            }
+        } else {
+            return (depth, s);
+        }
     }
-    let ch = *bytes.get(i)?;
+}
+
+fn fence_open(line: &str) -> Option<(u8, usize)> {
+    let mut s = line.trim_start();
+    // Allow fences starting directly after a list item marker (e.g. "- ```").
+    if let Some(rest) = s.strip_prefix("- ").or_else(|| s.strip_prefix("* ")).or_else(|| s.strip_prefix("+ ")) {
+        s = rest.trim_start();
+    } else {
+        let digits = s.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0
+            && let Some(rest) = s[digits..].strip_prefix(". ").or_else(|| s[digits..].strip_prefix(") "))
+        {
+            s = rest.trim_start();
+        }
+    }
+    let bytes = s.as_bytes();
+    let ch = *bytes.first()?;
     if ch != b'`' && ch != b'~' {
         return None;
     }
-    let start = i;
-    while i < bytes.len() && bytes[i] == ch {
-        i += 1;
-    }
-    let len = i - start;
+    let len = bytes.iter().take_while(|b| **b == ch).count();
     if len < 3 {
         return None;
     }
-    if ch == b'`' && bytes[i..].contains(&b'`') {
+    if ch == b'`' && bytes[len..].contains(&b'`') {
         return None;
     }
     Some((ch, len))
 }
 
 fn fence_close(line: &str, open_ch: u8, open_len: usize) -> bool {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && i < 3 && bytes[i] == b' ' {
-        i += 1;
-    }
-    let start = i;
-    while i < bytes.len() && bytes[i] == open_ch {
-        i += 1;
-    }
-    if i - start < open_len {
+    let bytes = line.trim_start().as_bytes();
+    let len = bytes.iter().take_while(|b| **b == open_ch).count();
+    if len < open_len {
         return false;
     }
-    bytes[i..].iter().all(|b| *b == b' ' || *b == b'\t')
+    bytes[len..].iter().all(|b| *b == b' ' || *b == b'\t')
 }
 
 fn strip_html_comments(line: &str, in_comment: &mut bool) -> String {
@@ -638,12 +656,12 @@ fn is_negated_prefix(prefix: &str) -> bool {
     false
 }
 
-fn starts_with_explicit_or_phase_or_quote(s: &str) -> bool {
+fn starts_with_explicit_ref(s: &str) -> bool {
     let t = s.trim_start().trim_start_matches("**").trim_start_matches("__").trim_start();
     if t.is_empty() {
         return false;
     }
-    if t.starts_with(['#', '"', '\'']) {
+    if t.starts_with('#') {
         return true;
     }
     if t.starts_with('[') && t.contains("](") && t.to_ascii_lowercase().contains("github.com/") {
@@ -654,16 +672,22 @@ fn starts_with_explicit_or_phase_or_quote(s: &str) -> bool {
     {
         return t.to_ascii_lowercase().contains("github.com/");
     }
-    // Check cross-repo owner/repo#N at start
     let token = t.split_whitespace().next().unwrap_or_default();
-    if let Some((prefix, _)) = token.split_once('#')
-        && let Some((o, r)) = prefix.split_once('/')
-        && !r.contains('/')
-        && gh_name(o)
-        && gh_name(r)
-    {
+    token.split_once('#').is_some_and(|(prefix, _)| {
+        prefix.split_once('/').is_some_and(|(o, r)| !r.contains('/') && gh_name(o) && gh_name(r))
+    })
+}
+
+fn starts_with_quoted(s: &str) -> bool {
+    let t = s.trim_start().trim_start_matches("**").trim_start_matches("__").trim_start();
+    t.starts_with(['"', '\''])
+}
+
+fn starts_with_explicit_or_phase_or_quote(s: &str) -> bool {
+    if starts_with_explicit_ref(s) || starts_with_quoted(s) {
         return true;
     }
+    let t = s.trim_start().trim_start_matches("**").trim_start_matches("__").trim_start();
     extract_leading_phase(t).is_some()
 }
 
@@ -876,7 +900,11 @@ fn scan_prose_segment(default_repo: &str, segment: &str, line_start: bool, parse
         let unbold = s.strip_prefix("**").or_else(|| s.strip_prefix("__")).unwrap_or(s);
         if let Some((k, rest)) = match_phase_of(unbold) {
             parsed.declared_phase = parsed.declared_phase.or(Some(k));
-            let (target, rem) = slice_directive_tail(rest, false);
+            let (target, rem) = if starts_with_explicit_ref(rest) || starts_with_quoted(rest) {
+                capture_inline_target(rest, false)
+            } else {
+                slice_directive_tail(rest, false)
+            };
             for r in parse_ref_list(default_repo, target, false) {
                 push_unique_ref(&mut parsed.parents, r);
             }
@@ -896,7 +924,11 @@ fn scan_prose_segment(default_repo: &str, segment: &str, line_start: bool, parse
                 if rest.is_empty() {
                     return has_colon.then_some(role);
                 }
-                let (target, rem) = slice_directive_tail(rest, false);
+                let (target, rem) = if starts_with_explicit_ref(rest) || starts_with_quoted(rest) {
+                    capture_inline_target(rest, false)
+                } else {
+                    slice_directive_tail(rest, false)
+                };
                 let refs = parse_ref_list(default_repo, target, false);
                 let dest = match role {
                     RefRole::Blocker => &mut parsed.blockers,
@@ -918,8 +950,11 @@ fn scan_prose_segment(default_repo: &str, segment: &str, line_start: bool, parse
                 return has_colon.then_some(RefRole::Blocker);
             }
             if has_colon || starts_with_explicit_or_phase_or_quote(rest) {
-                let (target, rem) =
-                    if has_colon { slice_directive_tail(rest, false) } else { capture_inline_target(rest, false) };
+                let (target, rem) = if starts_with_explicit_ref(rest) || starts_with_quoted(rest) || !has_colon {
+                    capture_inline_target(rest, false)
+                } else {
+                    slice_directive_tail(rest, false)
+                };
                 for r in parse_ref_list(default_repo, target, false) {
                     push_unique_ref(&mut parsed.blockers, r);
                 }
@@ -1059,7 +1094,7 @@ fn extract_leading_issue_ref(default_repo: &str, text: &str) -> Option<BodyRef> 
 
 pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
     let mut parsed = ParsedBody::default();
-    let mut fence: Option<(u8, usize)> = None;
+    let mut fence: Option<(usize, u8, usize)> = None;
     let mut in_comment = false;
     let mut flow_level: Option<usize> = None;
     let mut flow_list_key: Option<FlowListKey> = None;
@@ -1067,14 +1102,20 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
     let mut in_dep_section = false;
 
     for raw_line in body.lines() {
-        if let Some((ch, len)) = fence {
-            if fence_close(raw_line, ch, len) {
+        let (qdepth, unquoted) = strip_quote_prefix(raw_line);
+        if let Some((f_qdepth, ch, len)) = fence {
+            if qdepth < f_qdepth {
+                // Blockquote container ended, closing the fenced block inside it.
                 fence = None;
+            } else {
+                if qdepth == f_qdepth && fence_close(unquoted, ch, len) {
+                    fence = None;
+                }
+                continue;
             }
-            continue;
         }
-        if !in_comment && let Some(open) = fence_open(raw_line) {
-            fence = Some(open);
+        if !in_comment && let Some((ch, len)) = fence_open(unquoted) {
+            fence = Some((qdepth, ch, len));
             continue;
         }
         let line = strip_html_comments(raw_line, &mut in_comment);
@@ -1751,5 +1792,43 @@ The UI depends on the config file.
         );
         assert_eq!(p.track.as_deref(), Some("café-track"));
         assert_eq!(p.touches, vec!["src/flow.rs"]);
+    }
+
+    #[test]
+    fn skips_fences_inside_blockquotes_and_stops_at_trailing_prose_after_explicit_refs() {
+        let body = r#"
+> Quoted example:
+> ```markdown
+> Depends on #42
+> ## Flow
+> - Blocked by: #43
+> ```
+> > ~~~text
+> > Blocked by #44
+> > ~~~
+
+- Indented fence in list:
+    ```
+    Depends on #45
+    ```
+
+Depends on #10, which adds OAuth support.
+Blocked by #11, #12, because they wire the API.
+Part of #1, tracking the OAuth epic.
+Phase P2 of #1, covering follow-up work.
+After: #13, which ships the migration.
+"#;
+        let p = parse_body(REPO, body);
+        assert_eq!(
+            p.blockers,
+            vec![
+                BodyRef::Issue { repo: REPO.into(), number: 10 },
+                BodyRef::Issue { repo: REPO.into(), number: 11 },
+                BodyRef::Issue { repo: REPO.into(), number: 12 },
+                BodyRef::Issue { repo: REPO.into(), number: 13 },
+            ]
+        );
+        assert_eq!(p.parents, vec![BodyRef::Issue { repo: REPO.into(), number: 1 }]);
+        assert_eq!(p.declared_phase, Some(2));
     }
 }

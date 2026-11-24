@@ -789,7 +789,7 @@ fn full_issue_node(st: &GhState, i: &Value) -> Value {
            "subIssues": {"totalCount": subs.len(), "nodes": subs}})
 }
 
-fn flow_issues(st: &GhState, variables: &Value) -> Value {
+fn flow_issues(st: &GhState, query: &str, variables: &Value) -> Value {
     let raw_repo = format!("{}/{}", variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap())
         .to_ascii_lowercase();
     let canonical = st.repo_aliases.get(&raw_repo).cloned();
@@ -797,13 +797,14 @@ fn flow_issues(st: &GhState, variables: &Value) -> Value {
     if !st.repos.contains_key(&repo) {
         return gh_error(&format!("Could not resolve to a Repository with the name '{repo}'."));
     }
+    let want_state = if query.contains("states: CLOSED") { "CLOSED" } else { "OPEN" };
     let label = variables["label"].as_str().map(str::to_ascii_lowercase);
     let mut matching: Vec<&Value> = st
         .issues
         .iter()
         .filter(|((r, _), i)| {
             *r == repo
-                && i["state"] == "OPEN"
+                && i["state"] == want_state
                 && label.as_ref().is_none_or(|want| {
                     i["labels"]["nodes"]
                         .as_array()
@@ -814,7 +815,11 @@ fn flow_issues(st: &GhState, variables: &Value) -> Value {
         })
         .map(|(_, i)| i)
         .collect();
-    matching.sort_by(|a, b| a["createdAt"].as_str().cmp(&b["createdAt"].as_str()));
+    if want_state == "CLOSED" {
+        matching.sort_by(|a, b| b["createdAt"].as_str().cmp(&a["createdAt"].as_str()));
+    } else {
+        matching.sort_by(|a, b| a["createdAt"].as_str().cmp(&b["createdAt"].as_str()));
+    }
     let start: usize = variables["after"].as_str().and_then(|c| c.parse().ok()).unwrap_or(0);
     let size = if st.issue_page == 0 { 100 } else { st.issue_page };
     let end = (start + size).min(matching.len());
@@ -899,7 +904,7 @@ impl crate::github::GitHub for FakeGitHub {
                 return Ok(repo_canonical(&st, &variables));
             }
             if op == "flowIssues" {
-                return Ok(flow_issues(&st, &variables));
+                return Ok(flow_issues(&st, query, &variables));
             }
             if op == "flowTickets" {
                 return Ok(flow_tickets(&st, &variables));
