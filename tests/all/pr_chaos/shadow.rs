@@ -1468,7 +1468,12 @@ impl Model {
         if !later(&at, after) {
             return false;
         }
+        let superseded = format!("removed-superseded:{at}");
+        if self.events.contains(&(pr, superseded.clone(), BOARD.into())) {
+            return false;
+        }
         if self.waits.get(&pr).is_some_and(|w| earliest(&at, &w.at)) {
+            self.mark(pr, &superseded, BOARD);
             return false;
         }
         let event = format!("removed:{at}");

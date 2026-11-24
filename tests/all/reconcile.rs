@@ -2013,3 +2013,75 @@ async fn superseding_a_moved_approval_card_with_a_newer_approval_releases_the_me
     h.app.wf.dismiss(open[0]["id"].as_str().unwrap()).await.unwrap();
     assert_eq!(h.app.wf.tree().unwrap()[0]["gate"], Value::Null);
 }
+
+#[tokio::test]
+async fn a_queue_drop_superseded_by_a_reassigned_approval_is_not_reported_on_a_later_reconcile() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+    check(&h, 0).await;
+
+    h.github.drop_from_queue(REPO, 7, "failed_checks", &at(10));
+    h.clock.set(&at(11));
+    assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "waiting");
+    h.github.update_pr(REPO, 7, json!({"id": "PR_other", "mergeStateStatus": "CLEAN"}));
+
+    check(&h, 12).await;
+
+    assert!(h.github.operations().iter().all(|o| !o.ends_with("PullRequest")));
+    assert!(h.app.store.merge_waits().unwrap().is_empty());
+    let after_first = cards(&h, false);
+    assert_eq!(after_first.len(), 1, "{after_first:?}");
+    assert!(
+        after_first[0]["text"].as_str().unwrap().contains("no longer the pull request that was approved"),
+        "{after_first:?}"
+    );
+    let sent_after_first = h.sent().len();
+
+    let actions = check(&h, 14).await;
+
+    assert!(actions.is_empty(), "second reconcile must reach a fixpoint: {actions:?}");
+    assert_eq!(cards(&h, false), after_first, "second reconcile must not report the superseded drop");
+    assert_eq!(h.sent().len(), sent_after_first, "second reconcile must send no messages");
+
+    // A later queue drop at a new timestamp is still reported normally.
+    h.github.drop_from_queue(REPO, 7, "merge_conflict", &at(15));
+    check(&h, 16).await;
+    let after_fresh = cards(&h, false);
+    assert_eq!(after_fresh.len(), 2, "{after_fresh:?}");
+    assert!(after_fresh.iter().any(|c| c["text"].as_str().unwrap().contains("a merge conflict")), "{after_fresh:?}");
+}
+
+#[tokio::test]
+async fn a_queue_drop_superseded_by_a_wait_that_retires_on_head_move_stays_quiet_across_adopt() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.wf("mcp:ticket2", "join", json!({"parent": BOARD, "label": "widgets#42", "role": "ticket"})).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+    check(&h, 0).await;
+
+    h.github.drop_from_queue(REPO, 7, "failed_checks", &at(10));
+    h.clock.set(&at(11));
+    assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "waiting");
+    h.github.update_pr(REPO, 7, json!({"headRefOid": MOVED}));
+
+    check(&h, 12).await;
+
+    assert!(h.app.store.merge_waits().unwrap().is_empty());
+    let after_first = cards(&h, false);
+    assert_eq!(after_first.len(), 1, "{after_first:?}");
+    assert_eq!(after_first[0]["kind"], "gate");
+    assert!(after_first[0]["text"].as_str().unwrap().contains("moved to head 2222222"), "{after_first:?}");
+    let sent_after_first = h.sent().len();
+
+    let actions = check(&h, 14).await;
+    assert!(actions.is_empty(), "second reconcile must reach a fixpoint: {actions:?}");
+    assert_eq!(cards(&h, false), after_first);
+    assert_eq!(h.sent().len(), sent_after_first);
+
+    h.wf("mcp:ticket2", "adopt", json!({"from": TICKET})).await;
+    assert_eq!(h.app.store.link_get(WORKER).unwrap().unwrap().parent, "mcp:ticket2");
+    let actions_after_adopt = check(&h, 16).await;
+    assert!(actions_after_adopt.is_empty(), "superseded drop must stay quiet after adopt: {actions_after_adopt:?}");
+    assert_eq!(cards(&h, false).len(), 1, "{:?}", cards(&h, false));
+}

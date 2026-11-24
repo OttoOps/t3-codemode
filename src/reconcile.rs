@@ -935,12 +935,17 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         let Some((reason, at)) = o.removal.as_ref().filter(|(r, _)| !o.queued && r != "merged") else {
             return Ok(false);
         };
-        let newest = self.store.merge_wait_get(&t.repo, t.number)?;
         if !later(at, after) {
             self.reach.hit(ReachPoint::QueueDropPredatesTracking);
             return Ok(false);
         }
+        let superseded = format!("removed-superseded:{at}");
+        if self.store.pr_event_seen(&t.repo, t.number, &superseded, BOARD)? {
+            return Ok(false);
+        }
+        let newest = self.store.merge_wait_get(&t.repo, t.number)?;
         if newest.is_some_and(|w| parse_ts(&w.at).zip(parse_ts(at)).is_some_and(|(w, r)| w > r)) {
+            self.store.pr_event_mark(&t.repo, t.number, &superseded, BOARD, &self.now())?;
             return Ok(false);
         }
         let why = why_dropped(reason);
