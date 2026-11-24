@@ -250,12 +250,12 @@ async fn the_graph_covers_flow_issues_and_active_tickets_with_their_edges() {
     assert_eq!(
         g["edges"],
         json!([
-            {"from": "acme/gadgets#3", "to": "acme/widgets#11", "kind": "blockedBy"},
-            {"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy"},
-            {"from": "acme/widgets#2", "to": "acme/widgets#3", "kind": "blockedBy"},
-            {"from": "acme/widgets#4", "to": "acme/widgets#5", "kind": "parent"},
-            {"from": "acme/widgets#6", "to": "acme/tools#7", "kind": "blockedBy"},
-            {"from": "acme/widgets#11", "to": "acme/widgets#10", "kind": "parent"},
+            {"from": "acme/gadgets#3", "to": "acme/widgets#11", "kind": "blockedBy", "source": "github"},
+            {"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy", "source": "github"},
+            {"from": "acme/widgets#2", "to": "acme/widgets#3", "kind": "blockedBy", "source": "github"},
+            {"from": "acme/widgets#4", "to": "acme/widgets#5", "kind": "parent", "source": "github"},
+            {"from": "acme/widgets#6", "to": "acme/tools#7", "kind": "blockedBy", "source": "github"},
+            {"from": "acme/widgets#11", "to": "acme/widgets#10", "kind": "parent", "source": "github"},
         ])
     );
 
@@ -387,7 +387,10 @@ async fn with_no_flow_block_the_graph_discovers_t3_project_repos_and_reads_their
     assert_eq!((n1["track"].as_str(), n1["trackBy"].as_str()), (Some("widgets#1"), Some("component")));
     let n2 = node(&f, "acme/widgets#2");
     assert_eq!(ids(&n2["blockedBy"]), ["acme/widgets#1"]);
-    assert_eq!(f["graph"]["edges"], json!([{"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy"}]));
+    assert_eq!(
+        f["graph"]["edges"],
+        json!([{"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy", "source": "github"}])
+    );
 }
 
 #[tokio::test]
@@ -401,7 +404,7 @@ async fn with_no_flow_block_the_flow_is_off_and_reads_nothing() {
         json!({"enabled": false, "launch": null, "maxTickets": 0, "free": 0, "running": [], "queue": [], "blocked": [],
                "skipped": []})
     );
-    assert_eq!(graph(&h).await["graph"], json!({"nodes": [], "edges": []}));
+    assert_eq!(graph(&h).await["graph"], json!({"nodes": [], "edges": [], "warnings": []}));
     assert!(h.github.calls().is_empty());
 }
 
@@ -427,6 +430,8 @@ async fn wf_flow_is_in_the_catalog_with_its_signature() {
     let sig = ok_json(&out)["result"].as_str().unwrap().to_string();
     assert!(sig.contains("wf.flow(input?: { graph?: boolean }): Promise<{ enabled: boolean;"), "{sig}");
     assert!(sig.contains("graph?: { nodes:"), "{sig}");
+    assert!(sig.contains(r#"source: "github" | "body" | "git" | "code""#), "{sig}");
+    assert!(sig.contains("warnings: {"), "{sig}");
     assert!(sig.contains("queue:"), "{sig}");
 }
 
@@ -1498,7 +1503,7 @@ async fn zero_config_graph_discovers_t3_project_repos_and_keeps_launching_off() 
     assert_eq!(view["queue"], json!([]));
     assert_eq!(
         view["graph"]["edges"],
-        json!([{"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy"}])
+        json!([{"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy", "source": "github"}])
     );
     for id in ["acme/widgets#3", "acme/widgets#4"] {
         assert_eq!(
@@ -1684,8 +1689,8 @@ async fn transitive_blocker_chains_survive_unlabelled_intermediates() {
     assert_eq!(
         f["graph"]["edges"],
         json!([
-            {"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy"},
-            {"from": "acme/widgets#3", "to": "acme/widgets#2", "kind": "blockedBy"},
+            {"from": "acme/widgets#2", "to": "acme/widgets#1", "kind": "blockedBy", "source": "github"},
+            {"from": "acme/widgets#3", "to": "acme/widgets#2", "kind": "blockedBy", "source": "github"},
         ])
     );
 }
@@ -2300,4 +2305,314 @@ async fn pending_ticket_uses_saved_project_under_unavailable_discovery() {
     assert_eq!(pick2["free"], 0, "pending ticket on unavailable project must keep slot: {pick2}");
     assert_eq!(pick2["picked"], json!([]), "{pick2}");
     assert!(h2.fake.launched().is_empty());
+}
+
+#[tokio::test]
+async fn body_dependencies_block_the_queue_emit_body_edges_and_skip_fenced_code() {
+    let h = flowing(4);
+    issue(&h, REPO, 1, &[], 1); // Unlabelled epic
+    issue(&h, REPO, 2, &[], 2); // Unlabelled open blocker
+    issue(&h, REPO, 3, &[FLOW], 3); // Blocked by #2 via prose + Flow Track
+    issue(&h, REPO, 4, &[FLOW], 4); // Blocked by cross-repo tools#7 via ## Flow + fenced noise
+    issue(&h, REPO, 5, &[FLOW], 5); // Both native + body blocker on #2 (native wins)
+    issue(&h, REPO, 6, &[FLOW], 6); // Ready: only mentions Depends on #2 inside fenced & inline code
+    issue(&h, TOOLS, 7, &[], 7); // Cross-repo blocker
+    issue(&h, REPO, 8, &[FLOW], 8); // Child via #1 tasklist + After #2
+
+    h.github.set_body(
+        REPO,
+        1,
+        "## Tasks\n- [ ] #8 Child task\n- [ ] Write docs for #999\n\n## Flow\n- Track: flow-dag\n",
+    );
+    h.github.set_body(
+        REPO,
+        3,
+        "Depends on #2 (Phase 1).\nPhase P1 of #1.\n\n## Flow\n- Parent: #1\n- Track: flow-dag\n- Touches: `src/flow.rs`, `src/board.html`\n",
+    );
+    h.github.set_body(
+        REPO,
+        4,
+        "```markdown\nDepends on #999\n## Flow\n- Track: fake-track\n```\n~~~\nBlocked by #888\n~~~\n\n## Flow\n- Blocked by: acme/tools#7\n- Track: sync-track\n",
+    );
+    h.github.set_blockers(REPO, 5, &[(REPO, 2)]);
+    h.github.set_body(REPO, 5, "Blocked by #2\n\n## Flow\n- Blocked by: #2\n");
+    h.github.set_body(
+        REPO,
+        6,
+        "Docs note: write `Depends on #2` or ``Blocked by #7``.\n<!-- Depends on #2 -->\n```text\nDepends on #2\n```\nAfter merging, check the logs.\n",
+    );
+    h.github.set_body(REPO, 8, "After #2\n");
+
+    // Queue-only read (wf.flow() with optIn.label) must still block on unlabelled body blockers (#2 and tools#7).
+    let q = flow(&h).await;
+    assert_eq!(labels(&q["queue"]), ["widgets#6"], "only #6 is unblocked: {q}");
+    assert_eq!(labels(&q["blocked"]), ["widgets#3", "widgets#4", "widgets#5", "widgets#8"], "{q}");
+    let b4 = q["blocked"].as_array().unwrap().iter().find(|x| x["label"] == "widgets#4").unwrap();
+    assert_eq!(labels(&b4["blockers"]), ["tools#7"]);
+
+    // Full graph read carries source provenance, Flow Track lanes, tasklist parent, and zero false warnings.
+    let g = graph(&h).await;
+    assert_eq!(g["graph"]["warnings"], json!([]), "clean DAG must have no warnings: {g}");
+    assert_eq!(
+        (node(&g, "acme/widgets#3")["track"].as_str(), node(&g, "acme/widgets#3")["trackBy"].as_str()),
+        (Some("flow-dag"), Some("label"))
+    );
+    assert_eq!(
+        (node(&g, "acme/widgets#4")["track"].as_str(), node(&g, "acme/widgets#4")["trackBy"].as_str()),
+        (Some("sync-track"), Some("label"))
+    );
+    assert_eq!(node(&g, "acme/widgets#8")["parent"], "acme/widgets#1");
+    assert_eq!(
+        g["graph"]["edges"],
+        json!([
+            {"from": "acme/widgets#3", "to": "acme/widgets#2", "kind": "blockedBy", "source": "body"},
+            {"from": "acme/widgets#3", "to": "acme/widgets#1", "kind": "parent", "source": "body"},
+            {"from": "acme/widgets#4", "to": "acme/tools#7", "kind": "blockedBy", "source": "body"},
+            {"from": "acme/widgets#5", "to": "acme/widgets#2", "kind": "blockedBy", "source": "github"},
+            {"from": "acme/widgets#8", "to": "acme/widgets#2", "kind": "blockedBy", "source": "body"},
+            {"from": "acme/widgets#8", "to": "acme/widgets#1", "kind": "parent", "source": "body"},
+        ])
+    );
+
+    // Closing #2 unblocks #3, #5, and #8 in both wf.flow() and graph, preserving body edge + unblockedBy.
+    h.github.close_issue(REPO, 2);
+    let q2 = flow(&h).await;
+    assert_eq!(labels(&q2["queue"]), ["widgets#3", "widgets#5", "widgets#6", "widgets#8"], "{q2}");
+    let q3 = q2["queue"].as_array().unwrap().iter().find(|x| x["label"] == "widgets#3").unwrap();
+    assert_eq!(labels(&q3["unblockedBy"]), ["widgets#2"]);
+    let g2 = graph(&h).await;
+    assert_eq!(node(&g2, "acme/widgets#2")["state"], "closed");
+    assert_eq!(node(&g2, "acme/widgets#3")["ready"], true);
+}
+
+#[tokio::test]
+async fn plain_blocked_label_holds_issue_with_diagnostic_while_external_keeps_its_behavior() {
+    let h = flowing(4);
+    issue(&h, REPO, 1, &[FLOW, "blocked"], 1);
+    issue(&h, REPO, 2, &[FLOW, "Blocked"], 2);
+    issue(&h, REPO, 3, &[FLOW], 3);
+    issue(&h, REPO, 4, &[FLOW, "blocked: external"], 4);
+    h.github.set_body(REPO, 2, "Depends on #3");
+
+    let g = graph(&h).await;
+    assert_eq!(labels(&g["queue"]), ["widgets#3"], "{g}");
+    assert_eq!(labels(&g["blocked"]), ["widgets#1", "widgets#2", "widgets#4"], "{g}");
+
+    let b = |lbl: &str| g["blocked"].as_array().unwrap().iter().find(|x| x["label"] == lbl).unwrap();
+    assert_eq!(b("widgets#1")["blockedLabel"], true);
+    assert_eq!(b("widgets#1")["external"], false);
+    assert_eq!(b("widgets#1")["blockers"], json!([]));
+    assert_eq!(b("widgets#2")["blockedLabel"], true);
+    assert_eq!(labels(&b("widgets#2")["blockers"]), ["widgets#3"]);
+    assert_eq!(b("widgets#4")["external"], true);
+    assert!(b("widgets#4").get("blockedLabel").is_none());
+
+    // Only #1 has no open blocker linked, so only #1 gets the blockedLabel diagnostic.
+    assert_eq!(
+        node(&g, "acme/widgets#1")["warnings"],
+        json!([{"kind": "blockedLabel", "message": "Labelled \"blocked\" with no open blocker linked"}])
+    );
+    assert_eq!(node(&g, "acme/widgets#2")["warnings"], json!([]));
+    assert_eq!(node(&g, "acme/widgets#4")["warnings"], json!([]));
+    assert_eq!(
+        g["graph"]["warnings"],
+        json!([{
+            "kind": "blockedLabel",
+            "message": "widgets#1: Labelled \"blocked\" with no open blocker linked",
+            "nodes": ["acme/widgets#1"]
+        }])
+    );
+
+    // Once #3 closes, #2 still stays blocked by its plain `blocked` label and now gets the diagnostic.
+    h.github.close_issue(REPO, 3);
+    let g2 = graph(&h).await;
+    assert_eq!(labels(&g2["queue"]), Vec::<String>::new());
+    assert_eq!(labels(&g2["blocked"]), ["widgets#1", "widgets#2", "widgets#4"]);
+    assert_eq!(node(&g2, "acme/widgets#2")["warnings"][0]["kind"], "blockedLabel");
+}
+
+#[tokio::test]
+async fn sibling_title_and_phase_references_resolve_unambiguously_and_flag_unresolved_refs() {
+    let h = flowing(4);
+    // Epic #10 with unlabelled Phase 1 (#11) and flow-opted Phase 2 (#12) & title-ref (#13).
+    h.github.set_issue(REPO, github_issue(10, "Epic: DAG", &[], "2026-10-01T09:00:00Z"));
+    h.github.set_issue(REPO, github_issue(11, "feat: zero-config graph", &[], "2026-10-02T09:00:00Z"));
+    h.github.set_issue(REPO, github_issue(12, "feat: body parser", &[FLOW], "2026-10-03T09:00:00Z"));
+    h.github.set_issue(REPO, github_issue(13, "feat: UI edges", &[FLOW], "2026-10-04T09:00:00Z"));
+    h.github.set_body(REPO, 11, "## Scope (Phase 1 of #10)\n");
+    h.github.set_body(REPO, 12, "Part of #10\nDepends on Phase 1\n");
+    h.github.set_body(REPO, 13, "Part of #10\nBlocked by \"zero-config graph\"\n");
+
+    // Second epic #20 also has a Phase 1 (#21) so repo-wide "Phase 1" is ambiguous.
+    h.github.set_issue(REPO, github_issue(20, "Epic: Auth", &[], "2026-10-05T09:00:00Z"));
+    h.github.set_issue(REPO, github_issue(21, "Phase 1: auth schema", &[], "2026-10-06T09:00:00Z"));
+    h.github.set_issue(REPO, github_issue(22, "Phase 2: auth UI", &[FLOW], "2026-10-07T09:00:00Z"));
+    h.github.set_body(REPO, 21, "Part of #20\n");
+    h.github.set_body(REPO, 22, "Part of #20\nDepends on Phase 1\n");
+
+    // Unparented #30 references ambiguous "Phase 1"; #31 references nonexistent "Phase 9"; #32 references missing #999.
+    h.github.set_issue(REPO, github_issue(30, "Ambiguous dep", &[FLOW], "2026-10-08T09:00:00Z"));
+    h.github.set_issue(REPO, github_issue(31, "Missing phase", &[FLOW], "2026-10-09T09:00:00Z"));
+    h.github.set_issue(REPO, github_issue(32, "Missing issue num", &[FLOW], "2026-10-10T09:00:00Z"));
+    h.github.set_body(REPO, 30, "Depends on Phase 1\n");
+    h.github.set_body(REPO, 31, "Depends on Phase 9\n");
+    h.github.set_body(REPO, 32, "Depends on #999\n");
+
+    // Both queue-only wf.flow() and full graph must resolve unlabelled siblings and block unresolved issues.
+    let q = flow(&h).await;
+    let g = graph(&h).await;
+    assert_eq!(labels(&q["queue"]), Vec::<String>::new(), "{q}");
+    assert_eq!(
+        labels(&q["blocked"]),
+        ["widgets#12", "widgets#13", "widgets#22", "widgets#30", "widgets#31", "widgets#32"]
+    );
+    assert_eq!(labels(&g["blocked"]), labels(&q["blocked"]));
+
+    // Epic-scoped resolution bound #12 and #13 -> #11, and #22 -> #21.
+    assert_eq!(ids(&node(&g, "acme/widgets#12")["blockedBy"]), ["acme/widgets#11"]);
+    assert_eq!(ids(&node(&g, "acme/widgets#13")["blockedBy"]), ["acme/widgets#11"]);
+    assert_eq!(ids(&node(&g, "acme/widgets#22")["blockedBy"]), ["acme/widgets#21"]);
+    assert_eq!(node(&g, "acme/widgets#12")["warnings"], json!([]));
+    assert_eq!(node(&g, "acme/widgets#13")["warnings"], json!([]));
+    assert_eq!(node(&g, "acme/widgets#22")["warnings"], json!([]));
+
+    // Ambiguous and missing references raise explicit diagnostics without creating phantom #999.
+    assert!(g["graph"]["nodes"].as_array().unwrap().iter().all(|n| n["id"] != "acme/widgets#999"));
+    assert_eq!(node(&g, "acme/widgets#30")["warnings"][0]["kind"], "unresolved");
+    assert!(
+        node(&g, "acme/widgets#30")["warnings"][0]["message"].as_str().unwrap().contains("Ambiguous"),
+        "{}",
+        node(&g, "acme/widgets#30")["warnings"]
+    );
+    assert_eq!(node(&g, "acme/widgets#31")["warnings"][0]["raw"], "Phase 9");
+    assert_eq!(node(&g, "acme/widgets#32")["warnings"][0]["raw"], "#999");
+    let graph_warns = g["graph"]["warnings"].as_array().unwrap();
+    assert_eq!(graph_warns.len(), 3, "{graph_warns:?}");
+}
+
+#[tokio::test]
+async fn cycles_unresolved_refs_and_edge_sources_surface_in_graph_warnings_and_board_ui() {
+    let h = flowing(4);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    issue(&h, REPO, 3, &[FLOW], 3);
+    issue(&h, REPO, 4, &[FLOW], 4);
+    issue(&h, REPO, 5, &[FLOW, "blocked"], 5);
+    issue(&h, REPO, 6, &[FLOW], 6);
+    issue(&h, REPO, 7, &[FLOW], 7);
+    issue(&h, REPO, 8, &[FLOW], 8);
+
+    h.github.set_body(REPO, 1, "Depends on #2\n");
+    h.github.set_body(REPO, 2, "Depends on #1\n");
+    h.github.set_body(REPO, 3, "Depends on #3\n");
+    h.github.set_body(REPO, 4, "Depends on Phase 9\n");
+    h.github.set_blockers(REPO, 6, &[(REPO, 7)]);
+    h.github.set_body(REPO, 8, "Depends on #7\n");
+
+    let (html, st, view) = panel_page(h).await;
+    assert_eq!(labels(&view["queue"]), ["widgets#7"], "{view}");
+    assert_eq!(
+        labels(&view["blocked"]),
+        ["widgets#1", "widgets#2", "widgets#3", "widgets#4", "widgets#5", "widgets#6", "widgets#8"]
+    );
+    let warns = view["graph"]["warnings"].as_array().unwrap();
+    assert_eq!(warns.len(), 4, "2 cycles + 1 unresolved + 1 blockedLabel: {warns:?}");
+    assert!(warns.iter().any(
+        |w| w["kind"] == "cycle" && w["message"].as_str().unwrap().contains("widgets#1 -> widgets#2 -> widgets#1")
+    ));
+    assert!(
+        warns
+            .iter()
+            .any(|w| w["kind"] == "cycle" && w["message"].as_str().unwrap().contains("widgets#3 depends on itself"))
+    );
+    assert!(warns.iter().any(|w| w["kind"] == "unresolved" && w["raw"] == "Phase 9"));
+    assert!(warns.iter().any(|w| w["kind"] == "blockedLabel" && w["nodes"] == json!(["acme/widgets#5"])));
+
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        &format!(
+            r##"{GRAPH}
+fetchReply = (url) => url === "/api/flow" ? reply(200, view) : new Promise(() => {{}});
+emitState(base);
+await tick();
+const blockedRows = Object.fromEntries(rows("flow-b").map((row) => [row.label, row.why]));
+selectTab("graph");
+const banner = {{
+  hidden: q("#graph-warn").hidden,
+  head: q("#graph-warn .gwarn-h") ? q("#graph-warn .gwarn-h").textContent : null,
+  items: document.querySelectorAll("#graph-warn li").map((li) => [li.dataset.kind, li.textContent]),
+}};
+const edgeMeta = document.querySelectorAll(".ge").map((p) => [p.getAttribute("class"), p.getAttribute("data-source")]);
+const warnBadge = (id) => {{
+  const b = btn(id);
+  const w = b.querySelector('[data-part="warn"]');
+  return {{ warnClass: b.classList.contains("warn"), hidden: w.hidden, text: w.textContent }};
+}};
+const badges = {{
+  cycle: warnBadge("acme/widgets#1"),
+  selfCycle: warnBadge("acme/widgets#3"),
+  unresolved: warnBadge("acme/widgets#4"),
+  blockedLabel: warnBadge("acme/widgets#5"),
+  clean: warnBadge("acme/widgets#7"),
+}};
+btn("acme/widgets#8").dispatch("click");
+const bodyDepDrawer = {{ deps: deps(), warnsHidden: dp("deps-w").hidden }};
+btn("acme/widgets#4").dispatch("click");
+const warnDrawer = {{
+  warnsHidden: dp("deps-w").hidden,
+  warns: document.querySelectorAll('#drawer [data-part="deps-w"] li').map((li) => li.textContent),
+  note: dp("note-m").textContent,
+}};
+btn("acme/widgets#8").dispatch("pointerover");
+const hoverBodyEdge = document.querySelectorAll(".ge").map((p) => p.getAttribute("class"));
+// Clean payload hides the warning banner again.
+paintFlow({{ ...view, graph: {{ ...view.graph, warnings: [] }} }});
+const clearedHidden = q("#graph-warn").hidden;
+return {{ blockedRows, banner, edgeMeta, badges, bodyDepDrawer, warnDrawer, hoverBodyEdge, clearedHidden }};
+"##
+        ),
+    );
+
+    assert_eq!(r["blockedRows"]["widgets#4"], "unresolved: Phase 9 · priority: none", "{r}");
+    assert_eq!(r["blockedRows"]["widgets#5"], "labelled blocked (no blocker linked) · priority: none", "{r}");
+    assert_eq!(r["banner"]["hidden"], false, "{r}");
+    assert_eq!(
+        r["banner"]["head"], "Graph diagnostics: 2 cycles, 1 unresolved reference, 1 unlinked blocked label",
+        "{r}"
+    );
+    assert_eq!(r["banner"]["items"].as_array().unwrap().len(), 4, "{r}");
+    assert!(
+        r["edgeMeta"].as_array().unwrap().contains(&json!(["ge", "github"]))
+            && r["edgeMeta"].as_array().unwrap().contains(&json!(["ge src-body", "body"])),
+        "native and body edges render with distinct classes and data-source: {r}"
+    );
+    assert_eq!(r["badges"]["cycle"], json!({"warnClass": true, "hidden": false, "text": "cycle"}), "{r}");
+    assert_eq!(r["badges"]["selfCycle"], json!({"warnClass": true, "hidden": false, "text": "cycle"}), "{r}");
+    assert_eq!(r["badges"]["unresolved"], json!({"warnClass": true, "hidden": false, "text": "unresolved"}), "{r}");
+    assert_eq!(r["badges"]["blockedLabel"], json!({"warnClass": true, "hidden": false, "text": "warning"}), "{r}");
+    assert_eq!(r["badges"]["clean"], json!({"warnClass": false, "hidden": true, "text": ""}), "{r}");
+    assert_eq!(r["bodyDepDrawer"], json!({"deps": ["Blocked bywidgets#7readybody"], "warnsHidden": true}), "{r}");
+    assert_eq!(r["warnDrawer"]["warnsHidden"], false, "{r}");
+    assert_eq!(r["warnDrawer"]["warns"], json!(["Unresolved blocker reference \"Phase 9\""]), "{r}");
+    assert!(r["hoverBodyEdge"].as_array().unwrap().contains(&json!("ge src-body up")), "{r}");
+    assert_eq!(r["clearedHidden"], true, "{r}");
+}
+
+#[tokio::test]
+async fn body_blocker_changes_invalidate_skip_memory() {
+    let h = flowing(1);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    issue(&h, REPO, 2, &[], 2);
+    let first = next(&h).await;
+    let id = first["picked"][0]["card"].as_str().unwrap().to_string();
+    h.app.wf.answer(&id, "skip").await.unwrap();
+    assert_eq!(labels(&flow(&h).await["skipped"]), ["widgets#1"]);
+
+    // Adding an open body blocker moves #1 to blocked and clears stale skip when it later closes.
+    h.github.set_body(REPO, 1, "Depends on #2\n");
+    assert_eq!(labels(&flow(&h).await["blocked"]), ["widgets#1"]);
+    h.github.close_issue(REPO, 2);
+    assert_eq!(labels(&flow(&h).await["queue"]), ["widgets#1"]);
 }

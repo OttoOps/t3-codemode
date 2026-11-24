@@ -7,10 +7,12 @@ use serde_json::{Value, json};
 
 use crate::board::{BOARD, Card, LaunchArgs, card_text, chip};
 use crate::config::{FlowConfig, Launch, OptIn};
+use crate::flow_body::{self, BodyRef, Candidate, ParsedBody, RefRole, ResolveOutcome};
 use crate::github::errors;
 use crate::wf::Wf;
 
 pub const EXTERNAL: &str = "blocked: external";
+pub const BLOCKED_LABEL: &str = "blocked";
 pub const LAUNCH: &str = "launch";
 pub const SKIP: &str = "skip";
 const PRIORITIES: [&str; 3] = ["high", "medium", "low"];
@@ -21,7 +23,7 @@ pub const FLOW_TICKETS: &str = "query FlowTickets(";
 
 macro_rules! issue_fields {
     () => {
-        "number title url createdAt state
+        "number title url body createdAt state
         labels(first: 100) { nodes { name } }
         milestone { title dueOn }
         parent { number title url state repository { nameWithOwner } }
@@ -67,6 +69,15 @@ const TRACK_SUFFIX: &str = "-track";
 const AREA: &str = "area:";
 pub const BLOCKED_BY: &str = "blockedBy";
 pub const PARENT: &str = "parent";
+pub const SOURCE_GITHUB: &str = "github";
+pub const SOURCE_BODY: &str = "body";
+#[allow(dead_code)]
+pub const SOURCE_GIT: &str = "git";
+#[allow(dead_code)]
+pub const SOURCE_CODE: &str = "code";
+pub const WARN_CYCLE: &str = "cycle";
+pub const WARN_UNRESOLVED: &str = "unresolved";
+pub const WARN_BLOCKED_LABEL: &str = "blockedLabel";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -121,6 +132,10 @@ pub struct BlockedIssue {
     pub blockers: Vec<IssueRef>,
     pub more_blockers: bool,
     pub external: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked_label: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -149,10 +164,30 @@ pub struct FlowView {
     pub graph: Option<Graph>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphWarning {
+    pub kind: &'static str,
+    pub message: String,
+    pub nodes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeWarning {
+    pub kind: &'static str,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Graph {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
+    pub warnings: Vec<GraphWarning>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -160,6 +195,7 @@ pub struct GraphEdge {
     pub from: String,
     pub to: String,
     pub kind: &'static str,
+    pub source: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -196,6 +232,7 @@ pub struct GraphNode {
     pub ready: bool,
     pub external: bool,
     pub ticket: Option<GraphTicket>,
+    pub warnings: Vec<NodeWarning>,
 }
 
 #[derive(Clone, Default)]
@@ -283,6 +320,7 @@ struct Ticket {
 struct Target {
     to: IssueRef,
     state: Option<&'static str>,
+    source: &'static str,
 }
 
 #[derive(Clone)]
@@ -291,12 +329,18 @@ struct Read {
     state: Option<&'static str>,
     labels: Vec<String>,
     body_track: Option<String>,
+    #[allow(dead_code)] // PR 5 (#257) uses Touches: for fileConflict edges
+    body_touches: Vec<String>,
+    body_parsed: ParsedBody,
     open_blockers: Vec<IssueRef>,
     more_blockers: bool,
     blockers: Vec<Target>,
     parent: Option<Target>,
+    extra_parents: Vec<Target>,
     subs: Vec<Target>,
     more_subs: bool,
+    unresolved_blockers: Vec<String>,
+    warnings: Vec<NodeWarning>,
 }
 
 fn label_of(repo: &str, number: u64) -> String {
@@ -359,7 +403,7 @@ fn state_of(v: &Value) -> Option<&'static str> {
 }
 
 fn target(v: &Value) -> Option<Target> {
-    Some(Target { to: issue_ref(v)?, state: state_of(v) })
+    Some(Target { to: issue_ref(v)?, state: state_of(v), source: SOURCE_GITHUB })
 }
 
 fn targets(v: &Value) -> Vec<Target> {
@@ -368,6 +412,51 @@ fn targets(v: &Value) -> Vec<Target> {
 
 fn more(v: &Value, listed: usize) -> bool {
     v["totalCount"].as_u64().is_some_and(|t| t > listed as u64)
+}
+
+fn has_blocked_label(labels: &[String]) -> bool {
+    labels.iter().any(|l| l.trim().eq_ignore_ascii_case(BLOCKED_LABEL))
+}
+
+fn source_rank(source: &str) -> u8 {
+    match source {
+        SOURCE_GITHUB => 0,
+        SOURCE_BODY => 1,
+        SOURCE_GIT => 2,
+        SOURCE_CODE => 3,
+        _ => 4,
+    }
+}
+
+fn compute_skip_key(
+    labels: &[String],
+    blockers: &[Target],
+    more_blockers: bool,
+    unresolved_blockers: &[String],
+) -> String {
+    let mut names: Vec<String> = labels.iter().map(|l| l.trim().to_ascii_lowercase()).collect();
+    names.sort();
+    let mut held: Vec<String> = blockers
+        .iter()
+        .map(|b| {
+            format!(
+                "{}#{}:{}",
+                b.to.repo.to_ascii_lowercase(),
+                b.to.number,
+                if b.state == Some("closed") { "closed" } else { "open" }
+            )
+        })
+        .collect();
+    held.sort();
+    held.dedup();
+    if unresolved_blockers.is_empty() {
+        json!([names, held, more_blockers]).to_string()
+    } else {
+        let mut unres: Vec<String> = unresolved_blockers.iter().map(|u| u.trim().to_ascii_lowercase()).collect();
+        unres.sort();
+        unres.dedup();
+        json!([names, held, more_blockers, unres]).to_string()
+    }
 }
 
 fn parse_node(repo: &str, n: &Value) -> Result<Read> {
@@ -384,21 +473,15 @@ fn parse_node(repo: &str, n: &Value) -> Result<Read> {
     let more_subs = more(&n["subIssues"], n["subIssues"]["nodes"].as_array().map_or(0, Vec::len));
     let blockers: Vec<&Value> = n["blockedBy"]["nodes"].as_array().into_iter().flatten().collect();
     let more_blockers = n["blockedBy"]["totalCount"].as_u64().is_some_and(|t| t > blockers.len() as u64);
-    let mut names: Vec<String> = labels.iter().map(|l| l.trim().to_ascii_lowercase()).collect();
-    names.sort();
-    let mut held: Vec<String> = blockers
-        .iter()
-        .filter_map(|b| Some((issue_ref(b)?, b["state"] == "CLOSED")))
-        .map(|(r, closed)| {
-            format!("{}#{}:{}", r.repo.to_ascii_lowercase(), r.number, if closed { "closed" } else { "open" })
-        })
-        .collect();
-    held.sort();
-    let key = json!([names, held, more_blockers]).to_string();
+    let key = compute_skip_key(&labels, &all_blockers, more_blockers, &[]);
     let (open, closed): (Vec<&Value>, Vec<&Value>) = blockers.into_iter().partition(|b| b["state"] != "CLOSED");
     let milestone = n["milestone"]["title"]
         .as_str()
         .map(|t| Milestone { title: t.to_string(), due_on: n["milestone"]["dueOn"].as_str().map(String::from) });
+    let body_text = n["body"].as_str().unwrap_or_default();
+    let body_parsed = flow_body::parse_body(repo, body_text);
+    let body_track = body_parsed.track.clone();
+    let body_touches = body_parsed.touches.clone();
     let issue = FlowIssue {
         repo: repo.to_string(),
         number,
@@ -418,10 +501,15 @@ fn parse_node(repo: &str, n: &Value) -> Result<Read> {
         state: state_of(n),
         blockers: all_blockers,
         parent: target(&n["parent"]),
+        extra_parents: Vec::new(),
         subs,
         more_subs,
         labels,
-        body_track: None,
+        body_track,
+        body_touches,
+        body_parsed,
+        unresolved_blockers: Vec::new(),
+        warnings: Vec::new(),
         issue,
     })
 }
@@ -547,16 +635,37 @@ fn resolve_epic(
     (inherited_track, cur.to_string())
 }
 
+fn warn_kind_rank(kind: &str) -> u8 {
+    match kind {
+        WARN_CYCLE => 0,
+        WARN_UNRESOLVED => 1,
+        WARN_BLOCKED_LABEL => 2,
+        _ => 3,
+    }
+}
+
 #[derive(Default)]
 struct GraphBuild {
     nodes: BTreeMap<String, GraphNode>,
-    edges: std::collections::BTreeSet<(String, &'static str, String)>,
+    edges: BTreeMap<(String, &'static str, String), &'static str>,
     body_tracks: BTreeMap<String, String>,
     more_blockers: HashSet<String>,
     more_subs: HashSet<String>,
+    warnings: Vec<GraphWarning>,
 }
 
 impl GraphBuild {
+    fn add_edge(&mut self, from: String, kind: &'static str, to: String, source: &'static str) {
+        self.edges
+            .entry((from, kind, to))
+            .and_modify(|cur| {
+                if source_rank(source) < source_rank(cur) {
+                    *cur = source;
+                }
+            })
+            .or_insert(source);
+    }
+
     fn node(&mut self, r: &IssueRef, state: Option<&'static str>) -> String {
         let key = node_key(&r.repo, r.number);
         let n = self.nodes.entry(key.clone()).or_insert_with(|| GraphNode {
@@ -583,6 +692,7 @@ impl GraphBuild {
             ready: false,
             external: false,
             ticket: None,
+            warnings: Vec::new(),
         });
         n.title = n.title.take().or_else(|| r.title.clone());
         n.state = n.state.or(state);
@@ -601,15 +711,19 @@ impl GraphBuild {
         let key = self.node(&me, r.state);
         for b in &r.blockers {
             let to = self.node(&b.to, b.state);
-            self.edges.insert((key.clone(), BLOCKED_BY, to));
+            self.add_edge(key.clone(), BLOCKED_BY, to, b.source);
         }
         if let Some(p) = &r.parent {
             let to = self.node(&p.to, p.state);
-            self.edges.insert((key.clone(), PARENT, to));
+            self.add_edge(key.clone(), PARENT, to, p.source);
+        }
+        for p in &r.extra_parents {
+            let to = self.node(&p.to, p.state);
+            self.add_edge(key.clone(), PARENT, to, p.source);
         }
         for s in &r.subs {
             let from = self.node(&s.to, s.state);
-            self.edges.insert((from, PARENT, key.clone()));
+            self.add_edge(from, PARENT, key.clone(), s.source);
         }
         if r.more_blockers {
             self.more_blockers.insert(key.clone());
@@ -621,9 +735,42 @@ impl GraphBuild {
             self.body_tracks.insert(key.clone(), track);
         }
         let outside = |b: &IssueRef| !tracked.contains(&b.repo.to_ascii_lowercase());
-        let external = r.labels.iter().any(|l| l.eq_ignore_ascii_case(EXTERNAL))
-            || (!r.open_blockers.is_empty() && !r.more_blockers && r.open_blockers.iter().all(outside));
+        let has_external = r.labels.iter().any(|l| l.eq_ignore_ascii_case(EXTERNAL));
+        let external = has_external
+            || (!r.open_blockers.is_empty()
+                && !r.more_blockers
+                && r.unresolved_blockers.is_empty()
+                && r.open_blockers.iter().all(outside));
+        let mut node_warnings = r.warnings;
+        if r.state != Some("closed")
+            && has_blocked_label(&r.labels)
+            && !has_external
+            && r.open_blockers.is_empty()
+            && !r.more_blockers
+        {
+            node_warnings.push(NodeWarning {
+                kind: WARN_BLOCKED_LABEL,
+                message: "Labelled \"blocked\" with no open blocker linked".to_string(),
+                raw: None,
+            });
+        }
         let n = self.nodes.get_mut(&key).expect("node just added");
+        let node_id = n.id.clone();
+        let node_label = n.label.clone();
+        for w in &node_warnings {
+            if !n.warnings.contains(w) {
+                n.warnings.push(w.clone());
+                let graph_w = GraphWarning {
+                    kind: w.kind,
+                    message: format!("{node_label}: {}", w.message),
+                    nodes: vec![node_id.clone()],
+                    raw: w.raw.clone(),
+                };
+                if !self.warnings.contains(&graph_w) {
+                    self.warnings.push(graph_w);
+                }
+            }
+        }
         n.title = Some(i.title.clone());
         n.state = r.state.or(n.state);
         n.tracked = true;
@@ -665,40 +812,67 @@ impl GraphBuild {
             let n = &nodes[k];
             (n.repo.to_ascii_lowercase(), n.number)
         };
-        for (from, _, to) in &self.edges {
+        for (from, _, to) in self.edges.keys() {
             let (a, b) = (root(&mut up, from), root(&mut up, to));
             if a != b {
                 let (lo, hi) = if order(&self.nodes, &a) <= order(&self.nodes, &b) { (a, b) } else { (b, a) };
                 up.insert(hi, lo);
             }
         }
-        let mut sorted: Vec<&(String, &'static str, String)> = self.edges.iter().collect();
+        let mut sorted: Vec<(String, &'static str, String, &'static str)> =
+            self.edges.into_iter().map(|((f, k, t), s)| (f, k, t, s)).collect();
         sorted.sort_by(|a, b| {
             order(&self.nodes, &a.0)
                 .cmp(&order(&self.nodes, &b.0))
                 .then(a.1.cmp(b.1))
                 .then_with(|| order(&self.nodes, &a.2).cmp(&order(&self.nodes, &b.2)))
         });
-        let sorted: Vec<(String, &'static str, String)> = sorted.into_iter().cloned().collect();
         let mut edges = Vec::new();
-        let mut parent_of: BTreeMap<String, String> = BTreeMap::new();
-        for (from, kind, to) in &sorted {
+        let mut parent_of: BTreeMap<String, (u8, String)> = BTreeMap::new();
+        let mut blocked_pairs: Vec<(String, String)> = Vec::new();
+        let mut parent_pairs: Vec<(String, String)> = Vec::new();
+        let mut all_pairs: Vec<(String, String)> = Vec::new();
+        for (from, kind, to, source) in &sorted {
             let (f, t) = (id(&self.nodes, from), id(&self.nodes, to));
+            all_pairs.push((from.clone(), to.clone()));
             match *kind {
                 BLOCKED_BY => {
+                    blocked_pairs.push((from.clone(), to.clone()));
                     self.nodes.get_mut(from).expect("edge end").blocked_by.push(t.clone());
                     self.nodes.get_mut(to).expect("edge end").unlocks.push(f.clone());
                 }
                 _ => {
+                    parent_pairs.push((from.clone(), to.clone()));
+                    let sr = source_rank(source);
                     if from != to {
-                        parent_of.entry(from.clone()).or_insert_with(|| to.clone());
+                        parent_of
+                            .entry(from.clone())
+                            .and_modify(|cur| {
+                                if sr < cur.0 {
+                                    *cur = (sr, to.clone());
+                                }
+                            })
+                            .or_insert_with(|| (sr, to.clone()));
                     }
-                    let child = self.nodes.get_mut(from).expect("edge end");
-                    child.parent = child.parent.take().or_else(|| Some(t.clone()));
                     self.nodes.get_mut(to).expect("edge end").sub_issues.push(f.clone());
                 }
             }
-            edges.push(GraphEdge { from: f, to: t, kind });
+            edges.push(GraphEdge { from: f, to: t, kind, source });
+        }
+        let parent_of: BTreeMap<String, String> = parent_of.into_iter().map(|(k, (_, v))| (k, v)).collect();
+        for (child, parent) in &parent_of {
+            let pid = id(&self.nodes, parent);
+            self.nodes.get_mut(child).expect("edge end").parent = Some(pid);
+        }
+        // Preserve self-parent edge in `node.parent` if it was the only parent edge.
+        for (from, kind, to, _) in &sorted {
+            if *kind == PARENT && from == to {
+                let pid = id(&self.nodes, to);
+                let child = self.nodes.get_mut(from).expect("edge end");
+                if child.parent.is_none() {
+                    child.parent = Some(pid);
+                }
+            }
         }
         let mut keys: Vec<String> = self.nodes.keys().cloned().collect();
         keys.sort_by_key(|k| order(&self.nodes, k));
@@ -723,6 +897,49 @@ impl GraphBuild {
             let short = n.repo.rsplit_once('/').map_or(n.repo.as_str(), |(_, s)| s).to_ascii_lowercase();
             if short_repos.get(&short).is_some_and(Option::is_none) { n.id.clone() } else { n.label.clone() }
         };
+
+        // Detect cycles (blockedBy, parent, and mixed graph cycles) deterministically.
+        let mut covered_cycle_sets: Vec<HashSet<String>> = Vec::new();
+        for (prefix, pairs, check_subset) in [
+            ("Dependency cycle", &blocked_pairs, false),
+            ("Parent cycle", &parent_pairs, false),
+            ("Graph cycle", &all_pairs, true),
+        ] {
+            for comp in flow_body::find_cycles(&keys, pairs) {
+                let comp_set: HashSet<String> = comp.all_nodes.iter().cloned().collect();
+                if check_subset && covered_cycle_sets.iter().any(|prev| comp_set.is_subset(prev)) {
+                    continue;
+                }
+                let path_labels: Vec<String> = comp.cycle.iter().map(|k| node_lane(&self.nodes, k)).collect();
+                let extra_labels: Vec<String> = comp
+                    .all_nodes
+                    .iter()
+                    .filter(|k| !comp.cycle.contains(k))
+                    .map(|k| node_lane(&self.nodes, k))
+                    .collect();
+                let mut message = if path_labels.len() == 1 {
+                    format!("{prefix}: {} depends on itself", path_labels[0])
+                } else {
+                    format!("{prefix}: {} -> {}", path_labels.join(" -> "), path_labels[0])
+                };
+                if !extra_labels.is_empty() {
+                    message.push_str(&format!(" (and {})", extra_labels.join(", ")));
+                }
+                let node_ids: Vec<String> = comp.all_nodes.iter().map(|k| id(&self.nodes, k)).collect();
+                let nw = NodeWarning { kind: WARN_CYCLE, message: message.clone(), raw: None };
+                for k in &comp.all_nodes {
+                    let n = self.nodes.get_mut(k).expect("cycle node");
+                    if !n.warnings.contains(&nw) {
+                        n.warnings.push(nw.clone());
+                    }
+                }
+                let gw = GraphWarning { kind: WARN_CYCLE, message, nodes: node_ids, raw: None };
+                if !self.warnings.contains(&gw) {
+                    self.warnings.push(gw);
+                }
+                covered_cycle_sets.push(comp_set);
+            }
+        }
 
         // Tier 1: track:<name>, *-track, area:*, or ## Flow Track: hook.
         let mut explicit: BTreeMap<String, String> = BTreeMap::new();
@@ -827,10 +1044,22 @@ impl GraphBuild {
         }
 
         let mut nodes: Vec<GraphNode> = self.nodes.into_values().collect();
+        for n in &mut nodes {
+            n.warnings.sort_by(|a, b| {
+                warn_kind_rank(a.kind).cmp(&warn_kind_rank(b.kind)).then_with(|| a.message.cmp(&b.message))
+            });
+        }
         nodes.sort_by(|a, b| {
             a.repo.to_ascii_lowercase().cmp(&b.repo.to_ascii_lowercase()).then(a.number.cmp(&b.number))
         });
-        Graph { nodes, edges }
+        let mut warnings = self.warnings;
+        warnings.sort_by(|a, b| {
+            warn_kind_rank(a.kind)
+                .cmp(&warn_kind_rank(b.kind))
+                .then_with(|| a.nodes.cmp(&b.nodes))
+                .then_with(|| a.message.cmp(&b.message))
+        });
+        Graph { nodes, edges, warnings }
     }
 }
 
@@ -866,6 +1095,23 @@ pub fn why(i: &FlowIssue) -> String {
         s.push_str(&format!(", unblocked by {}", by.join(", ")));
     }
     s
+}
+
+fn refs_query(asks: &[(String, u64)]) -> (String, Value) {
+    let mut params = Vec::new();
+    let mut fields = Vec::new();
+    let mut vars = serde_json::Map::new();
+    for (i, (repo, number)) in asks.iter().enumerate() {
+        let (owner, name) = repo.split_once('/').unwrap_or_default();
+        params.push(format!("$o{i}: String!, $r{i}: String!, $n{i}: Int!"));
+        fields.push(format!(
+            "t{i}: repository(owner: $o{i}, name: $r{i}) {{ nameWithOwner issue(number: $n{i}) {{ number title url state }} }}"
+        ));
+        vars.insert(format!("o{i}"), json!(owner));
+        vars.insert(format!("r{i}"), json!(name));
+        vars.insert(format!("n{i}"), json!(number));
+    }
+    (format!("{FLOW_TICKETS}{}) {{ {} }}", params.join(", "), fields.join(" ")), Value::Object(vars))
 }
 
 fn tickets_query(asks: &[(String, u64)], full: bool) -> (String, Value) {
@@ -1020,7 +1266,13 @@ fn plan_flow(
             stored = Some(r.issue.key.clone());
         }
         let external = has(EXTERNAL);
-        if external || !r.open_blockers.is_empty() || r.more_blockers {
+        let blocked_label = has_blocked_label(&r.labels);
+        if external
+            || blocked_label
+            || !r.open_blockers.is_empty()
+            || r.more_blockers
+            || !r.unresolved_blockers.is_empty()
+        {
             if write && stored.as_ref().is_some_and(|k| *k != r.issue.key) {
                 skip_overlay.insert(key.clone(), None);
                 meta_ops.push(FlowMetaOp::DelSkip(key));
@@ -1030,6 +1282,8 @@ fn plan_flow(
                 blockers: r.open_blockers,
                 more_blockers: r.more_blockers,
                 external,
+                blocked_label,
+                unresolved: r.unresolved_blockers,
             });
             continue;
         }
@@ -1097,7 +1351,526 @@ fn plan_picks(
     PickPlan { offered, retire, picks }
 }
 
+struct ResolvedBodyRefs {
+    blockers: Vec<(String, u64)>,
+    parents: Vec<(String, u64)>,
+    subs: Vec<(String, u64)>,
+}
+
+fn disp_issue_ref(home_repo: &str, repo: &str, number: u64) -> String {
+    if repo.eq_ignore_ascii_case(home_repo) { format!("#{number}") } else { format!("{repo}#{number}") }
+}
+
+fn push_read_warning(warnings: &mut Vec<NodeWarning>, w: NodeWarning) {
+    if !warnings.contains(&w) {
+        warnings.push(w);
+    }
+}
+
+fn push_unresolved_blocker(unresolved: &mut Vec<String>, raw: String) {
+    if !unresolved.iter().any(|x| x.eq_ignore_ascii_case(&raw)) {
+        unresolved.push(raw);
+    }
+}
+
+fn seed_known_issue(known: &mut BTreeMap<String, (IssueRef, Option<&'static str>)>, r: &Read) {
+    let key = node_key(&r.issue.repo, r.issue.number);
+    let iref = IssueRef {
+        repo: r.issue.repo.clone(),
+        number: r.issue.number,
+        label: r.issue.label.clone(),
+        url: r.issue.url.clone(),
+        title: Some(r.issue.title.clone()),
+    };
+    known.insert(key, (iref, r.state));
+    for t in r.blockers.iter().chain(r.parent.iter()).chain(r.subs.iter()) {
+        let tk = node_key(&t.to.repo, t.to.number);
+        known
+            .entry(tk)
+            .and_modify(|cur| {
+                if cur.1.is_none() && t.state.is_some() {
+                    cur.1 = t.state;
+                }
+                if cur.0.title.is_none() && t.to.title.is_some() {
+                    cur.0.title = t.to.title.clone();
+                }
+            })
+            .or_insert_with(|| (t.to.clone(), t.state));
+    }
+}
+
+fn read_primary_parent_key(
+    r: &Read,
+    aliases: &std::collections::HashMap<String, String>,
+    inferred_parents: &BTreeMap<String, String>,
+) -> Option<String> {
+    if let Some(p) = &r.parent {
+        return Some(node_key(&canonicalize_repo(aliases, &p.to.repo), p.to.number));
+    }
+    for pref in &r.body_parsed.parents {
+        if let BodyRef::Issue { repo, number } = pref {
+            return Some(node_key(&canonicalize_repo(aliases, repo), *number));
+        }
+    }
+    inferred_parents.get(&node_key(&r.issue.repo, r.issue.number)).cloned()
+}
+
+fn record_unresolved_ref(
+    warnings: &mut Vec<NodeWarning>,
+    unresolved_blockers: &mut Vec<String>,
+    role: RefRole,
+    raw: String,
+    reason: Option<String>,
+) {
+    let role_str = role.label();
+    let message = match reason {
+        Some(detail) => detail,
+        None => format!("Unresolved {role_str} reference \"{raw}\""),
+    };
+    if role == RefRole::Blocker {
+        push_unresolved_blocker(unresolved_blockers, raw.clone());
+    }
+    push_read_warning(warnings, NodeWarning { kind: WARN_UNRESOLVED, message, raw: Some(raw) });
+}
+
+fn build_candidates(
+    all_reads: &[&Read],
+    aliases: &std::collections::HashMap<String, String>,
+    inferred_parents: &BTreeMap<String, String>,
+) -> Vec<Candidate> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for r in all_reads {
+        if r.state == Some("closed") {
+            continue;
+        }
+        let k = node_key(&r.issue.repo, r.issue.number);
+        if !seen.insert(k) {
+            continue;
+        }
+        out.push(Candidate {
+            repo: r.issue.repo.clone(),
+            number: r.issue.number,
+            label: r.issue.label.clone(),
+            title: r.issue.title.clone(),
+            parent_key: read_primary_parent_key(r, aliases, inferred_parents),
+            declared_phase: r.body_parsed.declared_phase,
+        });
+    }
+    out
+}
+
 impl Wf {
+    async fn resolve_body_dependencies(&self, reads: &mut Reads, extra: &mut [Read], all_open: bool) -> Result<()> {
+        let has_any_body_refs = reads.reads.iter().chain(extra.iter()).any(|r| {
+            !r.body_parsed.blockers.is_empty()
+                || !r.body_parsed.parents.is_empty()
+                || !r.body_parsed.sub_issues.is_empty()
+        });
+        if !has_any_body_refs {
+            return Ok(());
+        }
+
+        // If we read only optIn-labelled issues (all_open == false) and any issue has a symbolic
+        // sibling reference, fetch open issues for those repos so symbolic matching sees unlabelled siblings.
+        let mut symbolic_pool: Vec<Read> = Vec::new();
+        if !all_open {
+            let mut need_repos: Vec<String> = Vec::new();
+            for r in reads.reads.iter().chain(extra.iter()) {
+                if r.body_parsed.has_symbolic() && !need_repos.iter().any(|x| x.eq_ignore_ascii_case(&r.issue.repo)) {
+                    need_repos.push(r.issue.repo.clone());
+                }
+            }
+            for repo in need_repos {
+                match self.read_repo(&repo, None).await {
+                    Ok((full, rs)) => {
+                        self.record_github_repo_alias(&repo, &full);
+                        symbolic_pool.extend(rs);
+                    }
+                    Err(RepoReadError::Transport(e)) => return Err(e),
+                    Err(RepoReadError::Graphql(e)) => {
+                        tracing::warn!("flow: could not read open siblings in {repo} for body resolution: {e:#}");
+                    }
+                }
+            }
+            reads.aliases = self.repo_aliases_snapshot();
+        }
+
+        let aliases = reads.aliases.clone();
+        let mut known: BTreeMap<String, (IssueRef, Option<&'static str>)> = BTreeMap::new();
+        for r in reads.reads.iter().chain(extra.iter()).chain(symbolic_pool.iter()) {
+            seed_known_issue(&mut known, r);
+        }
+
+        // Collect parent links implied by tasklist sub-issues ("- [ ] #N") so sibling phase resolution
+        // knows epic membership even when only the parent epic lists its children.
+        let mut inferred_parents: BTreeMap<String, (String, u64, String)> = BTreeMap::new();
+        for r in reads.reads.iter().chain(extra.iter()).chain(symbolic_pool.iter()) {
+            let p_repo = r.issue.repo.clone();
+            let p_num = r.issue.number;
+            let p_key = node_key(&p_repo, p_num);
+            for sref in &r.body_parsed.sub_issues {
+                if let BodyRef::Issue { repo, number } = sref {
+                    let canon = canonicalize_repo(&aliases, repo);
+                    let ck = node_key(&canon, *number);
+                    inferred_parents
+                        .entry(ck)
+                        .and_modify(|cur| {
+                            if (p_repo.to_ascii_lowercase(), p_num) < (cur.0.to_ascii_lowercase(), cur.1) {
+                                *cur = (p_repo.clone(), p_num, p_key.clone());
+                            }
+                        })
+                        .or_insert_with(|| (p_repo.clone(), p_num, p_key.clone()));
+                }
+            }
+        }
+        let mut inferred_parent_keys: BTreeMap<String, String> =
+            inferred_parents.iter().map(|(k, (_, _, pk))| (k.clone(), pk.clone())).collect();
+
+        // Pass 1: resolve parent refs (explicit + symbolic) so Pass 2 knows every node's epic.
+        let mut pool_refs: Vec<&Read> = reads.reads.iter().chain(extra.iter()).chain(symbolic_pool.iter()).collect();
+        let initial_candidates = build_candidates(&pool_refs, &aliases, &inferred_parent_keys);
+
+        let total = reads.reads.len() + extra.len();
+        let mut resolved: Vec<ResolvedBodyRefs> = (0..total)
+            .map(|_| ResolvedBodyRefs { blockers: Vec::new(), parents: Vec::new(), subs: Vec::new() })
+            .collect();
+
+        let mut resolved_parent_keys: BTreeMap<String, String> = inferred_parent_keys.clone();
+        for idx in 0..total {
+            let r = if idx < reads.reads.len() { &mut reads.reads[idx] } else { &mut extra[idx - reads.reads.len()] };
+            let me_key = node_key(&r.issue.repo, r.issue.number);
+            let me_repo = r.issue.repo.clone();
+            let me_num = r.issue.number;
+            let parents_in = r.body_parsed.parents.clone();
+            let subs_in = r.body_parsed.sub_issues.clone();
+            for pref in parents_in {
+                match pref {
+                    BodyRef::Issue { repo, number } => {
+                        let canon = canonicalize_repo(&aliases, &repo);
+                        resolved_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
+                        resolved[idx].parents.push((canon, number));
+                    }
+                    BodyRef::Symbolic(raw) => {
+                        match flow_body::resolve_symbolic(
+                            &raw,
+                            RefRole::Parent,
+                            &me_repo,
+                            me_num,
+                            None,
+                            &initial_candidates,
+                        ) {
+                            ResolveOutcome::Resolved(repo, number) => {
+                                let canon = canonicalize_repo(&aliases, &repo);
+                                resolved_parent_keys.entry(me_key.clone()).or_insert_with(|| node_key(&canon, number));
+                                resolved[idx].parents.push((canon, number));
+                            }
+                            ResolveOutcome::Ambiguous(matches) => {
+                                let msg =
+                                    format!("Ambiguous parent reference \"{raw}\" (matches {})", matches.join(", "));
+                                record_unresolved_ref(
+                                    &mut r.warnings,
+                                    &mut r.unresolved_blockers,
+                                    RefRole::Parent,
+                                    raw,
+                                    Some(msg),
+                                );
+                            }
+                            ResolveOutcome::NotFound => {
+                                record_unresolved_ref(
+                                    &mut r.warnings,
+                                    &mut r.unresolved_blockers,
+                                    RefRole::Parent,
+                                    raw,
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                    BodyRef::Malformed(raw) => {
+                        record_unresolved_ref(&mut r.warnings, &mut r.unresolved_blockers, RefRole::Parent, raw, None);
+                    }
+                }
+            }
+            for sref in subs_in {
+                match sref {
+                    BodyRef::Issue { repo, number } => {
+                        let canon = canonicalize_repo(&aliases, &repo);
+                        resolved[idx].subs.push((canon, number));
+                    }
+                    BodyRef::Symbolic(raw) | BodyRef::Malformed(raw) => {
+                        record_unresolved_ref(
+                            &mut r.warnings,
+                            &mut r.unresolved_blockers,
+                            RefRole::SubIssue,
+                            raw,
+                            None,
+                        );
+                    }
+                }
+            }
+        }
+        inferred_parent_keys.extend(resolved_parent_keys);
+
+        // Pass 2: resolve blocker refs (explicit + symbolic) with full epic membership.
+        pool_refs = reads.reads.iter().chain(extra.iter()).chain(symbolic_pool.iter()).collect();
+        let candidates = build_candidates(&pool_refs, &aliases, &inferred_parent_keys);
+        for idx in 0..total {
+            let r = if idx < reads.reads.len() { &mut reads.reads[idx] } else { &mut extra[idx - reads.reads.len()] };
+            let me_repo = r.issue.repo.clone();
+            let me_num = r.issue.number;
+            let me_parent = read_primary_parent_key(r, &aliases, &inferred_parent_keys);
+            let blockers_in = r.body_parsed.blockers.clone();
+            for bref in blockers_in {
+                match bref {
+                    BodyRef::Issue { repo, number } => {
+                        let canon = canonicalize_repo(&aliases, &repo);
+                        resolved[idx].blockers.push((canon, number));
+                    }
+                    BodyRef::Symbolic(raw) => {
+                        match flow_body::resolve_symbolic(
+                            &raw,
+                            RefRole::Blocker,
+                            &me_repo,
+                            me_num,
+                            me_parent.as_deref(),
+                            &candidates,
+                        ) {
+                            ResolveOutcome::Resolved(repo, number) => {
+                                let canon = canonicalize_repo(&aliases, &repo);
+                                resolved[idx].blockers.push((canon, number));
+                            }
+                            ResolveOutcome::Ambiguous(matches) => {
+                                let msg =
+                                    format!("Ambiguous blocker reference \"{raw}\" (matches {})", matches.join(", "));
+                                record_unresolved_ref(
+                                    &mut r.warnings,
+                                    &mut r.unresolved_blockers,
+                                    RefRole::Blocker,
+                                    raw,
+                                    Some(msg),
+                                );
+                            }
+                            ResolveOutcome::NotFound => {
+                                record_unresolved_ref(
+                                    &mut r.warnings,
+                                    &mut r.unresolved_blockers,
+                                    RefRole::Blocker,
+                                    raw,
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                    BodyRef::Malformed(raw) => {
+                        record_unresolved_ref(&mut r.warnings, &mut r.unresolved_blockers, RefRole::Blocker, raw, None);
+                    }
+                }
+            }
+        }
+
+        // Pass 3: batch-fetch any referenced numeric issues whose state/title isn't already known.
+        let mut asks_map: BTreeMap<String, (String, u64)> = BTreeMap::new();
+        for res in &resolved {
+            for (repo, number) in res.blockers.iter().chain(&res.parents).chain(&res.subs) {
+                let k = node_key(repo, *number);
+                if known.get(&k).is_none_or(|(_, st)| st.is_none()) {
+                    asks_map.entry(k).or_insert_with(|| (repo.clone(), *number));
+                }
+            }
+        }
+        let asks: Vec<(String, u64)> = asks_map.into_values().collect();
+        let mut missing_refs: HashSet<String> = HashSet::new();
+        for chunk in asks.chunks(50) {
+            let (query, vars) = refs_query(chunk);
+            let resp = self.github.graphql(&query, vars).await?;
+            if !resp["data"].is_object() {
+                bail!(
+                    "wf.flow: reading referenced issues failed: {}",
+                    errors(&resp).unwrap_or_else(|| "no data".into())
+                );
+            }
+            for (i, (query_repo, number)) in chunk.iter().enumerate() {
+                let t = &resp["data"][format!("t{i}")];
+                let actual = t["nameWithOwner"].as_str().filter(|s| s.contains('/'));
+                if let Some(actual) = actual {
+                    self.record_github_repo_alias(query_repo, actual);
+                }
+                let final_repo = actual.unwrap_or(query_repo);
+                let issue = &t["issue"];
+                if issue.is_object() {
+                    let iref = IssueRef {
+                        repo: final_repo.to_string(),
+                        number: *number,
+                        label: label_of(final_repo, *number),
+                        url: issue["url"]
+                            .as_str()
+                            .map_or_else(|| format!("https://github.com/{final_repo}/issues/{number}"), String::from),
+                        title: issue["title"].as_str().map(String::from),
+                    };
+                    let st = state_of(issue);
+                    known.insert(node_key(final_repo, *number), (iref.clone(), st));
+                    if !final_repo.eq_ignore_ascii_case(query_repo) {
+                        known.insert(node_key(query_repo, *number), (iref, st));
+                    }
+                } else {
+                    missing_refs.insert(node_key(query_repo, *number));
+                    missing_refs.insert(node_key(final_repo, *number));
+                }
+            }
+        }
+        reads.aliases = self.repo_aliases_snapshot();
+        let aliases = reads.aliases.clone();
+
+        // Pass 4: merge resolved body links into each Read, preserving native GitHub precedence.
+        let mut sub_parent_fill: BTreeMap<String, IssueRef> = BTreeMap::new();
+        for (idx, res) in resolved.into_iter().enumerate() {
+            let r = if idx < reads.reads.len() { &mut reads.reads[idx] } else { &mut extra[idx - reads.reads.len()] };
+            let home = r.issue.repo.clone();
+            let me_ref = IssueRef {
+                repo: r.issue.repo.clone(),
+                number: r.issue.number,
+                label: r.issue.label.clone(),
+                url: r.issue.url.clone(),
+                title: Some(r.issue.title.clone()),
+            };
+
+            let lookup_target = |repo: &str, number: u64| -> Target {
+                let canon = canonicalize_repo(&aliases, repo);
+                let k = node_key(&canon, number);
+                if let Some((iref, st)) = known.get(&k) {
+                    Target { to: iref.clone(), state: *st, source: SOURCE_BODY }
+                } else {
+                    Target {
+                        to: IssueRef {
+                            label: label_of(&canon, number),
+                            url: format!("https://github.com/{canon}/issues/{number}"),
+                            title: None,
+                            repo: canon,
+                            number,
+                        },
+                        state: None,
+                        source: SOURCE_BODY,
+                    }
+                }
+            };
+
+            // Merge blockers
+            let mut seen_blockers: HashSet<String> =
+                r.blockers.iter().map(|b| node_key(&canonicalize_repo(&aliases, &b.to.repo), b.to.number)).collect();
+            for (repo, number) in res.blockers {
+                let canon = canonicalize_repo(&aliases, &repo);
+                let k = node_key(&canon, number);
+                if missing_refs.contains(&k) {
+                    let disp = disp_issue_ref(&home, &canon, number);
+                    let msg = format!("Unresolved blocker reference {disp} (issue not found)");
+                    record_unresolved_ref(
+                        &mut r.warnings,
+                        &mut r.unresolved_blockers,
+                        RefRole::Blocker,
+                        disp,
+                        Some(msg),
+                    );
+                    continue;
+                }
+                if seen_blockers.insert(k) {
+                    r.blockers.push(lookup_target(&canon, number));
+                }
+            }
+            // Re-partition open_blockers & unblocked_by from merged blockers
+            r.open_blockers.clear();
+            r.issue.unblocked_by.clear();
+            for b in &r.blockers {
+                if b.state == Some("closed") {
+                    r.issue.unblocked_by.push(b.to.clone());
+                } else {
+                    r.open_blockers.push(b.to.clone());
+                }
+            }
+
+            // Merge parents
+            for (repo, number) in res.parents {
+                let canon = canonicalize_repo(&aliases, &repo);
+                let k = node_key(&canon, number);
+                if missing_refs.contains(&k) {
+                    let disp = disp_issue_ref(&home, &canon, number);
+                    let msg = format!("Unresolved parent reference {disp} (issue not found)");
+                    record_unresolved_ref(
+                        &mut r.warnings,
+                        &mut r.unresolved_blockers,
+                        RefRole::Parent,
+                        disp,
+                        Some(msg),
+                    );
+                    continue;
+                }
+                let tgt = lookup_target(&canon, number);
+                match &r.parent {
+                    None => {
+                        r.issue.parent = Some(tgt.to.clone());
+                        r.parent = Some(tgt);
+                    }
+                    Some(existing) if node_key(&existing.to.repo, existing.to.number) == k => {}
+                    Some(_) => {
+                        if !r.extra_parents.iter().any(|p| node_key(&p.to.repo, p.to.number) == k) {
+                            r.extra_parents.push(tgt);
+                        }
+                    }
+                }
+            }
+
+            // Merge tasklist sub-issues
+            let mut seen_subs: HashSet<String> =
+                r.subs.iter().map(|s| node_key(&canonicalize_repo(&aliases, &s.to.repo), s.to.number)).collect();
+            for (repo, number) in res.subs {
+                let canon = canonicalize_repo(&aliases, &repo);
+                let k = node_key(&canon, number);
+                if missing_refs.contains(&k) {
+                    let disp = disp_issue_ref(&home, &canon, number);
+                    let msg = format!("Unresolved sub-issue reference {disp} (issue not found)");
+                    record_unresolved_ref(
+                        &mut r.warnings,
+                        &mut r.unresolved_blockers,
+                        RefRole::SubIssue,
+                        disp,
+                        Some(msg),
+                    );
+                    continue;
+                }
+                if seen_subs.insert(k.clone()) {
+                    r.subs.push(lookup_target(&canon, number));
+                }
+                sub_parent_fill
+                    .entry(k)
+                    .and_modify(|cur| {
+                        if (me_ref.repo.to_ascii_lowercase(), me_ref.number)
+                            < (cur.repo.to_ascii_lowercase(), cur.number)
+                        {
+                            *cur = me_ref.clone();
+                        }
+                    })
+                    .or_insert_with(|| me_ref.clone());
+            }
+
+            r.unresolved_blockers.sort_by_key(|u| u.to_ascii_lowercase());
+            r.warnings.sort_by(|a, b| {
+                warn_kind_rank(a.kind).cmp(&warn_kind_rank(b.kind)).then_with(|| a.message.cmp(&b.message))
+            });
+            r.issue.key = compute_skip_key(&r.labels, &r.blockers, r.more_blockers, &r.unresolved_blockers);
+        }
+
+        // Propagate parent ref onto child reads that only had a parent via an epic's tasklist.
+        for r in reads.reads.iter_mut().chain(extra.iter_mut()) {
+            if r.issue.parent.is_none()
+                && let Some(p) = sub_parent_fill.get(&node_key(&r.issue.repo, r.issue.number))
+            {
+                r.issue.parent = Some(p.clone());
+            }
+        }
+
+        Ok(())
+    }
+
     fn open_tickets(&self) -> Result<Vec<Ticket>> {
         let mut out: Vec<Ticket> = self
             .store
@@ -1363,9 +2136,11 @@ impl Wf {
         }
         let mut reads = self.flow_reads(cfg.as_ref(), with_graph).await?;
         let tickets = self.open_tickets()?;
-        let (closed, extra) = self.ticket_reads(&reads, &tickets, with_graph).await?;
+        let (closed, mut extra) = self.ticket_reads(&reads, &tickets, with_graph).await?;
         let aliases = self.repo_aliases_snapshot();
-        reads.aliases = aliases.clone();
+        reads.aliases = aliases;
+        self.resolve_body_dependencies(&mut reads, &mut extra, with_graph).await?;
+        let aliases = reads.aliases.clone();
         let covered = reads.covered.clone();
         let mut all = reads.reads.clone();
         all.extend(extra);
@@ -1513,8 +2288,9 @@ impl Wf {
         }
         let mut reads = self.flow_reads(Some(&cfg), false).await?;
         let (closed, _) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
-        let aliases = self.repo_aliases_snapshot();
-        reads.aliases = aliases.clone();
+        reads.aliases = self.repo_aliases_snapshot();
+        self.resolve_body_dependencies(&mut reads, &mut [], false).await?;
+        let aliases = reads.aliases.clone();
         let g = self.lock.lock().await;
         let covered = reads.capacity_repos();
         let view = self.flow_build(&cfg, reads, self.open_tickets()?, &closed, true)?;
@@ -1621,6 +2397,7 @@ impl Wf {
                 let mut reads = self.flow_reads(Some(c), false).await?;
                 let (closed, _) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
                 reads.aliases = self.repo_aliases_snapshot();
+                self.resolve_body_dependencies(&mut reads, &mut [], false).await?;
                 Some((reads, closed))
             }
             None => None,
@@ -1780,8 +2557,10 @@ mod prop_tests {
         list.iter().map(|i| (i.repo.clone(), i.number)).collect()
     }
 
-    fn blocked_ids(list: &[BlockedIssue]) -> Vec<(String, u64, bool, bool)> {
-        list.iter().map(|b| (b.issue.repo.clone(), b.issue.number, b.external, b.more_blockers)).collect()
+    fn blocked_ids(list: &[BlockedIssue]) -> Vec<(String, u64, bool, bool, bool)> {
+        list.iter()
+            .map(|b| (b.issue.repo.clone(), b.issue.number, b.external, b.more_blockers, b.blocked_label))
+            .collect()
     }
 
     fn assert_sorted_by_queue_order(list: &[FlowIssue]) {
@@ -2009,6 +2788,9 @@ mod prop_tests {
             if u.int_in_range(0..=5u8)? == 0 {
                 labels.push((*u.choose(&[EXTERNAL, "Blocked: External"])?).to_string());
             }
+            if u.int_in_range(0..=7u8)? == 0 {
+                labels.push((*u.choose(&[BLOCKED_LABEL, "Blocked"])?).to_string());
+            }
 
             let open_blocker_n = if u.int_in_range(0..=3u8)? == 0 { u.int_in_range(1..=2usize)? } else { 0 };
             let mut open_blockers = Vec::new();
@@ -2018,15 +2800,16 @@ mod prop_tests {
                 let bnum = u.int_in_range(100..=120u64)?;
                 let br = issue_ref_for(brepo, bnum);
                 open_blockers.push(br.clone());
-                blockers.push(Target { to: br, state: Some("open") });
+                blockers.push(Target { to: br, state: Some("open"), source: SOURCE_GITHUB });
             }
             let mut unblocked_by = Vec::new();
             if u.int_in_range(0..=3u8)? == 0 {
                 let cr = issue_ref_for(repo, u.int_in_range(200..=210u64)?);
                 unblocked_by.push(cr.clone());
-                blockers.push(Target { to: cr, state: Some("closed") });
+                blockers.push(Target { to: cr, state: Some("closed"), source: SOURCE_GITHUB });
             }
             let more_blockers = u.int_in_range(0..=9u8)? == 0;
+            let unresolved_blockers = if u.int_in_range(0..=9u8)? == 0 { vec!["Phase 9".into()] } else { Vec::new() };
 
             let parent_ref = if !issue_keys.is_empty() && u.int_in_range(0..=4u8)? == 0 {
                 let (pr, pn) = u.choose(&issue_keys)?;
@@ -2080,12 +2863,17 @@ mod prop_tests {
                 state: Some("open"),
                 labels,
                 body_track: None,
+                body_touches: Vec::new(),
+                body_parsed: ParsedBody::default(),
                 open_blockers,
                 more_blockers,
                 blockers,
-                parent: parent_ref.map(|to| Target { to, state: Some("open") }),
+                parent: parent_ref.map(|to| Target { to, state: Some("open"), source: SOURCE_GITHUB }),
+                extra_parents: Vec::new(),
                 subs: Vec::new(),
                 more_subs: false,
+                unresolved_blockers,
+                warnings: Vec::new(),
             });
         }
 
@@ -2231,7 +3019,12 @@ mod prop_tests {
                 }
 
                 let external = r.labels.iter().any(|l| l.eq_ignore_ascii_case(EXTERNAL));
-                let is_blocked = external || !r.open_blockers.is_empty() || r.more_blockers;
+                let blocked_label = has_blocked_label(&r.labels);
+                let is_blocked = external
+                    || blocked_label
+                    || !r.open_blockers.is_empty()
+                    || r.more_blockers
+                    || !r.unresolved_blockers.is_empty();
                 if is_blocked {
                     assert!(b_set.contains(&nk), "blocked issue {nk} missing from blocked");
                     assert!(!q_set.contains(&nk) && !s_set.contains(&nk));
@@ -2429,12 +3222,21 @@ mod prop_tests {
             state: Some("open"),
             labels: labels.iter().map(|s| (*s).to_string()).collect(),
             body_track: body_track.map(String::from),
+            body_touches: Vec::new(),
+            body_parsed: ParsedBody::default(),
             open_blockers: Vec::new(),
             more_blockers: false,
             blockers: Vec::new(),
-            parent: parent.map(|p| Target { to: issue_ref_for("acme/widgets", p), state: Some("open") }),
+            parent: parent.map(|p| Target {
+                to: issue_ref_for("acme/widgets", p),
+                state: Some("open"),
+                source: SOURCE_GITHUB,
+            }),
+            extra_parents: Vec::new(),
             subs: Vec::new(),
             more_subs: false,
+            unresolved_blockers: Vec::new(),
+            warnings: Vec::new(),
         };
         g.read(make(1, &[], Some("flow-dag"), None), None, &tracked);
         g.read(make(2, &["track: explicit"], Some("ignored-body"), None), None, &tracked);
