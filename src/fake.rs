@@ -542,6 +542,7 @@ struct GhState {
     issue_page: usize,
     calls: Vec<Value>,
     errors: BTreeMap<String, (String, String)>,
+    fail_after: BTreeMap<String, (usize, String, String)>,
     unlabelled_open_error: Option<String>,
     read_errors: BTreeMap<(String, u64), String>,
     field_errors: BTreeMap<(String, u64), (String, String)>,
@@ -687,8 +688,14 @@ impl FakeGitHub {
         self.st().errors.insert(operation.into(), (err_type.into(), message.into()));
     }
 
+    pub fn fail_operation_after(&self, operation: &str, ok_calls: usize, err_type: &str, message: &str) {
+        self.st().fail_after.insert(operation.into(), (ok_calls, err_type.into(), message.into()));
+    }
+
     pub fn clear_operation_errors(&self) {
-        self.st().errors.clear();
+        let mut st = self.st();
+        st.errors.clear();
+        st.fail_after.clear();
     }
 
     pub fn fail_unlabelled_open_issues(&self, message: Option<&str>) {
@@ -1353,6 +1360,12 @@ impl crate::github::GitHub for FakeGitHub {
             }
             if let Some((err_type, message)) = st.errors.get(op) {
                 return Ok(gh_typed_error(err_type, message));
+            }
+            if let Some((remaining, err_type, message)) = st.fail_after.get_mut(op) {
+                if *remaining == 0 {
+                    return Ok(gh_typed_error(err_type, message));
+                }
+                *remaining -= 1;
             }
             if op == "repoCanonical" {
                 return Ok(repo_canonical(&st, &variables));
