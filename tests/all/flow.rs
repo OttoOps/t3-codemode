@@ -5070,8 +5070,8 @@ async fn graph_tab_renders_code_dep_dashed_edge_legend_tooltip_hover_and_inspect
         .unwrap();
     std::fs::write(repo.join("src/storage.rs"), "pub struct LedgerStore;\n").unwrap();
     std::fs::write(repo.join("src/service.rs"), "use crate::storage::LedgerStore;\n").unwrap();
-    std::fs::write(repo.join("src/auth.rs"), "pub struct SessionToken;\n").unwrap();
-    std::fs::write(repo.join("src/api.rs"), "use crate::auth::SessionToken;\n").unwrap();
+    std::fs::write(repo.join("src/auth.rs"), "use crate::api::ApiRoute;\npub struct SessionToken;\n").unwrap();
+    std::fs::write(repo.join("src/api.rs"), "use crate::auth::SessionToken;\npub struct ApiRoute;\n").unwrap();
     run_git(&repo, &["add", "."]);
     run_git(&repo, &["commit", "-m", "init"]);
 
@@ -5114,6 +5114,7 @@ const edgeInfo = document.querySelectorAll(".ge").map((p) => ({{
   kind: p.getAttribute("data-kind"),
   source: p.getAttribute("data-source"),
   marker: p.getAttribute("marker-end"),
+  d: p.getAttribute("d"),
   title: p.querySelector("title") ? p.querySelector("title").textContent : null,
 }}));
 btn("acme/widgets#2").dispatch("pointerover");
@@ -5149,6 +5150,22 @@ return {{ legend, edgeInfo, hover2Edges, hover2Marks, drawer2, drawer1 }};
     assert_eq!(cd["source"], "code");
     assert_eq!(cd["marker"], "url(#gm-code)");
     assert!(cd["title"].as_str().unwrap().starts_with("Code dependency hint (code):"), "{cd}");
+
+    // Reciprocal codeDep edges (#3 <-> #4) in the same column must use distinct bend X coordinates so curves don't overlap.
+    let e34 = edges
+        .iter()
+        .find(|e| e["kind"] == "codeDep" && e["title"].as_str().unwrap().contains("src/auth.rs -> src/api.rs"))
+        .expect("auth -> api codeDep edge");
+    let e43 = edges
+        .iter()
+        .find(|e| e["kind"] == "codeDep" && e["title"].as_str().unwrap().contains("src/api.rs -> src/auth.rs"))
+        .expect("api -> auth codeDep edge");
+    let bend_x = |d: &str| d.split('C').nth(1).unwrap().split_whitespace().next().unwrap().to_string();
+    assert_ne!(
+        bend_x(e34["d"].as_str().unwrap()),
+        bend_x(e43["d"].as_str().unwrap()),
+        "reciprocal same-column codeDep curves must have distinct bends: {e34} vs {e43}"
+    );
 
     // Hovering #2 highlights incident #2->#1 codeDep as hot (keeping code marker) and keeps #1 undimmed (not red "up"),
     // while dimming unrelated #3, #4 and their #4->#3 codeDep edge.

@@ -206,7 +206,6 @@ struct ParsedCargoToml {
     package_name: Option<String>,
     lib_name: Option<String>,
     lib_path: Option<String>,
-    bin_paths: Vec<String>,
     workspace_members: Vec<String>,
     workspace_excludes: Vec<String>,
     workspace_deps: BTreeMap<String, CargoDepSpec>,
@@ -250,6 +249,7 @@ struct RepoCodeGraph {
     pkg_deps: HashMap<String, BTreeSet<String>>,
     pkg_dev_deps: HashMap<String, BTreeSet<String>>,
     file_to_unique_symbols: HashMap<String, Vec<String>>,
+    target_file_identifiers: HashMap<String, HashSet<String>>,
     has_any_unique_symbol: bool,
 }
 
@@ -677,7 +677,6 @@ enum CargoSection {
     Other,
     Package,
     Lib,
-    Bin,
     Workspace,
     WorkspaceDeps,
     WorkspaceDep(String),
@@ -693,7 +692,6 @@ fn classify_cargo_section(raw_header: &str) -> CargoSection {
     match refs.as_slice() {
         ["package"] => CargoSection::Package,
         ["lib"] => CargoSection::Lib,
-        ["bin"] => CargoSection::Bin,
         ["workspace"] => CargoSection::Workspace,
         ["workspace", "dependencies"] => CargoSection::WorkspaceDeps,
         ["workspace", "dependencies", name] => CargoSection::WorkspaceDep((*name).to_string()),
@@ -825,13 +823,6 @@ fn parse_cargo_toml(dir: &str, text: &str) -> ParsedCargoToml {
                     && let Some(path) = unquote_toml_str(val)
                 {
                     parsed.lib_path = Some(path);
-                }
-            }
-            CargoSection::Bin => {
-                if key == "path"
-                    && let Some(path) = unquote_toml_str(val)
-                {
-                    parsed.bin_paths.push(path);
                 }
             }
             CargoSection::Workspace => {
@@ -1267,10 +1258,17 @@ fn extract_rust_file_info(
         if !line.starts_with([' ', '\t']) {
             if is_pub {
                 let mut rem = after_vis;
-                for kw in ["async ", "unsafe ", "const "] {
-                    if let Some(r) = rem.strip_prefix(kw) {
-                        rem = r.trim_start();
+                if let Some(r) = rem.strip_prefix("async ") {
+                    rem = r.trim_start();
+                }
+                if let Some(r) = rem.strip_prefix("const ") {
+                    let after_const = r.trim_start();
+                    if after_const.starts_with("fn ") || after_const.starts_with("unsafe ") {
+                        rem = after_const;
                     }
+                }
+                if let Some(r) = rem.strip_prefix("unsafe ") {
+                    rem = r.trim_start();
                 }
                 for item_kw in ["fn ", "struct ", "enum ", "trait ", "type ", "const ", "static "] {
                     if let Some(r) = rem.strip_prefix(item_kw) {
@@ -1431,8 +1429,9 @@ fn strip_js_comments(src: &str, blank_strings: bool) -> String {
     out
 }
 
-fn parse_pnpm_workspace_yaml(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
+fn parse_pnpm_workspace_yaml(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut includes = Vec::new();
+    let mut excludes = Vec::new();
     let mut in_packages = false;
     for raw in text.lines() {
         let line = raw.split('#').next().unwrap_or("").trim_end();
@@ -1446,12 +1445,16 @@ fn parse_pnpm_workspace_yaml(text: &str) -> Vec<String> {
         }
         if in_packages && let Some(item) = trimmed.strip_prefix('-') {
             let pat = item.trim().trim_matches(['"', '\'']).trim();
-            if !pat.is_empty() && !pat.starts_with('!') {
-                out.push(pat.to_string());
+            if let Some(ex) = pat.strip_prefix('!') {
+                if !ex.is_empty() {
+                    excludes.push(ex.to_string());
+                }
+            } else if !pat.is_empty() {
+                includes.push(pat.to_string());
             }
         }
     }
-    out
+    (includes, excludes)
 }
 
 fn strip_jsonc_trailing_commas(s: &str) -> String {
@@ -1787,13 +1790,13 @@ fn extract_js_ts_file_info(
             }
         }
 
-        // 2. Inline `require("...")` and dynamic `import("...")` on this line
-        scan_js_call_specifiers(line, |spec: &str| {
-            add_spec(spec, None, false);
-        });
-
         i += 1;
     }
+
+    // 2. Inline `require("...")` and dynamic `import("...")` outside strings and template literals
+    scan_js_call_specifiers(&clean, |spec: &str| {
+        add_spec(spec, None, false);
+    });
 
     (imports, reexports, defs)
 }
@@ -1854,27 +1857,57 @@ fn extract_js_export_defs(after_export: &str, defs: &mut Vec<String>) {
     }
 }
 
-fn scan_js_call_specifiers(line: &str, mut on_spec: impl FnMut(&str)) {
-    let bytes = line.as_bytes();
+fn scan_js_call_specifiers(src: &str, mut on_spec: impl FnMut(&str)) {
+    let bytes = src.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
+        // Skip string and template literals so text like `'require("./storage")'` is ignored
+        if matches!(bytes[i], b'"' | b'\'' | b'`') {
+            let quote = bytes[i];
+            i += 1;
+            let mut esc = false;
+            while i < bytes.len() {
+                if esc {
+                    esc = false;
+                    let ch = src[i..].chars().next().expect("valid utf-8");
+                    i += ch.len_utf8();
+                } else if bytes[i] == b'\\' {
+                    esc = true;
+                    i += 1;
+                } else if bytes[i] == quote {
+                    i += 1;
+                    break;
+                } else {
+                    let ch = src[i..].chars().next().expect("valid utf-8");
+                    i += ch.len_utf8();
+                }
+            }
+            continue;
+        }
+        let mut matched_kw = false;
         for kw in ["require", "import"] {
             let klen = kw.len();
             if i + klen < bytes.len()
                 && &bytes[i..i + klen] == kw.as_bytes()
                 && (i == 0 || (!is_ident_continue(bytes[i - 1]) && bytes[i - 1] != b'.'))
+                && !is_ident_continue(bytes[i + klen])
             {
-                let rest = line[i + klen..].trim_start();
+                let rest = src[i + klen..].trim_start();
                 if let Some(inside) = rest.strip_prefix('(') {
                     let inside = inside.trim_start();
                     if let Some((spec, _)) = extract_quoted_specifier(inside) {
                         on_spec(spec);
                     }
                 }
+                i += klen;
+                matched_kw = true;
+                break;
             }
         }
-        let ch = line[i..].chars().next().expect("valid utf-8");
-        i += ch.len_utf8();
+        if !matched_kw {
+            let ch = src[i..].chars().next().expect("valid utf-8");
+            i += ch.len_utf8();
+        }
     }
 }
 
@@ -2610,6 +2643,7 @@ fn build_js_workspace_graph(root: &Path, tree_files: &HashSet<String>, scanned: 
         dir: String,
         name: Option<String>,
         workspaces: Vec<String>,
+        workspace_excludes: Vec<String>,
         normal_deps: Vec<(String, String)>,
         dev_deps: Vec<(String, String)>,
         entry_file: Option<String>,
@@ -2626,24 +2660,32 @@ fn build_js_workspace_graph(root: &Path, tree_files: &HashSet<String>, scanned: 
         let dir = parent_dir(pp).to_string();
         let name = v.get("name").and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from);
         let mut workspaces = Vec::new();
+        let mut workspace_excludes = Vec::new();
+        let mut push_ws_pat = |item: &str| {
+            if let Some(ex) = item.strip_prefix('!') {
+                if !ex.is_empty() {
+                    workspace_excludes.push(ex.to_string());
+                }
+            } else if !item.is_empty() {
+                workspaces.push(item.to_string());
+            }
+        };
         if let Some(arr) = v.get("workspaces").and_then(Value::as_array) {
             for item in arr.iter().filter_map(Value::as_str) {
-                if !item.starts_with('!') {
-                    workspaces.push(item.to_string());
-                }
+                push_ws_pat(item);
             }
         } else if let Some(arr) = v.get("workspaces").and_then(|w| w.get("packages")).and_then(Value::as_array) {
             for item in arr.iter().filter_map(Value::as_str) {
-                if !item.starts_with('!') {
-                    workspaces.push(item.to_string());
-                }
+                push_ws_pat(item);
             }
         }
         if dir.is_empty()
             && tree_files.contains("pnpm-workspace.yaml")
             && let Some(yaml) = read_capped_file(root, "pnpm-workspace.yaml")
         {
-            workspaces.extend(parse_pnpm_workspace_yaml(&yaml));
+            let (inc, exc) = parse_pnpm_workspace_yaml(&yaml);
+            workspaces.extend(inc);
+            workspace_excludes.extend(exc);
         }
 
         let mut normal_deps = Vec::new();
@@ -2691,7 +2733,7 @@ fn build_js_workspace_graph(root: &Path, tree_files: &HashSet<String>, scanned: 
             }
         }
 
-        raw_pkgs.push(RawPkg { dir, name, workspaces, normal_deps, dev_deps, entry_file });
+        raw_pkgs.push(RawPkg { dir, name, workspaces, workspace_excludes, normal_deps, dev_deps, entry_file });
     }
 
     let mut dir_to_name: HashMap<String, String> = HashMap::new();
@@ -2699,8 +2741,12 @@ fn build_js_workspace_graph(root: &Path, tree_files: &HashSet<String>, scanned: 
     let mut pkg_dirs: Vec<(String, String)> = Vec::new();
     let has_workspaces = raw_pkgs.iter().any(|p| !p.workspaces.is_empty());
 
-    let mut member_dirs: HashSet<String> = HashSet::new();
+    let mut ws_member_sets: Vec<HashSet<String>> = Vec::new();
     for ws in raw_pkgs.iter().filter(|p| !p.workspaces.is_empty()) {
+        let mut members = HashSet::new();
+        if ws.name.is_some() {
+            members.insert(ws.dir.clone());
+        }
         for cand in &raw_pkgs {
             if cand.dir == ws.dir || !path_in_dir(&cand.dir, &ws.dir) {
                 continue;
@@ -2710,65 +2756,83 @@ fn build_js_workspace_graph(root: &Path, tree_files: &HashSet<String>, scanned: 
             } else {
                 cand.dir.strip_prefix(&ws.dir).and_then(|s| s.strip_prefix('/')).unwrap_or("")
             };
-            if ws.workspaces.iter().any(|pat| matches_workspace_glob(pat, rel)) {
-                member_dirs.insert(cand.dir.clone());
+            let excluded = ws.workspace_excludes.iter().any(|pat| matches_workspace_glob(pat, rel));
+            if !excluded && ws.workspaces.iter().any(|pat| matches_workspace_glob(pat, rel)) {
+                members.insert(cand.dir.clone());
             }
         }
+        ws_member_sets.push(members);
     }
+
+    let in_any_workspace = |dir: &str| ws_member_sets.iter().any(|set| set.contains(dir));
+    let same_workspace = |a: &str, b: &str| ws_member_sets.iter().any(|set| set.contains(a) && set.contains(b));
 
     for p in &raw_pkgs {
         let Some(name) = &p.name else { continue };
-        // Register root only if it has no workspaces or has its own code; register all workspace members / local packages.
+        // Register virtual workspace root only for its own explicit deps if it has code; register all other named packages.
         if has_workspaces && p.dir.is_empty() && !p.workspaces.is_empty() && p.entry_file.is_none() {
-            // Virtual workspace root; still allow it to depend on workspace members, but don't make it a package dir owner for everything
             continue;
         }
         dir_to_name.insert(p.dir.clone(), name.clone());
         pkg_dirs.push((p.dir.clone(), name.clone()));
-        pkgs_by_name.insert(
-            name.clone(),
-            JsPackage { name: name.clone(), dir: p.dir.clone(), entry_file: p.entry_file.clone() },
-        );
     }
     pkg_dirs.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.1.cmp(&b.1)));
 
     let mut direct_normal: HashMap<String, BTreeSet<String>> = HashMap::new();
     let mut direct_dev: HashMap<String, BTreeSet<String>> = HashMap::new();
-    let resolve_js_dep = |pkg: &RawPkg, dep_name: &str, dep_ver: &str| -> Option<String> {
-        if let Some(file_rel) = dep_ver.strip_prefix("file:").or_else(|| dep_ver.strip_prefix("link:"))
-            && let Some(target_dir) = join_rel(&pkg.dir, file_rel)
-            && let Some(target_name) = dir_to_name.get(&target_dir)
-        {
-            return Some(target_name.clone());
-        }
-        if pkgs_by_name.contains_key(dep_name)
-            && (dep_ver.starts_with("workspace:")
-                || member_dirs.contains(&pkgs_by_name[dep_name].dir)
-                || raw_pkgs.len() > 1)
-        {
-            return Some(dep_name.to_string());
-        }
-        None
-    };
+    let mut linked_local_dirs: HashSet<String> = HashSet::new();
+    let resolve_js_dep =
+        |pkg: &RawPkg, dep_name: &str, dep_ver: &str, linked_dirs: &mut HashSet<String>| -> Option<String> {
+            if let Some(file_rel) = dep_ver.strip_prefix("file:").or_else(|| dep_ver.strip_prefix("link:"))
+                && let Some(target_dir) = join_rel(&pkg.dir, file_rel)
+                && let Some(target_name) = dir_to_name.get(&target_dir)
+            {
+                linked_dirs.insert(target_dir);
+                return Some(target_name.clone());
+            }
+            for cand in &raw_pkgs {
+                if cand.name.as_deref() == Some(dep_name)
+                    && dir_to_name.contains_key(&cand.dir)
+                    && same_workspace(&pkg.dir, &cand.dir)
+                {
+                    return Some(dep_name.to_string());
+                }
+            }
+            None
+        };
 
     for p in &raw_pkgs {
         let Some(name) = &p.name else { continue };
-        if !pkgs_by_name.contains_key(name) {
+        if !dir_to_name.contains_key(&p.dir) {
             continue;
         }
         for (dn, dv) in &p.normal_deps {
-            if let Some(target) = resolve_js_dep(p, dn, dv)
+            if let Some(target) = resolve_js_dep(p, dn, dv, &mut linked_local_dirs)
                 && target != *name
             {
                 direct_normal.entry(name.clone()).or_default().insert(target);
             }
         }
         for (dn, dv) in &p.dev_deps {
-            if let Some(target) = resolve_js_dep(p, dn, dv)
+            if let Some(target) = resolve_js_dep(p, dn, dv, &mut linked_local_dirs)
                 && target != *name
             {
                 direct_dev.entry(name.clone()).or_default().insert(target);
             }
+        }
+    }
+
+    // Only expose workspace members and explicitly file:/link:-referenced packages for bare specifier resolution.
+    for p in &raw_pkgs {
+        let Some(name) = &p.name else { continue };
+        if !dir_to_name.contains_key(&p.dir) {
+            continue;
+        }
+        if in_any_workspace(&p.dir) || linked_local_dirs.contains(&p.dir) {
+            pkgs_by_name.insert(
+                name.clone(),
+                JsPackage { name: name.clone(), dir: p.dir.clone(), entry_file: p.entry_file.clone() },
+            );
         }
     }
 
@@ -2869,7 +2933,7 @@ fn expand_barrel_reexports(
     out
 }
 
-fn build_repo_code_graph(local: &LocalRepoInfo) -> RepoCodeGraph {
+fn build_repo_code_graph(local: &LocalRepoInfo, target_files: &HashSet<String>) -> RepoCodeGraph {
     let root = &local.root;
     let tree_files = &local.tree_files;
     let mut scanned = 0usize;
@@ -2887,12 +2951,14 @@ fn build_repo_code_graph(local: &LocalRepoInfo) -> RepoCodeGraph {
     let mut raw_imports: HashMap<String, Vec<ImportRef>> = HashMap::new();
     let mut reexports: HashMap<String, Vec<ReexportEdge>> = HashMap::new();
     let mut symbol_definers: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut target_file_identifiers: HashMap<String, HashSet<String>> = HashMap::new();
 
     let mut source_files: Vec<&String> = tree_files
         .iter()
         .filter(|f| !is_ignored_path(f) && (is_rust_file(f) || is_js_ts_file(f) || is_python_file(f)))
         .collect();
-    source_files.sort();
+    // Prioritize open issues' target files first within the bounded scan budget, deterministically sorted.
+    source_files.sort_by_key(|f| (!target_files.contains(f.as_str()), f.as_str()));
 
     for f in source_files {
         if scanned >= MAX_REPO_FILES_TO_SCAN {
@@ -2923,6 +2989,13 @@ fn build_repo_code_graph(local: &LocalRepoInfo) -> RepoCodeGraph {
         } else {
             continue;
         };
+
+        if target_files.contains(f.as_str()) {
+            let idents = extract_code_file_identifiers(f, &raw);
+            if !idents.is_empty() {
+                target_file_identifiers.insert((*f).clone(), idents);
+            }
+        }
 
         if !imps.is_empty() {
             raw_imports.insert((*f).clone(), imps);
@@ -2958,6 +3031,7 @@ fn build_repo_code_graph(local: &LocalRepoInfo) -> RepoCodeGraph {
         pkg_deps,
         pkg_dev_deps,
         file_to_unique_symbols,
+        target_file_identifiers,
         has_any_unique_symbol,
     }
 }
@@ -3011,22 +3085,50 @@ pub(crate) fn analyze_repo_code_deps(
         return Vec::new();
     }
 
-    let graph = build_repo_code_graph(local);
     let mut sorted_tree_files: Vec<&String> = local.tree_files.iter().filter(|f| !is_ignored_path(f)).collect();
     sorted_tree_files.sort();
+
+    // Pre-expand each issue's target files so the single bounded repo scan captures target identifiers without reopening files.
+    let mut issue_files: Vec<BTreeSet<String>> = Vec::with_capacity(issues.len());
+    let mut all_target_files: HashSet<String> = HashSet::new();
+    for issue in issues {
+        let mut files: BTreeSet<String> = BTreeSet::new();
+        for tp in &issue.paths {
+            match tp {
+                TargetPath::File(f) => {
+                    files.insert(f.clone());
+                    all_target_files.insert(f.clone());
+                }
+                TargetPath::Dir(d) => {
+                    let mut count = 0usize;
+                    for f in &sorted_tree_files {
+                        if path_in_dir(f, d) {
+                            files.insert((*f).clone());
+                            all_target_files.insert((*f).clone());
+                            count += 1;
+                            if count >= MAX_DIR_FILES {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        issue_files.push(files);
+    }
+
+    let graph = build_repo_code_graph(local, &all_target_files);
 
     let mut expanded: Vec<ExpandedIssue> = Vec::with_capacity(issues.len());
     let mut any_issue_defines_symbols = false;
 
-    for issue in issues {
-        let mut files: BTreeSet<String> = BTreeSet::new();
+    for (issue, files) in issues.iter().zip(issue_files) {
         let mut crates: BTreeMap<String, bool> = BTreeMap::new();
         let mut pkgs: BTreeMap<String, bool> = BTreeMap::new();
 
         for tp in &issue.paths {
             match tp {
                 TargetPath::File(f) => {
-                    files.insert(f.clone());
                     if let Some((cdir, cname)) = owner_in(&graph.crate_dirs, f) {
                         record_unit_touch(&mut crates, cname, is_test_like_rust_path(f, cdir));
                     }
@@ -3046,16 +3148,6 @@ pub(crate) fn analyze_repo_code_deps(
                         if path_in_dir(d, pdir) || path_in_dir(pdir, d) {
                             let is_test = path_in_dir(d, pdir) && is_test_like_js_path(d, pdir);
                             record_unit_touch(&mut pkgs, pname, is_test);
-                        }
-                    }
-                    let mut count = 0usize;
-                    for f in &sorted_tree_files {
-                        if path_in_dir(f, d) {
-                            files.insert((*f).clone());
-                            count += 1;
-                            if count >= MAX_DIR_FILES {
-                                break;
-                            }
                         }
                     }
                 }
@@ -3089,26 +3181,14 @@ pub(crate) fn analyze_repo_code_deps(
         });
     }
 
-    // Pass 2: only tokenize open issues' bodies and target files when at least one open issue defines unique symbols
+    // Reuse identifiers captured during the bounded scan without reopening files from disk.
     if any_issue_defines_symbols {
-        let mut file_ident_cache: HashMap<String, HashSet<String>> = HashMap::new();
         for (idx, issue) in issues.iter().enumerate() {
             expanded[idx].body_candidates = extract_body_symbol_candidates(&issue.body);
             let target_files: Vec<String> = expanded[idx].files.iter().cloned().collect();
             for f in target_files {
-                if !local.tree_files.contains(&f) || !(is_rust_file(&f) || is_js_ts_file(&f) || is_python_file(&f)) {
-                    continue;
-                }
-                let idents = file_ident_cache
-                    .entry(f.clone())
-                    .or_insert_with(|| {
-                        read_capped_file(&local.root, &f)
-                            .map(|raw| extract_code_file_identifiers(&f, &raw))
-                            .unwrap_or_default()
-                    })
-                    .clone();
-                if !idents.is_empty() {
-                    expanded[idx].file_identifiers.insert(f, idents);
+                if let Some(idents) = graph.target_file_identifiers.get(&f) {
+                    expanded[idx].file_identifiers.insert(f, idents.clone());
                 }
             }
         }
@@ -3460,5 +3540,65 @@ mod tests {
         for w in COMMON_SYMBOL_STOPWORDS.windows(2) {
             assert!(w[0] < w[1], "COMMON_SYMBOL_STOPWORDS out of order: {:?} >= {:?}", w[0], w[1]);
         }
+    }
+
+    #[test]
+    fn rust_pub_const_and_js_strings_and_excluded_workspaces_are_handled_precisely() {
+        let td = tempfile::tempdir().unwrap();
+        let local = make_local_repo(
+            td.path(),
+            &[
+                ("Cargo.toml", "[package]\nname = \"const-demo\"\n"),
+                ("src/lib.rs", "pub mod limits;\n"),
+                (
+                    "src/limits.rs",
+                    "pub const DEFAULT_TIMEOUT_SECS: u64 = 30;\npub const fn build_retry_limit() -> u64 { 3 }\n",
+                ),
+                ("package.json", r#"{"private": true, "workspaces": ["packages/*", "!packages/excluded"]}"#),
+                ("packages/excluded/package.json", r#"{"name": "lodash"}"#),
+                ("packages/excluded/src/index.ts", "export function fakeLodash() {}\n"),
+                ("tools/outside/package.json", r#"{"name": "chalk"}"#),
+                ("tools/outside/src/index.ts", "export function fakeChalk() {}\n"),
+                ("tools/local-util/package.json", r#"{"name": "local-util"}"#),
+                ("tools/local-util/src/index.ts", "export function localHelper() {}\n"),
+                (
+                    "packages/web/package.json",
+                    r#"{"name": "@acme/web", "dependencies": {"lodash": "^4.17.21", "chalk": "^5.0.0", "local-util": "file:../../tools/local-util"}}"#,
+                ),
+                (
+                    "packages/web/src/app.ts",
+                    "import _ from 'lodash';\nconst doc = 'require(\"./storage\")';\nconst tpl = `import('./storage')`;\n",
+                ),
+                ("packages/web/src/storage.ts", "export function realStorage() {}\n"),
+            ],
+        );
+
+        let issues = vec![
+            issue_input(1, &[TargetPath::File("src/limits.rs".into())], ""),
+            issue_input(2, &[], "Tune `DEFAULT_TIMEOUT_SECS` and `build_retry_limit`."),
+            issue_input(3, &[TargetPath::File("packages/web/src/app.ts".into())], ""),
+            issue_input(4, &[TargetPath::File("packages/excluded/src/index.ts".into())], ""),
+            issue_input(5, &[TargetPath::File("tools/outside/src/index.ts".into())], ""),
+            issue_input(6, &[TargetPath::File("tools/local-util/src/index.ts".into())], ""),
+            issue_input(7, &[TargetPath::File("packages/web/src/storage.ts".into())], ""),
+        ];
+
+        let edges = analyze_repo_code_deps(&local, &issues, &BTreeMap::new());
+        let find = |from: u64, to: u64| edges.iter().find(|e| e.from.1 == from && e.to.1 == to);
+
+        // S4: pub const and pub const fn both emit symbol hints
+        let e21 = find(2, 1).expect("#2 -> #1 via pub const + pub const fn");
+        assert!(e21.symbols.contains(&"src/limits.rs::DEFAULT_TIMEOUT_SECS".to_string()), "{e21:?}");
+        assert!(e21.symbols.contains(&"src/limits.rs::build_retry_limit".to_string()), "{e21:?}");
+
+        // S2: excluded workspace pkg (#4) and outside-workspace pkg (#5) do NOT match registry deps,
+        // while explicit file: dep (#6) DOES match
+        assert!(find(3, 4).is_none(), "excluded workspace pkg must not match registry dep: {edges:?}");
+        assert!(find(3, 5).is_none(), "outside-workspace pkg must not match registry dep: {edges:?}");
+        let e36 = find(3, 6).expect("#3 -> #6 via explicit file: dep");
+        assert!(e36.modules.contains(&"workspace @acme/web -> local-util".to_string()), "{e36:?}");
+
+        // S3: require/import inside string or template literals must NOT emit import edge to #7
+        assert!(find(3, 7).is_none(), "string/template literal require/import must be ignored: {edges:?}");
     }
 }

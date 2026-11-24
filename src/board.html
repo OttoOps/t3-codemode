@@ -4919,7 +4919,7 @@ function graphBuild(box, lay, edges) {
       const x1 = dst.x + GEO.W, x2 = src.x, dx = Math.max(16, (x2 - x1) / 2);
       d = "M" + x1 + " " + dy + "C" + (x1 + dx) + " " + (dy + bow) + " " + (x2 - dx) + " " + (sy + bow) + " " + x2 + " " + sy;
     } else {
-      const x = src.x + GEO.W, bend = x + GEO.GAP / 2 + Math.abs(bow);
+      const x = src.x + GEO.W, bend = x + GEO.GAP / 2 + idx * 14;
       d = "M" + x + " " + sy + "C" + bend + " " + sy + " " + bend + " " + dy + " " + (dst.x + GEO.W + (directed ? 2 : 0)) + " " + dy;
     }
     const cls = edgeBaseClass(e);
