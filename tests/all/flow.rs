@@ -2236,3 +2236,68 @@ async fn unavailable_origin_during_discovery_preserves_running_ticket_capacity()
     assert_eq!(pick["picked"], json!([]), "{pick}");
     assert!(h.fake.launched().is_empty());
 }
+
+#[tokio::test]
+async fn pending_ticket_uses_saved_project_under_unavailable_discovery() {
+    let cfg = Config::from_value(json!({"flow": {"maxTickets": 1, "launch": "auto"}})).unwrap();
+    let h = H::build(Vec::new(), cfg.clone());
+    h.fake.set_projects(vec![
+        project("p-gitlab", "/src/gitlab"),
+        project("p-timeout", "/src/timeout"),
+        project("p-tools", "/src/tools"),
+    ]);
+    h.remotes.set("/src/gitlab", "git@gitlab.com:acme/internal.git");
+    h.remotes.set_unavailable("/src/timeout");
+    h.remotes.set("/src/tools", "git@github.com:acme/tools.git");
+    issue(&h, TOOLS, 2, &[], 1);
+
+    // A pending dispatch saved with confirmed non-GitHub p-gitlab must not consume the GitHub slot.
+    let params = h.app.wf.config().link_params("overseer", "ticket").unwrap();
+    h.app
+        .store
+        .pending_put(&Pending {
+            parent: BOARD.into(),
+            label: "gitlab: refactor".into(),
+            role: "ticket".into(),
+            params,
+            at: T0.into(),
+            reported: false,
+            thread: None,
+            link: None,
+            project: Some("p-gitlab".into()),
+            identity: Default::default(),
+            brief: None,
+        })
+        .unwrap();
+
+    let f = flow(&h).await;
+    assert_eq!(f["free"], 1, "non-GitHub pending dispatch must not consume slot: {f}");
+
+    // A pending dispatch saved with unavailable p-timeout must still reserve capacity.
+    let h2 = H::build(Vec::new(), cfg);
+    h2.fake.set_projects(vec![project("p-timeout", "/src/timeout"), project("p-tools", "/src/tools")]);
+    h2.remotes.set_unavailable("/src/timeout");
+    h2.remotes.set("/src/tools", "git@github.com:acme/tools.git");
+    issue(&h2, TOOLS, 3, &[], 1);
+    h2.app
+        .store
+        .pending_put(&Pending {
+            parent: BOARD.into(),
+            label: "timeout: task".into(),
+            role: "ticket".into(),
+            params,
+            at: T0.into(),
+            reported: false,
+            thread: None,
+            link: None,
+            project: Some("p-timeout".into()),
+            identity: Default::default(),
+            brief: None,
+        })
+        .unwrap();
+
+    let pick2 = next(&h2).await;
+    assert_eq!(pick2["free"], 0, "pending ticket on unavailable project must keep slot: {pick2}");
+    assert_eq!(pick2["picked"], json!([]), "{pick2}");
+    assert!(h2.fake.launched().is_empty());
+}

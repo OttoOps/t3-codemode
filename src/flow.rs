@@ -1123,8 +1123,12 @@ impl Wf {
                 .map(|p| {
                     let live = p.thread.as_deref().and_then(|t| self.live_of(t));
                     let status = if p.thread.is_none() { "launching" } else { chip(live.as_ref()) };
-                    let project = live.as_ref().and_then(|v| v["project"].as_str().map(String::from));
-                    let repo = self.place(None, &live.unwrap_or(Value::Null)).0.as_str().map(String::from);
+                    let project = p
+                        .project
+                        .clone()
+                        .or_else(|| live.as_ref().and_then(|v| v["project"].as_str().map(String::from)));
+                    let repo =
+                        self.place(project.as_deref(), &live.unwrap_or(Value::Null)).0.as_str().map(String::from);
                     Ticket {
                         label: p.label,
                         thread: p.thread,
