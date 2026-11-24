@@ -23,6 +23,7 @@ pub(crate) struct OpenPr {
     pub(crate) is_cross_repository: bool,
     pub(crate) closing_issues: Vec<(String, u64)>,
     pub(crate) files: Vec<String>,
+    pub(crate) files_next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -54,9 +55,12 @@ pub(crate) struct PrStackEdge {
     pub(crate) to: (String, u64),
     pub(crate) branch: Option<String>,
     pub(crate) base_branch: Option<String>,
+    pub(crate) base_repo: Option<String>,
+    pub(crate) base_oid: Option<String>,
     pub(crate) pr: Option<u64>,
     pub(crate) base_pr: Option<u64>,
     pub(crate) part: Option<String>,
+    pub(crate) direct: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,6 +143,9 @@ pub(crate) fn parse_open_pr(repo: &str, v: &Value) -> Option<OpenPr> {
             files.push(norm);
         }
     }
+    let files_page = &v["files"]["pageInfo"];
+    let files_next_cursor =
+        (files_page["hasNextPage"] == true).then(|| files_page["endCursor"].as_str().map(String::from)).flatten();
     Some(OpenPr {
         repo: repo.to_string(),
         number,
@@ -149,6 +156,7 @@ pub(crate) fn parse_open_pr(repo: &str, v: &Value) -> Option<OpenPr> {
         is_cross_repository,
         closing_issues,
         files,
+        files_next_cursor,
     })
 }
 
@@ -978,6 +986,12 @@ fn merge_pr_stack_edge(slot: &mut PrStackEdge, incoming: PrStackEdge) {
     if slot.base_branch.is_none() {
         slot.base_branch = incoming.base_branch;
     }
+    if slot.base_repo.is_none() {
+        slot.base_repo = incoming.base_repo;
+    }
+    if slot.base_oid.is_none() {
+        slot.base_oid = incoming.base_oid;
+    }
     if slot.pr.is_none() {
         slot.pr = incoming.pr;
     }
@@ -987,6 +1001,46 @@ fn merge_pr_stack_edge(slot: &mut PrStackEdge, incoming: PrStackEdge) {
     if slot.part.is_none() {
         slot.part = incoming.part;
     }
+    slot.direct |= incoming.direct;
+}
+
+pub(crate) fn reduce_ancestry_stacks(edges: Vec<PrStackEdge>) -> Vec<PrStackEdge> {
+    let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for e in &edges {
+        let from = issue_key(&e.from.0, e.from.1);
+        let to = issue_key(&e.to.0, e.to.1);
+        let list = adj.entry(from).or_default();
+        if !list.contains(&to) {
+            list.push(to);
+        }
+    }
+    let mut kept: Vec<PrStackEdge> = Vec::with_capacity(edges.len());
+    for e in edges {
+        if e.direct {
+            kept.push(e);
+            continue;
+        }
+        let from = issue_key(&e.from.0, e.from.1);
+        let to = issue_key(&e.to.0, e.to.1);
+        let redundant = adj.get(&from).is_some_and(|mids| {
+            mids.iter()
+                .any(|mid| mid != &from && mid != &to && reachable(&adj, mid, &to) && !reachable(&adj, mid, &from))
+        });
+        if !redundant {
+            kept.push(e);
+        }
+    }
+    kept
+}
+
+pub(crate) async fn is_local_branch_ahead_of_commit(root: &Path, merged_oid: &str, local_oid: &str) -> bool {
+    if merged_oid.is_empty() || local_oid.is_empty() || merged_oid == local_oid {
+        return false;
+    }
+    let Some(resolved) = resolve_commit_oid(root, merged_oid).await else {
+        return false;
+    };
+    is_strict_ancestor(root, &resolved, local_oid).await
 }
 
 fn reachable(adj: &BTreeMap<String, Vec<String>>, start: &str, target: &str) -> bool {
@@ -1178,9 +1232,12 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
                             to: (ra.clone(), *na),
                             branch: (!candidates[b_idx].branch.is_empty()).then(|| candidates[b_idx].branch.clone()),
                             base_branch: Some(candidates[a_idx].branch.clone()),
+                            base_repo: Some(repo_display.clone()),
+                            base_oid: candidates[a_idx].local_oid.clone(),
                             pr: candidates[b_idx].pr_number,
                             base_pr: candidates[a_idx].pr_number,
                             part: None,
+                            direct: true,
                         };
                         direct_edges
                             .entry((kb, ka))
@@ -1236,9 +1293,12 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
                                     .then(|| candidates[b_idx].branch.clone()),
                                 base_branch: (!candidates[a_idx].branch.is_empty())
                                     .then(|| candidates[a_idx].branch.clone()),
+                                base_repo: Some(repo_display.clone()),
+                                base_oid: Some(oid_a.to_string()),
                                 pr: candidates[b_idx].pr_number,
                                 base_pr: candidates[a_idx].pr_number,
                                 part: None,
+                                direct: false,
                             };
                             ancestry_edges
                                 .entry((kb, ka))
@@ -1277,28 +1337,10 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
         }
     }
 
-    // Transitive reduction on ancestry-only edges so a 3-deep commit stack A -> B -> C doesn't emit C -> A.
-    let mut combined_adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (from, to) in direct_edges.keys().chain(ancestry_edges.keys()) {
-        combined_adj.entry(from.clone()).or_default().push(to.clone());
-    }
+    // Merge direct and ancestry edges without premature transitive reduction (reduction runs after endpoint verification).
     let mut merged_stacks: BTreeMap<(String, String), PrStackEdge> = direct_edges;
-    for ((from, to), edge) in ancestry_edges {
-        if merged_stacks.contains_key(&(from.clone(), to.clone())) {
-            merged_stacks.entry((from, to)).and_modify(|slot| merge_pr_stack_edge(slot, edge));
-            continue;
-        }
-        let redundant = combined_adj.get(&from).is_some_and(|mids| {
-            mids.iter().any(|mid| {
-                mid != &from
-                    && mid != &to
-                    && reachable(&combined_adj, mid, &to)
-                    && !reachable(&combined_adj, mid, &from)
-            })
-        });
-        if !redundant {
-            merged_stacks.insert((from, to), edge);
-        }
+    for (pair, edge) in ancestry_edges {
+        merged_stacks.entry(pair).and_modify(|slot| merge_pr_stack_edge(slot, edge.clone())).or_insert(edge);
     }
 
     // 4. Sequential t3-ticket `part: n/N` chains from active links.
@@ -1328,9 +1370,12 @@ pub(crate) async fn analyze_source_control(input: SourceControlInput<'_>) -> Sou
                         to: (rp.clone(), *np),
                         branch: None,
                         base_branch: None,
+                        base_repo: None,
+                        base_oid: None,
                         pr: None,
                         base_pr: None,
                         part: Some(label.clone()),
+                        direct: true,
                     };
                     merged_stacks
                         .entry((kc, kp))

@@ -102,11 +102,24 @@ pub const FLOW_OPEN_PRS: &str = "query FlowOpenPrs($owner: String!, $name: Strin
       nodes {
         number title url body baseRefName headRefName headRefOid isCrossRepository
         closingIssuesReferences(first: 20) { nodes { number repository { nameWithOwner } } }
-        files(first: 100) { nodes { path } }
+        files(first: 100) { pageInfo { hasNextPage endCursor } nodes { path } }
       }
     }
   }
 }";
+
+pub const FLOW_PR_FILES: &str = "query FlowPrFiles($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      files(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { path }
+      }
+    }
+  }
+}";
+
+pub const FLOW_BRANCH_MERGED: &str = "query FlowBranchMerged(";
 
 pub trait GitHub: Send + Sync {
     fn graphql<'a>(&'a self, query: &'a str, variables: Value) -> BoxFut<'a, Result<Value>>;
