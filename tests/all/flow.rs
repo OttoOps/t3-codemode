@@ -1132,7 +1132,7 @@ return { off, failed, gone: { hidden: q("#p-flow").hidden, err: q("#flow-err").h
 }
 
 #[tokio::test]
-async fn rows_pills_and_the_pulse_strip_show_ready_and_external_work() {
+async fn rows_pills_and_the_telemetry_show_ready_and_external_work() {
     let h = flowing(3);
     issue(&h, REPO, 1, &[FLOW], 1);
     issue(&h, REPO, 2, &[FLOW, "blocked: external"], 2);
@@ -1149,7 +1149,7 @@ async fn rows_pills_and_the_pulse_strip_show_ready_and_external_work() {
         &view,
         r##"
 fetchReply = (url) => url === "/api/flow" ? reply(200, view) : new Promise(() => {});
-const slot = (k) => q('#pslots [data-slot="' + k + '"]');
+const byId = (id) => document.getElementById(id);
 const pill = (thread) => { const p = q('#open [data-thread="' + thread + '"] [data-part="ext"]'); return p ? !p.hidden : false; };
 const open = () => [...document.getElementById("open").children].filter((e) => e.dataset.thread && !e.classList.contains("gone")).map((e) => e.dataset.thread);
 const flowRows = (id) => [...document.querySelectorAll("#" + id + " li")].map((li) => ({
@@ -1159,8 +1159,8 @@ emitState(base);
 await tick();
 const before = {
   pills: [pill("mcp:t3"), pill("mcp:t4")],
-  active: slot("active").querySelector(".pd").textContent,
-  held: [slot("held").querySelector(".pn").textContent, slot("held").querySelector(".pd").textContent],
+  slots: [byId("t-slots").hidden, byId("t-slots-n").textContent],
+  queueTab: [byId("vn-queue").textContent, byId("vt-queue").getAttribute("aria-label")],
   queue: flowRows("flow-q"), blocked: flowRows("flow-b"),
 };
 setFilter({ statuses: ["external"] });
@@ -1169,20 +1169,19 @@ const external = { open: open(), queue: flowRows("flow-q"), blocked: flowRows("f
 setFilter({ statuses: ["ready"] });
 await tick();
 const ready = { open: open(), queue: flowRows("flow-q"), n: q("#n-flow").textContent, nb: q("#n-flow-b").textContent };
-setFilter({});
-slot("held").dispatch("click");
+setFilter({ statuses: ["paused", "blocked", "external"] });
 const held = open();
 setFilter({});
-emitState({ ...base, flow: false });
-const off = { pill: pill("mcp:t3"), held: slot("held").querySelector(".pd").textContent };
+emitState({ ...base, flow: false, flowMaxTickets: null });
+const off = { pill: pill("mcp:t3"), slots: byId("t-slots").hidden };
 return { before, external, ready, held, off };
 "##,
     );
 
     let b = &r["before"];
     assert_eq!(b["pills"], json!([true, false]), "{r}");
-    assert_eq!(b["active"], "2 threads running, 2 of 3 tickets, 1 ready to launch", "{r}");
-    assert_eq!(b["held"], json!(["1", "2 external"]), "{r}");
+    assert_eq!(b["slots"], json!([false, "2 / 3"]), "{r}");
+    assert_eq!(b["queueTab"], json!(["1", "Queue and Graph, 1 ready to launch"]), "{r}");
     assert_eq!(b["queue"], json!([{"label": "widgets#1", "hidden": false, "pill": "ready"}]), "{r}");
     assert_eq!(b["blocked"], json!([{"label": "widgets#2", "hidden": false, "pill": "external"}]), "{r}");
     let e = &r["external"];
@@ -1195,7 +1194,7 @@ return { before, external, ready, held, off };
     assert_eq!(rd["queue"][0]["hidden"], false, "{r}");
     assert_eq!((rd["n"].as_str(), rd["nb"].as_str()), (Some("1/1"), Some("0/1")), "{r}");
     assert_eq!(r["held"], json!(["mcp:t3"]), "{r}");
-    assert_eq!(r["off"], json!({"pill": false, "held": "Nothing parked"}), "{r}");
+    assert_eq!(r["off"], json!({"pill": false, "slots": true}), "{r}");
 }
 
 #[tokio::test]
