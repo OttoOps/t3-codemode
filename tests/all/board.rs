@@ -3993,6 +3993,107 @@ return {{ before, compact, back: snap() }};
 }
 
 #[tokio::test]
+async fn the_layout_switches_to_workspace_is_remembered_and_survives_missing_storage() {
+    let (html, st) = two_gate_page().await;
+    let body = format!(
+        r##"() => {{
+{PAGE_HELPERS}
+const base = {st};
+emitState(base);
+const root = document.documentElement;
+const btn = document.getElementById("layout-btn");
+const snap = () => ({{ layout: root.getAttribute("data-layout"), stored: localStorage.getItem("t3board.layout"), label: btn.getAttribute("aria-label") }});
+const loaded = snap();
+const cards = ids();
+btn.dispatch("click");
+const ws = {{ ...snap(), cards: ids(), color: document.getElementById("theme-color").getAttribute("content") }};
+btn.dispatch("click");
+const back = snap();
+localStorage.setItem = () => {{ throw new Error("blocked"); }};
+btn.dispatch("click");
+const noStore = snap();
+return {{ loaded, cards, ws, back, noStore }};
+}}"##
+    );
+    let r = run_page_async_with(&html, "", &body);
+    assert_eq!(
+        r["loaded"],
+        json!({"layout": "dispatch", "stored": null, "label": "Layout: Dispatch. Switch to Workspace"}),
+        "Dispatch is the default: {r}"
+    );
+    assert_eq!(
+        (&r["ws"]["layout"], &r["ws"]["stored"], &r["ws"]["label"]),
+        (&json!("workspace"), &json!("workspace"), &json!("Layout: Workspace. Switch to Dispatch")),
+        "{r}"
+    );
+    assert_eq!(r["ws"]["cards"], r["cards"], "switching keeps every card: {r}");
+    assert_eq!(r["ws"]["color"], json!("#0d1117"), "{r}");
+    assert_eq!(r["back"]["layout"], json!("dispatch"), "{r}");
+    assert_eq!(r["back"]["stored"], Value::Null, "Dispatch clears the saved pick: {r}");
+    assert_eq!(r["noStore"]["layout"], json!("workspace"), "a storage error still switches the layout: {r}");
+    let saved = run_page_async_with(
+        &html,
+        r#"globalThis.__storage = { "t3board.layout": "workspace" };"#,
+        "() => document.documentElement.getAttribute(\"data-layout\")",
+    );
+    assert_eq!(saved, json!("workspace"), "a saved Workspace pick survives a reload");
+    let boot = &html[..html.find("</script>").unwrap()];
+    assert!(boot.contains(r#"localStorage.getItem("t3board.layout")"#), "the head script sets the layout before paint");
+    assert!(html.contains(r#":root[data-layout="workspace"] .wnav {"#));
+    assert!(html.contains(".wnav, .tr .side .wstep { display: none; }"), "Dispatch never shows the Workspace parts");
+}
+
+#[tokio::test]
+async fn the_workspace_nav_counts_routes_views_and_ticket_rows_carry_a_step_pill() {
+    let (html, st) = two_gate_page().await;
+    let r = page_scenario(
+        &html,
+        &st,
+        &format!(
+            r##"{ROWS}
+{PR_TREE}
+const rt = [...tree, T("acme/r#10", {{ progress: {{ step: 2, of: 3, merged: 1 }}, workers: [
+  W("#10 PR 1/3", "done", {{ step: {{ n: 1, of: 3 }}, pr: pr(101, {{ state: "merged" }}) }}),
+  W("#10 PR 2/3", "running", {{ step: {{ n: 2, of: 3 }}, pr: pr(102) }}),
+] }})];
+emitState({{ ...base, tree: rt }});
+document.getElementById("layout-btn").dispatch("click");
+const app = document.getElementById("app");
+const count = (k) => document.getElementById("wc-" + k).textContent;
+const counts = {{ overview: count("overview"), needs: count("needs"), hot: document.getElementById("wc-needs").classList.contains("on"), prs: count("prs") }};
+const go = (k) => {{
+  document.getElementById("wn-" + k).dispatch("click");
+  return [app.getAttribute("data-view"), app.getAttribute("data-wsnav"), document.getElementById("wn-" + k).getAttribute("aria-current")];
+}};
+const nav = {{ graph: go("graph"), activity: go("activity"), issues: go("issues"), prs: go("prs"), needs: go("needs"), overview: go("overview") }};
+selectView("queue");
+const followed = app.getAttribute("data-wsnav");
+jump("decisions");
+const jumped = app.getAttribute("data-wsnav");
+const step = (label) => {{
+  const el = row(label);
+  const sp = el.querySelector('[data-part="wstep"]');
+  return [el.getAttribute("data-step"), sp ? sp.hidden : null, sp ? sp.textContent : null];
+}};
+return {{ counts, nav, followed, jumped, routed: step("acme/r#10"), plain: step("acme/a#8") }};
+"##
+        ),
+    );
+    assert_eq!(r["counts"], json!({"overview": "10", "needs": "2", "hot": true, "prs": r["counts"]["prs"]}), "{r}");
+    assert_ne!(r["counts"]["prs"], json!(""), "{r}");
+    assert_eq!(r["nav"]["graph"], json!(["queue", "graph", "page"]), "{r}");
+    assert_eq!(r["nav"]["activity"], json!(["activity", "activity", "page"]), "{r}");
+    assert_eq!(r["nav"]["issues"], json!(["issues", "issues", "page"]), "{r}");
+    assert_eq!(r["nav"]["prs"], json!(["dispatch", "prs", "page"]), "{r}");
+    assert_eq!(r["nav"]["needs"], json!(["dispatch", "needs", "page"]), "{r}");
+    assert_eq!(r["nav"]["overview"], json!(["dispatch", "overview", "page"]), "{r}");
+    assert_eq!(r["followed"], json!("graph"), "a view picked another way moves the nav: {r}");
+    assert_eq!(r["jumped"], json!("needs"), "g d shows Needs you even when it is clear: {r}");
+    assert_eq!(r["routed"], json!(["", false, "Step 2/3"]), "{r}");
+    assert_eq!(r["plain"], json!([null, null, null]), "a one-PR ticket keeps its status pill: {r}");
+}
+
+#[tokio::test]
 async fn cards_and_feed_filter_by_a_context_or_projects_as_the_page_does() {
     let h = H::new();
     let mut gadgets = project("p-gadgets", "/src/gadgets");
