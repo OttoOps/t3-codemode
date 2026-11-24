@@ -98,16 +98,7 @@ fn live_pr(number: u64) -> Value {
     }
 }
 
-const GITLAB_UNSUPPORTED: &[OpKind] = &[
-    OpKind::PrOpened,
-    OpKind::PrUpdated,
-    OpKind::PrReady,
-    OpKind::PrFollowup,
-    OpKind::AnswerReadyAndClearGate,
-    OpKind::MergeWaitPut,
-    OpKind::GhQueueDrop,
-    OpKind::GhFilesPaginated,
-];
+const GITLAB_UNSUPPORTED: &[OpKind] = &[OpKind::AnswerReadyAndClearGate, OpKind::MergeWaitPut, OpKind::GhQueueDrop];
 const HEADS: &[&str] = &[
     "1111111111111111111111111111111111111111",
     "2222222222222222222222222222222222222222",
@@ -116,6 +107,8 @@ const HEADS: &[&str] = &[
 ];
 const GOOD_BODY: &str = "## Summary\n\n```text\nwf.pr\n  chaos\n```\n\n## Evidence\n\n- **Before:** old\n  **After:** new\n\n\
 ## Merge Danger\n\n**Door:** two-way\n\n**Blast Radius:** board\n\nRefs #41\n";
+const LAB_BODY: &str = "## Summary\n\n```text\nwf.pr\n  chaos\n```\n\n## Evidence\n\n- **Before:** old\n  **After:** new\n\n\
+## Merge Danger\n\n**Door:** two-way\n\n**Blast Radius:** board\n\nRefs acme/widgets#41\n";
 const PUBLISHING: &str = "Publishing: pr skill; passes: none configured";
 const TICKETS: &[&str] = &["mcp:t1", "mcp:t2", "mcp:t3"];
 const WORKERS: &[&str] = &["mcp:w1", "mcp:w2", "mcp:w3"];
@@ -316,6 +309,14 @@ fn sync_lab(h: &H, prs: &BTreeMap<u64, GhPrModel>) {
             mr["head_pipeline"] = own.unwrap_or(Value::Null);
         }
         mr["pipelines"] = json!(pipelines);
+        mr["description"] = json!(LAB_BODY);
+        let files = if m.many_files { 101 } else { 1 };
+        mr["changes_count"] = json!(files.to_string());
+        mr["diffs"] = json!(
+            (0..files)
+                .map(|i| json!({"old_path": format!("src/f{i}.rs"), "new_path": format!("src/f{i}.rs")}))
+                .collect::<Vec<_>>()
+        );
         if m.state == "MERGED" {
             let oid = m.merge_commit.as_deref().unwrap_or(HEADS[(m.head_idx + 1) % HEADS.len()]);
             let squashed = number % 2 == 0;
@@ -1254,7 +1255,7 @@ async fn run_sequential_ops(
                         .wf(
                             w,
                             "pr",
-                            json!({"event": "opened", "repo": REPO, "pr": pr, "head": sha,
+                            json!({"event": "opened", "repo": repo_key(), "pr": pr, "head": sha,
                                    "publishing": PUBLISHING, "checks": checks}),
                         )
                         .await;
@@ -1270,7 +1271,7 @@ async fn run_sequential_ops(
                     };
                     let head = HEADS[gh[&pr].head_idx];
                     let sha = if short_sha { &head[..7] } else { head };
-                    let r = h.wf(w, "pr", json!({"event": "updated", "repo": REPO, "pr": pr, "head": sha})).await;
+                    let r = h.wf(w, "pr", json!({"event": "updated", "repo": repo_key(), "pr": pr, "head": sha})).await;
                     trace.push(format!("#{step} {w} pr updated #{pr}@{sha} -> {}", r["status"]));
                     let want = model.pr_updated(w, pr, sha);
                     oracle.status(&r, &want, &trace, run_id);
@@ -1283,7 +1284,7 @@ async fn run_sequential_ops(
                     };
                     let head = HEADS[gh[&pr].head_idx];
                     let sha = if short_sha { &head[..7] } else { head };
-                    let r = h.wf(w, "pr", json!({"event": "ready", "repo": REPO, "pr": pr, "head": sha})).await;
+                    let r = h.wf(w, "pr", json!({"event": "ready", "repo": repo_key(), "pr": pr, "head": sha})).await;
                     trace.push(format!("#{step} {w} pr ready #{pr}@{sha} -> {}", r["status"]));
                     let want = model.pr_ready(w, pr, sha, &gh);
                     oracle.status(&r, &want, &trace, run_id);
@@ -2175,7 +2176,7 @@ async fn run_sequential_ops(
                                 .wf(
                                     w,
                                     "pr",
-                                    json!({"event": "opened", "repo": REPO, "pr": pr_num, "head": sha,
+                                    json!({"event": "opened", "repo": repo_key(), "pr": pr_num, "head": sha,
                                            "publishing": PUBLISHING, "checks": checks}),
                                 )
                                 .await;
@@ -2184,14 +2185,14 @@ async fn run_sequential_ops(
                         }
                         PrEventKind::Updated => {
                             let r = h
-                                .wf(w, "pr", json!({"event": "updated", "repo": REPO, "pr": pr_num, "head": sha}))
+                                .wf(w, "pr", json!({"event": "updated", "repo": repo_key(), "pr": pr_num, "head": sha}))
                                 .await;
                             let want = model.pr_updated(w, pr_num, sha);
                             (r, want, "updated")
                         }
                         PrEventKind::Ready => {
                             let r =
-                                h.wf(w, "pr", json!({"event": "ready", "repo": REPO, "pr": pr_num, "head": sha})).await;
+                                h.wf(w, "pr", json!({"event": "ready", "repo": repo_key(), "pr": pr_num, "head": sha})).await;
                             let want = model.pr_ready(w, pr_num, sha, &gh);
                             (r, want, "ready")
                         }
@@ -2415,6 +2416,8 @@ async fn seeded_sequential_chaos_holds_all_invariants_on_gitlab() {
                 ReachPoint::FinishedEventReported,
                 ReachPoint::CloseEventPredatesTracking,
                 ReachPoint::ReconcileAdoptedPr,
+                ReachPoint::PrFilesPaginatedFallback,
+                ReachPoint::PrFollowupRecorded,
             ],
             "seeded_sequential_chaos_on_gitlab",
         );
@@ -2500,12 +2503,12 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
                     let r1 = h.wf(
                         WORKERS[0],
                         "pr",
-                        json!({"event": "ready", "repo": REPO, "pr": 7, "head": HEADS[gh[&7].head_idx]}),
+                        json!({"event": "ready", "repo": repo_key(), "pr": 7, "head": HEADS[gh[&7].head_idx]}),
                     );
                     let r2 = h.wf(
                         WORKERS[1],
                         "pr",
-                        json!({"event": "ready", "repo": REPO, "pr": 8, "head": HEADS[gh[&8].head_idx]}),
+                        json!({"event": "ready", "repo": repo_key(), "pr": 8, "head": HEADS[gh[&8].head_idx]}),
                     );
                     let clr = async {
                         tokio::time::sleep(Duration::from_millis(8)).await;
@@ -2555,12 +2558,19 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
                         Raced::Updated(WORKERS[1], 8, new_head.into()),
                         Raced::Reconcile,
                     ];
-                    let rdy =
-                        h.wf(WORKERS[1], "pr", json!({"event": "ready", "repo": REPO, "pr": 8, "head": old_head}));
+                    let rdy = h.wf(
+                        WORKERS[1],
+                        "pr",
+                        json!({"event": "ready", "repo": repo_key(), "pr": 8, "head": old_head}),
+                    );
                     let upd = async {
                         tokio::time::sleep(Duration::from_millis(7)).await;
-                        h.wf(WORKERS[1], "pr", json!({"event": "updated", "repo": REPO, "pr": 8, "head": new_head}))
-                            .await
+                        h.wf(
+                            WORKERS[1],
+                            "pr",
+                            json!({"event": "updated", "repo": repo_key(), "pr": 8, "head": new_head}),
+                        )
+                        .await
                     };
                     let rec = h.app.wf.reconcile();
                     let (a, b, r) = join3(rdy, upd, rec).await;
@@ -2581,7 +2591,7 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
                     let op = h.wf(
                         WORKERS[2],
                         "pr",
-                        json!({"event": "opened", "repo": REPO, "pr": 9, "head": HEADS[gh[&9].head_idx],
+                        json!({"event": "opened", "repo": repo_key(), "pr": 9, "head": HEADS[gh[&9].head_idx],
                                "publishing": PUBLISHING}),
                     );
                     let ad = async {
@@ -2607,7 +2617,7 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
                     let rdy = h.wf(
                         WORKERS[2],
                         "pr",
-                        json!({"event": "ready", "repo": REPO, "pr": 9, "head": HEADS[gh[&9].head_idx]}),
+                        json!({"event": "ready", "repo": repo_key(), "pr": 9, "head": HEADS[gh[&9].head_idx]}),
                     );
                     let rec = h.app.wf.reconcile();
                     let open = h.app.wf.cards().unwrap();
