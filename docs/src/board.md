@@ -15,7 +15,7 @@ each new card while the tab is hidden.
 ## What the page shows
 
 The page is a command bar over four views. The bar holds the view tabs, Ask, Launch, and the update,
-skills, notification, density, theme, settings and shortcut buttons. Each tab
+skills, notification, density, theme, layout, settings and shortcut buttons. Each tab
 carries one count: Dispatch the cards waiting on you, New Issues the issues
 with no ticket, Queue & Graph the issues ready to launch, and Activity &
 Settled the finished tickets waiting to be settled. A filter never changes the
@@ -212,6 +212,24 @@ Dark, and this browser remembers the choice. A browser that blocks storage
 still switches, but goes back to Dark on reload. The density button, or `d`,
 switches the rows between comfortable and compact. Below 640 px the button
 hides and rows stay comfortable.
+
+The layout button, next to the theme button, switches between two layouts of
+the same board, and this browser remembers the choice. **Dispatch**, the
+default, is the command bar, telemetry line and views this page describes.
+**Workspace** is a calmer layout in a neutral palette with one accent color
+for primary actions: a left nav (Overview, Needs you, PRs, New issues, Graph
+and Activity, each with a count), and a top bar with search, the connection
+and launch-routing line, and Launch. Its Overview opens with one banner per
+card waiting on you, each with its options, Reply and Dismiss, and shows
+nothing when none wait. Issues in progress and PRs in progress follow, side by
+side above 1180 px, each row with its full title, one muted line and one
+pill, `Step n/m` for a ticket with more than one pull request. Both layouts
+render the same state and send the same answers, with the same undo, so
+switching loses nothing. Needs you and PRs move focus to their list on the
+Overview, and New issues, Graph and Activity open the Dispatch views in the
+Workspace palette. At 1180 px and below, Workspace drops the left nav and uses
+the Dispatch command bar and view tabs in the Workspace palette, so Launch,
+the layout button and the view tabs stay on screen down to 390 px.
 
 Single-key shortcuts work while no field has focus: `/` focuses search, `a`
 opens Ask, `l` opens Launch, `t` switches the theme, `d` switches the density,
