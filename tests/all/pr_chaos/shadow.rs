@@ -862,7 +862,7 @@ impl Model {
         }
         self.deliver(&t, "reply", BOARD);
         self.resolve(|c| c.seq == card.seq);
-        if card.kind == "gate" && card.worker.is_none() && card.ready {
+        if card.kind == "gate" && card.worker.is_none() {
             let l = self.link(&t);
             if l.open && l.gate.as_deref() == Some("merge") && l.gate_pr.is_some() {
                 l.gate_pr = None;
@@ -1396,6 +1396,7 @@ impl Model {
         for (t, old) in moved.into_iter().map(|(t, _, old)| (t, old)) {
             if wait.as_ref().is_some_and(|w| w.thread == t && w.head == head) {
                 self.resolve(|c| old.contains(&c.seq));
+                self.release_and_sync(std::slice::from_ref(&t));
                 continue;
             }
             let kind = if m.queued { "report" } else { "gate" };

@@ -1849,3 +1849,167 @@ async fn a_pre_tracking_merge_with_a_later_ready_card_does_not_trigger_after_mer
     assert_eq!(cards(&h, false).len(), 1, "ready card created after the pre-tracking merge must stay untouched");
     assert_eq!(h.app.wf.reach().count(t3_codemode::reach::ReachPoint::MergeEventPredatesTracking), 1);
 }
+
+#[tokio::test]
+async fn answering_a_moved_approval_card_clears_gate_pr_so_gate_clear_keeps_later_ready_card() {
+    let h = H::new();
+    let repo = h.dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    h.fake.set_projects(vec![project("proj:widgets", &repo.to_string_lossy())]);
+    h.fake.update(TICKET, json!({"projectId": "proj:widgets"}));
+    h.fake.update(WORKER, json!({"projectId": "proj:widgets"}));
+    h.wf(TICKET, "join", json!({"parent": BOARD, "label": "widgets#41", "role": "ticket"})).await;
+    h.wf(
+        WORKER,
+        "join",
+        json!({"parent": TICKET, "label": "#41 PR 1/1", "role": "worker", "issue": "acme/widgets#41", "part": "1/1"}),
+    )
+    .await;
+
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+    assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "waiting");
+
+    let mut moved_pr = github_pr(MOVED, "CLEAN", false);
+    moved_pr["body"] = json!("## Summary\n\ntest\n\nRefs #41\n");
+    h.github.set_pr(REPO, 7, moved_pr);
+    h.github.set_checks(REPO, 7, json!([check_run("ci", "SUCCESS")]));
+    check(&h, 2).await;
+
+    let open = result(&h.exec("async () => wf.cards()").await);
+    let moved_id = open.as_array().unwrap()[0]["id"].as_str().unwrap().to_string();
+    assert!(open[0]["text"].as_str().unwrap().contains("moved to head 2222222"), "{open}");
+
+    h.app.wf.answer(&moved_id, "merge").await.unwrap();
+    assert_eq!(h.app.store.link_get(TICKET).unwrap().unwrap().gate_pr, None);
+    let ready = h.wf(WORKER, "pr", json!({"event": "ready", "repo": REPO, "pr": 7, "head": MOVED})).await;
+    assert_eq!(ready["status"], "gated", "{ready}");
+    let ready_id = ready["card"].as_str().unwrap().to_string();
+
+    let cleared = h.wf(TICKET, "gate", json!({"clear": true})).await;
+    assert_eq!(cleared["gate"], "merge", "later unanswered ready merge card must hold the merge gate: {cleared}");
+    let remaining = result(&h.exec("async () => wf.cards()").await);
+    let remaining = remaining.as_array().unwrap();
+    assert_eq!(remaining.len(), 1, "gate clear must not wipe the later ready merge card: {remaining:?}");
+    assert_eq!(remaining[0]["id"], ready_id);
+}
+
+#[tokio::test]
+async fn answering_a_moved_approval_card_then_clearing_gate_keeps_another_prs_ready_card() {
+    for ready_first in [false, true] {
+        let h = H::new();
+        let repo = h.dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        h.fake.set_projects(vec![project("proj:widgets", &repo.to_string_lossy())]);
+        let worker2 = "mcp:worker-2";
+        let mut th2 = t3_codemode::fake::thread(worker2, "idle", T0);
+        th2["projectId"] = json!("proj:widgets");
+        h.fake.put(th2);
+        h.fake.update(TICKET, json!({"projectId": "proj:widgets"}));
+        h.fake.update(WORKER, json!({"projectId": "proj:widgets"}));
+        h.wf(TICKET, "join", json!({"parent": BOARD, "label": "widgets#41", "role": "ticket"})).await;
+        h.wf(
+            WORKER,
+            "join",
+            json!({"parent": TICKET, "label": "#41 PR 1/2", "role": "worker", "issue": "acme/widgets#41", "part": "1/2"}),
+        )
+        .await;
+        h.wf(
+            worker2,
+            "join",
+            json!({"parent": TICKET, "label": "#41 PR 2/2", "role": "worker", "issue": "acme/widgets#41", "part": "2/2"}),
+        )
+        .await;
+
+        let mut pr8 = github_pr(HEAD, "CLEAN", false);
+        pr8["body"] = json!("## Summary\n\ntest\n\nRefs #41\n");
+        h.github.set_pr(REPO, 8, pr8);
+        h.github.set_checks(REPO, 8, json!([check_run("ci", "SUCCESS")]));
+
+        let ready_id = if ready_first {
+            let ready = h.wf(worker2, "pr", json!({"event": "ready", "repo": REPO, "pr": 8, "head": HEAD})).await;
+            assert_eq!(ready["status"], "gated", "{ready}");
+            Some(ready["card"].as_str().unwrap().to_string())
+        } else {
+            None
+        };
+
+        h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+        assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "waiting");
+        h.github.update_pr(REPO, 7, json!({"headRefOid": MOVED}));
+        check(&h, 2).await;
+
+        let open = result(&h.exec("async () => wf.cards()").await);
+        let moved_id = open
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["text"].as_str().is_some_and(|t| t.contains("moved to head 2222222")))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let ready_id = match ready_id {
+            Some(id) => id,
+            None => {
+                let ready = h.wf(worker2, "pr", json!({"event": "ready", "repo": REPO, "pr": 8, "head": HEAD})).await;
+                assert_eq!(ready["status"], "gated", "{ready}");
+                ready["card"].as_str().unwrap().to_string()
+            }
+        };
+
+        h.app.wf.answer(&moved_id, "merge").await.unwrap();
+        assert_eq!(h.app.store.link_get(TICKET).unwrap().unwrap().gate_pr, None, "ready_first={ready_first}");
+        let cleared = h.wf(TICKET, "gate", json!({"clear": true})).await;
+
+        assert_eq!(
+            cleared["gate"], "merge",
+            "other PR's unanswered ready merge card must hold the merge gate (ready_first={ready_first}): {cleared}"
+        );
+        let remaining = result(&h.exec("async () => wf.cards()").await);
+        let remaining = remaining.as_array().unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "unanswered PR #8 ready card must survive (ready_first={ready_first}): {remaining:?}"
+        );
+        assert_eq!(remaining[0]["id"], ready_id);
+    }
+}
+
+#[tokio::test]
+async fn superseding_a_moved_approval_card_with_a_newer_approval_releases_the_merge_gate() {
+    let h = H::new();
+    ticket_with_worker(&h, 0).await;
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
+    assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "waiting");
+
+    h.github.update_pr(REPO, 7, json!({"headRefOid": MOVED}));
+    check(&h, 2).await;
+    assert_eq!(h.app.wf.tree().unwrap()[0]["gate"], "merge");
+
+    let review = format!("**ACTION NEEDED:** reply \"fix\" or \"ship\", here: {URL}");
+    h.wf(WORKER, "send", json!({"kind": "gate", "gate": "review", "body": review})).await;
+    assert_eq!(h.app.wf.tree().unwrap()[0]["gate"], "merge");
+
+    h.github.update_pr(REPO, 7, json!({"headRefOid": MERGED}));
+    assert_eq!(wf_merge(&h, 7, MERGED).await["status"], "waiting");
+    check(&h, 4).await;
+
+    let open = result(&h.exec("async () => wf.cards()").await);
+    let open = open.as_array().unwrap();
+    assert_eq!(open.len(), 1, "only the relayed worker review card should remain open: {open:?}");
+    assert_eq!(open[0]["worker"]["gate"], "review");
+    let all = cards(&h, true);
+    let superseded = all.iter().find(|c| c["resolution"] == "superseded by a newer merge approval");
+    assert!(superseded.is_some(), "expected moved-approval card superseded by newer approval: {all:?}");
+    assert_eq!(
+        h.app.wf.tree().unwrap()[0]["gate"],
+        "relay:review",
+        "releasing the superseded merge gate must restore the relayed worker gate"
+    );
+    assert_eq!(h.app.store.link_get(TICKET).unwrap().unwrap().gate_pr, None);
+
+    h.app.wf.dismiss(open[0]["id"].as_str().unwrap()).await.unwrap();
+    assert_eq!(h.app.wf.tree().unwrap()[0]["gate"], Value::Null);
+}

@@ -1613,7 +1613,6 @@ impl Wf {
         self.store.waiting_resolve_seq(BOARD, card.seq, Some(&format!("answered: {text}")), &self.now())?;
         if card.kind == "gate"
             && card.worker.is_none()
-            && card.pr.as_ref().is_some_and(|p| p.ready)
             && let Some(mut tl) = self
                 .store
                 .link_get(&ticket)?
