@@ -2855,6 +2855,7 @@ impl Wf {
                 self.store.outbox_drop_to(&ln.child)?;
             }
             self.resolve_ticket_cards(&ln.child, "ticket closed from the board")?;
+            self.reach.hit(crate::reach::ReachPoint::TicketClosed);
             self.flow_soon();
             ln.label
         };

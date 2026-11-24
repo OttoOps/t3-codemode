@@ -207,13 +207,18 @@ pub struct CardView {
     pub ready: bool,
 }
 
+pub type PrRef = (String, u64);
+
+pub type LinkPrView = (String, u64, String, bool, Vec<PrRef>);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkView {
     pub parent: String,
     pub closed: bool,
+    pub paused: bool,
     pub gate: Option<String>,
-    pub gate_pr: Option<(String, u64)>,
-    pub pr: Option<(String, u64, String, bool)>,
+    pub gate_pr: Option<PrRef>,
+    pub pr: Option<LinkPrView>,
 }
 
 pub type WaitView = (String, String, Option<String>, u32);
@@ -378,9 +383,10 @@ impl H {
                 let view = LinkView {
                     parent: l.parent,
                     closed: l.closed,
+                    paused: l.paused_at.is_some(),
                     gate: l.gate,
                     gate_pr: l.gate_pr,
-                    pr: l.pr.map(|p| (p.repo, p.number, p.head, p.waiting)),
+                    pr: l.pr.map(|p| (p.repo, p.number, p.head, p.waiting, p.followups)),
                 };
                 (l.child, view)
             })

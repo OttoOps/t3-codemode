@@ -84,18 +84,30 @@ pub struct PrM {
     pub head: String,
     pub waiting: bool,
     pub no_ci: bool,
+    pub followups: Vec<u64>,
 }
 
 #[derive(Clone, Debug)]
 pub struct LinkM {
     pub parent: String,
     pub open: bool,
+    pub paused: bool,
+    pub merge_only: bool,
     pub gate: Option<String>,
     pub gate_pr: Option<u64>,
     pub pr: Option<PrM>,
     pub label: String,
     pub opened: String,
     pub worker: bool,
+}
+
+#[derive(Clone, Debug)]
+struct OutboxM {
+    to: String,
+    kind: String,
+    from: String,
+    queued: String,
+    allow_closed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,9 +242,13 @@ pub struct Model {
     floor: String,
     now: String,
     pub wakes: Vec<Wake>,
+    pub reopen_wakes: BTreeMap<String, usize>,
     pub retired: BTreeSet<(String, u64)>,
     busy: BTreeSet<String>,
-    outbox: Vec<(String, String, String, String)>,
+    archived: BTreeSet<String>,
+    gone: BTreeSet<String>,
+    relay: bool,
+    outbox: Vec<OutboxM>,
     watcher_alive: bool,
     defer_flush: bool,
     deferred_woken: Vec<String>,
@@ -253,8 +269,12 @@ impl Model {
             floor: floor.into(),
             now: floor.into(),
             wakes: Vec::new(),
+            reopen_wakes: BTreeMap::new(),
             retired: BTreeSet::new(),
             busy: BTreeSet::new(),
+            archived: BTreeSet::new(),
+            gone: BTreeSet::new(),
+            relay: true,
             outbox: Vec::new(),
             watcher_alive: false,
             defer_flush: false,
@@ -275,12 +295,74 @@ impl Model {
     }
 
     pub fn reply(&mut self, w: &str) {
-        self.deliver(w, "reply", "parent");
+        self.reply_with_reopen(w, false);
+    }
+
+    pub fn reply_with_reopen(&mut self, w: &str, reopen: bool) {
+        let allow_closed = !self.is_open(w) && reopen;
+        self.deliver_with(w, "reply", "parent", allow_closed);
+    }
+
+    pub fn set_paused(&mut self, id: &str, paused: bool) {
+        self.link(id).paused = paused;
+    }
+
+    pub fn is_paused(&self, id: &str) -> bool {
+        self.links.get(id).is_some_and(|l| l.open && l.paused)
+    }
+
+    pub fn set_relay(&mut self, relay: bool) {
+        self.relay = relay;
+    }
+
+    pub fn relay(&self) -> bool {
+        self.relay
+    }
+
+    pub fn set_merge_only(&mut self, w: &str, merge_only: bool) {
+        self.link(w).merge_only = merge_only;
+        self.refresh(w);
+    }
+
+    pub fn merge_only(&self, w: &str) -> bool {
+        self.links.get(w).is_some_and(|l| l.merge_only)
+    }
+
+    pub fn primary_pr(&self, w: &str) -> Option<u64> {
+        self.links.get(w).and_then(|l| l.pr.as_ref().map(|p| p.number))
+    }
+
+    pub fn mark_archived(&mut self, t: &str) {
+        self.archived.insert(t.into());
+    }
+
+    pub fn mark_gone(&mut self, t: &str) {
+        self.gone.insert(t.into());
+    }
+
+    pub fn is_archived_or_gone(&self, t: &str) -> bool {
+        self.archived.contains(t) || self.gone.contains(t)
+    }
+
+    pub fn sweep(&self, id: &str) -> (Vec<String>, bool) {
+        let mut open: Vec<String> =
+            self.links.values().filter(|l| l.open && l.parent == id).map(|l| l.label.clone()).collect();
+        open.sort();
+        (open, self.is_open(id))
+    }
+
+    pub fn live_prs(&self) -> BTreeMap<String, BTreeSet<u64>> {
+        self.live
+            .iter()
+            .filter(|(id, prs)| !prs.is_empty() && self.links.get(*id).is_some_and(|l| l.open && l.worker))
+            .map(|(id, prs)| (id.clone(), prs.clone()))
+            .collect()
     }
 
     pub fn step(&mut self, now: &str) {
         self.now = now.into();
         self.wakes.clear();
+        self.reopen_wakes.clear();
     }
 
     pub fn proj(&self) -> Proj {
@@ -288,10 +370,14 @@ impl Model {
             .links
             .iter()
             .map(|(id, l)| {
-                let pr = l.pr.as_ref().map(|p| (REPO.into(), p.number, p.head.clone(), p.waiting));
+                let pr = l.pr.as_ref().map(|p| {
+                    let followups = p.followups.iter().map(|&n| (REPO.into(), n)).collect();
+                    (REPO.into(), p.number, p.head.clone(), p.waiting, followups)
+                });
                 let view = LinkView {
                     parent: l.parent.clone(),
                     closed: !l.open,
+                    paused: l.paused,
                     gate: l.gate.clone(),
                     gate_pr: l.gate_pr.map(|n| (REPO.into(), n)),
                     pr,
@@ -307,8 +393,8 @@ impl Model {
             })
             .collect();
         let mut outbox = BTreeMap::new();
-        for (to, ..) in &self.outbox {
-            *outbox.entry(to.clone()).or_insert(0) += 1;
+        for item in &self.outbox {
+            *outbox.entry(item.to.clone()).or_insert(0) += 1;
         }
         Proj {
             links,
@@ -333,7 +419,17 @@ impl Model {
     }
 
     fn deliver(&mut self, to: &str, kind: &str, from: &str) {
-        self.outbox.push((to.into(), kind.into(), from.into(), self.now.clone()));
+        self.deliver_with(to, kind, from, false);
+    }
+
+    fn deliver_with(&mut self, to: &str, kind: &str, from: &str, allow_closed: bool) {
+        self.outbox.push(OutboxM {
+            to: to.into(),
+            kind: kind.into(),
+            from: from.into(),
+            queued: self.now.clone(),
+            allow_closed,
+        });
         if self.defer_flush {
             self.deferred_woken.push(to.into());
         } else {
@@ -343,31 +439,39 @@ impl Model {
 
     fn flush_outbox(&mut self, only_to: Option<&str>, force: bool) {
         let mut targets: Vec<String> = Vec::new();
-        for (to, ..) in &self.outbox {
-            if only_to.is_some_and(|o| o != to) {
+        for item in &self.outbox {
+            if only_to.is_some_and(|o| o != item.to) {
                 continue;
             }
-            if !targets.contains(to) {
-                targets.push(to.clone());
+            if !targets.contains(&item.to) {
+                targets.push(item.to.clone());
             }
         }
         for to in targets {
             if !self.is_open(&to) {
-                self.outbox.retain(|(t, ..)| *t != to);
-                continue;
+                self.outbox.retain(|item| item.to != to || item.allow_closed);
+                if !self.outbox.iter().any(|item| item.to == to) {
+                    continue;
+                }
             }
             if !force {
-                self.refresh(&to);
-                let first = self.outbox.iter().find(|(t, ..)| *t == to).map(|(_, _, _, q)| q.as_str()).unwrap();
+                if !self.gone.contains(&to) {
+                    self.refresh(&to);
+                }
+                let first = self.outbox.iter().find(|item| item.to == to).map(|item| item.queued.as_str()).unwrap();
                 if self.busy.contains(&to) && mins(&self.now, first) < MAX_HOLD_MINS {
                     continue;
                 }
             }
+            let closed_dest = !self.is_open(&to);
             let (sent, kept): (Vec<_>, Vec<_>) =
-                std::mem::take(&mut self.outbox).into_iter().partition(|(t, ..)| *t == to);
+                std::mem::take(&mut self.outbox).into_iter().partition(|item| item.to == to);
             self.outbox = kept;
-            for (t, kind, from, _) in sent {
-                self.wakes.push((t, kind, from));
+            for item in sent {
+                if closed_dest && item.allow_closed {
+                    *self.reopen_wakes.entry(item.to.clone()).or_insert(0) += 1;
+                }
+                self.wakes.push((item.to, item.kind, item.from));
             }
         }
     }
@@ -473,6 +577,8 @@ impl Model {
         let l = LinkM {
             parent: BOARD.into(),
             open: true,
+            paused: false,
+            merge_only: false,
             gate: None,
             gate_pr: None,
             pr: None,
@@ -488,6 +594,8 @@ impl Model {
         let l = LinkM {
             parent: parent.into(),
             open: true,
+            paused: false,
+            merge_only: false,
             gate: None,
             gate_pr: None,
             pr: None,
@@ -507,6 +615,11 @@ impl Model {
         self.links.get(parent).is_some_and(|t| t.open && t.parent == BOARD)
     }
 
+    fn route_ok(&self, w: &str, number: u64) -> bool {
+        let followup = self.links[w].pr.as_ref().is_some_and(|p| p.number != number);
+        self.relay && self.ticket_ok(w) && !followup
+    }
+
     fn remember(&mut self, w: &str, number: u64, head: &str, waiting: bool, ready: bool, opened: Option<bool>) {
         let l = self.link(w);
         match l.pr.as_mut() {
@@ -521,9 +634,19 @@ impl Model {
                     p.no_ci = no_ci;
                 }
             }
-            Some(_) => panic!("model: chaos workers never send a follow-up PR"),
+            Some(p) => {
+                if !p.followups.contains(&number) {
+                    p.followups.push(number);
+                }
+            }
             None => {
-                l.pr = Some(PrM { number, head: head.into(), waiting, no_ci: opened.unwrap_or(false) });
+                l.pr = Some(PrM {
+                    number,
+                    head: head.into(),
+                    waiting,
+                    no_ci: opened.unwrap_or(false),
+                    followups: Vec::new(),
+                });
             }
         }
     }
@@ -560,7 +683,7 @@ impl Model {
             }
         }
         let wake = WAKE_KINDS.contains(&kind);
-        if wake && relays && self.links.get(&parent).is_some_and(|t| t.open && t.parent == BOARD) {
+        if wake && self.relay && relays && self.links.get(&parent).is_some_and(|t| t.open && t.parent == BOARD) {
             let g = if kind == "gate" { gate_now.unwrap_or_default() } else { kind.to_string() };
             self.board_card(Self::card(
                 if kind == "gate" { "gate" } else { "blocker" },
@@ -575,7 +698,7 @@ impl Model {
             l.open = false;
             l.gate = None;
             l.gate_pr = None;
-            self.outbox.retain(|(to, ..)| to != w);
+            self.outbox.retain(|item| item.to != w);
         }
         let label = self.label(w);
         self.deliver(&parent, kind, &label);
@@ -594,7 +717,7 @@ impl Model {
     }
 
     pub fn pr_opened(&mut self, w: &str, number: u64, sha: &str, no_ci: bool, gh: &BTreeMap<u64, GhPrModel>) -> String {
-        let ok = self.ticket_ok(w);
+        let ok = self.route_ok(w, number);
         self.remember(w, number, sha, false, false, Some(no_ci));
         if ok {
             self.refresh(w);
@@ -607,8 +730,9 @@ impl Model {
     }
 
     pub fn pr_updated(&mut self, w: &str, number: u64, sha: &str) -> String {
+        let ok = self.route_ok(w, number);
         let no_ci = self.links[w].pr.as_ref().is_some_and(|p| p.no_ci);
-        if !self.ticket_ok(w) || no_ci {
+        if !ok || no_ci {
             self.remember(w, number, sha, false, false, None);
             self.worker_send(w, "event", None, None);
             return "ticket".into();
@@ -629,8 +753,14 @@ impl Model {
     }
 
     pub fn pr_ready(&mut self, w: &str, number: u64, sha: &str, gh: &BTreeMap<u64, GhPrModel>) -> String {
+        let followup = self.links[w].pr.as_ref().is_some_and(|p| p.number != number);
+        let ok = self.route_ok(w, number);
+        if followup {
+            self.remember(w, number, sha, false, false, None);
+        }
+        let merge_only = self.links[w].merge_only;
         let no_ci = self.links[w].pr.as_ref().is_some_and(|p| p.no_ci);
-        if !self.ticket_ok(w) || no_ci {
+        if !ok || merge_only || no_ci {
             self.worker_send(w, "gate", Some("merge"), None);
             return "ticket".into();
         }
@@ -683,6 +813,9 @@ impl Model {
         if m.merge_state == "DIRTY" {
             return self.refuse(w, src);
         }
+        if m.many_files {
+            return self.fallback(w, seen);
+        }
         self.refresh(w);
         let t = self.parent(w);
         self.resolve(|c| c.own_gate(&t) && c.pr == Some(number));
@@ -727,6 +860,13 @@ impl Model {
         }
         let mut seen_prs: Vec<u64> = prs.clone();
         for c in &children {
+            if let Some(p) = &self.links[c].pr {
+                for &f in &p.followups {
+                    if !seen_prs.contains(&f) {
+                        seen_prs.push(f);
+                    }
+                }
+            }
             for p in self.live.get(c).cloned().unwrap_or_default() {
                 if !seen_prs.contains(&p) {
                     seen_prs.push(p);
@@ -778,6 +918,11 @@ impl Model {
             self.sync_relay_gate(from);
             self.sync_relay_gate(to);
         }
+        for item in &mut self.outbox {
+            if item.to == from {
+                item.to = to.into();
+            }
+        }
     }
 
     pub fn ticket_gate_clear(&mut self, t: &str) {
@@ -817,13 +962,34 @@ impl Model {
         }
     }
 
+    fn resolve_ticket_cards(&mut self, t: &str) {
+        self.resolve(|c| c.ticket.as_deref() == Some(t));
+        for l in self.links.values_mut() {
+            if l.open && l.parent == t && l.gate.as_deref() == Some("relay:blocker") {
+                l.gate = None;
+            }
+        }
+    }
+
+    pub fn close_ticket(&mut self, t: &str, clear_paused: bool) {
+        let l = self.link(t);
+        l.open = false;
+        l.gate = None;
+        l.gate_pr = None;
+        if clear_paused {
+            l.paused = false;
+        }
+        self.outbox.retain(|item| item.to != t);
+        self.resolve_ticket_cards(t);
+    }
+
     pub fn close(&mut self, w: &str) {
         let parent = self.parent(w);
         let l = self.link(w);
         l.open = false;
         l.gate = None;
         l.gate_pr = None;
-        self.outbox.retain(|(to, ..)| to != w);
+        self.outbox.retain(|item| item.to != w);
         self.drop_relayed(w, &parent);
     }
 
@@ -833,7 +999,9 @@ impl Model {
 
     pub fn answer(&mut self, seq: Option<u64>, ticket: Option<&str>, text: &str, shown: &[String]) {
         let Some(seq) = seq else {
-            if let Some(t) = ticket {
+            if let Some(t) = ticket
+                && self.is_open(t)
+            {
                 self.deliver(t, "reply", BOARD);
             }
             return;
@@ -859,6 +1027,9 @@ impl Model {
                 self.sync_relay_gate(&t);
                 return;
             }
+        }
+        if !self.is_open(&t) {
+            return;
         }
         self.deliver(&t, "reply", BOARD);
         self.resolve(|c| c.seq == card.seq);
@@ -889,11 +1060,11 @@ impl Model {
     pub fn tick_may(&self) -> Vec<Wake> {
         let mut may = Vec::new();
         for (id, l) in &self.links {
-            if !l.open || l.gate.is_some() {
+            if !l.open || l.gate.is_some() || l.paused {
                 continue;
             }
             if self.busy.contains(id) {
-                if l.parent != BOARD {
+                if l.parent != BOARD && self.is_open(&l.parent) {
                     may.push((l.parent.clone(), "report".into(), l.label.clone()));
                 }
                 continue;
@@ -902,7 +1073,7 @@ impl Model {
                 continue;
             }
             may.push((id.clone(), "nudge".into(), "watcher".into()));
-            if l.parent != BOARD {
+            if l.parent != BOARD && self.is_open(&l.parent) {
                 may.push((l.parent.clone(), "escalate".into(), l.label.clone()));
             }
         }
@@ -915,9 +1086,23 @@ impl Model {
     }
 
     pub fn tick(&mut self) {
-        let open: Vec<String> = self.links.iter().filter(|(_, l)| l.open && l.worker).map(|(k, _)| k.clone()).collect();
-        for w in open {
-            self.refresh(&w);
+        let open: Vec<String> = self.links.iter().filter(|(_, l)| l.open).map(|(k, _)| k.clone()).collect();
+        for id in open {
+            if self.gone.contains(&id) || self.archived.contains(&id) {
+                let parent = self.links[&id].parent.clone();
+                let l = self.link(&id);
+                l.open = false;
+                l.gate = None;
+                l.gate_pr = None;
+                self.outbox.retain(|item| item.to != id);
+                if parent == BOARD {
+                    self.resolve_ticket_cards(&id);
+                } else {
+                    self.drop_relayed(&id, &parent);
+                }
+            } else if self.links[&id].worker {
+                self.refresh(&id);
+            }
         }
         self.flush_outbox(None, false);
     }
@@ -1031,8 +1216,8 @@ impl Model {
             add(&w.thread, &w.at);
         }
         for (id, l) in self.links.iter().filter(|(_, l)| l.open && l.worker) {
-            let ours =
-                l.pr.as_ref().is_some_and(|p| p.number == pr) || self.live.get(id).is_some_and(|s| s.contains(&pr));
+            let ours = l.pr.as_ref().is_some_and(|p| p.number == pr || p.followups.contains(&pr))
+                || self.live.get(id).is_some_and(|s| s.contains(&pr));
             if ours {
                 add(&l.parent, &l.opened);
             }
@@ -1106,7 +1291,7 @@ impl Model {
             if self.links[&w].pr.as_ref() != Some(&p) {
                 continue;
             }
-            if !self.ticket_ok(&w) {
+            if !self.route_ok(&w, p.number) {
                 self.fallback(&w, Some(p.clone()));
                 continue;
             }
@@ -1565,7 +1750,7 @@ impl Model {
                 l.open
                     && l.worker
                     && l.parent == t
-                    && (l.pr.as_ref().is_some_and(|p| p.number == pr)
+                    && (l.pr.as_ref().is_some_and(|p| p.number == pr || p.followups.contains(&pr))
                         || self.live.get(id).is_some_and(|s| s.contains(&pr)))
             })
     }

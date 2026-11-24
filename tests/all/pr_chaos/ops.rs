@@ -1,3 +1,5 @@
+use std::fmt;
+
 use arbitrary::Unstructured;
 use serde::{Deserialize, Serialize};
 use t3_codemode::board::Card;
@@ -5,13 +7,13 @@ use t3_codemode::board::Card;
 use super::{PRS, Rng, TICKETS, WORKERS};
 
 /// Default maximum number of ops decoded per sequential chaos seed.
-pub const DEFAULT_MAX_OPS: usize = 55;
+pub const DEFAULT_MAX_OPS: usize = 70;
 
 /// Deterministic byte buffer size fed into `arbitrary::Unstructured` per seed.
 ///
-/// Each op consumes at most ~5 bytes (1 for kind + up to 4 for operands), so
-/// 512 bytes comfortably decodes `DEFAULT_MAX_OPS` ops with room to spare.
-pub const SEED_BYTES: usize = 512;
+/// Each op consumes at most ~6 bytes (1 for kind + up to 5 for operands), so
+/// 768 bytes comfortably decodes `DEFAULT_MAX_OPS` ops with room to spare.
+pub const SEED_BYTES: usize = 768;
 
 /// Salt separating Swarm profile derivation from the `Unstructured` op byte stream.
 const SWARM_SALT: u64 = 0x51a7_c0de_2440_cafe;
@@ -127,6 +129,31 @@ impl QueueDropReason {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PauseTarget {
+    Ticket { ticket: TSym },
+    WorkerSelf { worker: WSym },
+    WorkerByParent { worker: WSym },
+    BoardTicket { ticket: TSym },
+    BoardWorker { worker: WSym },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SweepTarget {
+    Ticket { ticket: TSym },
+    Worker { worker: WSym },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrEventKind {
+    Opened,
+    Updated,
+    Ready,
+}
+
 /// Declarative sequential chaos operation with symbolic pool-index targets.
 ///
 /// Every subsequence of a `Vec<Op>` is a valid replayable program: any out-of-range
@@ -161,6 +188,17 @@ pub enum Op {
     FakeSetPrs { worker: WSym, pr: PrSym },
     WorkerSetBusy { worker: WSym, busy: bool },
     ParentReply { worker: WSym },
+    TicketClose { ticket: TSym, by_board: bool },
+    TicketArchive { ticket: TSym, tick: bool },
+    TicketThreadGone { ticket: TSym, tick: bool },
+    WfReply { worker: WSym, by_label: bool, reopen: bool },
+    Pause { target: PauseTarget, paused: bool },
+    Sweep { target: SweepTarget },
+    SetRelay { relay: bool },
+    WorkerSetMergeOnly { worker: WSym, merge_only: bool },
+    PrFollowup { worker: WSym, pr: PrSym, event: PrEventKind, short_sha: bool, no_ci: bool },
+    GhFilesPaginated { pr: PrSym, paginated: bool },
+    GhReopen { pr: PrSym },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -193,6 +231,17 @@ pub enum OpKind {
     FakeSetPrs,
     WorkerSetBusy,
     ParentReply,
+    TicketClose,
+    TicketArchive,
+    TicketThreadGone,
+    WfReply,
+    Pause,
+    Sweep,
+    SetRelay,
+    WorkerSetMergeOnly,
+    PrFollowup,
+    GhFilesPaginated,
+    GhReopen,
 }
 
 impl OpKind {
@@ -224,9 +273,63 @@ impl OpKind {
         Self::FakeSetPrs,
         Self::WorkerSetBusy,
         Self::ParentReply,
+        Self::TicketClose,
+        Self::TicketArchive,
+        Self::TicketThreadGone,
+        Self::WfReply,
+        Self::Pause,
+        Self::Sweep,
+        Self::SetRelay,
+        Self::WorkerSetMergeOnly,
+        Self::PrFollowup,
+        Self::GhFilesPaginated,
+        Self::GhReopen,
     ];
 
     pub const COUNT: usize = Self::ALL.len();
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::PrOpened => "pr_opened",
+            Self::PrUpdated => "pr_updated",
+            Self::PrReady => "pr_ready",
+            Self::GhPush => "gh_push",
+            Self::GhStatus => "gh_status",
+            Self::GhFinish => "gh_finish",
+            Self::GhReadError => "gh_read_error",
+            Self::GhRemovePr => "gh_remove_pr",
+            Self::GhClearReadErrors => "gh_clear_read_errors",
+            Self::Reconcile => "reconcile",
+            Self::Adopt => "adopt",
+            Self::TicketGateClear => "ticket_gate_clear",
+            Self::TicketSendGate => "ticket_send_gate",
+            Self::TicketGateOpen => "ticket_gate_open",
+            Self::AnswerCard => "answer_card",
+            Self::DismissCard => "dismiss_card",
+            Self::AnswerReadyAndClearGate => "answer_ready_and_clear_gate",
+            Self::WorkerReviewGate => "worker_review_gate",
+            Self::WorkerClose => "worker_close",
+            Self::WorkerHandoff => "worker_handoff",
+            Self::AdvanceTick => "advance_tick",
+            Self::MergeWaitPut => "merge_wait_put",
+            Self::GhQueueConfig => "gh_queue_config",
+            Self::GhQueueDrop => "gh_queue_drop",
+            Self::FakeSetPrs => "fake_set_prs",
+            Self::WorkerSetBusy => "worker_set_busy",
+            Self::ParentReply => "parent_reply",
+            Self::TicketClose => "ticket_close",
+            Self::TicketArchive => "ticket_archive",
+            Self::TicketThreadGone => "ticket_thread_gone",
+            Self::WfReply => "wf_reply",
+            Self::Pause => "pause",
+            Self::Sweep => "sweep",
+            Self::SetRelay => "set_relay",
+            Self::WorkerSetMergeOnly => "worker_set_merge_only",
+            Self::PrFollowup => "pr_followup",
+            Self::GhFilesPaginated => "gh_files_paginated",
+            Self::GhReopen => "gh_reopen",
+        }
+    }
 
     pub const fn is_creating(self) -> bool {
         matches!(
@@ -238,6 +341,8 @@ impl OpKind {
                 | Self::MergeWaitPut
                 | Self::FakeSetPrs
                 | Self::ParentReply
+                | Self::WfReply
+                | Self::PrFollowup
         )
     }
 
@@ -247,11 +352,13 @@ impl OpKind {
 
     const fn base_weight(self) -> u16 {
         match self {
-            Self::Reconcile => 4,
-            Self::PrReady | Self::GhStatus | Self::WorkerSetBusy | Self::ParentReply => 3,
+            Self::Reconcile => 5,
+            Self::PrReady => 4,
+            Self::GhStatus | Self::WorkerSetBusy | Self::ParentReply | Self::WfReply => 3,
             Self::PrOpened
             | Self::PrUpdated
             | Self::GhPush
+            | Self::GhFinish
             | Self::Adopt
             | Self::TicketGateClear
             | Self::TicketSendGate
@@ -266,8 +373,20 @@ impl OpKind {
             | Self::MergeWaitPut
             | Self::GhQueueConfig
             | Self::GhQueueDrop
-            | Self::FakeSetPrs => 2,
-            Self::GhFinish | Self::GhReadError | Self::GhRemovePr | Self::GhClearReadErrors => 1,
+            | Self::FakeSetPrs
+            | Self::Pause
+            | Self::Sweep
+            | Self::PrFollowup
+            | Self::GhFilesPaginated
+            | Self::GhReopen => 2,
+            Self::GhReadError
+            | Self::GhRemovePr
+            | Self::GhClearReadErrors
+            | Self::TicketClose
+            | Self::TicketArchive
+            | Self::TicketThreadGone
+            | Self::SetRelay
+            | Self::WorkerSetMergeOnly => 1,
         }
     }
 }
@@ -302,7 +421,67 @@ impl Op {
             Self::FakeSetPrs { .. } => OpKind::FakeSetPrs,
             Self::WorkerSetBusy { .. } => OpKind::WorkerSetBusy,
             Self::ParentReply { .. } => OpKind::ParentReply,
+            Self::TicketClose { .. } => OpKind::TicketClose,
+            Self::TicketArchive { .. } => OpKind::TicketArchive,
+            Self::TicketThreadGone { .. } => OpKind::TicketThreadGone,
+            Self::WfReply { .. } => OpKind::WfReply,
+            Self::Pause { .. } => OpKind::Pause,
+            Self::Sweep { .. } => OpKind::Sweep,
+            Self::SetRelay { .. } => OpKind::SetRelay,
+            Self::WorkerSetMergeOnly { .. } => OpKind::WorkerSetMergeOnly,
+            Self::PrFollowup { .. } => OpKind::PrFollowup,
+            Self::GhFilesPaginated { .. } => OpKind::GhFilesPaginated,
+            Self::GhReopen { .. } => OpKind::GhReopen,
         }
+    }
+}
+
+/// Per-`OpKind` decoded and non-noop execution counters, mergeable across seeds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpStats {
+    decoded: [u64; OpKind::COUNT],
+    executed: [u64; OpKind::COUNT],
+}
+
+impl Default for OpStats {
+    fn default() -> Self {
+        Self { decoded: [0; OpKind::COUNT], executed: [0; OpKind::COUNT] }
+    }
+}
+
+impl OpStats {
+    pub fn record(&mut self, kind: OpKind, executed: bool) {
+        self.decoded[kind as usize] = self.decoded[kind as usize].saturating_add(1);
+        if executed {
+            self.executed[kind as usize] = self.executed[kind as usize].saturating_add(1);
+        }
+    }
+
+    pub fn merge(&mut self, other: &OpStats) {
+        for i in 0..OpKind::COUNT {
+            self.decoded[i] = self.decoded[i].saturating_add(other.decoded[i]);
+            self.executed[i] = self.executed[i].saturating_add(other.executed[i]);
+        }
+    }
+
+    pub fn executed(&self, kind: OpKind) -> u64 {
+        self.executed[kind as usize]
+    }
+
+    pub fn assert_all_executed(&self, context: &str) {
+        let missing: Vec<&str> =
+            OpKind::ALL.iter().copied().filter(|&k| self.executed(k) == 0).map(OpKind::name).collect();
+        assert!(missing.is_empty(), "op execution coverage failed in {context}: unexecuted ops: {missing:?}\n{self}");
+    }
+}
+
+impl fmt::Display for OpStats {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Op execution summary (executed / decoded):")?;
+        for &k in OpKind::ALL {
+            writeln!(f, "  {:<32} {:>4} / {:<4}", k.name(), self.executed[k as usize], self.decoded[k as usize])?;
+        }
+        Ok(())
     }
 }
 
@@ -534,6 +713,47 @@ fn decode_one(u: &mut Unstructured<'_>, weights: &OpWeights, total: u32) -> arbi
         OpKind::FakeSetPrs => Op::FakeSetPrs { worker: decode_worker(u)?, pr: decode_pr(u)? },
         OpKind::WorkerSetBusy => Op::WorkerSetBusy { worker: decode_worker(u)?, busy: u.int_in_range(0..=2)? != 0 },
         OpKind::ParentReply => Op::ParentReply { worker: decode_worker(u)? },
+        OpKind::TicketClose => Op::TicketClose { ticket: decode_ticket(u)?, by_board: u.arbitrary()? },
+        OpKind::TicketArchive => Op::TicketArchive { ticket: decode_ticket(u)?, tick: u.arbitrary()? },
+        OpKind::TicketThreadGone => Op::TicketThreadGone { ticket: decode_ticket(u)?, tick: u.arbitrary()? },
+        OpKind::WfReply => Op::WfReply { worker: decode_worker(u)?, by_label: u.arbitrary()?, reopen: u.arbitrary()? },
+        OpKind::Pause => {
+            let target = match u.int_in_range(0..=4)? {
+                0 => PauseTarget::Ticket { ticket: decode_ticket(u)? },
+                1 => PauseTarget::WorkerSelf { worker: decode_worker(u)? },
+                2 => PauseTarget::WorkerByParent { worker: decode_worker(u)? },
+                3 => PauseTarget::BoardTicket { ticket: decode_ticket(u)? },
+                _ => PauseTarget::BoardWorker { worker: decode_worker(u)? },
+            };
+            Op::Pause { target, paused: u.int_in_range(0..=2)? != 0 }
+        }
+        OpKind::Sweep => {
+            let target = if u.arbitrary()? {
+                SweepTarget::Ticket { ticket: decode_ticket(u)? }
+            } else {
+                SweepTarget::Worker { worker: decode_worker(u)? }
+            };
+            Op::Sweep { target }
+        }
+        OpKind::SetRelay => Op::SetRelay { relay: u.int_in_range(0..=2)? == 0 },
+        OpKind::WorkerSetMergeOnly => {
+            Op::WorkerSetMergeOnly { worker: decode_worker(u)?, merge_only: u.int_in_range(0..=2)? != 0 }
+        }
+        OpKind::PrFollowup => {
+            let worker = decode_worker(u)?;
+            let offset = u.int_in_range(1..=(PRS.len() - 1))?;
+            let pr = PrSym((worker.0 + offset) % PRS.len());
+            const EVENTS: &[PrEventKind] = &[PrEventKind::Opened, PrEventKind::Updated, PrEventKind::Ready];
+            Op::PrFollowup {
+                worker,
+                pr,
+                event: *u.choose(EVENTS)?,
+                short_sha: u.arbitrary()?,
+                no_ci: u.int_in_range(0..=7)? == 0,
+            }
+        }
+        OpKind::GhFilesPaginated => Op::GhFilesPaginated { pr: decode_pr(u)?, paginated: u.int_in_range(0..=2)? != 0 },
+        OpKind::GhReopen => Op::GhReopen { pr: decode_pr(u)? },
     };
     Ok(op)
 }
