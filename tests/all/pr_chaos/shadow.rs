@@ -1347,9 +1347,10 @@ impl Model {
                 continue;
             }
             let ready_at = c.head.clone().filter(|_| c.ready);
-            if ready_at.is_some_and(|b| {
-                !same_head(&head, &b) && !wait.as_ref().is_some_and(|w| w.thread == t && same_head(&w.head, &b))
-            }) {
+            let approved_ready = ready_at.as_deref().is_some_and(|b| {
+                !same_head(&head, b) && wait.as_ref().is_some_and(|w| w.thread == t && same_head(&w.head, b))
+            });
+            if ready_at.as_deref().is_some_and(|b| !same_head(&head, b) && !approved_ready) {
                 self.resolve(|x| x.seq == c.seq);
                 self.release_and_sync(std::slice::from_ref(&t));
                 let told: Vec<String> = self
@@ -1370,7 +1371,7 @@ impl Model {
                 }
                 continue;
             }
-            if !self.links.get(&t).is_some_and(|l| l.open && l.gate.as_deref() == Some("merge")) {
+            if !approved_ready && !self.links.get(&t).is_some_and(|l| l.open && l.gate.as_deref() == Some("merge")) {
                 continue;
             }
             let Some(base) = c.head.clone() else {

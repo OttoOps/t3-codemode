@@ -2386,3 +2386,33 @@ async fn op_prefix_and_subsequence_replay_holds_invariants() {
         }
     }
 }
+
+#[tokio::test]
+async fn moved_ready_card_under_non_merge_gate_reconciles_idempotently() {
+    // Regression for #282: PR #7 moves while mcp:t1 holds delivery:verify, an open
+    // ready merge card at the old head, and a MergeWait at that same old head.
+    let five_ops = vec![
+        Op::TicketSendGate { ticket: TSym(0) },
+        Op::PrReady { worker: WSym(0), short_sha: false },
+        Op::MergeWaitPut { pr: PrSym(0), ticket: TSym(0), reassigned_id: false },
+        Op::GhPush { pr: PrSym(0) },
+        Op::Reconcile,
+    ];
+    let (trace, _) = run_sequential_ops(&five_ops, None, true, "issue-282").await;
+    assert!(trace.iter().any(|l| l.contains("reconcile -> ok=true")), "trace:\n{}", trace.join("\n"));
+
+    let queued_ops = vec![
+        Op::TicketSendGate { ticket: TSym(0) },
+        Op::PrReady { worker: WSym(0), short_sha: false },
+        Op::MergeWaitPut { pr: PrSym(0), ticket: TSym(0), reassigned_id: false },
+        Op::GhPush { pr: PrSym(0) },
+        Op::GhQueueConfig { pr: PrSym(0), enabled: true, queued: true },
+        Op::Reconcile,
+    ];
+    let (queued_trace, _) = run_sequential_ops(&queued_ops, None, true, "issue-282-queued").await;
+    assert!(
+        queued_trace.iter().any(|l| l.contains("reconcile -> ok=true")),
+        "queued trace:\n{}",
+        queued_trace.join("\n")
+    );
+}

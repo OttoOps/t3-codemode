@@ -2085,3 +2085,135 @@ async fn a_queue_drop_superseded_by_a_wait_that_retires_on_head_move_stays_quiet
     assert!(actions_after_adopt.is_empty(), "superseded drop must stay quiet after adopt: {actions_after_adopt:?}");
     assert_eq!(cards(&h, false).len(), 1, "{:?}", cards(&h, false));
 }
+
+#[tokio::test]
+async fn a_moved_ready_card_with_a_matching_merge_wait_under_a_non_merge_gate_reconciles_idempotently() {
+    for (queued, ready_first) in [(false, false), (true, false), (false, true)] {
+        let h = H::new();
+        let repo = h.dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        h.fake.set_projects(vec![project("proj:widgets", &repo.to_string_lossy())]);
+        h.fake.update(TICKET, json!({"projectId": "proj:widgets"}));
+        h.fake.update(WORKER, json!({"projectId": "proj:widgets"}));
+        h.wf(TICKET, "join", json!({"parent": BOARD, "label": "widgets#41", "role": "ticket"})).await;
+        h.wf(
+            WORKER,
+            "join",
+            json!({"parent": TICKET, "label": "#41 PR 1/1", "role": "worker", "issue": "acme/widgets#41", "part": "1/1"}),
+        )
+        .await;
+
+        let mut pr = github_pr(HEAD, "BLOCKED", true);
+        pr["body"] = json!("## Summary\n\ntest\n\nRefs #41\n");
+        h.github.set_pr(REPO, 7, pr);
+        h.github.set_checks(REPO, 7, json!([check_run("ci", "SUCCESS")]));
+
+        let (verify_id, ready_id) = if ready_first {
+            // Ready card opens first, then a non-merge delivery:verify gate referencing the
+            // same PR and head opens on top of it (board_card preserves open ready cards).
+            let ready = h.wf(WORKER, "pr", json!({"event": "ready", "repo": REPO, "pr": 7, "head": HEAD})).await;
+            assert_eq!(ready["status"], "gated", "{ready}");
+            let verify = h
+                .wf(
+                    TICKET,
+                    "send",
+                    json!({
+                        "kind": "gate",
+                        "gate": "delivery:verify",
+                        "body": format!("**ACTION NEEDED:** verify #7 at head {}: reply \"ok\", here: {URL}", &HEAD[..7]),
+                        "options": ["ok"]
+                    }),
+                )
+                .await;
+            (verify["card"].as_str().unwrap().to_string(), ready["card"].as_str().unwrap().to_string())
+        } else {
+            // Exact #282 sequence: delivery:verify opens first, then worker opens a ready
+            // merge card at HEAD while the ticket keeps delivery:verify.
+            let verify = h
+                .wf(
+                    TICKET,
+                    "send",
+                    json!({
+                        "kind": "gate",
+                        "gate": "delivery:verify",
+                        "body": "**ACTION NEEDED:** verify: reply \"ok\"",
+                        "options": ["ok"]
+                    }),
+                )
+                .await;
+            let ready = h.wf(WORKER, "pr", json!({"event": "ready", "repo": REPO, "pr": 7, "head": HEAD})).await;
+            assert_eq!(ready["status"], "gated", "{ready}");
+            (verify["card"].as_str().unwrap().to_string(), ready["card"].as_str().unwrap().to_string())
+        };
+        assert_eq!(h.app.store.link_get(TICKET).unwrap().unwrap().gate.as_deref(), Some("delivery:verify"));
+
+        // 3. Ticket records a MergeWait for PR #7 at HEAD.
+        assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "waiting");
+        assert_eq!(h.app.store.merge_waits().unwrap().len(), 1);
+
+        // 4. PR #7 advances to MOVED (optionally queued).
+        h.github.update_pr(REPO, 7, json!({"headRefOid": MOVED, "isInMergeQueue": queued}));
+
+        // 5. First reconcile retires the wait, replaces the ready card in the same pass,
+        //    preserves delivery:verify (even when its body references PR #7), and sends no
+        //    worker wake.
+        let sent_before = h.sent().len();
+        check(&h, 5).await;
+
+        assert!(
+            h.app.store.merge_waits().unwrap().is_empty(),
+            "queued={queued} ready_first={ready_first}: MergeWait must retire on pass 1"
+        );
+        let open_after_first = cards(&h, false);
+        assert!(
+            open_after_first.iter().any(|c| c["id"] == verify_id),
+            "queued={queued} ready_first={ready_first}: non-merge gate card must stay open: {open_after_first:?}"
+        );
+        assert!(
+            open_after_first.iter().all(|c| c["id"] != ready_id),
+            "queued={queued} ready_first={ready_first}: stale ready merge card must resolve on pass 1: {open_after_first:?}"
+        );
+        assert_eq!(open_after_first.len(), 2, "queued={queued} ready_first={ready_first}: {open_after_first:?}");
+        let replacement = open_after_first.iter().find(|c| c["id"] != verify_id).unwrap();
+        let expected_kind = if queued { "report" } else { "gate" };
+        assert_eq!(replacement["kind"], expected_kind, "queued={queued} ready_first={ready_first}: {replacement}");
+        assert!(
+            replacement["text"].as_str().unwrap().contains("2222222"),
+            "queued={queued} ready_first={ready_first}: {replacement}"
+        );
+        let resolved_ready = cards(&h, true).into_iter().find(|c| c["id"] == ready_id).unwrap();
+        assert!(
+            resolved_ready["resolution"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("head moved to 2222222 after this approval")),
+            "queued={queued} ready_first={ready_first}: {resolved_ready}"
+        );
+        let tlink = h.app.store.link_get(TICKET).unwrap().unwrap();
+        assert_eq!(tlink.gate.as_deref(), Some("delivery:verify"), "queued={queued} ready_first={ready_first}");
+        assert_eq!(tlink.gate_pr, None, "queued={queued} ready_first={ready_first}");
+        assert_eq!(
+            h.sent().len(),
+            sent_before,
+            "queued={queued} ready_first={ready_first}: pass 1 must not wake worker: {:?}",
+            h.sent()
+        );
+
+        // Second reconcile is a complete no-op (idempotent, no extra worker wake).
+        let actions_second = check(&h, 6).await;
+        assert!(
+            actions_second.is_empty(),
+            "queued={queued} ready_first={ready_first}: pass 2 must be idempotent: {actions_second:?}"
+        );
+        assert_eq!(
+            cards(&h, false),
+            open_after_first,
+            "queued={queued} ready_first={ready_first}: pass 2 changed cards"
+        );
+        assert_eq!(
+            h.sent().len(),
+            sent_before,
+            "queued={queued} ready_first={ready_first}: pass 2 sent extra messages: {:?}",
+            h.sent()
+        );
+    }
+}
