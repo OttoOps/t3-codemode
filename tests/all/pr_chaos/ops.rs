@@ -140,7 +140,7 @@ pub enum Op {
     GhPush { pr: PrSym },
     GhStatus { pr: PrSym, checks: GhChecks, merge_state: GhMergeState, draft: bool },
     GhFinish { pr: PrSym, state: GhEndState, predates: bool },
-    GhReadError { pr: PrSym },
+    GhReadError { pr: PrSym, fail: bool },
     GhRemovePr { pr: PrSym },
     GhClearReadErrors,
     Reconcile,
@@ -400,7 +400,12 @@ pub fn seed_bytes(seed: u64) -> [u8; SEED_BYTES] {
 }
 
 fn pick_kind(u: &mut Unstructured<'_>, weights: &OpWeights, total: u32) -> arbitrary::Result<OpKind> {
-    let mut target = u.int_in_range(0..=(total - 1))?;
+    let mut target = if total == 1 {
+        let _ = u.arbitrary::<u8>()?;
+        0
+    } else {
+        u.int_in_range(0..=(total - 1))?
+    };
     for &kind in OpKind::ALL {
         let w = u32::from(weights.get(kind));
         if w == 0 {
@@ -483,7 +488,7 @@ fn decode_one(u: &mut Unstructured<'_>, weights: &OpWeights, total: u32) -> arbi
             state: if u.arbitrary()? { GhEndState::Merged } else { GhEndState::Closed },
             predates: u.arbitrary()?,
         },
-        OpKind::GhReadError => Op::GhReadError { pr: decode_pr(u)? },
+        OpKind::GhReadError => Op::GhReadError { pr: decode_pr(u)?, fail: u.int_in_range(0..=2)? != 0 },
         OpKind::GhRemovePr => Op::GhRemovePr { pr: decode_pr(u)? },
         OpKind::GhClearReadErrors => Op::GhClearReadErrors,
         OpKind::Reconcile => Op::Reconcile,
