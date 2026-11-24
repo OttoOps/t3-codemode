@@ -1,7 +1,9 @@
 use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::BOARD;
-use t3_codemode::fake::project;
+use t3_codemode::config::{Config, FlowConfig, OptIn};
+use t3_codemode::fake::{FakeGitHub, github_issue, project};
+use t3_codemode::github::{self, EnsureLabelOutcome, LabelSpec, LinkOutcome, UnlinkOutcome};
 use t3_codemode::server;
 
 const REPORT: &str = "async () => wf.issue({ url: 'https://github.com/Acme/widgets/issues/41', title: 'Fix the grader', note: 'found while testing' })";
@@ -260,4 +262,545 @@ async fn dismiss_takes_an_issue_off_the_list_and_restore_brings_it_back() {
     assert_eq!(status, 404);
     let (status, _) = s.post("/api/new-issues/bogus/restore", true).await;
     assert_eq!(status, 404);
+}
+
+fn issue_label_names(gh: &FakeGitHub, repo: &str, number: u64) -> Vec<String> {
+    gh.issue(repo, number).unwrap()["labels"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn wf_issue_wires_blockers_parent_and_labels_idempotently() {
+    let h = H::new();
+    h.github.set_issue("Acme/widgets", github_issue(10, "Epic", &[], T0));
+    h.github.set_issue("Acme/widgets", github_issue(40, "Blocker 1", &[], T0));
+    h.github.set_issue("Acme/widgets", github_issue(41, "Target issue", &[], T0));
+    h.github.set_issue("Other/core", github_issue(7, "Cross-repo blocker", &[], T0));
+    h.github.add_label("Acme/widgets", "priority: high", "b60205");
+
+    let first = result(
+        &h.exec_as(
+            WORKER,
+            r##"async () => wf.issue({
+                url: "https://github.com/Acme/widgets/issues/41",
+                title: "Target issue",
+                blockedBy: ["#40", "Other/core#7", "https://github.com/Acme/widgets/issues/40"],
+                parent: "#10",
+                track: "flow-dag",
+                priority: "high",
+            })"##,
+        )
+        .await,
+    );
+    assert_eq!(first["added"], true, "{first}");
+    let w = &first["wiring"];
+    assert_eq!(w["ok"], true, "{first}");
+    assert_eq!(w["errors"], json!([]));
+    assert_eq!(w["parent"], json!({"ref": "Acme/widgets#10", "status": "linked"}));
+    assert_eq!(
+        w["blockedBy"],
+        json!([
+            {"ref": "Acme/widgets#40", "status": "linked"},
+            {"ref": "Other/core#7", "status": "linked"},
+        ])
+    );
+    assert_eq!(
+        w["labels"],
+        json!([
+            {"name": "track: flow-dag", "status": "createdAndAdded"},
+            {"name": "priority: high", "status": "added"},
+        ])
+    );
+
+    // Sub-issue mutation sends GraphQL-Features: sub_issues header.
+    let sub_call = h.github.calls().into_iter().find(|c| c["operation"] == "addSubIssue").unwrap();
+    assert_eq!(sub_call["headers"]["GraphQL-Features"], "sub_issues");
+
+    // Verify mutated fake GitHub state.
+    let stored = h.github.issue("Acme/widgets", 41).unwrap();
+    assert_eq!(stored["parentRef"], json!(["Acme/widgets", 10]));
+    assert_eq!(stored["blockers"], json!([["Acme/widgets", 40], ["Other/core", 7]]));
+    assert_eq!(issue_label_names(&h.github, "Acme/widgets", 41), vec!["track: flow-dag", "priority: high"]);
+
+    // Second call is completely idempotent: no mutation calls needed and wiring.ok stays true.
+    let calls_before = h.github.calls().len();
+    let second = result(
+        &h.exec_as(
+            WORKER,
+            r##"async () => wf.issue({
+                url: "Acme/widgets#41",
+                blockedBy: ["#40", "Other/core#7"],
+                parent: "#10",
+                track: "flow-dag",
+                priority: "high",
+            })"##,
+        )
+        .await,
+    );
+    assert_eq!(second["added"], false);
+    assert_eq!(second["reason"], "reported");
+    let w2 = &second["wiring"];
+    assert_eq!(w2["ok"], true, "{second}");
+    assert_eq!(w2["errors"], json!([]));
+    assert_eq!(w2["parent"]["status"], "alreadyLinked");
+    assert_eq!(w2["blockedBy"][0]["status"], "alreadyLinked");
+    assert_eq!(w2["blockedBy"][1]["status"], "alreadyLinked");
+    assert_eq!(w2["labels"][0]["status"], "alreadyApplied");
+    assert_eq!(w2["labels"][1]["status"], "alreadyApplied");
+    let new_ops: Vec<String> =
+        h.github.calls().into_iter().skip(calls_before).map(|c| c["operation"].as_str().unwrap().to_string()).collect();
+    assert_eq!(new_ops, vec!["issueNode"], "idempotent repeat should not resend mutations: {new_ops:?}");
+}
+
+#[tokio::test]
+async fn wf_issue_reuses_compact_track_and_priority_labels_and_respects_sync_false() {
+    let h = H::new();
+    h.github.set_issue("Acme/widgets", github_issue(1, "B", &[], T0));
+    h.github.set_issue("Acme/widgets", github_issue(2, "T", &[], T0));
+    h.github.add_label("Acme/widgets", "track:auth", "1d76db");
+    h.github.add_label("Acme/widgets", "priority:low", "0e8a16");
+
+    // sync: false skips every GitHub call.
+    let no_sync = result(
+        &h.exec_as(
+            WORKER,
+            r##"async () => wf.issue({ url: "Acme/widgets#2", blockedBy: ["#1"], track: "auth", priority: "low", sync: false })"##,
+        )
+        .await,
+    );
+    assert_eq!(no_sync["added"], true);
+    assert!(no_sync.get("wiring").is_none());
+    assert!(h.github.calls().is_empty());
+
+    // Calling again with sync default (true) wires links and reuses existing compact labels.
+    let synced = result(
+        &h.exec_as(
+            WORKER,
+            r##"async () => wf.issue({ url: "Acme/widgets#2", blockedBy: ["#1"], track: "auth", priority: "low" })"##,
+        )
+        .await,
+    );
+    assert_eq!(synced["wiring"]["ok"], true, "{synced}");
+    assert_eq!(
+        synced["wiring"]["labels"],
+        json!([
+            {"name": "track:auth", "status": "added"},
+            {"name": "priority:low", "status": "added"},
+        ])
+    );
+    assert_eq!(issue_label_names(&h.github, "Acme/widgets", 2), vec!["track:auth", "priority:low"]);
+    assert!(!h.github.operations().contains(&"createLabel".to_string()));
+}
+
+#[tokio::test]
+async fn wf_issue_reports_permission_and_parent_conflict_errors_without_dropping_them() {
+    let h = H::new();
+    h.github.set_issue("Acme/widgets", github_issue(1, "Old Epic", &[], T0));
+    h.github.set_issue("Acme/widgets", github_issue(2, "New Epic", &[], T0));
+    h.github.set_issue("Acme/widgets", github_issue(3, "Blocker", &[], T0));
+    h.github.set_issue("Acme/widgets", github_issue(4, "Target", &[], T0));
+    h.github.set_parent("Acme/widgets", 4, ("Acme/widgets", 1));
+    h.github.fail_operation_with_type("addBlockedBy", "FORBIDDEN", "Resource not accessible by integration");
+    h.github.fail_operation_with_type("createLabel", "FORBIDDEN", "Viewer does not have permission to create labels");
+
+    let r = result(
+        &h.exec_as(
+            WORKER,
+            r##"async () => wf.issue({
+                url: "Acme/widgets#4",
+                parent: "#2",
+                blockedBy: ["#3"],
+                track: "new-track",
+            })"##,
+        )
+        .await,
+    );
+    assert_eq!(r["added"], true, "issue must still be recorded on board: {r}");
+    let w = &r["wiring"];
+    assert_eq!(w["ok"], false, "{r}");
+    assert_eq!(w["parent"]["status"], "error");
+    assert!(w["parent"]["error"].as_str().unwrap().contains("already has a parent"), "{w}");
+    assert_eq!(w["blockedBy"][0]["status"], "error");
+    assert_eq!(w["labels"][0]["status"], "error");
+    let errs = w["errors"].as_array().unwrap();
+    assert_eq!(errs.len(), 3, "{errs:?}");
+    let blocked_err = errs.iter().find(|e| e["op"] == "addBlockedBy").unwrap();
+    assert_eq!(blocked_err["permission"], true);
+    let label_err = errs.iter().find(|e| e["op"] == "ensureLabel").unwrap();
+    assert_eq!(label_err["permission"], true);
+    let parent_err = errs.iter().find(|e| e["op"] == "addSubIssue").unwrap();
+    assert_eq!(parent_err["permission"], false);
+    assert!(r["message"].as_str().unwrap().contains("GitHub wiring failed"), "{r}");
+    assert!(r["message"].as_str().unwrap().contains("[permission]"), "{r}");
+}
+
+#[tokio::test]
+async fn wf_issue_validates_new_fields_before_touching_store_or_github() {
+    let h = H::new();
+    let bad_cases = [
+        ("async () => wf.issue({ url: 'Acme/widgets#41', blockedBy: ['#41'] })", "blocked by itself"),
+        ("async () => wf.issue({ url: 'Acme/widgets#41', parent: 'acme/widgets#41' })", "its own parent"),
+        ("async () => wf.issue({ url: 'Acme/widgets#41', priority: 'urgent' })", "priority must be"),
+        ("async () => wf.issue({ url: 'Acme/widgets#41', blockedBy: ['bogus'] })", "not a GitHub issue"),
+    ];
+    for (code, want) in bad_cases {
+        let out = h.exec_as(WORKER, code).await;
+        assert!(err_text(&out).contains(want), "for {code}: {}", out.text);
+    }
+    assert!(h.app.store.new_issues().unwrap().is_empty());
+    assert!(h.github.calls().is_empty());
+}
+
+#[tokio::test]
+async fn wf_file_issues_sorts_topologically_writes_flow_blocks_wires_links_and_round_trips_into_flow_graph() {
+    let cfg = Config {
+        flow: Some(FlowConfig {
+            repos: Some(vec!["Acme/widgets".into()]),
+            opt_in: Some(OptIn { label: Some("flow".into()), milestone: None }),
+            max_tickets: Some(2),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let h = H::build(Vec::new(), cfg);
+    h.github.add_repo("Acme/widgets");
+    h.github.set_issue("Acme/widgets", github_issue(10, "Existing prereq", &[], T0));
+
+    let r = result(
+        &h.exec_as(
+            WORKER,
+            r###"async () => wf.fileIssues({
+                repo: "Acme/widgets",
+                track: "flow-dag",
+                priority: "high",
+                labels: ["enhancement"],
+                issues: [
+                    {
+                        id: "P2",
+                        title: "Phase 2: board sync",
+                        body: "## Goal\nSync parsed links.",
+                        parent: "E",
+                        blockedBy: ["P1"],
+                        touches: ["src/web.rs", "src/board.html"],
+                        queue: true,
+                    },
+                    {
+                        id: "P1",
+                        title: "Phase 1: wire mutations",
+                        body: "## Goal\nWire mutations.\n\n## Flow\n- Parent: E\n- Blocked by: P0",
+                        parent: "E",
+                        blockedBy: ["P0", "#10"],
+                        touches: ["src/issues.rs", "src/github.rs"],
+                        queue: true,
+                    },
+                    {
+                        id: "P0",
+                        title: "Phase 0: foundation",
+                        body: "## Goal\nParse bodies.",
+                        parent: "E",
+                        blockedBy: ["#10"],
+                        priority: "medium",
+                        touches: ["src/flow_body.rs"],
+                        queue: true,
+                    },
+                    {
+                        id: "E",
+                        title: "Epic: dependency DAG",
+                        body: "## Goal\nUmbrella epic.",
+                        queue: false,
+                    },
+                ],
+            })"###,
+        )
+        .await,
+    );
+
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["errors"], json!([]));
+    assert_eq!(r["order"], json!(["E", "P0", "P1", "P2"]));
+    assert_eq!(r["byId"]["E"]["number"], 11);
+    assert_eq!(r["byId"]["P0"]["number"], 12);
+    assert_eq!(r["byId"]["P1"]["number"], 13);
+    assert_eq!(r["byId"]["P2"]["number"], 14);
+
+    // Check generated ## Flow blocks carry substituted real #N references.
+    let p1_body = h.github.issue("Acme/widgets", 13).unwrap()["body"].as_str().unwrap().to_string();
+    assert!(!p1_body.contains("Parent: E"), "stale symbolic ## Flow must be replaced:\n{p1_body}");
+    assert!(
+        p1_body.contains("## Flow\n- Parent: #11\n- Blocked by: #12, #10\n- Track: flow-dag\n- Priority: high\n- Touches: `src/issues.rs`, `src/github.rs`"),
+        "{p1_body}"
+    );
+    let p2_body = h.github.issue("Acme/widgets", 14).unwrap()["body"].as_str().unwrap().to_string();
+    assert!(
+        p2_body.contains("## Flow\n- Parent: #11\n- Blocked by: #13\n- Track: flow-dag\n- Priority: high\n- Touches: `src/web.rs`, `src/board.html`"),
+        "{p2_body}"
+    );
+
+    // Check labels: epic has NO `flow` queue opt-in label; P0/P1/P2 DO have `flow`.
+    let epic_labels = issue_label_names(&h.github, "Acme/widgets", 11);
+    assert!(epic_labels.contains(&"track: flow-dag".into()), "{epic_labels:?}");
+    assert!(epic_labels.contains(&"priority: high".into()), "{epic_labels:?}");
+    assert!(epic_labels.contains(&"enhancement".into()), "{epic_labels:?}");
+    assert!(!epic_labels.contains(&"flow".into()), "queue: false epic must not carry flow label: {epic_labels:?}");
+    let p0_labels = issue_label_names(&h.github, "Acme/widgets", 12);
+    assert!(p0_labels.contains(&"flow".into()), "{p0_labels:?}");
+    assert!(p0_labels.contains(&"priority: medium".into()), "{p0_labels:?}");
+
+    // Check board new-issues list recorded all 4 created issues.
+    assert_eq!(h.app.store.new_issues().unwrap().len(), 4);
+
+    // End-to-end check with wf.flow({ graph: true }): native GitHub edges, track, priority, no warnings.
+    let flow = result(&h.exec("async () => wf.flow({ graph: true })").await);
+    assert_eq!(flow["graph"]["warnings"], json!([]), "{flow}");
+    let edges = flow["graph"]["edges"].as_array().unwrap();
+    assert!(
+        edges.contains(
+            &json!({"from": "Acme/widgets#13", "to": "Acme/widgets#12", "kind": "blockedBy", "source": "github"})
+        ),
+        "{edges:?}"
+    );
+    assert!(
+        edges.contains(
+            &json!({"from": "Acme/widgets#13", "to": "Acme/widgets#11", "kind": "parent", "source": "github"})
+        ),
+        "{edges:?}"
+    );
+    assert!(
+        edges.contains(
+            &json!({"from": "Acme/widgets#14", "to": "Acme/widgets#13", "kind": "blockedBy", "source": "github"})
+        ),
+        "{edges:?}"
+    );
+}
+
+#[tokio::test]
+async fn wf_file_issues_with_sync_false_round_trips_body_flow_block_through_flow_graph() {
+    let cfg = Config {
+        flow: Some(FlowConfig { repos: Some(vec!["Acme/widgets".into(), "Acme/core".into()]), ..Default::default() }),
+        ..Default::default()
+    };
+    let h = H::build(Vec::new(), cfg);
+    h.github.add_repo("Acme/widgets");
+    h.github.add_repo("Acme/core");
+
+    let r = result(
+        &h.exec(
+            r#"async () => wf.fileIssues({
+                sync: false,
+                issues: [
+                    { id: "epic", repo: "Acme/core", title: "Cross-repo epic", track: "platform" },
+                    { id: "core-1", repo: "Acme/core", title: "Core step", parent: "epic", track: "platform" },
+                    { id: "app-1", repo: "Acme/widgets", title: "App step", parent: "epic", blockedBy: ["core-1"], track: "platform", touches: ["src/app.rs"] },
+                ],
+            })"#,
+        )
+        .await,
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["issues"][2]["wiring"], Value::Null);
+    let app_body = r["issues"][2]["body"].as_str().unwrap();
+    assert!(app_body.contains("- Parent: Acme/core#1"), "{app_body}");
+    assert!(app_body.contains("- Blocked by: Acme/core#2"), "{app_body}");
+    assert!(app_body.contains("- Track: platform"), "{app_body}");
+    assert!(app_body.contains("- Touches: `src/app.rs`"), "{app_body}");
+
+    // With sync: false, no native links exist; wf.flow({ graph: true }) must recover every edge
+    // and track cleanly via src/flow_body.rs with zero warnings.
+    let flow = result(&h.exec("async () => wf.flow({ graph: true })").await);
+    assert_eq!(flow["graph"]["warnings"], json!([]), "{flow}");
+    let edges = flow["graph"]["edges"].as_array().unwrap();
+    assert!(
+        edges.contains(&json!({"from": "Acme/widgets#1", "to": "Acme/core#1", "kind": "parent", "source": "body"})),
+        "{edges:?}"
+    );
+    assert!(
+        edges.contains(&json!({"from": "Acme/widgets#1", "to": "Acme/core#2", "kind": "blockedBy", "source": "body"})),
+        "{edges:?}"
+    );
+    let app_node = flow["graph"]["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "Acme/widgets#1").unwrap();
+    assert_eq!(app_node["track"], "platform");
+}
+
+#[tokio::test]
+async fn wf_file_issues_rejects_cycles_and_bad_plans_with_zero_partial_writes() {
+    let h = H::new();
+    h.github.add_repo("Acme/widgets");
+
+    let cases = [
+        (
+            r#"async () => wf.fileIssues({ repo: "Acme/widgets", issues: [
+                { id: "A", title: "Self blocker", blockedBy: ["A"] }
+            ]})"#,
+            "dependency cycle detected",
+        ),
+        (
+            r#"async () => wf.fileIssues({ repo: "Acme/widgets", issues: [
+                { id: "A", title: "Self parent", parent: "A" }
+            ]})"#,
+            "dependency cycle detected",
+        ),
+        (
+            r#"async () => wf.fileIssues({ repo: "Acme/widgets", issues: [
+                { id: "D", title: "Independent" },
+                { id: "A", title: "A", blockedBy: ["C"] },
+                { id: "B", title: "B", blockedBy: ["A"] },
+                { id: "C", title: "C", blockedBy: ["B"] }
+            ]})"#,
+            "dependency cycle detected",
+        ),
+        (
+            r#"async () => wf.fileIssues({ repo: "Acme/widgets", issues: [
+                { id: "A", title: "A", parent: "B" },
+                { id: "B", title: "B", blockedBy: ["A"] }
+            ]})"#,
+            "dependency cycle detected",
+        ),
+        (
+            r#"async () => wf.fileIssues({ repo: "Acme/widgets", issues: [
+                { id: "A", title: "A", blockedBy: ["MISSING"] }
+            ]})"#,
+            "unknown blockedBy",
+        ),
+        (
+            r#"async () => wf.fileIssues({ repo: "Acme/widgets", issues: [
+                { id: "dup", title: "First" },
+                { id: "DUP", title: "Second" }
+            ]})"#,
+            "duplicate local id",
+        ),
+        (
+            r#"async () => wf.fileIssues({ repo: "Acme/nonexistent", issues: [
+                { id: "A", title: "First" }
+            ]})"#,
+            "cannot read repository",
+        ),
+        (
+            r##"async () => wf.fileIssues({ repo: "Acme/widgets", sync: false, issues: [
+                { id: "A", title: "Guessed number", blockedBy: ["#1"] }
+            ]})"##,
+            "external issue reference Acme/widgets#1 does not exist",
+        ),
+        (
+            r##"async () => wf.fileIssues({ repo: "Acme/widgets", issues: [
+                { id: "A", title: "Missing external parent", parent: "#999" }
+            ]})"##,
+            "external issue reference Acme/widgets#999 does not exist",
+        ),
+    ];
+
+    for (code, want) in cases {
+        let out = h.exec_as(WORKER, code).await;
+        assert!(err_text(&out).contains(want), "for {code}: {}", out.text);
+    }
+
+    // Zero issues created on GitHub and zero new-issues stored on board.
+    assert!(h.github.issue("Acme/widgets", 1).is_none());
+    assert!(!h.github.operations().contains(&"createIssue".to_string()));
+    assert!(h.app.store.new_issues().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn wf_file_issues_inherits_top_level_parent_without_self_linking_parent_item_and_reports_wiring_errors() {
+    let h = H::new();
+    h.github.add_repo("Acme/widgets");
+    h.github.fail_operation_with_type("addBlockedBy", "FORBIDDEN", "No permission to add blocked-by links");
+
+    let r = result(
+        &h.exec_as(
+            WORKER,
+            r#"async () => wf.fileIssues({
+                repo: "Acme/widgets",
+                parent: "E",
+                report: false,
+                issues: [
+                    { id: "P1", title: "Step 1", blockedBy: ["P0"] },
+                    { id: "P0", title: "Step 0" },
+                    { id: "E", title: "Epic" },
+                ],
+            })"#,
+        )
+        .await,
+    );
+
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(r["order"], json!(["E", "P0", "P1"]));
+    assert_eq!(r["issues"][0]["parent"], Value::Null, "E must not inherit itself as parent");
+    assert_eq!(r["issues"][1]["parent"], "Acme/widgets#1");
+    assert_eq!(r["issues"][2]["parent"], "Acme/widgets#1");
+    assert_eq!(r["issues"][2]["wiring"]["parent"]["status"], "linked");
+    assert_eq!(r["issues"][2]["wiring"]["blockedBy"][0]["status"], "error");
+    assert_eq!(r["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(r["errors"][0]["op"], "addBlockedBy");
+    assert_eq!(r["errors"][0]["permission"], true);
+    assert!(h.app.store.new_issues().unwrap().is_empty(), "report: false skips board new-issues");
+}
+
+#[tokio::test]
+async fn github_dependency_and_label_helpers_are_idempotent_and_support_removal() {
+    let gh = FakeGitHub::default();
+    gh.set_issue("Acme/widgets", github_issue(1, "Epic", &[], T0));
+    gh.set_issue("Acme/widgets", github_issue(2, "New Epic", &[], T0));
+    gh.set_issue("Acme/widgets", github_issue(3, "Blocker", &[], T0));
+    gh.set_issue("Acme/widgets", github_issue(4, "Task", &[], T0));
+
+    let repo = github::read_repo(&gh, "Acme", "widgets").await.unwrap();
+    let epic = github::read_issue_node(&gh, "Acme", "widgets", 1).await.unwrap();
+    let new_epic = github::read_issue_node(&gh, "Acme", "widgets", 2).await.unwrap();
+    let blocker = github::read_issue_node(&gh, "Acme", "widgets", 3).await.unwrap();
+    let task = github::read_issue_node(&gh, "Acme", "widgets", 4).await.unwrap();
+
+    // addBlockedBy -> Linked, repeat -> AlreadyLinked, removeBlockedBy -> Removed, repeat -> NotLinked.
+    assert_eq!(github::add_blocked_by(&gh, &task.id, &blocker.id).await.unwrap(), LinkOutcome::Linked);
+    assert_eq!(github::add_blocked_by(&gh, &task.id, &blocker.id).await.unwrap(), LinkOutcome::AlreadyLinked);
+    assert_eq!(github::remove_blocked_by(&gh, &task.id, &blocker.id).await.unwrap(), UnlinkOutcome::Removed);
+    assert_eq!(github::remove_blocked_by(&gh, &task.id, &blocker.id).await.unwrap(), UnlinkOutcome::NotLinked);
+
+    // addSubIssue -> Linked, repeat -> AlreadyLinked, different parent without replace -> Err, with replace -> Linked.
+    assert_eq!(github::add_sub_issue(&gh, &epic.id, &task.id, false).await.unwrap(), LinkOutcome::Linked);
+    assert_eq!(github::add_sub_issue(&gh, &epic.id, &task.id, false).await.unwrap(), LinkOutcome::AlreadyLinked);
+    let conflict = github::add_sub_issue(&gh, &new_epic.id, &task.id, false).await.unwrap_err();
+    assert!(conflict.message.contains("already has a parent"), "{conflict}");
+    assert_eq!(github::add_sub_issue(&gh, &new_epic.id, &task.id, true).await.unwrap(), LinkOutcome::Linked);
+    assert_eq!(github::remove_sub_issue(&gh, &new_epic.id, &task.id).await.unwrap(), UnlinkOutcome::Removed);
+    assert_eq!(github::remove_sub_issue(&gh, &new_epic.id, &task.id).await.unwrap(), UnlinkOutcome::NotLinked);
+
+    // ensure_label creates once then returns Existing.
+    let spec = LabelSpec { name: "track: api", alt_name: Some("track:api"), color: "1d76db", description: None };
+    let first = github::ensure_label(&gh, &repo, &spec).await.unwrap();
+    assert!(matches!(first, EnsureLabelOutcome::Created(_)));
+    let second = github::ensure_label(&gh, &repo, &spec).await.unwrap();
+    assert!(matches!(second, EnsureLabelOutcome::Existing(_)));
+
+    // Both addSubIssue and removeSubIssue pass GraphQL-Features: sub_issues header.
+    let sub_ops: Vec<Value> = gh
+        .calls()
+        .into_iter()
+        .filter(|c| matches!(c["operation"].as_str(), Some("addSubIssue" | "removeSubIssue")))
+        .collect();
+    assert!(!sub_ops.is_empty());
+    for c in sub_ops {
+        assert_eq!(c["headers"]["GraphQL-Features"], "sub_issues", "{c}");
+    }
+}
+
+#[test]
+fn catalog_exposes_extended_wf_issue_and_wf_file_issues() {
+    let entries = t3_codemode::catalog::builtins();
+    let issue = entries.iter().find(|e| e.name == "wf.issue").unwrap();
+    for field in ["blockedBy", "parent", "track", "priority", "sync"] {
+        assert!(issue.signature.contains(field), "wf.issue signature missing {field}: {}", issue.signature);
+        assert!(issue.input_schema["properties"].get(field).is_some(), "wf.issue schema missing {field}");
+    }
+    let file_issues = entries.iter().find(|e| e.name == "wf.fileIssues").unwrap();
+    for field in ["blockedBy", "parent", "track", "priority", "touches", "queue"] {
+        assert!(
+            file_issues.signature.contains(field),
+            "wf.fileIssues signature missing {field}: {}",
+            file_issues.signature
+        );
+    }
 }

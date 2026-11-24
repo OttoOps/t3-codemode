@@ -30,6 +30,8 @@ const MERGE_SIGNATURE: &str = r#"wf.merge(input: { repo: string; pr: number; hea
 const CARD: &str = r#"{ id: string; kind: string; label: string | null; ticket: string | null; link: string | null; text: string; handle: string | null; options: string[]; at: string; atLocal: string; resolved?: string; resolution?: string | null; token: string; approval?: string; repo: string | null; project: { id: string; title: string | null } | null }"#;
 
 const NEW_ISSUE: &str = "{ id: string; url: string; repo: string; number: number; label: string; title: string | null; note: string | null; thread: string; threadLink: string | null; threadTitle: string | null; at: string; atLocal: string; dismissed: boolean; dismissedAt: string | null; dismissedAtLocal: string | null; restoredAt: string | null }";
+const ISSUE_WIRING: &str = "{ ok: boolean; blockedBy: { ref: string; status: \"linked\" | \"alreadyLinked\" | \"error\"; error?: string }[]; parent: { ref: string; status: \"linked\" | \"alreadyLinked\" | \"error\"; error?: string } | null; labels: { name: string; status: \"added\" | \"createdAndAdded\" | \"alreadyApplied\" | \"error\"; error?: string }[]; errors: { op: string; target: string; message: string; permission: boolean }[] }";
+const FILED_ISSUE: &str = "{ id: string | null; inputIndex: number; repo: string; number: number; label: string; url: string; title: string; body: string; parent: string | null; blockedBy: string[]; labels: string[]; reported: { added: boolean; reason?: \"reported\" | \"ticket\"; issue?: NEW_ISSUE; ticket?: { label: string; thread: string | null; link: string | null; done: boolean }; message: string } | null; wiring: ISSUE_WIRING | null }";
 const SKIPPED: &str = "{ instanceId: string; reason: string }";
 const ISSUE_REF: &str = "{ repo: string; number: number; label: string; url: string; title: string | null }";
 const FLOW_ISSUE: &str = "{ repo: string; number: number; label: string; url: string; title: string; priority: \"high\" | \"medium\" | \"low\" | null; milestone: { title: string; dueOn: string | null } | null; createdAt: string; parent: { repo: string; number: number; label: string; url: string; title: string | null } | null; unblockedBy: { repo: string; number: number; label: string; url: string; title: string | null }[] }";
@@ -261,14 +263,67 @@ pub fn builtins() -> Vec<Entry> {
         builtin(
             "wf.issue",
             "wf",
-            "Report a GitHub issue this thread just filed, so it shows on the board's new-issues list with a link back to this thread and when it was filed. Needs no parent link. Reporting an issue already on the list, dismissed or not, or one that already has a board ticket, adds nothing: added is false, reason says which, and message says so. From the list the user launches a ticket for it (the same path as wf.launchTicket) or dismisses it.",
+            "Report a GitHub issue this thread just filed, so it shows on the board's new-issues list with a link back to this thread and when it was filed. Needs no parent link. Reporting an issue already on the list, dismissed or not, or one that already has a board ticket, adds nothing: added is false, reason says which, and message says so. When blockedBy, parent, track or priority is given and sync is not false (sync defaults to true when any of those is passed), also wires native GitHub blocked-by links (addBlockedBy), sub-issue parent link (addSubIssue), and track:/priority: labels idempotently (creating missing labels as needed). Already-linked relationships and already-applied labels succeed; GitHub and permission errors are reported in wiring.errors rather than discarded. From the list the user launches a ticket for it (the same path as wf.launchTicket) or dismisses it.",
             &format!(
-                "wf.issue(input: {{ url: string; title?: string; note?: string }}): Promise<{{ added: boolean; reason?: \"reported\" | \"ticket\"; message: string; issue?: {NEW_ISSUE}; ticket?: {{ label: string; thread: string | null; link: string | null; done: boolean }} }}>;"
+                "wf.issue(input: {{ url: string; title?: string; note?: string; blockedBy?: string[]; parent?: string; track?: string; priority?: \"high\" | \"medium\" | \"low\"; sync?: boolean }}): Promise<{{ added: boolean; reason?: \"reported\" | \"ticket\"; message: string; issue?: {NEW_ISSUE}; ticket?: {{ label: string; thread: string | null; link: string | null; done: boolean }}; wiring?: {ISSUE_WIRING} }}>;"
             ),
             obj(
-                json!({"url": {"type": "string", "description": "https://github.com/<owner>/<repo>/issues/<n> or <owner>/<repo>#<n>"},
-                       "title": {"type": "string", "maxLength": 300}, "note": {"type": "string", "maxLength": 2000}}),
+                json!({
+                    "url": {"type": "string", "description": "https://github.com/<owner>/<repo>/issues/<n> or <owner>/<repo>#<n>"},
+                    "title": {"type": "string", "maxLength": 300},
+                    "note": {"type": "string", "maxLength": 2000},
+                    "blockedBy": {"type": "array", "items": {"type": "string"}, "description": "Issues that block this one: #N, owner/repo#N, or GitHub issue URL"},
+                    "parent": {"type": "string", "description": "Parent epic issue: #N, owner/repo#N, or GitHub issue URL"},
+                    "track": {"type": "string", "description": "Flow track slug; ensures and applies label \"track: <track>\""},
+                    "priority": {"type": "string", "enum": ["high", "medium", "low"], "description": "Priority; ensures and applies label \"priority: <priority>\""},
+                    "sync": {"type": "boolean", "description": "Wire native GitHub links and labels (defaults to true when blockedBy, parent, track, or priority is provided)"}
+                }),
                 &["url"],
+            ),
+        ),
+        builtin(
+            "wf.fileIssues",
+            "wf",
+            "Create a batch of GitHub issues forming a dependency DAG in one call. Items may carry symbolic local ids (for example \"P0\", \"P1\") referenced by other items' blockedBy and parent fields alongside external GitHub issue refs (#N, owner/repo#N, or URL). Validates every item, topologically sorts the batch across both parent and blockedBy edges, and rejects cycles or invalid references before making any GitHub write. Creates issues in topological order so real #N numbers are known, writes the canonical ## Flow block (Parent, Blocked by, Track, Priority, Touches) with resolved #N (or owner/repo#N across repos) into each issue body, wires native GitHub addBlockedBy, addSubIssue, and labels (track:, priority:, queue opt-in label from flow.optIn.label when queue is true, plus custom labels) when sync is not false, and reports created issues to the board's new-issues list when called from a thread (unless report is false). Permission or wiring errors are reported in each item's wiring and top-level errors without being swallowed.",
+            &format!(
+                "wf.fileIssues(input: {{ repo?: string; parent?: string; track?: string; priority?: \"high\" | \"medium\" | \"low\"; labels?: string[]; queue?: boolean; report?: boolean; sync?: boolean; issues: {{ id?: string; repo?: string; title: string; body?: string; blockedBy?: string[]; parent?: string; track?: string; priority?: \"high\" | \"medium\" | \"low\"; touches?: string[]; labels?: string[]; queue?: boolean; note?: string }}[] }}): Promise<{{ ok: boolean; order: string[]; issues: ({})[]; byId: Record<string, {{ repo: string; number: number; label: string; url: string }}>; errors: {{ issue: string; op: string; target: string; message: string; permission: boolean }}[] }}>;",
+                FILED_ISSUE.replace("NEW_ISSUE", NEW_ISSUE).replace("ISSUE_WIRING", ISSUE_WIRING)
+            ),
+            obj(
+                json!({
+                    "repo": {"type": "string", "description": "Default GitHub repo (owner/name) for items that omit repo"},
+                    "parent": {"type": "string", "description": "Default parent (local id or GitHub issue ref)"},
+                    "track": {"type": "string", "description": "Default flow track slug"},
+                    "priority": {"type": "string", "enum": ["high", "medium", "low"], "description": "Default priority"},
+                    "labels": {"type": "array", "items": {"type": "string"}, "description": "Default GitHub labels added to every created issue"},
+                    "queue": {"type": "boolean", "description": "Default flow queue opt-in (applies config flow.optIn.label when set)"},
+                    "report": {"type": "boolean", "description": "Record created issues on the board's new-issues list (default true when a caller thread is present)"},
+                    "sync": {"type": "boolean", "description": "Wire native GitHub blockedBy, sub-issue links, and labels (default true)"},
+                    "issues": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["title"],
+                            "properties": {
+                                "id": {"type": "string", "description": "Symbolic local id for blockedBy/parent references within this batch"},
+                                "repo": {"type": "string", "description": "GitHub repo (owner/name); falls back to top-level repo"},
+                                "title": {"type": "string", "maxLength": 300},
+                                "body": {"type": "string", "description": "Markdown body; canonical ## Flow block is appended or replaced with resolved #N refs"},
+                                "blockedBy": {"type": "array", "items": {"type": "string"}, "description": "Local ids or external GitHub issue refs"},
+                                "parent": {"type": "string", "description": "Local id or external GitHub issue ref; falls back to top-level parent"},
+                                "track": {"type": "string"},
+                                "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+                                "touches": {"type": "array", "items": {"type": "string"}, "description": "Repo-relative paths written to ## Flow Touches:"},
+                                "labels": {"type": "array", "items": {"type": "string"}},
+                                "queue": {"type": "boolean", "description": "When true, applies config flow.optIn.label if configured"},
+                                "note": {"type": "string", "maxLength": 2000}
+                            }
+                        }
+                    }
+                }),
+                &["issues"],
             ),
         ),
         builtin(

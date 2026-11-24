@@ -133,14 +133,26 @@ parent and a child, and the service keeps every link and message in its store.
   paused, not idle.
 - `wf.launchTicket`, `wf.dispatch`, `wf.cards`, `wf.answer` and `wf.feed` work
   with the [board](board.md).
-- `wf.issue({ url, title?, note? })` reports a GitHub issue the calling thread
-  just filed. The board lists it under [new issues](board.md#new-issues) with
-  the filing thread and the time. The call needs the caller's thread id but no
-  parent link, so any thread can make it. It returns `{ added, message, issue }`.
-  When the issue is already on the list, dismissed or not, or already has a
-  board ticket, the call adds nothing. Its result then has `added: false`, a
-  `reason` of `reported` or `ticket`, the existing `issue` or `ticket`, and a
-  `message` that says which.
+- `wf.issue({ url, title?, note?, blockedBy?, parent?, track?, priority?, sync? })`
+  reports a GitHub issue the calling thread just filed. The board lists it under
+  [new issues](board.md#new-issues) with the filing thread and the time. The call
+  needs the caller's thread id but no parent link, so any thread can make it. It
+  returns `{ added, message, issue }`. When the issue is already on the list,
+  dismissed or not, or already has a board ticket, the call adds nothing. Its
+  result then has `added: false`, a `reason` of `reported` or `ticket`, the
+  existing `issue` or `ticket`, and a `message` that says which. Passing any of
+  `blockedBy`, `parent`, `track`, or `priority` enables GitHub wiring by default
+  unless `sync` is `false`. Each entry in `blockedBy` or `parent` accepts `#N`,
+  `owner/repo#N`, or a GitHub issue URL, `track` takes a flow track slug, and
+  `priority` takes `"high"`, `"medium"`, or `"low"`. The service wires GitHub's
+  native `addBlockedBy` and `addSubIssue` links and applies the `track: <track>`
+  and `priority: <priority>` labels idempotently, creating missing labels when
+  the repo lacks them. Existing links and labels succeed as `alreadyLinked` or
+  `alreadyApplied`. GitHub and permission errors land in `wiring.errors` and in
+  `message`.
+- `wf.fileIssues({ repo?, parent?, track?, priority?, labels?, queue?, report?, sync?, issues })`
+  creates a batch of GitHub issues forming a dependency DAG in one call. See
+  [wf.fileIssues](#wffileissues).
 - `wf.pick({ pool })` picks a member of a configured [pool](config.md#pools)
   for one launch and returns `{ pool, pick, instanceId, driver, model, effort,
   options, reason, skipped, modelSelection }`. Pass `modelSelection` to
@@ -468,6 +480,62 @@ nothing and launches nothing. It returns:
 
 ```js
 async () => (await wf.flow.next()).picked
+```
+
+### wf.fileIssues
+
+`wf.fileIssues` creates a multi-issue dependency plan on GitHub in topological
+order. Each entry in `issues` requires `title` and accepts optional fields:
+`id` for a symbolic local id such as `"E"`, `"P0"`, or `"P1"`, `repo`, `body`,
+`blockedBy`, `parent`, `track`, `priority` as `"high"`, `"medium"`, or `"low"`,
+`touches` for repo-relative paths, `labels`, `queue`, and `note`. Top-level
+`repo`, `parent`, `track`, `priority`, `labels`, and `queue` act as defaults
+for items that omit them, except that a top-level `parent` matching an item's
+own local `id` does not attach that item to itself. When `queue` is `true` and
+`flow.optIn.label` is configured, the service adds that opt-in label. Entries
+in `blockedBy` and `parent` can name another item's local `id` or an external
+GitHub issue as `#N`, `owner/repo#N`, or a URL.
+
+Before writing anything to GitHub, `wf.fileIssues` validates every item and
+reference, checks that every target repository is reachable, and topologically
+sorts the batch across both `parent` and `blockedBy` edges. Any cycle,
+including a self-reference or a mixed `parent` and `blockedBy` cycle, or any
+unknown local id throws with zero partial writes.
+
+For each item in topological order, `wf.fileIssues`:
+
+1. Substitutes real `#N` references within the same repository, or
+   `owner/repo#N` across repositories, for every resolved `parent` and
+   `blockedBy` target, and writes the canonical `## Flow` block with `Parent:`,
+   `Blocked by:`, `Track:`, `Priority:`, and `Touches:` into the issue body. If
+   the body already has a `## Flow` section outside fenced code, the service
+   replaces that section; otherwise it appends the block.
+2. Creates the issue on GitHub through `createIssue`.
+3. Unless `sync` is `false`, wires native GitHub `addSubIssue` and
+   `addBlockedBy` relationships, creates any missing labels, and applies
+   `track: <track>`, `priority: <priority>`, `flow.optIn.label` when `queue` is
+   `true`, and any custom labels. The service records permission and wiring
+   errors in each item's `wiring` object and in top-level `errors`.
+4. When called from a thread with `report` omitted or `true`, records each
+   created issue on the board's new-issues list.
+
+The result holds `{ ok, order, issues, byId, errors }`. The `issues` array
+follows creation order and gives each issue's `id`, `inputIndex`, `repo`,
+`number`, `label`, `url`, `title`, `body`, resolved `parent` and `blockedBy`,
+applied `labels`, `reported`, and `wiring`. The `byId` map indexes each
+symbolic local `id` to `{ repo, number, label, url }`.
+
+```js
+async () => wf.fileIssues({
+  repo: "acme/widgets",
+  track: "auth",
+  priority: "high",
+  issues: [
+    { id: "E", title: "Epic: auth refresh", queue: false },
+    { id: "P0", title: "Phase 0: token store", parent: "E", touches: ["src/tokens.rs"], queue: true },
+    { id: "P1", title: "Phase 1: refresh flow", parent: "E", blockedBy: ["P0"], touches: ["src/auth.rs"], queue: true },
+  ],
+})
 ```
 
 ## console

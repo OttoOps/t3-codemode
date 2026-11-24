@@ -1502,6 +1502,82 @@ fn extract_leading_issue_ref(default_repo: &str, text: &str) -> Option<BodyRef> 
     None
 }
 
+pub(crate) struct FlowBodyLayout {
+    pub(crate) section: Option<(usize, usize)>,
+    pub(crate) unclosed_fence: Option<(u8, usize)>,
+    pub(crate) unclosed_comment: bool,
+}
+
+pub(crate) fn inspect_flow_body(body: &str) -> FlowBodyLayout {
+    let mut containers: Vec<Container> = Vec::new();
+    let mut fence: Option<ActiveFence> = None;
+    let mut in_comment = false;
+    let mut flow_start: Option<(usize, usize)> = None;
+    let mut section: Option<(usize, usize)> = None;
+    let mut total_lines = 0usize;
+
+    for (idx, raw_line) in body.lines().enumerate() {
+        total_lines = idx + 1;
+        if let Some(active) = fence.as_ref() {
+            let (matched, cursor) = match_containers(raw_line, &active.containers);
+            if matched == active.containers.len() {
+                if fence_close(&cursor, active.ch, active.len) {
+                    containers = active.containers.clone();
+                    fence = None;
+                }
+                continue;
+            }
+            containers = active.containers[..matched].to_vec();
+            fence = None;
+        }
+        let was_in_comment = in_comment;
+        let line = strip_html_comments(raw_line, &mut in_comment);
+        if line.trim().is_empty() {
+            if !was_in_comment && !raw_line.trim().is_empty() {
+                let (matched, _) = match_containers(raw_line, &containers);
+                containers.truncate(matched);
+            }
+            continue;
+        }
+        let (matched, mut cursor) = match_containers(&line, &containers);
+        containers.truncate(matched);
+        if !cursor.is_blank() {
+            loop {
+                if cursor.consume_quote() {
+                    containers.push(Container::Quote);
+                    continue;
+                }
+                if let Some(content_col) = cursor.consume_list_marker() {
+                    containers.push(Container::ListItem { content_col });
+                    continue;
+                }
+                break;
+            }
+            if !in_comment
+                && !cursor.is_blank()
+                && let Some((ch, len)) = fence_open(&cursor)
+            {
+                fence = Some(ActiveFence { containers: containers.clone(), ch, len });
+                continue;
+            }
+        }
+        if section.is_none()
+            && let Some((level, heading)) = parse_heading(&line)
+        {
+            if let Some((start_idx, start_level)) = flow_start {
+                if level <= start_level {
+                    section = Some((start_idx, idx));
+                }
+            } else if (level == 2 || level == 3) && heading.eq_ignore_ascii_case("flow") {
+                flow_start = Some((idx, level));
+            }
+        }
+    }
+    let section = section.or_else(|| flow_start.map(|(start, _)| (start, total_lines)));
+    let unclosed_fence = fence.filter(|f| f.containers.is_empty()).map(|f| (f.ch, f.len));
+    FlowBodyLayout { section, unclosed_fence, unclosed_comment: in_comment }
+}
+
 pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
     let mut parsed = ParsedBody::default();
     let mut containers: Vec<Container> = Vec::new();
