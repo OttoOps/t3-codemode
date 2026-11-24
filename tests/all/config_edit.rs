@@ -170,6 +170,8 @@ pub(crate) fn every_kind_of_key() -> Vec<(&'static str, Value)> {
         ("flow.serializeFileConflicts", json!(true)),
         ("trackers.jira.PROJ", json!("widgets")),
         ("trackers.hosts.\"jira.acme.example\"", json!("widgets")),
+        ("forges.\"gitlab.acme.example\"", json!({"kind": "gitlab", "cli": "glab"})),
+        ("forges.\"gitlab.acme.example\".cli", json!("/opt/glab/bin/glab")),
     ]
 }
 

@@ -31,15 +31,20 @@ pub(crate) struct Answered {
 }
 
 impl Answered {
+    fn change(&self) -> ChangeRef {
+        ChangeRef::of_key(&self.repo, self.pr)
+    }
+
     fn url(&self, host: &dyn CodeHost) -> String {
-        host.url(&ChangeRef::github(&self.repo, self.pr))
+        host.url(&self.change())
     }
 
     fn merged(&self, host: &dyn CodeHost, commit: &str) -> String {
         match self.answer.as_str() {
             "" => format!(
-                "{} merged on GitHub at {}, outside t3cm (merge commit {commit})",
+                "{} merged on {} at {}, outside t3cm (merge commit {commit})",
                 self.url(host),
+                self.change().forge.name(),
                 short(commit)
             ),
             a => {
@@ -401,7 +406,7 @@ impl Wf {
     }
 
     async fn delete_branch(&self, repo: &str, pr: u64) -> String {
-        match self.host.delete_branch(&ChangeRef::github(repo, pr)).await {
+        match self.host.delete_branch(&ChangeRef::of_key(repo, pr)).await {
             Branch::Unread(e) => format!("left the branch, as it could not read it on GitHub ({e})"),
             Branch::NotMerged(b) => format!("left branch {b}, as GitHub does not show the PR merged yet"),
             Branch::Fork(b) => format!("left branch {b}, which is on a fork"),

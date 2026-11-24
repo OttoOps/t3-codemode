@@ -11,6 +11,7 @@ use crate::clock::{Clock, iso};
 use crate::config::{Config, MIN_TIMEOUT_MS, OpenLinks, RemoteMode};
 use crate::desktop::{Desktop, WindowsDesktop, app_link};
 use crate::github::{GhCli, GitHub};
+use crate::gitlab::{GitLab, GlabCli};
 use crate::sandbox::{self, Host, Limits, NoHost, Run};
 use crate::store::Store;
 use crate::t3::{BoxFut, T3Client};
@@ -175,6 +176,7 @@ fn error_output(msg: &str, logs: Vec<String>, globals: &str) -> ToolOutput {
 struct Outside {
     remotes: Arc<dyn Remotes>,
     github: Arc<dyn GitHub>,
+    gitlab: Arc<dyn GitLab>,
     desktop: Arc<dyn Desktop>,
     tailscale: Arc<dyn TailscaleRunner>,
 }
@@ -237,8 +239,23 @@ impl App {
         desktop: Arc<dyn Desktop>,
         tailscale: Arc<dyn TailscaleRunner>,
     ) -> Arc<App> {
+        App::with_forges(config, store, t3, clock, remotes, github, Arc::new(GlabCli), desktop, tailscale)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_forges(
+        config: Config,
+        store: Arc<Store>,
+        t3: Arc<dyn T3Client>,
+        clock: Arc<dyn Clock>,
+        remotes: Arc<dyn Remotes>,
+        github: Arc<dyn GitHub>,
+        gitlab: Arc<dyn GitLab>,
+        desktop: Arc<dyn Desktop>,
+        tailscale: Arc<dyn TailscaleRunner>,
+    ) -> Arc<App> {
         let upstreams = Arc::new(UpstreamManager::new(config.upstreams.clone()));
-        App::assemble(config, store, t3, clock, upstreams, Outside { remotes, github, desktop, tailscale })
+        App::assemble(config, store, t3, clock, upstreams, Outside { remotes, github, gitlab, desktop, tailscale })
     }
 
     pub fn build(
@@ -258,6 +275,7 @@ impl App {
             Outside {
                 remotes,
                 github: Arc::new(GhCli),
+                gitlab: Arc::new(GlabCli),
                 desktop: Arc::new(WindowsDesktop),
                 tailscale: Arc::new(TailscaleCli::from_env()),
             },
@@ -270,10 +288,10 @@ impl App {
         t3: Arc<dyn T3Client>,
         clock: Arc<dyn Clock>,
         upstreams: Arc<UpstreamManager>,
-        Outside { remotes, github, desktop, tailscale }: Outside,
+        Outside { remotes, github, gitlab, desktop, tailscale }: Outside,
     ) -> Arc<App> {
         let runs = Arc::new(Semaphore::new(config.max_concurrent_runs));
-        let wf = Arc::new(Wf::new(store.clone(), t3.clone(), clock.clone(), Arc::new(config), remotes, github));
+        let wf = Arc::new(Wf::new(store.clone(), t3.clone(), clock.clone(), Arc::new(config), remotes, github, gitlab));
         let cached: Vec<Value> =
             store.meta_get(TOOLS_CACHE).ok().flatten().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let generation = upstreams.generation();

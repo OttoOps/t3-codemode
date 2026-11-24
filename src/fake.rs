@@ -103,6 +103,15 @@ pub fn pull_request(repository: &str, number: u64, state: &str) -> Value {
     })
 }
 
+pub fn merge_request(host: &str, path: &str, iid: u64, state: &str) -> Value {
+    json!({
+        "host": host, "repository": path, "number": iid,
+        "url": format!("https://{host}/{path}/-/merge_requests/{iid}"), "source": "agent",
+        "watching": state == "open", "state": state, "title": format!("MR {iid}"),
+        "headBranch": format!("fix/{iid}"), "baseBranch": "main", "isDraft": false, "stack": null
+    })
+}
+
 pub fn provider(id: &str, driver: &str, models: &[&str]) -> Value {
     let models: Vec<Value> = models
         .iter()
@@ -1690,6 +1699,235 @@ impl crate::github::GitHub for FakeGitHub {
                 }
                 _ => Ok(gh_error("the fake does not support this mutation")),
             }
+        })
+    }
+}
+
+type MrKey = (String, String, u64);
+
+#[derive(Default)]
+struct GlState {
+    mrs: BTreeMap<MrKey, Value>,
+    calls: Vec<Value>,
+    read_errors: BTreeMap<MrKey, String>,
+    rest_status: BTreeMap<String, u16>,
+    down: bool,
+}
+
+#[derive(Default)]
+pub struct FakeGitLab(Mutex<GlState>);
+
+pub fn gitlab_mr(head: &str, detailed_merge_status: &str) -> Value {
+    json!({
+        "state": "opened", "draft": false, "sha": head, "detailed_merge_status": detailed_merge_status,
+        "merged_at": null, "closed_at": null, "updated_at": null, "merge_commit_sha": null, "squash_commit_sha": null,
+        "squash_on_merge": false, "squash": false, "head_pipeline": null, "pipelines": [], "train": null
+    })
+}
+
+pub fn gitlab_pipeline(id: u64, sha: &str, git_ref: &str, status: &str) -> Value {
+    json!({"id": id, "sha": sha, "ref": git_ref, "status": status, "source": "merge_request_event"})
+}
+
+fn mr_key(host: &str, path: &str, iid: u64) -> MrKey {
+    (host.to_ascii_lowercase(), path.to_ascii_lowercase(), iid)
+}
+
+fn upper(v: &Value) -> Value {
+    v.as_str().map_or(Value::Null, |s| json!(s.to_ascii_uppercase()))
+}
+
+fn graphql_mr(mr: &Value) -> Value {
+    let pipe = &mr["head_pipeline"];
+    let car = &mr["train"];
+    json!({
+        "state": mr["state"], "draft": mr["draft"], "diffHeadSha": mr["sha"],
+        "detailedMergeStatus": upper(&mr["detailed_merge_status"]), "mergedAt": mr["merged_at"],
+        "squashOnMerge": mr["squash_on_merge"], "mergeCommitSha": mr["merge_commit_sha"],
+        "headPipeline": if pipe.is_object() { json!({"status": upper(&pipe["status"]), "ref": pipe["ref"]}) } else { Value::Null },
+        "mergeTrainCar": if car.is_object() { json!({"status": upper(&car["status"]), "index": car["index"]}) } else { Value::Null },
+    })
+}
+
+fn rest_mr(iid: u64, mr: &Value) -> Value {
+    let mut out = mr.clone();
+    if let Some(o) = out.as_object_mut() {
+        o.remove("pipelines");
+        o.remove("train");
+        o.insert("iid".into(), json!(iid));
+    }
+    out
+}
+
+impl FakeGitLab {
+    fn st(&self) -> std::sync::MutexGuard<'_, GlState> {
+        self.0.lock().unwrap()
+    }
+
+    pub fn set_mr(&self, host: &str, path: &str, iid: u64, mr: Value) {
+        self.st().mrs.insert(mr_key(host, path, iid), mr);
+    }
+
+    pub fn update_mr(&self, host: &str, path: &str, iid: u64, patch: Value) {
+        let mut st = self.st();
+        let mr = st.mrs.get_mut(&mr_key(host, path, iid)).expect("known merge request");
+        for (k, v) in patch.as_object().expect("object patch") {
+            mr[k] = v.clone();
+        }
+    }
+
+    pub fn mr(&self, host: &str, path: &str, iid: u64) -> Value {
+        self.st().mrs[&mr_key(host, path, iid)].clone()
+    }
+
+    pub fn remove_mr(&self, host: &str, path: &str, iid: u64) {
+        self.st().mrs.remove(&mr_key(host, path, iid));
+    }
+
+    pub fn set_pipeline(&self, host: &str, path: &str, iid: u64, status: &str) {
+        let mr = self.mr(host, path, iid);
+        let sha = mr["sha"].as_str().unwrap_or_default().to_string();
+        let pipe = gitlab_pipeline(100 + iid, &sha, &format!("refs/merge-requests/{iid}/head"), status);
+        self.update_mr(host, path, iid, json!({"pipelines": [pipe.clone()], "head_pipeline": pipe}));
+    }
+
+    pub fn join_train(&self, host: &str, path: &str, iid: u64, index: u64) {
+        let mr = self.mr(host, path, iid);
+        let train = gitlab_pipeline(900 + iid, &"e".repeat(40), &format!("refs/merge-requests/{iid}/train"), "running");
+        let mut pipelines = vec![train.clone()];
+        pipelines.extend(mr["pipelines"].as_array().cloned().unwrap_or_default());
+        self.update_mr(
+            host,
+            path,
+            iid,
+            json!({"train": {"status": "fresh", "index": index}, "head_pipeline": train, "pipelines": pipelines,
+                   "detailed_merge_status": "merge_request_blocked"}),
+        );
+    }
+
+    pub fn merge(&self, host: &str, path: &str, iid: u64, commit: &str, at: &str) {
+        let mr = self.mr(host, path, iid);
+        let squash = mr["squash"] == true;
+        let (merge_commit, squash_commit) =
+            if squash { (Value::Null, json!(commit)) } else { (json!(commit), Value::Null) };
+        let mut patch = json!({"state": "merged", "merged_at": at, "updated_at": at, "merge_commit_sha": merge_commit,
+                               "squash_commit_sha": squash_commit, "detailed_merge_status": "not_open"});
+        if mr["train"].is_object() {
+            patch["train"] = json!({"status": "merged", "index": null});
+        }
+        self.update_mr(host, path, iid, patch);
+    }
+
+    pub fn close(&self, host: &str, path: &str, iid: u64, at: &str) {
+        let patch = json!({"state": "closed", "closed_at": at, "updated_at": at, "detailed_merge_status": "not_open"});
+        self.update_mr(host, path, iid, patch);
+    }
+
+    pub fn fail_read(&self, host: &str, path: &str, iid: u64, message: &str) {
+        self.st().read_errors.insert(mr_key(host, path, iid), message.into());
+    }
+
+    pub fn clear_read_errors(&self) {
+        self.st().read_errors.clear();
+    }
+
+    pub fn fail_rest(&self, suffix: &str, status: u16) {
+        self.st().rest_status.insert(suffix.into(), status);
+    }
+
+    pub fn set_down(&self, down: bool) {
+        self.st().down = down;
+    }
+
+    pub fn calls(&self) -> Vec<Value> {
+        self.st().calls.clone()
+    }
+
+    pub fn operations(&self) -> Vec<String> {
+        self.st().calls.iter().filter_map(|c| c["operation"].as_str().map(String::from)).collect()
+    }
+}
+
+fn rest_path(path: &str) -> Option<(String, u64, &str)> {
+    let rest = path.strip_prefix("projects/")?;
+    let (project, tail) = rest.split_once("/merge_requests/")?;
+    let (iid, sub) = tail.split_once('/').unwrap_or((tail, ""));
+    Some((project.replace("%2F", "/").to_ascii_lowercase(), iid.parse().ok()?, sub))
+}
+
+impl crate::gitlab::GitLab for FakeGitLab {
+    fn graphql<'a>(
+        &'a self,
+        to: crate::gitlab::Target<'a>,
+        query: &'a str,
+        variables: Value,
+    ) -> BoxFut<'a, anyhow::Result<Value>> {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            let mut st = self.st();
+            let op = if query.starts_with("query Reconcile") { "reconcile" } else { "unknown" };
+            st.calls
+                .push(json!({"operation": op, "host": to.host, "cli": to.cli, "query": query, "variables": variables}));
+            if st.down {
+                anyhow::bail!("{} api graphql failed: glab: not authenticated", to.cli);
+            }
+            if op != "reconcile" {
+                return Ok(json!({"errors": [{"message": "the fake does not support this query"}]}));
+            }
+            let mut data = serde_json::Map::new();
+            let mut errs = Vec::new();
+            for i in 0.. {
+                let Some(path) = variables[format!("p{i}")].as_str() else { break };
+                let iid: u64 = variables[format!("i{i}")].as_str().and_then(|n| n.parse().ok()).unwrap();
+                let alias = format!("m{i}");
+                let key = mr_key(to.host, path, iid);
+                if let Some(message) = st.read_errors.get(&key) {
+                    errs.push(json!({"path": [alias, "mergeRequest"], "message": message}));
+                    data.insert(alias, json!({"mergeRequest": null}));
+                    continue;
+                }
+                let known = st.mrs.keys().any(|(h, p, _)| *h == key.0 && *p == key.1);
+                let mr = st.mrs.get(&key).map_or(Value::Null, graphql_mr);
+                data.insert(alias, if known { json!({"mergeRequest": mr}) } else { Value::Null });
+            }
+            let mut out = json!({"data": data});
+            if !errs.is_empty() {
+                out["errors"] = json!(errs);
+            }
+            Ok(out)
+        })
+    }
+
+    fn get<'a>(
+        &'a self,
+        to: crate::gitlab::Target<'a>,
+        path: &'a str,
+    ) -> BoxFut<'a, anyhow::Result<crate::gitlab::Rest>> {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            let mut st = self.st();
+            let parsed = rest_path(path);
+            let op = match parsed.as_ref().map(|(_, _, sub)| *sub) {
+                Some("") => "mergeRequest",
+                Some("pipelines") => "pipelines",
+                _ => "unknown",
+            };
+            st.calls.push(json!({"operation": op, "host": to.host, "cli": to.cli, "path": path}));
+            if st.down {
+                anyhow::bail!("{} api failed: glab: not authenticated", to.cli);
+            }
+            let missing = || crate::gitlab::Rest { status: 404, body: json!({"message": "404 Not found"}) };
+            if let Some((_, status)) = st.rest_status.iter().find(|(s, _)| path.ends_with(s.as_str())) {
+                return Ok(crate::gitlab::Rest { status: *status, body: json!({"message": "fake failure"}) });
+            }
+            let Some((project, iid, _)) = parsed else { return Ok(missing()) };
+            let Some(mr) = st.mrs.get(&mr_key(to.host, &project, iid)) else { return Ok(missing()) };
+            let body = match op {
+                "mergeRequest" => rest_mr(iid, mr),
+                "pipelines" => mr["pipelines"].clone(),
+                _ => return Ok(missing()),
+            };
+            Ok(crate::gitlab::Rest { status: 200, body })
         })
     }
 }

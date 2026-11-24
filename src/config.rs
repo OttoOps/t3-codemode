@@ -323,6 +323,60 @@ pub struct Config {
     pub flow: Option<FlowConfig>,
     #[serde(default)]
     pub trackers: TrackersConfig,
+    #[serde(default)]
+    pub forges: Forges,
+}
+
+pub type Forges = BTreeMap<String, ForgeConfig>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ForgeKind {
+    Gitlab,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForgeConfig {
+    pub kind: ForgeKind,
+    #[serde(default = "glab")]
+    pub cli: String,
+}
+
+fn glab() -> String {
+    "glab".into()
+}
+
+pub fn gitlab_cli<'a>(forges: &'a Forges, host: &str) -> Option<&'a str> {
+    forges.iter().find(|(h, f)| f.kind == ForgeKind::Gitlab && h.eq_ignore_ascii_case(host)).map(|(_, f)| f.cli.trim())
+}
+
+fn validate_forges(forges: &Forges) -> Result<()> {
+    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+    for (host, forge) in forges {
+        let at = field::display(&["forges", host]);
+        if !is_tracker_host(host) {
+            return Err(invalid(
+                at,
+                format!(
+                    "forges: {host:?} must be a hostname without scheme, port or path (such as \"gitlab.example.com\")"
+                ),
+            ));
+        }
+        if host.eq_ignore_ascii_case("github.com") || host.eq_ignore_ascii_case("www.github.com") {
+            return Err(invalid(at, "forges: github.com is built in and needs no entry"));
+        }
+        if let Some(other) = seen.insert(host.to_ascii_lowercase(), host) {
+            return Err(invalid(at, format!("forges lists both {other:?} and {host:?}, which are the same host")));
+        }
+        if forge.cli.trim().is_empty() {
+            return Err(invalid(
+                format!("{at}.cli"),
+                format!("forges.{}.cli must name the CLI to run", field::segment(host)),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -549,7 +603,8 @@ pub fn builtin_defaults() -> Value {
         "trackers": {
             "jira": {},
             "hosts": {}
-        }
+        },
+        "forges": {}
     })
 }
 
@@ -730,6 +785,7 @@ impl Config {
             flow.validate().map_err(|e| within(e, "flow", "flow"))?;
         }
         self.trackers.validate().map_err(|e| within(e, "trackers", "trackers"))?;
+        validate_forges(&self.forges)?;
         Ok(())
     }
 

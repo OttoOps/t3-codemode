@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 
 use crate::t3::BoxFut;
@@ -15,9 +17,43 @@ pub struct ChangeRef {
     pub number: u64,
 }
 
+impl Forge {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Forge::Github => "GitHub",
+            Forge::Gitlab { .. } => "GitLab",
+        }
+    }
+
+    pub fn sender(&self) -> &'static str {
+        match self {
+            Forge::Github => "github",
+            Forge::Gitlab { .. } => "gitlab",
+        }
+    }
+}
+
 impl ChangeRef {
     pub fn github(repo: &str, number: u64) -> ChangeRef {
         ChangeRef { forge: Forge::Github, repo: repo.into(), number }
+    }
+
+    pub fn gitlab(host: &str, path: &str, number: u64) -> ChangeRef {
+        ChangeRef { forge: Forge::Gitlab { host: host.to_ascii_lowercase() }, repo: path.to_ascii_lowercase(), number }
+    }
+
+    pub fn of_key(key: &str, number: u64) -> ChangeRef {
+        match key.split_once('/') {
+            Some((host, path)) if path.contains('/') => ChangeRef::gitlab(host, path, number),
+            _ => ChangeRef::github(key, number),
+        }
+    }
+
+    pub fn key(&self) -> String {
+        match &self.forge {
+            Forge::Github => self.repo.to_ascii_lowercase(),
+            Forge::Gitlab { host } => format!("{host}/{}", self.repo).to_ascii_lowercase(),
+        }
     }
 }
 
@@ -140,4 +176,62 @@ pub trait CodeHost: Send + Sync {
     fn delete_branch<'a>(&'a self, r: &'a ChangeRef) -> BoxFut<'a, Branch>;
 
     fn url(&self, r: &ChangeRef) -> String;
+}
+
+pub struct Router {
+    github: Arc<dyn CodeHost>,
+    gitlab: Arc<dyn CodeHost>,
+}
+
+impl Router {
+    pub fn new(github: Arc<dyn CodeHost>, gitlab: Arc<dyn CodeHost>) -> Router {
+        Router { github, gitlab }
+    }
+
+    fn of(&self, r: &ChangeRef) -> &dyn CodeHost {
+        match r.forge {
+            Forge::Github => &*self.github,
+            Forge::Gitlab { .. } => &*self.gitlab,
+        }
+    }
+}
+
+impl CodeHost for Router {
+    fn read<'a>(&'a self, refs: &'a [ChangeRef]) -> BoxFut<'a, Result<Vec<Read>>> {
+        Box::pin(async move {
+            let (hub, lab): (Vec<ChangeRef>, Vec<ChangeRef>) =
+                refs.iter().cloned().partition(|r| r.forge == Forge::Github);
+            let mut hub = if hub.is_empty() { Vec::new() } else { self.github.read(&hub).await? }.into_iter();
+            let mut lab = if lab.is_empty() { Vec::new() } else { self.gitlab.read(&lab).await? }.into_iter();
+            Ok(refs
+                .iter()
+                .map(|r| {
+                    let next = if r.forge == Forge::Github { hub.next() } else { lab.next() };
+                    next.unwrap_or_else(|| Read::Failed(format!("{} returned no read", r.forge.name())))
+                })
+                .collect())
+        })
+    }
+
+    fn view<'a>(&'a self, r: &'a ChangeRef) -> BoxFut<'a, Result<Viewed>> {
+        self.of(r).view(r)
+    }
+
+    fn merge<'a>(
+        &'a self,
+        r: &'a ChangeRef,
+        id: &'a str,
+        head: &'a str,
+        how: Landing<'a>,
+    ) -> BoxFut<'a, Result<Landed>> {
+        self.of(r).merge(r, id, head, how)
+    }
+
+    fn delete_branch<'a>(&'a self, r: &'a ChangeRef) -> BoxFut<'a, Branch> {
+        self.of(r).delete_branch(r)
+    }
+
+    fn url(&self, r: &ChangeRef) -> String {
+        self.of(r).url(r)
+    }
 }

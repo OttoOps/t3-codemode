@@ -8797,8 +8797,8 @@ function confBoard() {
     h("div", { class: "conf-grid" },
       num("feed", { label: "Activity feed", unit: "entries", min: 0, help: "Entries kept on the page." }),
       num("settleAfterHours", { label: "Settle after", unit: "hours", min: 0, help: "0 turns auto-settle off." }),
-      num("reconcileActiveMinutes", { label: "GitHub check, merge queued", unit: "minutes", min: 1, help: "From 1 to the idle interval below." }),
-      num("reconcileIdleMinutes", { label: "GitHub check, idle", unit: "minutes", min: 0, help: "0 turns the checks off." }),
+      num("reconcileActiveMinutes", { label: "PR check, merge queued", unit: "minutes", min: 1, help: "From 1 to the idle interval below." }),
+      num("reconcileIdleMinutes", { label: "PR check, idle", unit: "minutes", min: 0, help: "0 turns the checks off." }),
       num("askPollSecs", { label: "Ask poll", unit: "seconds", min: 0, help: "How often an open ask is checked. 0 runs as 1." }),
       num("askTimeoutMinutes", { label: "Ask timeout", unit: "minutes", min: 0, help: "How long an ask may run." }),
       confSelect(sec, ["board", "openLinks"], {

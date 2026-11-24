@@ -835,6 +835,7 @@ async fn the_dialog_has_a_control_or_an_editor_for_every_key() {
             "board.pool",
             "board.ticketEffort",
             "board.ticketModel",
+            "forges",
             "trackers.hosts",
             "trackers.jira",
         ],

@@ -1678,7 +1678,7 @@ impl Wf {
 
     pub(crate) fn card_add(&self, c: NewCard) -> Result<String> {
         let options = c.options.unwrap_or_else(|| reply_options(c.body));
-        let pr = c.pr.or_else(|| card_pr(c.body));
+        let pr = c.pr.or_else(|| card_pr(c.body, &self.config().forges));
         let mut data = json!({"kind": c.kind, "ticket": c.ticket, "handle": c.handle, "options": options, "pr": pr});
         if let Some(a) = c.approval {
             data["approval"] = json!(a);
