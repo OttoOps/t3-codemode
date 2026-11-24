@@ -1061,7 +1061,7 @@ fn starts_with_directive_keyword(s: &str) -> bool {
 }
 
 fn target_starts_with_ref_or_backticked_ref(s: &str) -> bool {
-    let trimmed = s.trim_start();
+    let trimmed = s.trim_start().trim_start_matches("**").trim_start_matches("__").trim_start();
     if starts_with_explicit_or_phase_or_quote(trimmed) {
         return true;
     }
@@ -2775,6 +2775,7 @@ _No response_
 - [ ] Part of #10
 - [ ] Tracked here (part of #18)
 - [ ] Not after `#19`
+- [ ] Not after **`#23`**
 - [ ] #11, #12
 - [ ] `#16`
 - [ ] #21 (see the `blocked by:` field)
@@ -2786,6 +2787,7 @@ Part of #13
 Phase 1 of #14
 Not blocked by #15
 Not after `#20`
+Not after **`#24`**
 Part of:
 - #17
 ";
