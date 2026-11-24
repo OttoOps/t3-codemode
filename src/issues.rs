@@ -1530,6 +1530,9 @@ impl Wf {
             bail!("wf.issue: issue number #{number} is out of range for GitHub GraphQL");
         }
 
+        if let Some(t) = &title {
+            self.note_issue_title(&full_repo, number, t);
+        }
         let mut out = self.record_board_issue(me, &issue, title, note, None).await?;
         if should_sync {
             let plan = WiringPlan { blocked_by, parent, labels };
@@ -1840,15 +1843,54 @@ impl Wf {
         }))
     }
 
+    fn worker_coverage(&self) -> Result<Vec<(String, u8, Value)>> {
+        let mut out = Vec::new();
+        for t in self.store.children(BOARD, false)? {
+            for w in self.store.children(&t.child, false)? {
+                let Some(issue) = w.identity.issue.clone() else { continue };
+                let v = self.node_view(&w);
+                let pr = &v["pr"];
+                let (rank, kind) = if pr["state"] == "merged" {
+                    (0, "merged")
+                } else if pr["url"].is_string() && pr["state"] != "closed" {
+                    (1, "pr")
+                } else if !w.closed {
+                    (2, "worker")
+                } else {
+                    continue;
+                };
+                out.push((
+                    issue,
+                    rank,
+                    json!({
+                        "kind": kind, "ticket": t.label, "ticketThread": t.child, "worker": w.label,
+                        "thread": w.child, "link": v["link"], "status": v["status"],
+                        "pr": if rank < 2 { pr.clone() } else { Value::Null },
+                    }),
+                ));
+            }
+        }
+        out.sort_by_key(|(_, rank, _)| *rank);
+        Ok(out)
+    }
+
     pub fn new_issues(&self) -> Result<(Vec<Value>, Vec<Value>)> {
         let tickets = self.ticket_keys()?;
+        let coverage = self.worker_coverage()?;
         let (mut open, mut dismissed) = (Vec::new(), Vec::new());
         for (seq, i) in self.store.new_issues()?.into_iter().rev() {
             let slug = format!("{}#{}", i.repo, i.number).to_ascii_lowercase();
             if tickets.contains(&slug) || tickets.contains(&i.label.to_ascii_lowercase()) {
                 continue;
             }
-            let v = issue_view(seq, &i);
+            let mut v = issue_view(seq, &i);
+            v["coveredBy"] = json!(
+                coverage
+                    .iter()
+                    .filter(|(issue, ..)| self.same_issue_slug(issue, &slug))
+                    .map(|(.., c)| c)
+                    .collect::<Vec<_>>()
+            );
             if i.dismissed_at.is_some() { dismissed.push(v) } else { open.push(v) }
         }
         Ok((open, dismissed))

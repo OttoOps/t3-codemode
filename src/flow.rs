@@ -3462,6 +3462,7 @@ impl Wf {
         let covered = reads.covered.clone();
         let mut all = reads.reads.clone();
         all.extend(extra);
+        self.note_read_titles(&all);
         let mut view = match cfg.as_ref().filter(|c| c.queue_enabled()) {
             Some(c) => self.flow_build(c, reads, tickets.clone(), &closed, &sc, false)?,
             None => FlowView {
@@ -3684,6 +3685,21 @@ impl Wf {
         }
     }
 
+    fn note_read_titles<'a>(&self, reads: impl IntoIterator<Item = &'a Read>) {
+        let mut changed = false;
+        for r in reads {
+            changed |= self.note_issue_title(&r.issue.repo, r.issue.number, &r.issue.title);
+            for i in r.issue.parent.iter().chain(&r.issue.unblocked_by).chain(&r.open_blockers) {
+                if let Some(t) = &i.title {
+                    changed |= self.note_issue_title(&i.repo, i.number, t);
+                }
+            }
+        }
+        if changed {
+            self.changed();
+        }
+    }
+
     pub(crate) fn flow_soon(&self) {
         self.flow_due.store(true, std::sync::atomic::Ordering::Release);
     }
@@ -3736,6 +3752,7 @@ impl Wf {
         reads.aliases = self.repo_aliases_snapshot();
         self.resolve_body_dependencies(&mut reads, &mut extra, false).await?;
         let sc = self.resolve_source_control(&mut reads, &mut extra, &closed, cfg.serialize_file_conflicts).await?;
+        self.note_read_titles(reads.reads.iter().chain(&extra));
         let aliases = reads.aliases.clone();
         let conflict_adj = cfg.serialize_file_conflicts.then(|| sc.conflict_adj());
         let g = self.lock.lock().await;

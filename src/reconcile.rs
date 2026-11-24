@@ -272,6 +272,13 @@ fn batch_query(chunk: &[&Tracked]) -> (String, Value) {
 
 impl Wf {
     pub fn pr_view(&self, pr: &Value) -> Value {
+        if !pr.is_object() {
+            return pr.clone();
+        }
+        crate::board::with_verdict(self.pr_seen_view(pr))
+    }
+
+    fn pr_seen_view(&self, pr: &Value) -> Value {
         let mut pr = pr.clone();
         if pr["state"] == "open"
             && let Some((o, r, n)) = pr["url"].as_str().and_then(|u| pr_refs(u).into_iter().next())
