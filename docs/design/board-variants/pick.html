@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>t3 board - Swiss Railway Dispatch</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1440px; height: 900px; overflow: hidden; background: #f6f7f5; color: #14181f; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .top { height: 64px; background: #182232; color: #eef2f7; padding: 0 28px; display: flex; align-items: center; gap: 24px; }
+  .logo { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; color: #fff; }
+  .tabs { display: flex; gap: 4px; height: 64px; align-items: stretch; }
+  .tab { display: flex; align-items: center; gap: 8px; padding: 0 16px; font-size: 14px; font-weight: 500; color: #a7b6cb; border-bottom: 3px solid transparent; }
+  .tab.on { color: #fff; font-weight: 700; border-bottom-color: #d98218; }
+  .tc { font-size: 12px; font-variant-numeric: tabular-nums; padding: 1px 7px; border-radius: 3px; background: rgba(255,255,255,0.12); }
+  .right { margin-left: auto; display: flex; align-items: center; gap: 12px; font-size: 13px; color: #b7c4d6; }
+  .btn-nav { background: #d98218; color: #181000; padding: 8px 16px; border-radius: 4px; font-weight: 700; font-size: 13px; }
+  .btn-ghost { border: 1px solid rgba(255,255,255,0.22); color: #eef2f7; padding: 7px 12px; border-radius: 4px; font-size: 13px; }
+
+  .strip { height: 48px; background: #fff; border-bottom: 1px solid #d7dce2; padding: 0 28px; display: flex; align-items: center; gap: 20px; font-size: 13px; }
+  .stat { display: flex; align-items: center; gap: 8px; padding-right: 20px; border-right: 1px solid #e1e5ea; }
+  .stat b { font-size: 15px; font-variant-numeric: tabular-nums; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; }
+  .search { margin-left: auto; width: 280px; height: 32px; border: 1px solid #c7ced8; border-radius: 4px; padding: 0 10px; display: flex; align-items: center; color: #677282; }
+
+  .main { padding: 24px 28px; display: grid; gap: 22px; }
+  .alert-bar { background: #fff8eb; border: 1px solid #e6b86a; border-left: 5px solid #d98218; padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .alert-h { font-size: 16px; font-weight: 700; }
+  .alert-m { font-size: 13px; color: #5b4928; margin-top: 2px; }
+  .acts { display: flex; gap: 8px; }
+  .b-go { background: #182232; color: #fff; padding: 8px 16px; border-radius: 4px; font-size: 13px; font-weight: 700; }
+  .b-alt { background: #fff; border: 1px solid #c9cfd8; padding: 8px 14px; border-radius: 4px; font-size: 13px; font-weight: 600; }
+
+  .grid { display: grid; grid-template-columns: 1.25fr 1fr; gap: 28px; align-items: start; }
+  .panel { background: #fff; border: 1px solid #d7dce2; border-radius: 4px; overflow: hidden; }
+  .ph { padding: 14px 20px; border-bottom: 2px solid #182232; display: flex; justify-content: space-between; align-items: baseline; }
+  .ph h2 { font-size: 22px; font-weight: 800; letter-spacing: -0.015em; }
+  .ph span { font-size: 13px; color: #596577; font-variant-numeric: tabular-nums; }
+
+  .route-item { padding: 18px 20px; border-bottom: 1px solid #e4e8ed; display: grid; gap: 12px; }
+  .ri-top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .code { font-family: ui-monospace, Menlo, monospace; font-weight: 700; font-size: 13px; color: #182232; background: #edf1f6; padding: 2px 7px; border-radius: 3px; }
+  .rtitle { font-size: 16px; font-weight: 700; flex: 1; }
+  .rsub { font-size: 13px; color: #4f5b6c; }
+  .line-track { display: flex; align-items: center; gap: 0; padding: 8px 0 2px; }
+  .node { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 58px; }
+  .circle { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #9aa6b8; background: #fff; }
+  .circle.done { background: #1c8253; border-color: #1c8253; }
+  .circle.now { background: #fff; border-color: #d98218; border-width: 4px; width: 16px; height: 16px; }
+  .seg { flex: 1; height: 3px; background: #d2d8e0; margin-top: -18px; }
+  .seg.done { background: #1c8253; }
+  .nlab { font-size: 11px; font-family: ui-monospace, Menlo, monospace; color: #546173; font-weight: 600; }
+
+  .pr-row { padding: 16px 20px; border-bottom: 1px solid #e4e8ed; display: grid; gap: 6px; }
+  .pr-h { display: flex; align-items: center; gap: 10px; }
+  .pr-t { font-size: 15px; font-weight: 700; }
+  .pill { margin-left: auto; font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 3px; }
+  .pill.rev { background: #e1effb; color: #0b5187; }
+  .pill.run { background: #e3f4ec; color: #176943; }
+  .pill.mrg { background: #edf1f6; color: #435061; }
+  .pr-meta { font-size: 13px; color: #556173; display: flex; justify-content: space-between; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="logo">t3 board</div>
+  <nav class="tabs">
+    <div class="tab on">Live Dispatch <span class="tc">2</span></div>
+    <div class="tab">New Issues <span class="tc">14</span></div>
+    <div class="tab">Up Next <span class="tc">2 blocked</span></div>
+    <div class="tab">Graph <span class="tc">36</span></div>
+    <div class="tab">Activity <span class="tc">50</span></div>
+  </nav>
+  <div class="right">
+    <span>pool-a 100%</span>
+    <span class="btn-ghost">Ask agent</span>
+    <span class="btn-nav">+ Launch</span>
+  </div>
+</header>
+<div class="strip">
+  <div class="stat"><span class="dot" style="background:#d98218"></span><b>1</b> waiting on you</div>
+  <div class="stat"><span class="dot" style="background:#182232"></span><b>2</b> issues in progress (2/2 slots)</div>
+  <div class="stat"><span class="dot" style="background:#0b5187"></span><b>2</b> PRs active · 1 in review</div>
+  <div class="stat"><span class="dot" style="background:#1c8253"></span><b>5</b> merged today</div>
+  <div class="search">Filter issues, PRs, repos...</div>
+</div>
+<main class="main">
+  <section class="alert-bar">
+    <div>
+      <div class="alert-h">Merge PR #283: feat: sync parsed links to GitHub from board</div>
+      <div class="alert-m">t3-codemode#254 (Step 4/10) · Approved &amp; CI green at 7125906 · waiting 6m</div>
+    </div>
+    <div class="acts">
+      <div class="b-go">Merge</div>
+      <div class="b-alt">Hold</div>
+      <div class="b-alt">Inspect</div>
+    </div>
+  </section>
+  <div class="grid">
+    <section class="panel">
+      <div class="ph"><h2>Active Issues &amp; PR Routes</h2><span>2 running</span></div>
+      <div class="route-item">
+        <div class="ri-top"><span class="code">#254</span><div class="rtitle">Automatic dependency DAG and flow wiring for project issues</div></div>
+        <div class="rsub">Current sub-issue #256: Wire native GitHub dependencies on issue filing and sync parsed links</div>
+        <div class="line-track">
+          <div class="node"><span class="circle done"></span><span class="nlab">#265</span></div><div class="seg done"></div>
+          <div class="node"><span class="circle done"></span><span class="nlab">#272</span></div><div class="seg done"></div>
+          <div class="node"><span class="circle done"></span><span class="nlab">#278</span></div><div class="seg done"></div>
+          <div class="node"><span class="circle now"></span><span class="nlab">#283</span></div><div class="seg"></div>
+          <div class="node"><span class="circle"></span><span class="nlab">5..10</span></div>
+        </div>
+      </div>
+      <div class="route-item">
+        <div class="ri-top"><span class="code">#244</span><div class="rtitle">Shared arbitrary op decoder, swarm weights, and ddmin shrinker</div></div>
+        <div class="rsub">Current sub-issue #282: Fix reconcile leaving moved ready card open under non-merge gate</div>
+        <div class="line-track">
+          <div class="node"><span class="circle done"></span><span class="nlab">#280</span></div><div class="seg done"></div>
+          <div class="node"><span class="circle done"></span><span class="nlab">#281</span></div><div class="seg done"></div>
+          <div class="node"><span class="circle now"></span><span class="nlab">#282</span></div><div class="seg"></div>
+          <div class="node"><span class="circle"></span><span class="nlab">4/5</span></div><div class="seg"></div>
+          <div class="node"><span class="circle"></span><span class="nlab">5/5</span></div>
+        </div>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="ph"><h2>PRs in Progress</h2><span>2 open · 3 recent</span></div>
+      <div class="pr-row">
+        <div class="pr-h"><span class="code">PR #283</span><span class="pr-t">Sync parsed links to GitHub from board</span><span class="pill rev">In review</span></div>
+        <div class="pr-meta"><span>#254 (4/10) · Sub-issue #256</span><span>12m ago</span></div>
+      </div>
+      <div class="pr-row">
+        <div class="pr-h"><span class="code">WIP #282</span><span class="pr-t">Drop moved ready card under non-merge gate</span><span class="pill run">Building</span></div>
+        <div class="pr-meta"><span>#244 (3/5) · Gemini 4 Neon worker</span><span>4m ago</span></div>
+      </div>
+      <div class="pr-row">
+        <div class="pr-h"><span class="code">PR #281</span><span class="pr-t">Decode chaos ops with swarm weights</span><span class="pill mrg">Merged</span></div>
+        <div class="pr-meta"><span>#244 (2/5) · 09dc89e</span><span>6m ago</span></div>
+      </div>
+      <div class="pr-row">
+        <div class="pr-h"><span class="code">PR #278</span><span class="pr-t">Wire GitHub dependencies in wf.issue</span><span class="pill mrg">Merged</span></div>
+        <div class="pr-meta"><span>#254 (3/10) · e7c900b</span><span>1h ago</span></div>
+      </div>
+    </section>
+  </div>
+</main>
+</body>
+</html>

@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Modern Dev Workspace vs Swiss Railway Dispatch (Dark)</title>
+<style>
+  :root {
+    --ui-sans: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
+    --ui-mono: var(--font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
+    --ui-r: var(--radius, 8px);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    font-family: var(--ui-sans);
+    color: var(--foreground, #e8edf5);
+    line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { display: grid; gap: 12px; }
+
+  /* Controls bar */
+  .ctrl-bar {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .seg {
+    display: inline-flex; border: 1px solid var(--border, #30363d);
+    border-radius: var(--ui-r); overflow: hidden;
+  }
+  .seg button {
+    border: 0; background: transparent; color: var(--muted-foreground, #9aa4b2);
+    font: 600 12px/1 var(--ui-sans); padding: 7px 11px; cursor: pointer;
+    border-right: 1px solid var(--border, #30363d); transition: background 120ms, color 120ms;
+  }
+  .seg button:last-child { border-right: 0; }
+  .seg button:hover { color: var(--foreground, #e8edf5); background: var(--secondary, rgba(255,255,255,0.06)); }
+  .seg button[aria-pressed="true"] {
+    background: var(--primary, #3b82f6); color: var(--primary-foreground, #ffffff);
+  }
+
+  /* Grid layout */
+  .compare { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: stretch; }
+  .compare[data-view="modern"] { grid-template-columns: minmax(0, 1fr); }
+  .compare[data-view="modern"] .pane-swiss { display: none; }
+  .compare[data-view="swiss"] { grid-template-columns: minmax(0, 1fr); }
+  .compare[data-view="swiss"] .pane-modern { display: none; }
+  @media (max-width: 640px) {
+    .compare { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  .col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+  .col-head { display: grid; gap: 2px; }
+  .col-title { font-size: 13px; font-weight: 700; color: var(--foreground, #e8edf5); }
+  .col-tag { font-size: 11px; font-family: var(--ui-mono); color: var(--muted-foreground, #8b949e); }
+  .col-notes {
+    display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--muted-foreground, #9aa4b2);
+  }
+  .col-notes span {
+    padding: 2px 7px; border-radius: 4px; border: 1px solid var(--border, #30363d);
+  }
+
+  /* Mockup frames */
+  .frame {
+    flex: 1; display: flex; flex-direction: column; min-width: 0;
+    border-radius: var(--ui-r); overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.12);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* =========================================================
+     LEFT: MODERN DEV WORKSPACE (DARK - CATEGORY STANDARD)
+     ========================================================= */
+  .mod { background: #0d1117; color: #e6edf3; font-size: 11px; line-height: 1.35; }
+  .compare:not([data-view="both"]) .mod { font-size: 13px; }
+  .mod-shell { flex: 1; display: grid; grid-template-columns: 92px minmax(0, 1fr); }
+  .compare:not([data-view="both"]) .mod-shell { grid-template-columns: 168px minmax(0, 1fr); }
+
+  .mod-side {
+    background: #161b22; border-right: 1px solid #30363d; padding: 10px 7px;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .compare:not([data-view="both"]) .mod-side { padding: 14px 10px; }
+  .mod-logo { font-size: 12px; font-weight: 700; padding: 2px 6px 8px; color: #f0f6fc; }
+  .compare:not([data-view="both"]) .mod-logo { font-size: 15px; }
+  .mod-nav {
+    display: flex; align-items: center; justify-content: space-between; gap: 4px;
+    padding: 5px 6px; border-radius: 5px; color: #8b949e; font-size: 10px; white-space: nowrap;
+  }
+  .compare:not([data-view="both"]) .mod-nav { font-size: 12px; padding: 6px 8px; }
+  .mod-nav.on { background: #21262d; color: #f0f6fc; font-weight: 600; }
+  .mod-c {
+    font-size: 9px; padding: 1px 5px; border-radius: 8px; background: #30363d; color: #c9d1d9;
+  }
+  .compare:not([data-view="both"]) .mod-c { font-size: 11px; }
+  .mod-c.y { background: rgba(217,119,6,0.28); color: #fbbf24; font-weight: 700; }
+  .mod-side-foot {
+    margin-top: auto; padding-top: 8px; border-top: 1px solid #21262d;
+    font-size: 9px; color: #8b949e; display: grid; gap: 4px;
+  }
+  .compare:not([data-view="both"]) .mod-side-foot { font-size: 11px; }
+
+  .mod-main { display: flex; flex-direction: column; min-width: 0; }
+  .mod-top {
+    padding: 8px 10px; border-bottom: 1px solid #30363d; display: flex; align-items: center; gap: 6px;
+  }
+  .compare:not([data-view="both"]) .mod-top { padding: 10px 16px; gap: 10px; }
+  .mod-search {
+    flex: 1; min-width: 0; background: #161b22; border: 1px solid #30363d; border-radius: 5px;
+    padding: 4px 8px; color: #7d8590; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .compare:not([data-view="both"]) .mod-search { font-size: 12px; padding: 6px 10px; }
+  .mod-btn {
+    background: #3b82f6; color: #fff; border-radius: 5px; padding: 4px 8px;
+    font-weight: 600; font-size: 10px; white-space: nowrap;
+  }
+  .compare:not([data-view="both"]) .mod-btn { font-size: 12px; padding: 6px 12px; }
+
+  .mod-body { padding: 10px; display: grid; gap: 10px; align-content: start; }
+  .compare:not([data-view="both"]) .mod-body { padding: 16px; gap: 14px; }
+
+  .mod-banner {
+    background: rgba(217,119,6,0.12); border: 1px solid rgba(251,191,36,0.35);
+    border-radius: 6px; padding: 8px 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .mod-clear {
+    background: #161b22; border: 1px solid #26332c; border-radius: 6px; padding: 6px 10px;
+    display: flex; align-items: center; gap: 6px; color: #7ee787; font-size: 10px; font-weight: 600;
+  }
+  .compare:not([data-view="both"]) .mod-clear { font-size: 12px; padding: 8px 12px; }
+  .mod-bq { font-weight: 600; color: #f0f6fc; font-size: 11px; }
+  .compare:not([data-view="both"]) .mod-bq { font-size: 13px; }
+  .mod-bm { font-size: 10px; color: #9ea7b3; margin-top: 2px; }
+  .compare:not([data-view="both"]) .mod-bm { font-size: 12px; }
+
+  .mod-card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }
+  .mod-ch {
+    padding: 7px 10px; border-bottom: 1px solid #30363d; display: flex; justify-content: space-between; align-items: center;
+  }
+  .mod-ch h3 { font-size: 11px; font-weight: 700; color: #f0f6fc; }
+  .compare:not([data-view="both"]) .mod-ch h3 { font-size: 14px; }
+  .mod-ch span { font-size: 10px; color: #8b949e; }
+  .mod-row {
+    padding: 8px 10px; border-bottom: 1px solid #21262d; display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;
+  }
+  .mod-row:last-child { border-bottom: 0; }
+  .mod-t { font-weight: 600; color: #e6edf3; font-size: 11px; }
+  .compare:not([data-view="both"]) .mod-t { font-size: 13px; }
+  .mod-s { font-size: 10px; color: #8b949e; margin-top: 2px; }
+  .compare:not([data-view="both"]) .mod-s { font-size: 12px; }
+  .mod-id { font-family: var(--ui-mono); color: #79c0ff; font-weight: 600; margin-right: 4px; }
+  .mod-pill {
+    flex: none; font-size: 9px; font-weight: 600; padding: 2px 7px; border-radius: 10px; white-space: nowrap;
+    background: rgba(59,130,246,0.16); color: #60a5fa;
+  }
+  .compare:not([data-view="both"]) .mod-pill { font-size: 11px; padding: 3px 9px; }
+  .mod-pill.g { background: rgba(16,185,129,0.16); color: #34d399; }
+  .mod-pill.m { background: #21262d; color: #8b949e; }
+
+  /* =========================================================
+     RIGHT: SWISS RAILWAY DISPATCH (DARK - NOCTURNAL SBB)
+     ========================================================= */
+  .sw { background: #0c1017; color: #eef2f7; font-size: 11px; line-height: 1.35; display: flex; flex-direction: column; min-width: 0; }
+  .compare:not([data-view="both"]) .sw { font-size: 13px; }
+
+  .sw-top {
+    background: #131c2b; border-bottom: 1px solid #24334a; padding: 0 10px;
+    display: flex; align-items: center; gap: 8px; height: 38px; min-width: 0;
+  }
+  .compare:not([data-view="both"]) .sw-top { padding: 0 18px; height: 46px; gap: 18px; }
+  .sw-logo { font-size: 12px; font-weight: 800; letter-spacing: -0.02em; color: #fff; white-space: nowrap; flex: none; }
+  .compare:not([data-view="both"]) .sw-logo { font-size: 16px; }
+  .sw-tabs { display: flex; gap: 1px; height: 100%; align-items: stretch; overflow: hidden; min-width: 0; flex: 1; }
+  .sw-tab {
+    display: flex; align-items: center; gap: 4px; padding: 0 6px; font-size: 10px; font-weight: 500;
+    color: #8fa2bc; border-bottom: 2px solid transparent; white-space: nowrap;
+  }
+  .compare:not([data-view="both"]) .sw-tab { font-size: 12px; padding: 0 12px; gap: 6px; }
+  .sw-tab.on { color: #fff; font-weight: 700; border-bottom-color: #e29524; }
+  .sw-tc {
+    font-size: 9px; padding: 0 4px; border-radius: 2px; background: rgba(255,255,255,0.1); color: #cdd8e6;
+  }
+  .compare:not([data-view="both"]) .sw-tc { font-size: 11px; padding: 1px 6px; }
+  .sw-cta {
+    margin-left: auto; flex: none; background: #e29524; color: #170f00; border-radius: 3px;
+    padding: 4px 8px; font-size: 10px; font-weight: 800; white-space: nowrap;
+  }
+  .compare:not([data-view="both"]) .sw-cta { font-size: 12px; padding: 6px 12px; }
+
+  .sw-strip {
+    background: #101621; border-bottom: 1px solid #1f2b3d; padding: 6px 10px;
+    display: flex; align-items: center; gap: 8px; font-size: 10px; color: #9aa8bc; flex-wrap: wrap; min-width: 0;
+  }
+  .compare:not([data-view="both"]) .sw-strip { padding: 8px 18px; gap: 18px; font-size: 12px; }
+  .sw-stat { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .sw-stat b { color: #eef2f7; font-weight: 700; }
+  .sw-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+
+  .sw-body { padding: 10px; display: grid; gap: 10px; min-width: 0; }
+  .compare:not([data-view="both"]) .sw-body { padding: 16px 18px; gap: 14px; }
+
+  .sw-alert {
+    background: #1d170c; border: 1px solid #594016; border-left: 4px solid #e29524;
+    border-radius: 3px; padding: 8px 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0;
+  }
+  .sw-clear {
+    background: #0f1b16; border: 1px solid #1f4534; border-left: 4px solid #2da46e;
+    border-radius: 3px; padding: 6px 10px; display: flex; align-items: center; justify-content: space-between;
+    font-size: 10px; color: #7adba9; font-weight: 600; min-width: 0;
+  }
+  .compare:not([data-view="both"]) .sw-clear { font-size: 12px; padding: 8px 14px; }
+  .sw-ah { font-weight: 700; color: #fff6e5; font-size: 11px; }
+  .compare:not([data-view="both"]) .sw-ah { font-size: 13px; }
+  .sw-am { font-size: 10px; color: #c7ad82; margin-top: 2px; }
+  .compare:not([data-view="both"]) .sw-am { font-size: 12px; }
+  .sw-act { display: flex; gap: 5px; flex: none; }
+  .sw-bgo {
+    background: #e29524; color: #170f00; padding: 4px 8px; border-radius: 3px; font-weight: 800; font-size: 10px; white-space: nowrap;
+  }
+  .compare:not([data-view="both"]) .sw-bgo { font-size: 12px; padding: 6px 12px; }
+  .sw-balt {
+    background: transparent; border: 1px solid #485870; color: #dce4ef; padding: 4px 6px; border-radius: 3px; font-weight: 600; font-size: 10px; white-space: nowrap;
+  }
+  .compare:not([data-view="both"]) .sw-balt { font-size: 12px; padding: 6px 10px; }
+
+  .sw-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; }
+  .compare:not([data-view="both"]) .sw-grid { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+
+  .sw-panel { background: #121822; border: 1px solid #222f42; border-top: 2px solid #354c6e; border-radius: 3px; min-width: 0; overflow: hidden; }
+  .sw-ph {
+    padding: 7px 10px; border-bottom: 1px solid #1f2b3d; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; min-width: 0;
+  }
+  .sw-ph h3 { font-size: 11px; font-weight: 800; letter-spacing: 0.01em; color: #f5f8fc; text-transform: uppercase; white-space: nowrap; }
+  .compare:not([data-view="both"]) .sw-ph h3 { font-size: 12px; letter-spacing: 0.04em; }
+  .sw-ph span { font-size: 10px; font-family: var(--ui-mono); color: #8fa2bc; white-space: nowrap; }
+
+  .sw-issue { padding: 9px 10px; border-bottom: 1px solid #1b2535; display: grid; gap: 6px; min-width: 0; }
+  .sw-issue:last-child { border-bottom: 0; }
+  .sw-itop { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+  .sw-code {
+    font-family: var(--ui-mono); font-size: 10px; font-weight: 700; color: #dbe6f5;
+    background: #1e2c40; padding: 1px 5px; border-radius: 2px; flex: none;
+  }
+  .compare:not([data-view="both"]) .sw-code { font-size: 11px; padding: 2px 6px; }
+  .sw-ititle { font-weight: 700; color: #f5f8fc; font-size: 11px; min-width: 0; }
+  .compare:not([data-view="both"]) .sw-ititle { font-size: 13px; }
+  .sw-isub { font-size: 10px; color: #95a5bc; min-width: 0; }
+  .compare:not([data-view="both"]) .sw-isub { font-size: 12px; }
+
+  /* Route-line station track (signature move) */
+  .track { display: flex; align-items: center; padding-top: 2px; min-width: 0; }
+  .st { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 26px; flex: none; }
+  .compare:not([data-view="both"]) .st { min-width: 44px; }
+  .st-c { width: 9px; height: 9px; border-radius: 50%; border: 2px solid #485b75; background: #121822; }
+  .st-c.done { background: #2da46e; border-color: #2da46e; }
+  .st-c.now { width: 11px; height: 11px; border-width: 3px; border-color: #e29524; background: #121822; }
+  .st-seg { flex: 1; min-width: 8px; height: 2px; background: #2b3a50; margin-top: -12px; }
+  .st-seg.done { background: #2da46e; }
+  .st-l { font-size: 9px; font-family: var(--ui-mono); color: #8b9cb5; font-weight: 600; }
+  .compare:not([data-view="both"]) .st-l { font-size: 10px; }
+  .st-l.now { color: #f5bc62; }
+
+  .sw-pr { padding: 8px 10px; border-bottom: 1px solid #1b2535; display: grid; gap: 3px; min-width: 0; }
+  .sw-pr:last-child { border-bottom: 0; }
+  .sw-pr1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .sw-prt { font-weight: 700; color: #eef2f7; font-size: 11px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .compare:not([data-view="both"]) .sw-prt { font-size: 13px; white-space: normal; }
+  .sw-tag {
+    flex: none; font-size: 9px; font-weight: 700; padding: 2px 5px; border-radius: 2px;
+    font-family: var(--ui-mono); text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap;
+  }
+  .compare:not([data-view="both"]) .sw-tag { font-size: 10px; padding: 2px 7px; }
+  .sw-tag.rev { background: rgba(56,152,224,0.18); color: #67baf7; border: 1px solid rgba(56,152,224,0.35); }
+  .sw-tag.run { background: rgba(45,164,110,0.18); color: #5ed49b; border: 1px solid rgba(45,164,110,0.35); }
+  .sw-tag.mrg { background: #1c2533; color: #8fa2bc; }
+  .sw-prm { font-size: 10px; color: #8b9cb5; display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
+  .compare:not([data-view="both"]) .sw-prm { font-size: 11px; }
+
+  /* State toggle visibility */
+  [data-state="busy"] .only-clear { display: none !important; }
+  [data-state="clear"] .only-busy { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap" id="wrap" data-state="busy">
+  <div class="ctrl-bar">
+    <div class="seg" role="group" aria-label="Comparison view">
+      <button type="button" data-v="both" aria-pressed="true">Side by Side</button>
+      <button type="button" data-v="modern" aria-pressed="false">Modern Dev (Full)</button>
+      <button type="button" data-v="swiss" aria-pressed="false">Swiss Railway Dark (Full)</button>
+    </div>
+    <div class="seg" role="group" aria-label="Decision load state">
+      <button type="button" data-s="busy" aria-pressed="true">1 waiting (Gate open)</button>
+      <button type="button" data-s="clear" aria-pressed="false">0 waiting (Live now)</button>
+    </div>
+  </div>
+
+  <div class="compare" id="compare" data-view="both">
+    <!-- LEFT: MODERN DEV WORKSPACE -->
+    <div class="col pane-modern">
+      <div class="col-head">
+        <span class="col-title">Modern Dev Workspace</span>
+        <span class="col-tag">Category standard · Sidebar + cards</span>
+      </div>
+      <div class="frame mod">
+        <div class="mod-shell">
+          <aside class="mod-side">
+            <div class="mod-logo">t3 board</div>
+            <div class="mod-nav on">Overview <span class="mod-c">2</span></div>
+            <div class="mod-nav">Needs you <span class="mod-c y only-busy">1</span><span class="mod-c only-clear">0</span></div>
+            <div class="mod-nav">PRs <span class="mod-c">2</span></div>
+            <div class="mod-nav">New issues <span class="mod-c">14</span></div>
+            <div class="mod-nav">Graph <span class="mod-c">36</span></div>
+            <div class="mod-nav">Activity <span class="mod-c">50</span></div>
+            <div class="mod-side-foot">
+              <div>● T3 connected</div>
+              <div>pool-a 100%</div>
+            </div>
+          </aside>
+          <div class="mod-main">
+            <div class="mod-top">
+              <div class="mod-search">Search issues, PRs, activity...</div>
+              <div class="mod-btn">+ Launch</div>
+            </div>
+            <div class="mod-body">
+              <div class="mod-banner only-busy">
+                <div style="min-width:0">
+                  <div class="mod-bq">Merge PR #283: sync parsed links to GitHub</div>
+                  <div class="mod-bm">#254 (4/10) · CI passing, approved · 6m</div>
+                </div>
+                <div class="mod-btn">Merge</div>
+              </div>
+              <div class="mod-clear only-clear">✓ Nothing waiting on you right now</div>
+
+              <div class="mod-card">
+                <div class="mod-ch"><h3>Issues in Progress</h3><span>2 active</span></div>
+                <div class="mod-row">
+                  <div style="min-width:0">
+                    <div class="mod-t"><span class="mod-id">#254</span>Automatic dependency DAG and flow wiring</div>
+                    <div class="mod-s">Sub-issue #256 · 3 merged, PR #283 in review</div>
+                  </div>
+                  <span class="mod-pill">4/10</span>
+                </div>
+                <div class="mod-row">
+                  <div style="min-width:0">
+                    <div class="mod-t"><span class="mod-id">#244</span>Shared op decoder, swarm weights &amp; shrinker</div>
+                    <div class="mod-s">Sub-issue #282 · 2 merged, worker running</div>
+                  </div>
+                  <span class="mod-pill">3/5</span>
+                </div>
+              </div>
+
+              <div class="mod-card">
+                <div class="mod-ch"><h3>PRs in Progress</h3><span>2 active</span></div>
+                <div class="mod-row">
+                  <div style="min-width:0">
+                    <div class="mod-t"><span class="mod-id">#283</span>feat: sync parsed links to GitHub from board</div>
+                    <div class="mod-s">#254 (4/10) · Sub-issue #256 · 12m</div>
+                  </div>
+                  <span class="mod-pill">Review</span>
+                </div>
+                <div class="mod-row">
+                  <div style="min-width:0">
+                    <div class="mod-t"><span class="mod-id">#282</span>fix: drop moved ready card under non-merge gate</div>
+                    <div class="mod-s">#244 (3/5) · worker building · 4m</div>
+                  </div>
+                  <span class="mod-pill g">Running</span>
+                </div>
+                <div class="mod-row">
+                  <div style="min-width:0">
+                    <div class="mod-t"><span class="mod-id">#281</span>test: decode chaos ops with swarm weights</div>
+                    <div class="mod-s">#244 (2/5) · merged 09dc89e · 6m</div>
+                  </div>
+                  <span class="mod-pill m">Merged</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="col-notes">
+        <span>Left nav always visible</span>
+        <span>Soft rounded cards</span>
+        <span>Numeric step pills (4/10)</span>
+      </div>
+    </div>
+
+    <!-- RIGHT: SWISS RAILWAY DISPATCH (DARK) -->
+    <div class="col pane-swiss">
+      <div class="col-head">
+        <span class="col-title">Swiss Railway Dispatch (Dark)</span>
+        <span class="col-tag">Nocturnal SBB · Full-width + PR tracks</span>
+      </div>
+      <div class="frame sw">
+        <div class="sw-top">
+          <div class="sw-logo">t3 board</div>
+          <div class="sw-tabs">
+            <div class="sw-tab on">Dispatch <span class="sw-tc">2</span></div>
+            <div class="sw-tab">Issues <span class="sw-tc">14</span></div>
+            <div class="sw-tab">Graph <span class="sw-tc">36</span></div>
+            <div class="sw-tab">Activity</div>
+          </div>
+          <div class="sw-cta">+ Launch</div>
+        </div>
+        <div class="sw-strip">
+          <span class="sw-stat only-busy"><span class="sw-dot" style="background:#e29524"></span><b>1</b> waiting</span>
+          <span class="sw-stat only-clear"><span class="sw-dot" style="background:#2da46e"></span><b>0</b> waiting</span>
+          <span class="sw-stat"><span class="sw-dot" style="background:#67baf7"></span><b>2/2</b> slots</span>
+          <span class="sw-stat"><span class="sw-dot" style="background:#2da46e"></span><b>5</b> merged today</span>
+          <span class="sw-stat" style="margin-left:auto">pool-a 100%</span>
+        </div>
+        <div class="sw-body">
+          <div class="sw-alert only-busy">
+            <div style="min-width:0">
+              <div class="sw-ah">Merge PR #283: sync parsed links to GitHub from board</div>
+              <div class="sw-am">#254 (Step 4/10) · CI green &amp; approved at 7125906 · 6m</div>
+            </div>
+            <div class="sw-act">
+              <span class="sw-bgo">Merge</span>
+              <span class="sw-balt">Hold</span>
+            </div>
+          </div>
+          <div class="sw-clear only-clear">
+            <span>All clear - 0 decisions waiting on you</span>
+            <span style="font-family:var(--ui-mono);font-size:10px;opacity:.85">T3 live</span>
+          </div>
+
+          <div class="sw-grid">
+            <div class="sw-panel">
+              <div class="sw-ph"><h3>Issues in Progress</h3><span>2 RUNNING</span></div>
+              <div class="sw-issue">
+                <div class="sw-itop"><span class="sw-code">#254</span><div class="sw-ititle">Automatic dependency DAG and flow wiring</div></div>
+                <div class="sw-isub">Active #256: Wire native GitHub dependencies &amp; sync parsed links</div>
+                <div class="track">
+                  <div class="st"><span class="st-c done"></span><span class="st-l">#265</span></div><div class="st-seg done"></div>
+                  <div class="st"><span class="st-c done"></span><span class="st-l">#272</span></div><div class="st-seg done"></div>
+                  <div class="st"><span class="st-c done"></span><span class="st-l">#278</span></div><div class="st-seg done"></div>
+                  <div class="st"><span class="st-c now"></span><span class="st-l now">#283</span></div><div class="st-seg"></div>
+                  <div class="st"><span class="st-c"></span><span class="st-l">5..10</span></div>
+                </div>
+              </div>
+              <div class="sw-issue">
+                <div class="sw-itop"><span class="sw-code">#244</span><div class="sw-ititle">Shared op decoder, swarm weights &amp; ddmin shrinker</div></div>
+                <div class="sw-isub">Active #282: Drop moved ready card under non-merge gate</div>
+                <div class="track">
+                  <div class="st"><span class="st-c done"></span><span class="st-l">#280</span></div><div class="st-seg done"></div>
+                  <div class="st"><span class="st-c done"></span><span class="st-l">#281</span></div><div class="st-seg done"></div>
+                  <div class="st"><span class="st-c now"></span><span class="st-l now">#282</span></div><div class="st-seg"></div>
+                  <div class="st"><span class="st-c"></span><span class="st-l">4/5</span></div><div class="st-seg"></div>
+                  <div class="st"><span class="st-c"></span><span class="st-l">5/5</span></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="sw-panel">
+              <div class="sw-ph"><h3>PRs in Progress</h3><span>2 ACTIVE</span></div>
+              <div class="sw-pr">
+                <div class="sw-pr1"><span class="sw-code">#283</span><span class="sw-prt">Sync parsed links to GitHub from board</span><span class="sw-tag rev">Review</span></div>
+                <div class="sw-prm"><span>#254 (4/10) · Sub-issue #256</span><span>12m</span></div>
+              </div>
+              <div class="sw-pr">
+                <div class="sw-pr1"><span class="sw-code">#282</span><span class="sw-prt">Drop moved ready card under non-merge gate</span><span class="sw-tag run">Building</span></div>
+                <div class="sw-prm"><span>#244 (3/5) · fix/282-moved-ready</span><span>4m</span></div>
+              </div>
+              <div class="sw-pr">
+                <div class="sw-pr1"><span class="sw-code">#281</span><span class="sw-prt">Decode chaos ops with swarm weights</span><span class="sw-tag mrg">Merged</span></div>
+                <div class="sw-prm"><span>#244 (2/5) · 09dc89e</span><span>6m</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="col-notes">
+        <span>100% width for titles</span>
+        <span>Visual PR route tracks</span>
+        <span>Ochre reserved for action</span>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+  const cmp = document.getElementById("compare");
+  const wrap = document.getElementById("wrap");
+  document.querySelectorAll("[data-v]").forEach(b => {
+    b.addEventListener("click", () => {
+      cmp.dataset.view = b.dataset.v;
+      document.querySelectorAll("[data-v]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    });
+  });
+  document.querySelectorAll("[data-s]").forEach(b => {
+    b.addEventListener("click", () => {
+      wrap.dataset.state = b.dataset.s;
+      document.querySelectorAll("[data-s]").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    });
+  });
+</script>
+</body>
+</html>
