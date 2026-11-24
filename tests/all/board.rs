@@ -2675,20 +2675,28 @@ const rt = [T("acme/r#1", {{ progress: {{ step: 3, of: 4, merged: 1 }}, workers:
   W("#1 PR 2/4", "done", {{ step: step(2) }}),
   W("#1 PR 3/4", "idle", {{ step: step(3), pr: pr(13) }}),
   W("#1 PR 4/4", "idle", {{ step: step(4), pr: pr(14) }}),
+] }}), T("acme/q#2", {{ workers: [
+  W("#2 PR 1/2", "idle", {{ step: {{ n: 1, of: 2 }}, pr: pr(13) }}),
+  W("#2 PR 2/2", "idle", {{ step: {{ n: 2, of: 2 }}, pr: {{ number: 13, url: "https://github.com/acme/other/pull/13", state: "open" }} }}),
 ] }})];
 const gate = (id, text) => ({{ ...base.cards[0], id, kind: "gate", ticket: "t-acme/r#1", label: "acme/r#1", text }});
 emitState({{ ...base, tree: rt, cards: [
   gate("g1", '**ACTION NEEDED:** reply "merge" to merge #13, here: https://github.com/acme/a/pull/13'),
   gate("g2", "**ACTION NEEDED:** decide each open review finding on #14"),
+  {{ ...gate("g3", '**ACTION NEEDED:** reply "merge" to merge #13, here: https://github.com/acme/other/pull/13'), ticket: "t-acme/q#2", label: "acme/q#2" }},
 ] }});
-return [...row("acme/r#1").querySelectorAll(".station")].map((b) => [b.children[0].className, b.children[2].textContent, b.getAttribute("data-seg-r")]);
+const st = (label) => [...row(label).querySelectorAll(".station")].map((b) => [b.children[1].textContent, b.children[0].className, b.children[2].textContent, b.getAttribute("data-seg-r")]);
+return {{ r: st("acme/r#1"), q: st("acme/q#2").slice(0, 2).map((x) => x[2]) }};
 "##
         ),
     );
-    assert_eq!(r[0], json!(["st-dot merged", "merged", null]), "{r}");
-    assert_eq!(r[1], json!(["st-dot done", "done", null]), "{r}");
-    assert_eq!(r[2], json!(["st-dot gate", "merge gate", null]), "{r}");
-    assert_ne!(r[3][1], "merge gate", "{r}");
+    let st = &r["r"];
+    assert_eq!(st[0], json!(["#11", "st-dot merged", "merged", null]), "{r}");
+    assert_eq!((&st[1][1], &st[1][2], &st[1][3]), (&json!("st-dot done"), &json!("done"), &Value::Null), "{r}");
+    assert_eq!(st[2], json!(["#13", "st-dot gate", "merge gate", null]), "{r}");
+    assert_eq!(st[3][0], "#14", "{r}");
+    assert_ne!(st[3][2], "merge gate", "{r}");
+    assert_eq!(r["q"], json!(["open", "merge gate"]), "{r}");
 }
 
 #[tokio::test]
@@ -2709,7 +2717,8 @@ emitState({{ ...base, cards: [], tree: rt }});
 setFilter({{ q: "indexing" }});
 const keys = [...document.getElementById("prs").children].filter((e) => !e.classList.contains("gone")).map((e) => e.dataset.key);
 setFilter({{}});
-document.getElementById("p-arch").append(document.getElementById("done"));
+selectView("activity");
+selectTab("done");
 q("#done .tk").focus();
 emitState({{ ...base, cards: [], tree: [...rt, T("acme/d#4", {{ status: "done", done: true }})] }});
 const nd = q("#new-done");

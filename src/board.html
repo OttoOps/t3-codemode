@@ -3899,11 +3899,25 @@ function prVerdict(pr) {
   return exec === "pr-green" ? "ready" : exec === "alert" ? "failing" : "review";
 }
 
+function prRefs(text) {
+  return [...String(text || "").matchAll(/https?:\/\/[^\s/]+\/([^\s]+?)\/(?:-\/)?(?:pull|merge_requests)\/(\d+)/g)]
+    .map((m) => [m[1].toLowerCase(), Number(m[2])]);
+}
+
+function prRepo(pr) {
+  const ref = prRefs(pr.url)[0];
+  return String(pr.repository || (ref ? ref[0] : "")).toLowerCase();
+}
+
 function gateFor(pr, t, cards) {
   if (!pr || !pr.number) return null;
   const re = new RegExp("#" + pr.number + "\\b");
-  return cards.find((c) => c.kind === "gate" && (!t || !c.ticket || c.ticket === t.thread) && /\bmerge\b/i.test(c.text || "")
-    && (re.test(c.text || "") || (pr.url && String(c.text || "").includes(pr.url)))) || null;
+  const repo = prRepo(pr);
+  const mine = (c) => {
+    const refs = prRefs(c.text);
+    return refs.length ? refs.some(([r, n]) => n === Number(pr.number) && (!repo || r === repo)) : re.test(c.text || "");
+  };
+  return cards.find((c) => c.kind === "gate" && (!t || !c.ticket || c.ticket === t.thread) && /\bmerge\b/i.test(c.text || "") && mine(c)) || null;
 }
 
 function stationOf(w, t, cards) {
@@ -4044,7 +4058,7 @@ function patchPr(el, r) {
   setAttr(el, "data-kind", r.s.kind);
   const pb = part(el, "pb");
   const badge = r.pr ? "PR #" + r.pr.number : "WIP " + (stepText(r.w, r.of).replace("Step ", "") || "branch");
-  if (r.pr) setLink(pb, r.pr.url, badge, "PR #" + r.pr.number + " on GitHub");
+  if (r.pr) setLink(pb, r.pr.url, badge, "Open PR #" + r.pr.number);
   else plainText(pb, badge);
   const title = prTitle(r);
   setText(part(el, "pt"), title);
@@ -4085,8 +4099,8 @@ function syncPrs(s) {
   const merged = rows.filter((r) => r.merged).sort((a, b) => b.at - a.at);
   const shownRows = prf.mode === "active" ? active : prf.mode === "merged" ? merged : rows;
   sync($("prs"), shownRows, { key: (r) => r.key, make: () => makePr("prow"), patch: patchPr, live: true, quiet: true });
-  const allActive = all.filter((r) => !r.merged && !r.closed).length;
-  setText($("n-prs"), shown(active.length, allActive, true));
+  const pick = (list) => prf.mode === "active" ? list.filter((r) => !r.merged && !r.closed) : prf.mode === "merged" ? list.filter((r) => r.merged) : list;
+  setText($("n-prs"), shown(shownRows.length, pick(all).length, true));
   const e = $("prs-empty");
   e.hidden = shownRows.length > 0;
   setText(e, prf.mode === "merged" ? "No merged pull requests on open tickets." : rows.length ? "No pull requests in this filter." : "No pull requests in progress.");
