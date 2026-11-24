@@ -117,9 +117,12 @@ requests merged on open tickets, where the next ticket launch goes, as
 - **PRs in progress.** One row per pull request on an open ticket, and one per
   worker still building with no pull request yet, keyed by the pull request's
   URL so two repositories never share a row. A row shows `PR #283` or
-  `WIP 4/5`, the pull request's title, a pill from its `verdict`, the parent
-  issue and its title, the step, and its age. Gates sort first, then failing,
-  ready, in review and building. Active, Merged and All pick which rows show.
+  `WIP 4/5`, a title, a pill from its `verdict`, the parent issue and its
+  title, the step, and its age. The title is the worker's `humanTitle` or
+  `issueTitle`, else the ticket's, so it names the issue the pull request
+  closes. Gates sort first, then failing, ready, in review and building.
+  Active, Merged and All pick which rows show, and the heading counts the rows
+  in the one picked.
   Under Active, **Recently merged** lists the last five merged pull requests,
   each on two lines so the title never cuts mid-word.
 
