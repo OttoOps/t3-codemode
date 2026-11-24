@@ -14,6 +14,7 @@ mod gitlab_merge;
 mod gitlab_pr;
 mod issues;
 mod live_github;
+mod live_gitlab;
 mod mcp_http;
 mod memory;
 mod merge;
