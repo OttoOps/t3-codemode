@@ -167,6 +167,7 @@ pub(crate) fn every_kind_of_key() -> Vec<(&'static str, Value)> {
         ("flow.optIn.milestone", json!("v1.0")),
         ("flow.maxTickets", json!(3)),
         ("flow.launch", json!("auto")),
+        ("flow.serializeFileConflicts", json!(true)),
         ("trackers.jira.PROJ", json!("widgets")),
         ("trackers.hosts.\"jira.acme.example\"", json!("widgets")),
     ]
@@ -241,6 +242,8 @@ fn optional_keys_read_as_their_defaults() {
     assert_eq!(c.get("pools.p.moveOnLimit"), json!("ask"));
     assert_eq!(c.get("pools.p.members.0.weight"), json!(1));
     assert_eq!(c.get("pools.p.members.0.model"), Value::Null);
+    let fc = Cfg::with(r#"{"flow": {"repos": ["acme/widgets"], "maxTickets": 2}}"#);
+    assert_eq!(fc.get("flow.serializeFileConflicts"), json!(false));
 }
 
 #[test]

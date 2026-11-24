@@ -1099,9 +1099,10 @@ kbd { font-family: var(--mono); font-size: 12px; }
 .dr-dep { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 4px 8px; align-items: center; font-size: 13px; line-height: 18px; }
 .dr-dep > span:first-child { color: var(--fg-2); }
 .dr-dep ul { display: flex; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
-.dr-dep li { display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
+.dr-dep li { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
 .dr-dep .linkish { max-width: 100%; }
 .dr-dep .gone-dep { color: var(--fg-2); }
+.dr-dep .dep-detail { color: var(--fg-2); font-size: 11px; line-height: 15px; overflow-wrap: anywhere; }
 .dr-lane { font-size: 13px; line-height: 18px; color: var(--fg-2); overflow-wrap: anywhere; }
 .dr-warns {
   display: grid; gap: 4px; padding: 8px 10px; border-radius: 4px;
@@ -1138,6 +1139,8 @@ kbd { font-family: var(--mono); font-size: 12px; }
 .gkey .k-down { stroke: var(--unlock); }
 .gkey .k-par { stroke: var(--border-strong); stroke-dasharray: 3 3; }
 .gkey .k-body { stroke: var(--pause); stroke-dasharray: 5 3; }
+.gkey .k-stack { stroke: var(--s3); }
+.gkey .k-conflict { stroke: var(--s2); stroke-dasharray: 2 3; }
 .gscroll { overflow: auto; overscroll-behavior: contain; }
 #tp-graph > .empty { position: static; }
 .gscroll > svg { display: block; }
@@ -1149,11 +1152,15 @@ kbd { font-family: var(--mono); font-size: 12px; }
 .ge.par { stroke-dasharray: 4 3; }
 .ge.src-body { stroke: var(--pause); stroke-dasharray: 6 3; }
 .ge.par.src-body { stroke: var(--pause); stroke-dasharray: 2 3; }
+.ge.stack { stroke: var(--s3); stroke-width: 2; }
+.ge.conflict { stroke: var(--s2); stroke-width: 1.75; stroke-dasharray: 2 3; }
+.ge.conflict.hot { stroke-width: 2.5; }
 .ge.up { stroke: var(--fail); stroke-width: 2.5; }
 .ge.down { stroke: var(--unlock); stroke-width: 2.5; }
 .ge.dim { stroke-opacity: 0.25; }
 .gmk { fill: var(--border-strong); }
 .gmk.body { fill: var(--pause); }
+.gmk.git { fill: var(--s3); }
 .gmk.up { fill: var(--fail); }
 .gmk.down { fill: var(--unlock); }
 .gnode {
@@ -1391,6 +1398,8 @@ kbd { font-family: var(--mono); font-size: 12px; }
           <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-down" d="M1 4h20" stroke-width="2.5"/></svg>it unlocks</span>
           <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-par" d="M1 4h20" stroke-width="1.5"/></svg>parent</span>
           <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-body" d="M1 4h20" stroke-width="1.5"/></svg>from body</span>
+          <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-stack" d="M1 4h20" stroke-width="2"/></svg>PR stack</span>
+          <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-conflict" d="M1 4h20" stroke-width="1.75"/></svg>file conflict</span>
           <button class="btn gsync" type="button" id="graph-sync" hidden></button>
           <span class="gnote" id="graph-note"></span>
         </div>
@@ -4287,11 +4296,33 @@ function flowFacts(i) {
 function flowBlockers(b) {
   const parts = [];
   if (b.external) parts.push("blocked: external");
-  const refs = flowRefs(b.blockers || [], b.repo);
+  const stackKeys = new Set((b.prStack || []).map((s) => String(s.repo || "").toLowerCase() + "#" + s.number));
+  const nonStack = (b.blockers || []).filter((r) => !stackKeys.has(String(r.repo || "").toLowerCase() + "#" + r.number));
+  const refs = flowRefs(nonStack, b.repo);
   if (b.moreBlockers) refs.push(refs.length ? ", and more" : "more than GitHub lists");
   if (refs.length) parts.push(["blocked by ", ...refs]);
+  if (b.prStack && b.prStack.length) {
+    const items = [];
+    b.prStack.forEach((s, i) => {
+      if (i) items.push(", ");
+      items.push(flowRef(s, b.repo));
+      const detail = prStackDetail(s);
+      if (detail) items.push(" (" + detail + ")");
+    });
+    parts.push(["stacked on ", ...items]);
+  }
+  if (b.fileConflicts && b.fileConflicts.length) {
+    const items = [];
+    b.fileConflicts.forEach((c, i) => {
+      if (i) items.push(", ");
+      items.push(flowRef(c, b.repo));
+      const files = fileConflictDetail(c.files, 3);
+      if (files) items.push(" (" + files + ")");
+    });
+    parts.push(["file conflict with ", ...items]);
+  }
   if (b.unresolved && b.unresolved.length) parts.push("unresolved: " + b.unresolved.join(", "));
-  if (b.blockedLabel && !b.external && !refs.length) parts.push("labelled blocked (no blocker linked)");
+  if (b.blockedLabel && !b.external && !refs.length && !(b.prStack && b.prStack.length)) parts.push("labelled blocked (no blocker linked)");
   if (!parts.length) return null;
   const out = [];
   parts.forEach((p, i) => {
@@ -4414,6 +4445,7 @@ function graphLayout(nodes, edges) {
   const succs = list.map(() => []);
   const link = new Set();
   for (const e of edges) {
+    if (e.kind === "fileConflict") continue;
     const a = at.get(e.to), b = at.get(e.from);
     if (a === undefined || b === undefined || a === b) continue;
     const k = a + ">" + b;
@@ -4532,12 +4564,19 @@ function graphDesc(n, ctx) {
   return { place: placeOf({ repo: n.repo }), phase: phase.length ? phase : null, text: [n.label, n.title, n.repo, ...extra] };
 }
 
-function graphWalk(id, key) {
+function graphWalk(id, dir) {
   const seen = new Set();
   const todo = [id];
   while (todo.length) {
-    const n = graph.nodes.get(todo.pop());
-    for (const x of (n && n[key]) || []) if (!seen.has(x) && x !== id && graph.nodes.has(x)) { seen.add(x); todo.push(x); }
+    const cur = todo.pop();
+    const n = graph.nodes.get(cur);
+    const nexts = dir === "up" ? [...((n && n.blockedBy) || [])] : [...((n && n.unlocks) || [])];
+    for (const e of graph.edges || []) {
+      if (e.kind !== "prStack") continue;
+      if (dir === "up" && e.from === cur) nexts.push(e.to);
+      else if (dir === "down" && e.to === cur) nexts.push(e.from);
+    }
+    for (const x of nexts) if (!seen.has(x) && x !== id && graph.nodes.has(x)) { seen.add(x); todo.push(x); }
   }
   return seen;
 }
@@ -4552,9 +4591,15 @@ function graphSub(n) {
   return { kind: "issue", key: n.id };
 }
 
+function edgeDirected(e) {
+  return e.kind === "blockedBy" || e.kind === "prStack";
+}
+
 function edgeBaseClass(e) {
   let cls = "ge";
-  if (e.kind !== "blockedBy") cls += " par";
+  if (e.kind === "parent") cls += " par";
+  else if (e.kind === "prStack") cls += " stack";
+  else if (e.kind === "fileConflict") cls += " conflict";
   if (e.source && e.source !== "github") cls += " src-" + e.source;
   return cls;
 }
@@ -4562,13 +4607,53 @@ function edgeBaseClass(e) {
 function edgeMarker(e, cls) {
   if (/ up$/.test(cls)) return "url(#gm-up)";
   if (/ down$/.test(cls)) return "url(#gm-down)";
+  if (e.kind === "prStack" || e.source === "git") return "url(#gm-git)";
   if (e.source === "body") return "url(#gm-body)";
   return "url(#gm-base)";
 }
 
+function prStackDetail(e) {
+  const bits = [];
+  if (e.branch && e.baseBranch) {
+    const head = e.branch + (e.pr ? " (PR #" + e.pr + ")" : "");
+    const base = e.baseBranch + (e.basePr ? " (PR #" + e.basePr + ")" : "");
+    bits.push(head + " on " + base);
+  } else if (e.baseBranch) {
+    bits.push("branch " + e.baseBranch + (e.basePr ? " (PR #" + e.basePr + ")" : ""));
+  } else if (e.branch) {
+    bits.push("branch " + e.branch + (e.pr ? " (PR #" + e.pr + ")" : ""));
+  } else if (e.pr || e.basePr) {
+    bits.push((e.pr ? "PR #" + e.pr : "stacked") + (e.basePr ? " on PR #" + e.basePr : ""));
+  }
+  if (e.part) bits.push("part " + e.part);
+  return bits.join(" · ");
+}
+
+function fileConflictDetail(files, limit) {
+  const list = files || [];
+  if (!list.length) return "";
+  if (limit && list.length > limit) return list.slice(0, limit).join(", ") + " (+" + (list.length - limit) + " more)";
+  return list.join(", ");
+}
+
+function edgeTooltip(e) {
+  const source = e.source || "github";
+  if (e.kind === "prStack") {
+    const detail = prStackDetail(e);
+    return detail ? "PR stack (git): " + detail : "PR stack (git)";
+  }
+  if (e.kind === "fileConflict") {
+    const detail = fileConflictDetail(e.files, 6);
+    return detail ? "File conflict (code): " + detail : "File conflict (code)";
+  }
+  return (e.kind === "blockedBy" ? "Blocked by" : "Parent")
+    + (source === "body" ? " (parsed from body)" : source === "github" ? " (GitHub)" : " (" + source + ")");
+}
+
 function graphSig(lay, edges) {
   return JSON.stringify([graph.mode, lay.wide, lay.height, lay.lanes.map((l) => [l.name, l.by, l.top, l.h, l.count]),
-    [...lay.pos.entries()].map(([id, p]) => [id, p.x, p.y]), edges.map((e) => [e.from, e.to, e.kind, e.source || "github"])]);
+    [...lay.pos.entries()].map(([id, p]) => [id, p.x, p.y]),
+    edges.map((e) => [e.from, e.to, e.kind, e.source || "github", e.branch || "", e.baseBranch || "", e.pr || 0, e.basePr || 0, e.part || "", e.files || []])]);
 }
 
 function paintGraphWarn(warnings) {
@@ -4771,7 +4856,7 @@ function graphBuild(box, lay, edges) {
   const marker = (cls) => svgEl("marker", { id: "gm-" + cls, viewBox: "0 0 8 8", refX: "7", refY: "4", markerWidth: "8", markerHeight: "8", orient: "auto-start-reverse", markerUnits: "userSpaceOnUse" },
     svgEl("path", { class: "gmk" + (cls === "base" ? "" : " " + cls), d: "M0 0L8 4L0 8z" }));
   const root = svgEl("svg", { width: lay.width, height: lay.height, viewBox: "0 0 " + lay.width + " " + lay.height },
-    svgEl("defs", {}, marker("base"), marker("body"), marker("up"), marker("down")));
+    svgEl("defs", {}, marker("base"), marker("body"), marker("git"), marker("up"), marker("down")));
   const wide = lay.wide;
   lay.lanes.forEach((l, i) => {
     const words = { label: "track label", epic: "epic", milestone: "milestone", repo: "repository", component: "linked issues", independent: "" }[l.by] || "";
@@ -4784,23 +4869,39 @@ function graphBuild(box, lay, edges) {
   });
   if (wide > lay.width) { root.setAttribute("width", wide); root.setAttribute("viewBox", "0 0 " + wide + " " + lay.height); }
   const eg = svgEl("g", { class: "gedges" });
+  const pairTotals = new Map();
+  const pairSeen = new Map();
+  const pairKey = (a, b) => (a < b ? a + "\0" + b : b + "\0" + a);
   for (const e of edges) {
-    const blocked = e.kind === "blockedBy";
+    if (!lay.pos.has(e.to) || !lay.pos.has(e.from)) continue;
+    const pk = pairKey(e.from, e.to);
+    pairTotals.set(pk, (pairTotals.get(pk) || 0) + 1);
+  }
+  for (const e of edges) {
+    const directed = edgeDirected(e);
     const src = lay.pos.get(e.to), dst = lay.pos.get(e.from);
     if (!src || !dst) continue;
+    const pk = pairKey(e.from, e.to);
+    const total = pairTotals.get(pk) || 1;
+    const idx = pairSeen.get(pk) || 0;
+    pairSeen.set(pk, idx + 1);
+    const bow = total > 1 ? (idx - (total - 1) / 2) * 14 : 0;
     let d;
     const sy = src.y + GEO.H / 2, dy = dst.y + GEO.H / 2;
     if (dst.x > src.x) {
-      const x1 = src.x + GEO.W, x2 = dst.x - (blocked ? 2 : 0), dx = Math.max(16, (x2 - x1) / 2);
-      d = "M" + x1 + " " + sy + "C" + (x1 + dx) + " " + sy + " " + (x2 - dx) + " " + dy + " " + x2 + " " + dy;
+      const x1 = src.x + GEO.W, x2 = dst.x - (directed ? 2 : 0), dx = Math.max(16, (x2 - x1) / 2);
+      d = "M" + x1 + " " + sy + "C" + (x1 + dx) + " " + (sy + bow) + " " + (x2 - dx) + " " + (dy + bow) + " " + x2 + " " + dy;
+    } else if (e.kind === "fileConflict" && src.x > dst.x) {
+      const x1 = dst.x + GEO.W, x2 = src.x, dx = Math.max(16, (x2 - x1) / 2);
+      d = "M" + x1 + " " + dy + "C" + (x1 + dx) + " " + (dy + bow) + " " + (x2 - dx) + " " + (sy + bow) + " " + x2 + " " + sy;
     } else {
-      const x = src.x + GEO.W, bend = x + GEO.GAP / 2;
-      d = "M" + x + " " + sy + "C" + bend + " " + sy + " " + bend + " " + dy + " " + (dst.x + GEO.W + (blocked ? 2 : 0)) + " " + dy;
+      const x = src.x + GEO.W, bend = x + GEO.GAP / 2 + Math.abs(bow);
+      d = "M" + x + " " + sy + "C" + bend + " " + sy + " " + bend + " " + dy + " " + (dst.x + GEO.W + (directed ? 2 : 0)) + " " + dy;
     }
     const cls = edgeBaseClass(e);
     const source = e.source || "github";
-    const tip = (blocked ? "Blocked by" : "Parent") + (source === "body" ? " (parsed from body)" : source === "github" ? " (GitHub)" : " (" + source + ")");
-    const p = svgEl("path", { class: cls, "data-source": source, d, "marker-end": blocked ? edgeMarker(e, cls) : null }, svgEl("title", {}, tip));
+    const tip = edgeTooltip(e);
+    const p = svgEl("path", { class: cls, "data-kind": e.kind, "data-source": source, d, "marker-end": directed ? edgeMarker(e, cls) : null }, svgEl("title", {}, tip));
     graph.paths.push({ el: p, e });
     eg.append(p);
   }
@@ -4860,10 +4961,17 @@ function graphRove() {
 
 function graphMark() {
   const hot = graph.hot && graph.nodes.has(graph.hot) ? graph.hot : null;
-  const up = hot ? graphWalk(hot, "blockedBy") : new Set();
-  const down = hot ? graphWalk(hot, "unlocks") : new Set();
+  const up = hot ? graphWalk(hot, "up") : new Set();
+  const down = hot ? graphWalk(hot, "down") : new Set();
   const n = hot ? graph.nodes.get(hot) : null;
   const kin = new Set(n ? [n.parent, ...(n.subIssues || [])].filter(Boolean) : []);
+  if (hot) {
+    for (const e of graph.edges || []) {
+      if (e.kind !== "fileConflict") continue;
+      if (e.from === hot) kin.add(e.to);
+      else if (e.to === hot) kin.add(e.from);
+    }
+  }
   for (const [id, b] of graph.btns) {
     b.classList.toggle("hot", id === hot);
     b.classList.toggle("up", up.has(id));
@@ -4872,14 +4980,18 @@ function graphMark() {
   }
   for (const { el, e } of graph.paths) {
     let cls = edgeBaseClass(e);
-    if (hot && e.kind === "blockedBy") {
+    const directed = edgeDirected(e);
+    if (hot && directed) {
       if ((e.from === hot || up.has(e.from)) && up.has(e.to)) cls += " up";
       else if ((e.to === hot || down.has(e.to)) && down.has(e.from)) cls += " down";
+      else cls += " dim";
+    } else if (hot && e.kind === "fileConflict") {
+      if (e.from === hot || e.to === hot) cls += " hot";
       else cls += " dim";
     } else if (hot && e.from !== hot && e.to !== hot) cls += " dim";
     if (el.getAttribute("class") !== cls) {
       el.setAttribute("class", cls);
-      if (e.kind === "blockedBy") el.setAttribute("marker-end", edgeMarker(e, cls));
+      if (directed) el.setAttribute("marker-end", edgeMarker(e, cls));
     }
   }
 }
@@ -6601,7 +6713,12 @@ function drDeps(n) {
   const on = !!n && graph.mode === "flow";
   sec.hidden = !on;
   if (!on) return;
-  const linked = ["blockedBy", "unlocks", "subIssues"].some((k) => (n[k] || []).length) || !!n.parent;
+  const edges = graph.edges || [];
+  const stackUp = edges.filter((e) => e.kind === "prStack" && e.from === n.id);
+  const stackDown = edges.filter((e) => e.kind === "prStack" && e.to === n.id);
+  const conflicts = edges.filter((e) => e.kind === "fileConflict" && (e.from === n.id || e.to === n.id));
+  const linked = ["blockedBy", "unlocks", "subIssues"].some((k) => (n[k] || []).length)
+    || !!n.parent || stackUp.length > 0 || stackDown.length > 0;
   const why = n.trackBy === "component" && !linked ? "" : LANE_BY[n.trackBy];
   setText(drPart("deps-lane"), n.track ? "Lane " + n.track + (why ? ", from " + why : "") + "." : "");
   const warns = n.warnings || [];
@@ -6610,11 +6727,32 @@ function drDeps(n) {
   if (warns.length) wbox.replaceChildren(h("ul", {}, ...warns.map((w) => h("li", { "data-kind": w.kind }, w.message))));
   else wbox.replaceChildren();
   const ctx = filterCtx(state);
-  const rows = DEP_ROWS.map(([k, name]) => [k, name, [].concat(n[k] || []).filter(Boolean).map((id) => {
+  const entry = (id, src, detail, detailTitle) => {
     const x = graphNode(id);
-    const src = depEdgeSource(n, k, id);
-    return x ? [id, x.label || id, x.title || "", ...graphState(x, ctx), src] : [id, id, "", null, null, src];
-  })]);
+    return x
+      ? [id, x.label || id, x.title || "", ...graphState(x, ctx), src, detail || "", detailTitle || ""]
+      : [id, id, "", null, null, src, detail || "", detailTitle || ""];
+  };
+  const rows = DEP_ROWS.map(([k, name]) => [k, name, [].concat(n[k] || []).filter(Boolean).map((id) => entry(id, depEdgeSource(n, k, id), "", ""))]);
+  if (stackUp.length) {
+    rows.push(["prStack", "PR stack", stackUp.map((e) => {
+      const detail = prStackDetail(e);
+      return entry(e.to, e.source || "git", detail, detail);
+    })]);
+  }
+  if (stackDown.length) {
+    rows.push(["stackedBy", "Stacked", stackDown.map((e) => {
+      const detail = prStackDetail(e);
+      return entry(e.from, e.source || "git", detail, detail);
+    })]);
+  }
+  if (conflicts.length) {
+    rows.push(["fileConflict", "File conflicts", conflicts.map((e) => {
+      const otherId = e.from === n.id ? e.to : e.from;
+      const full = fileConflictDetail(e.files, 0);
+      return entry(otherId, e.source || "code", fileConflictDetail(e.files, 4), full);
+    })]);
+  }
   const more = (n.moreBlockers ? ["blockedBy"] : []).concat(n.moreSubIssues ? ["subIssues"] : []);
   rows.splice(0, rows.length, ...rows.filter((r) => r[2].length || more.includes(r[0])));
   const l = drPart("deps-l");
@@ -6622,13 +6760,17 @@ function drDeps(n) {
   if (l._sig === sig) return;
   l._sig = sig;
   const said = (r) => r.length + (r.length === 1 ? " issue" : " issues");
-  const kids = rows.map(([k, name, list]) => h("div", { class: "dr-dep", role: "group", "aria-label": name + ", " + said(list) },
+  const srcTitle = (src) => src === "body" ? "Parsed from issue body"
+    : src === "git" ? "Inferred from git / PR stack"
+    : src === "code" ? "Inferred from overlapping files" : "Source: " + src;
+  const kids = rows.map(([k, name, list]) => h("div", { class: "dr-dep", "data-dep": k, role: "group", "aria-label": name + ", " + said(list) },
     h("span", {}, name),
-    h("ul", {}, ...list.map(([id, label, title, mk, word, src]) => h("li", {},
+    h("ul", {}, ...list.map(([id, label, title, mk, word, src, detail, detailTitle]) => h("li", {},
       graphNode(id) ? ticketChip(label, { onclick: () => drJump(id), name: "Inspect " + label + (title ? ": " + title : "") + (word ? ", " + word : ""), class: "dep" })
         : h("span", { class: "chip gone-dep", title: label }, label),
       mk ? statusPill(mk, word) : null,
-      src && src !== "github" ? h("span", { class: "tag", title: src === "body" ? "Parsed from issue body" : "Source: " + src }, src) : null)),
+      src && src !== "github" ? h("span", { class: "tag", title: srcTitle(src) }, src) : null,
+      detail ? h("span", { class: "dep-detail mono", title: detailTitle || detail }, detail) : null)),
       more.includes(k) && safeUrl(n.url) ? h("li", {}, h("a", { href: safeUrl(n.url), target: "_blank", rel: "noopener noreferrer" }, "and more on GitHub")) : null)));
   l.replaceChildren(...(kids.length ? kids : [h("p", { class: "meta" }, "No blockers, unlocks, parent or sub-issues.")]));
 }
@@ -6644,7 +6786,10 @@ function flowSaid(n) {
   if (n.state === "closed") out.push("Closed on GitHub.");
   if (n.flowList === "queue") out.push("In the ready queue: opted in, no open blocker and no ticket yet.");
   else if (n.flowList === "blocked") {
+    const blockedEntry = flow.view && (flow.view.blocked || []).find((b) => (b.repo + "#" + b.number).toLowerCase() === String(n.id || "").toLowerCase());
     if (n.external) out.push("Held by blockers outside the covered repos, or labelled blocked: external.");
+    else if (blockedEntry && blockedEntry.prStack && blockedEntry.prStack.length) out.push("Held by a stacked PR until its base PR merges.");
+    else if (blockedEntry && blockedEntry.fileConflicts && blockedEntry.fileConflicts.length) out.push("Held by a file conflict with a running ticket.");
     else if (warns.some((w) => w.kind === "blockedLabel")) out.push("Held by a plain blocked label with no open blocker linked.");
     else if (warns.some((w) => w.kind === "unresolved")) out.push("Held by an unresolved dependency reference.");
     else out.push("Held by an open blocker.");

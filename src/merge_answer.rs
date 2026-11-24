@@ -389,6 +389,7 @@ impl Wf {
         self.store.merge_wait_remove(&rec.repo, rec.pr)?;
         self.answered_drop(&rec.repo, rec.pr)?;
         mark(&rec.worker, "")?;
+        self.flow_soon();
         self.changed();
         Ok(flush)
     }

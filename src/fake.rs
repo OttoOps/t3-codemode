@@ -536,10 +536,12 @@ struct GhState {
     repos: BTreeMap<String, Value>,
     repo_names: BTreeMap<String, String>,
     repo_aliases: BTreeMap<String, String>,
+    default_branches: BTreeMap<String, String>,
     repo_labels: BTreeMap<String, Vec<(String, String, String)>>,
     prs: BTreeMap<(String, u64), Value>,
     issues: BTreeMap<(String, u64), Value>,
     issue_page: usize,
+    pr_page: usize,
     calls: Vec<Value>,
     errors: BTreeMap<String, (String, String)>,
     fail_after: BTreeMap<String, (usize, String, String)>,
@@ -620,19 +622,25 @@ impl FakeGitHub {
     pub fn set_pr(&self, repo: &str, number: u64, pr: Value) {
         let mut st = self.st();
         let mut pr = pr;
+        let key = repo.to_ascii_lowercase();
         pr["id"] = json!(format!("PR_{repo}_{number}"));
+        pr["number"] = json!(number);
+        if pr.get("baseRefName").is_none() {
+            pr["baseRefName"] = json!("main");
+        }
         if pr.get("headRefName").is_none() {
             pr["headRefName"] = json!(format!("feat/{number}"));
             pr["headRef"] = json!({"id": format!("REF_{repo}_{number}")});
             pr["isCrossRepository"] = json!(false);
         }
-        st.repos.entry(repo.into()).or_insert_with(|| json!({"viewerDefaultMergeMethod": "MERGE"}));
-        st.prs.insert((repo.into(), number), pr);
+        st.repos.entry(key.clone()).or_insert_with(|| json!({"viewerDefaultMergeMethod": "MERGE"}));
+        st.repo_names.entry(key.clone()).or_insert_with(|| repo.to_string());
+        st.prs.insert((key, number), pr);
     }
 
     pub fn update_pr(&self, repo: &str, number: u64, patch: Value) {
         let mut st = self.st();
-        let pr = st.prs.get_mut(&(repo.into(), number)).expect("known pull request");
+        let pr = st.prs.get_mut(&(repo.to_ascii_lowercase(), number)).expect("known pull request");
         for (k, v) in patch.as_object().expect("object patch") {
             pr[k] = v.clone();
         }
@@ -644,11 +652,23 @@ impl FakeGitHub {
     }
 
     pub fn pr(&self, repo: &str, number: u64) -> Value {
-        self.st().prs[&(repo.into(), number)].clone()
+        self.st().prs[&(repo.to_ascii_lowercase(), number)].clone()
     }
 
     pub fn remove_pr(&self, repo: &str, number: u64) {
-        self.st().prs.remove(&(repo.into(), number));
+        self.st().prs.remove(&(repo.to_ascii_lowercase(), number));
+    }
+
+    pub fn set_default_branch(&self, repo: &str, branch: &str) {
+        let mut st = self.st();
+        let key = repo.to_ascii_lowercase();
+        st.repos.entry(key.clone()).or_insert_with(|| json!({"viewerDefaultMergeMethod": "MERGE"}));
+        st.repo_names.entry(key.clone()).or_insert_with(|| repo.to_string());
+        st.default_branches.insert(key, branch.to_string());
+    }
+
+    pub fn set_pr_page(&self, size: usize) {
+        self.st().pr_page = size;
     }
 
     pub fn drop_from_queue(&self, repo: &str, number: u64, reason: &str, at: &str) {
@@ -832,6 +852,9 @@ fn operation(query: &str) -> &'static str {
     if query.starts_with("query FlowIssues(") {
         return "flowIssues";
     }
+    if query.starts_with("query FlowOpenPrs(") {
+        return "flowOpenPrs";
+    }
     if query.starts_with(crate::flow::FLOW_TICKETS) {
         return "flowTickets";
     }
@@ -888,6 +911,75 @@ fn full_issue_node(st: &GhState, i: &Value) -> Value {
            "subIssues": {"totalCount": subs.len(), "nodes": subs}})
 }
 
+fn full_pr_node(display_repo: &str, number: u64, pr: &Value) -> Value {
+    let head_ref = pr["headRefName"].as_str().map(String::from).unwrap_or_else(|| format!("feat/{number}"));
+    let base_ref = pr["baseRefName"].as_str().unwrap_or("main");
+    let closing = if pr.get("closingIssuesReferences").is_some_and(Value::is_object) {
+        pr["closingIssuesReferences"].clone()
+    } else {
+        json!({"nodes": []})
+    };
+    let files = if pr.get("files").is_some_and(Value::is_object) {
+        pr["files"].clone()
+    } else if let Some(arr) = pr.get("files").and_then(Value::as_array) {
+        let nodes: Vec<Value> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|p| json!({"path": p})).or_else(|| v.is_object().then(|| v.clone())))
+            .collect();
+        json!({"nodes": nodes})
+    } else {
+        json!({"nodes": []})
+    };
+    json!({
+        "number": pr["number"].as_u64().unwrap_or(number),
+        "title": pr["title"].as_str().map(String::from).unwrap_or_else(|| format!("PR {number}")),
+        "url": pr["url"].as_str().map(String::from).unwrap_or_else(|| format!("https://github.com/{display_repo}/pull/{number}")),
+        "body": pr["body"].as_str().unwrap_or(""),
+        "baseRefName": base_ref,
+        "headRefName": head_ref,
+        "headRefOid": pr["headRefOid"].as_str().unwrap_or(""),
+        "isCrossRepository": pr["isCrossRepository"].as_bool().unwrap_or(false),
+        "closingIssuesReferences": closing,
+        "files": files,
+    })
+}
+
+fn open_prs_page(st: &GhState, repo: &str, display: &str, after: Option<&str>) -> Value {
+    let mut matching: Vec<(u64, &Value)> = st
+        .prs
+        .iter()
+        .filter(|((r, _), p)| r.eq_ignore_ascii_case(repo) && p["state"] == "OPEN")
+        .map(|((_, n), p)| (*n, p))
+        .collect();
+    matching.sort_by_key(|(n, _)| *n);
+    let start: usize = after.and_then(|c| c.parse().ok()).unwrap_or(0);
+    let size = if st.pr_page == 0 { 100 } else { st.pr_page };
+    let end = (start + size).min(matching.len());
+    let nodes: Vec<Value> = matching[start.min(end)..end].iter().map(|(n, p)| full_pr_node(display, *n, p)).collect();
+    json!({
+        "pageInfo": {"hasNextPage": end < matching.len(), "endCursor": (end < matching.len()).then(|| end.to_string())},
+        "nodes": nodes,
+    })
+}
+
+fn flow_open_prs(st: &GhState, variables: &Value) -> Value {
+    let raw_repo = format!("{}/{}", variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap())
+        .to_ascii_lowercase();
+    let canonical = st.repo_aliases.get(&raw_repo).cloned();
+    let repo = canonical.as_deref().map(str::to_ascii_lowercase).unwrap_or(raw_repo);
+    if !st.repos.contains_key(&repo) {
+        return gh_error(&format!("Could not resolve to a Repository with the name '{repo}'."));
+    }
+    let display = st.repo_names.get(&repo).cloned().or(canonical).unwrap_or_else(|| repo.clone());
+    let default_branch = st.default_branches.get(&repo).map(String::as_str).unwrap_or("main");
+    let prs = open_prs_page(st, &repo, &display, variables["after"].as_str());
+    json!({"data": {"repository": {
+        "nameWithOwner": display,
+        "defaultBranchRef": {"name": default_branch},
+        "pullRequests": prs
+    }}})
+}
+
 fn flow_issues(st: &GhState, query: &str, variables: &Value) -> Value {
     let raw_repo = format!("{}/{}", variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap())
         .to_ascii_lowercase();
@@ -932,13 +1024,23 @@ fn flow_issues(st: &GhState, query: &str, variables: &Value) -> Value {
     let name = matching
         .first()
         .and_then(|i| i["nameWithOwner"].as_str())
+        .or_else(|| st.repo_names.get(&repo).map(String::as_str))
         .or(canonical.as_deref())
         .unwrap_or(&repo)
         .to_string();
-    json!({"data": {"repository": {"nameWithOwner": name, "issues": {
-        "pageInfo": {"hasNextPage": end < matching.len(), "endCursor": (end < matching.len()).then(|| end.to_string())},
-        "nodes": nodes
-    }}}})
+    let default_branch = st.default_branches.get(&repo).map(String::as_str).unwrap_or("main");
+    let mut repository = json!({
+        "nameWithOwner": name,
+        "defaultBranchRef": {"name": default_branch},
+        "issues": {
+            "pageInfo": {"hasNextPage": end < matching.len(), "endCursor": (end < matching.len()).then(|| end.to_string())},
+            "nodes": nodes
+        }
+    });
+    if variables.get("withPrs").and_then(Value::as_bool).unwrap_or(false) {
+        repository["pullRequests"] = open_prs_page(st, &repo, &name, None);
+    }
+    json!({"data": {"repository": repository}})
 }
 
 fn repo_canonical(st: &GhState, variables: &Value) -> Value {
@@ -1402,6 +1504,9 @@ impl crate::github::GitHub for FakeGitHub {
             }
             if op == "flowIssues" {
                 return Ok(flow_issues(&st, query, &variables));
+            }
+            if op == "flowOpenPrs" {
+                return Ok(flow_open_prs(&st, &variables));
             }
             if op == "flowTickets" {
                 return Ok(flow_tickets(&st, &variables));

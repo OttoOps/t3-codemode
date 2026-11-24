@@ -926,6 +926,7 @@ enum DiscoveredProject {
 pub(crate) struct DiscoveredRepos {
     pub(crate) repos: Vec<(String, Vec<String>)>,
     pub(crate) unavailable_projects: Vec<String>,
+    pub(crate) workspaces: std::collections::BTreeMap<String, Vec<std::path::PathBuf>>,
 }
 
 enum ProjectMatch {
@@ -1110,6 +1111,8 @@ impl Wf {
             "pr": pr_of(th), "title": th["title"], "prStale": th["pullRequestsStale"] == true,
             "prs": th["pullRequests"].as_array().map(|a| a.iter().filter_map(|p| p["url"].as_str()).collect::<Vec<_>>()),
             "project": th["projectId"],
+            "branch": th["branch"],
+            "worktreePath": th["worktreePath"],
         });
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((cur, _)) = live.get(id)
@@ -1258,6 +1261,8 @@ impl Wf {
         let resolved = futures_util::future::join_all(projects.iter().map(|p| self.project_github_repo(p))).await;
         let mut repos: Vec<(String, Vec<String>)> = Vec::new();
         let mut by_key: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut workspaces: std::collections::BTreeMap<String, Vec<std::path::PathBuf>> =
+            std::collections::BTreeMap::new();
         let mut unavailable_projects: Vec<String> = Vec::new();
         for (p, found) in projects.iter().zip(resolved) {
             let pid = p["id"].as_str().filter(|s| !s.is_empty()).map(String::from);
@@ -1268,7 +1273,7 @@ impl Wf {
                         Some(i) => i,
                         None => {
                             let i = repos.len();
-                            by_key.insert(key, i);
+                            by_key.insert(key.clone(), i);
                             repos.push((repo, Vec::new()));
                             i
                         }
@@ -1277,6 +1282,13 @@ impl Wf {
                         && !repos[idx].1.contains(&pid)
                     {
                         repos[idx].1.push(pid);
+                    }
+                    if let Some(root) = p["workspaceRoot"].as_str().filter(|s| !s.is_empty()) {
+                        let pb = std::path::PathBuf::from(root);
+                        let list = workspaces.entry(key).or_default();
+                        if !list.contains(&pb) {
+                            list.push(pb);
+                        }
                     }
                 }
                 DiscoveredProject::Unavailable => {
@@ -1290,7 +1302,7 @@ impl Wf {
             }
         }
         repos.sort_by_key(|(r, _)| r.to_ascii_lowercase());
-        Ok(DiscoveredRepos { repos, unavailable_projects })
+        Ok(DiscoveredRepos { repos, unavailable_projects, workspaces })
     }
 
     async fn hydrate(&self, ln: &Link) -> Result<Option<String>> {
