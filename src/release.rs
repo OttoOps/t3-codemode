@@ -12,7 +12,7 @@ pub const RELEASES: &str = "https://github.com/OttoOps/t3-codemode/releases";
 pub const RELEASES_ENV: &str = "T3CM_RELEASES_URL";
 pub const NO_CHECK_ENV: &str = "T3CM_NO_UPDATE_CHECK";
 pub const CLI_FRESH: SignedDuration = SignedDuration::from_hours(24);
-pub const SERVICE_EVERY: Duration = Duration::from_secs(12 * 3600);
+pub const SERVICE_EVERY: Duration = Duration::from_secs(3600);
 const CACHE_FILE: &str = "update-check.json";
 const CHECK_DEADLINE: Duration = Duration::from_secs(10);
 

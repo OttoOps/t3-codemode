@@ -288,7 +288,7 @@ it as the installed binary (`~/.local/bin/t3cm`, or
 updates with `deploy/install.sh --from-source` instead.
 
 `t3cm --version`, `t3cm --help` and a bare `t3cm` end with a notice when a
-newer release is out. The service checks every 12 hours, the CLI at most once
+newer release is out. The service checks every hour, the CLI at most once
 a day, and both share the answer in `update-check.json` in the state directory.
 The notice goes to stderr, and only when stderr is a terminal, so scripts that
 read `t3cm --version` see no change. The board shows the same news in its

@@ -778,6 +778,7 @@ fn spawn_release_checks(app: Arc<App>, state_dir: PathBuf) {
             return;
         }
         let every = release::SERVICE_EVERY;
+        let mut announced: Option<Version> = None;
         let mut wait = std::time::Duration::from_secs(5);
         if let Some(c) = release::read_own_cache(&state_dir)
             && let Some(v) = c.version()
@@ -798,7 +799,8 @@ fn spawn_release_checks(app: Arc<App>, state_dir: PathBuf) {
                     if let Err(e) = release::write_cache(&state_dir, &release::Checked::now(&v)) {
                         tracing::debug!("update check cache: {e:#}");
                     }
-                    if v > Version::current() {
+                    if v > Version::current() && announced.as_ref() != Some(&v) {
+                        announced = Some(v.clone());
                         tracing::info!(latest = %v, "a newer t3cm release is out; run `t3cm update`");
                     }
                     app.wf.set_release(v);
