@@ -1060,6 +1060,24 @@ fn starts_with_directive_keyword(s: &str) -> bool {
         || match_phase_of(s).is_some()
 }
 
+fn target_starts_with_ref_or_backticked_ref(s: &str) -> bool {
+    let trimmed = s.trim_start();
+    if starts_with_explicit_or_phase_or_quote(trimmed) {
+        return true;
+    }
+    let bytes = trimmed.as_bytes();
+    if bytes.first() == Some(&b'`')
+        && let Some((content_start, end)) = find_inline_code_end(bytes, 0)
+    {
+        let inner = trimmed[content_start..end - content_start].trim();
+        if starts_with_explicit_or_phase_or_quote(inner) {
+            return true;
+        }
+    }
+    let stripped = strip_inline_code(trimmed);
+    starts_with_explicit_or_phase_or_quote(stripped.trim_start())
+}
+
 fn contains_prose_directive_cue(s: &str) -> bool {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -1076,13 +1094,23 @@ fn contains_prose_directive_cue(s: &str) -> bool {
     }
     if let Some(after_kw) = strip_leading_kw(unbold, "after") {
         let (has_colon, rest) = strip_colon_and_bold(after_kw);
-        if has_colon || starts_with_explicit_or_phase_or_quote(rest) {
+        if has_colon || target_starts_with_ref_or_backticked_ref(rest) {
             return true;
         }
     }
     let bytes = trimmed.as_bytes();
     let mut i = 0;
     while i < trimmed.len() {
+        if bytes[i] == b'`' {
+            if let Some((_, end)) = find_inline_code_end(bytes, i) {
+                i = end;
+            } else {
+                while i < bytes.len() && bytes[i] == b'`' {
+                    i += 1;
+                }
+            }
+            continue;
+        }
         if i > 0 && bytes[i - 1].is_ascii_alphanumeric() {
             i = next_char(trimmed, i);
             continue;
@@ -1096,9 +1124,9 @@ fn contains_prose_directive_cue(s: &str) -> bool {
                 let t = after_kw.trim_start();
                 let has_colon = t.starts_with(':');
                 let target_src = t.strip_prefix(':').unwrap_or(t).trim_start();
-                if starts_with_explicit_or_phase_or_quote(target_src)
+                if target_starts_with_ref_or_backticked_ref(target_src)
                     || (has_colon && kw != "after")
-                    || (kw != "after" && is_negated_prefix(&trimmed[..i]))
+                    || (kw != "after" && is_negated_prefix(&strip_inline_code(&trimmed[..i])))
                 {
                     return true;
                 }
@@ -1107,6 +1135,37 @@ fn contains_prose_directive_cue(s: &str) -> bool {
         i = next_char(trimmed, i);
     }
     false
+}
+
+fn sanitize_form_refs(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            if let Some((content_start, end)) = find_inline_code_end(bytes, i) {
+                let tick_len = content_start - i;
+                let inner = &raw[content_start..end - tick_len];
+                if contains_prose_directive_cue(inner) {
+                    out.push(' ');
+                } else {
+                    out.push_str(inner);
+                }
+                i = end;
+            } else {
+                let start = i;
+                while i < bytes.len() && bytes[i] == b'`' {
+                    i += 1;
+                }
+                out.push_str(&raw[start..i]);
+            }
+        } else {
+            let ch = raw[i..].chars().next().expect("valid utf-8 boundary");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
 }
 
 fn capture_inline_target(rest: &str, inside_parens: bool) -> (&str, &str) {
@@ -1771,22 +1830,19 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
                     if pending_prose_role.is_none() && !trimmed.starts_with('|') {
                         if let Some(task_rest) = parse_tasklist_item(&line) {
                             let task_clean = strip_inline_code(task_rest);
-                            let has_cue = contains_prose_directive_cue(&task_clean)
-                                || contains_prose_directive_cue(&task_rest.replace('`', ""));
-                            if has_cue {
+                            if contains_prose_directive_cue(task_rest) {
                                 pending_prose_role = scan_prose_segment(default_repo, &task_clean, true, &mut parsed);
                             } else {
-                                for r in parse_ref_list(default_repo, task_rest, true) {
+                                let form_text = sanitize_form_refs(task_rest);
+                                for r in parse_ref_list(default_repo, &form_text, false) {
                                     push_unique_ref(dest, r);
                                 }
                             }
                             continue;
                         }
-                        let (_, clean_stripped) = strip_bullet_and_quote(&clean);
-                        let has_cue = contains_prose_directive_cue(clean_stripped)
-                            || contains_prose_directive_cue(&raw_stripped.replace('`', ""));
-                        if !has_cue {
-                            for r in parse_ref_list(default_repo, raw_stripped, true) {
+                        if !contains_prose_directive_cue(raw_stripped) {
+                            let form_text = sanitize_form_refs(raw_stripped);
+                            for r in parse_ref_list(default_repo, &form_text, false) {
                                 push_unique_ref(dest, r);
                             }
                             continue;
@@ -2721,8 +2777,11 @@ _No response_
 - [ ] Not after `#19`
 - [ ] #11, #12
 - [ ] `#16`
+- [ ] #21 (see the `blocked by:` field)
+#22 (see the `blocked by:` field and `part of #99`)
 Setup auth
 Clean up after migration
+Add `sync-links` endpoint
 Part of #13
 Phase 1 of #14
 Not blocked by #15
@@ -2748,8 +2807,11 @@ Part of:
                 BodyRef::Issue { repo: REPO.into(), number: 11 },
                 BodyRef::Issue { repo: REPO.into(), number: 12 },
                 BodyRef::Issue { repo: REPO.into(), number: 16 },
+                BodyRef::Issue { repo: REPO.into(), number: 21 },
+                BodyRef::Issue { repo: REPO.into(), number: 22 },
                 BodyRef::Symbolic("Setup auth".into()),
                 BodyRef::Symbolic("Clean up after migration".into()),
+                BodyRef::Symbolic("Add sync-links endpoint".into()),
             ],
             "{mixed_parsed:?}"
         );
