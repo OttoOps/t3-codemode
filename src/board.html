@@ -5317,6 +5317,9 @@ function driftOf(k) {
     return { label: "Skills check failed", lines: ["t3cm could not read the T3 workflow skills: " + k.error], fixes: ["t3cm skills status"] };
   }
   if (!k.fixes || !k.fixes.length) return null;
+  if (k.serviceStale) {
+    return { label: "Service needs a restart", lines: ["The T3 workflow skills are at " + k.installed + ", newer than the t3cm " + k.release + " this service runs. Restart the service to load " + k.installed + "."], fixes: k.fixes };
+  }
   const lines = [];
   let label = "";
   if (k.foreign) {

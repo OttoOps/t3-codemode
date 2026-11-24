@@ -6134,6 +6134,65 @@ async fn stale_skills_and_a_missing_rule_show_in_healthz_and_the_header() {
 }
 
 #[tokio::test]
+async fn skills_newer_than_the_service_name_the_restart_not_a_skills_update() {
+    let restart = t3_codemode::platform::SERVICE.restart;
+    let s = start(H::new()).await;
+    let home = skills_home(&s.h);
+    install_skills(&home, "99.0.0");
+    setup_done(&home);
+    s.h.app.wf.refresh_skills();
+    let (st, health) = state_and_health(&s).await;
+    let k = &health["skills"];
+    assert_eq!((k["installed"].as_str(), k["serviceStale"].as_bool()), (Some("99.0.0"), Some(true)), "{k}");
+    assert_eq!(
+        (k["current"].as_bool(), &k["fix"], &k["fixes"]),
+        (Some(false), &json!(restart), &json!([restart])),
+        "{k}"
+    );
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    let r = drift_page(&html, &st);
+    assert_eq!(r["label"], "Service needs a restart", "{r}");
+    assert_eq!(r["aria"], format!("Service needs a restart. Fix: {restart}"), "{r}");
+    let msg = r["msg"].as_str().unwrap();
+    assert!(msg.contains("are at 99.0.0, newer than the t3cm") && !msg.contains("skills update"), "{r}");
+    assert_eq!(r["cmds"], json!([restart]), "{r}");
+    assert_eq!(r["cleared"], true, "{r}");
+}
+
+#[test]
+fn doctor_names_the_restart_when_the_service_is_older_than_the_skills() {
+    use t3_codemode::{doctor, drift::Home, skills::Bundle};
+    let restart = t3_codemode::platform::SERVICE.restart;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    install_skills(home, env!("CARGO_PKG_VERSION"));
+    setup_done(home);
+    t3_codemode::steps::apply(&t3_codemode::steps::Env::under(home, None), &Bundle::embedded()).unwrap();
+    let f = doctor::skills(&Home::under(home), &Bundle::embedded(), Some("0.0.1"));
+    let want = format!(
+        "service: runs t3cm 0.0.1, but the T3 workflow skills are at {v}; restart the service to load {v}: {restart}",
+        v = env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(f.problems, [want], "{:?}", f.problems);
+    assert!(f.warnings.is_empty(), "{:?}", f.warnings);
+    let f = doctor::skills(&Home::under(home), &Bundle::embedded(), Some(env!("CARGO_PKG_VERSION")));
+    assert!(f.problems.is_empty() && f.warnings.is_empty(), "{:?} {:?}", f.problems, f.warnings);
+    let emb = Bundle::embedded();
+    let old = Bundle::new("0.0.1", emb.expected().keys().map(|p| (p.clone(), emb.raw(p).unwrap().to_vec())));
+    let f = doctor::skills(&Home::under(home), &old, Some("0.0.1"));
+    assert_eq!(f.problems.len(), 1, "one finding, not a second skills line: {:?}", f.problems);
+    assert!(f.problems[0].ends_with(restart) && !f.problems[0].contains("skills update"), "{:?}", f.problems);
+    let f = doctor::skills(&Home::under(home), &old, Some(env!("CARGO_PKG_VERSION")));
+    assert!(f.problems.is_empty(), "an older CLI does not blame a current service: {:?}", f.problems);
+    assert_eq!(f.warnings.len(), 1, "{:?}", f.warnings);
+    assert!(
+        f.warnings[0].contains("newer than this t3cm 0.0.1") && !f.warnings[0].contains(restart),
+        "{:?}",
+        f.warnings
+    );
+}
+
+#[tokio::test]
 async fn the_rule_alone_missing_is_a_setup_step_and_clears_after_update() {
     let s = start(H::new()).await;
     let home = skills_home(&s.h);
