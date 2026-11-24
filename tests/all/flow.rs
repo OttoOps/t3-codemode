@@ -2747,3 +2747,69 @@ async fn closed_symbolic_sibling_paginates_past_100_and_closed_epic_never_overri
     assert_eq!(ids(&node(&g, "acme/widgets#12")["blockedBy"]), ["acme/widgets#11"]);
     assert_eq!(node(&g, "acme/widgets#12")["parent"], "acme/widgets#10");
 }
+
+#[tokio::test]
+async fn sole_closed_epic_context_open_epic_precedence_and_after_prose_work_consistently() {
+    let h = flowing(6);
+
+    // S9: closed epic #1 is the sole parent of closed Phase 1 (#2) and open Phase 2 (#3);
+    // another epic #20 also has Phase 1 (#21), yet #3 resolves cleanly to #2 via its sole epic #1.
+    h.github.set_issue(REPO, github_issue(1, "Closed sole epic", &[], "2026-01-01T00:00:00Z"));
+    h.github.set_body(REPO, 1, "- [x] #2\n- [ ] #3\n");
+    h.github.close_issue(REPO, 1);
+    h.github.set_issue(REPO, github_issue(2, "Phase 1: old init", &[], "2026-01-02T00:00:00Z"));
+    h.github.close_issue(REPO, 2);
+    h.github.set_issue(REPO, github_issue(3, "Phase 2: follow-up", &[FLOW], "2026-01-03T00:00:00Z"));
+    h.github.set_body(REPO, 3, "Depends on Phase 1\n");
+
+    h.github.set_issue(REPO, github_issue(20, "Other open epic", &[], "2026-02-01T00:00:00Z"));
+    h.github.set_body(REPO, 20, "- [ ] #21\n- [ ] #30\n");
+    h.github.set_issue(REPO, github_issue(21, "Phase 1: other", &[], "2026-02-02T00:00:00Z"));
+
+    // S10: closed epic #10 with an active ticket AND open unlabelled epic #20 both list #30;
+    // both wf.flow() and wf.flow({ graph: true }) must pick open epic #20 and mark #30 ready.
+    h.github.set_issue(REPO, github_issue(10, "Old closed ticket epic", &[], "2026-01-04T00:00:00Z"));
+    h.github.set_body(REPO, 10, "- [x] #30\n");
+    h.github.close_issue(REPO, 10);
+    ticket(&h, "mcp:t10", "widgets#10").await;
+    h.github.set_issue(REPO, github_issue(30, "Moved child", &[FLOW], "2026-02-03T00:00:00Z"));
+
+    // S6 + S11: colonless `After #42, Setup auth` resolves Setup auth (#43) as a real blocker;
+    // `After #42, the board renders edges.` and `Depends on #42, please review before merging.`
+    // stay unblocked once #42 closes; `Depends on Setup auth, Do database migration` keeps both.
+    h.github.set_issue(REPO, github_issue(42, "Closed base", &[], "2026-03-01T00:00:00Z"));
+    h.github.close_issue(REPO, 42);
+    h.github.set_issue(REPO, github_issue(43, "Setup auth", &[], "2026-03-02T00:00:00Z"));
+    h.github.set_issue(REPO, github_issue(44, "Do database migration", &[], "2026-03-03T00:00:00Z"));
+
+    h.github.set_issue(REPO, github_issue(50, "Needs auth via After", &[FLOW], "2026-03-04T00:00:00Z"));
+    h.github.set_body(REPO, 50, "After #42, Setup auth\n");
+
+    h.github.set_issue(REPO, github_issue(51, "After with trailing prose", &[FLOW], "2026-03-05T00:00:00Z"));
+    h.github.set_body(REPO, 51, "After #42, the board renders edges.\n");
+
+    h.github.set_issue(REPO, github_issue(52, "Depends with trailing prose", &[FLOW], "2026-03-06T00:00:00Z"));
+    h.github.set_body(REPO, 52, "Depends on #42, please review before merging.\n");
+
+    h.github.set_issue(REPO, github_issue(53, "Pure title list", &[FLOW], "2026-03-07T00:00:00Z"));
+    h.github.set_body(REPO, 53, "Depends on Setup auth, Do database migration\n");
+
+    let q = flow(&h).await;
+    let g = graph(&h).await;
+
+    // Ready queue agrees across wf.flow() and wf.flow({ graph: true }): #3 (S9), #30 (S10), #51 (S6 prose), #52 (S11 prose).
+    assert_eq!(labels(&q["queue"]), ["widgets#3", "widgets#30", "widgets#51", "widgets#52"], "{q}");
+    assert_eq!(labels(&g["queue"]), ["widgets#3", "widgets#30", "widgets#51", "widgets#52"], "{g}");
+    assert_eq!(labels(&q["queue"][0]["unblockedBy"]), ["widgets#2"]);
+    assert_eq!(node(&g, "acme/widgets#3")["warnings"], json!([]));
+    assert_eq!(node(&g, "acme/widgets#30")["ready"], true);
+    assert_eq!(node(&g, "acme/widgets#51")["warnings"], json!([]));
+    assert_eq!(node(&g, "acme/widgets#52")["warnings"], json!([]));
+
+    // #50 stays blocked by open #43 ("Setup auth"); #53 stays blocked by both #43 and #44 ("Do database migration").
+    assert_eq!(labels(&q["blocked"]), ["widgets#50", "widgets#53"], "{q}");
+    assert_eq!(labels(&q["blocked"][0]["blockers"]), ["widgets#43"]);
+    assert_eq!(labels(&q["blocked"][1]["blockers"]), ["widgets#43", "widgets#44"]);
+    assert_eq!(ids(&node(&g, "acme/widgets#50")["blockedBy"]), ["acme/widgets#42", "acme/widgets#43"]);
+    assert_eq!(ids(&node(&g, "acme/widgets#53")["blockedBy"]), ["acme/widgets#43", "acme/widgets#44"]);
+}

@@ -4,8 +4,15 @@ use crate::board::{gh_name, parse_github_issue_only};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum BodyRef {
-    Issue { repo: String, number: u64 },
+    Issue {
+        repo: String,
+        number: u64,
+    },
     Symbolic(String),
+    /// Unquoted text after a comma following a structured ref on a line-start blocker directive
+    /// (e.g. `After #42, Setup auth` vs `After #42, the board renders edges.`). Resolves when it
+    /// matches a sibling title and is ignored as trailing prose when no candidate matches.
+    OptionalSymbolic(String),
     Malformed(String),
 }
 
@@ -38,7 +45,10 @@ pub(crate) struct ParsedBody {
 
 impl ParsedBody {
     pub(crate) fn has_symbolic(&self) -> bool {
-        self.blockers.iter().chain(&self.parents).any(|r| matches!(r, BodyRef::Symbolic(_)))
+        self.blockers
+            .iter()
+            .chain(&self.parents)
+            .any(|r| matches!(r, BodyRef::Symbolic(_) | BodyRef::OptionalSymbolic(_)))
     }
 }
 
@@ -764,17 +774,32 @@ fn parse_ref_list(default_repo: &str, raw: &str, strip_backticks: bool) -> Vec<B
 }
 
 fn push_unique_ref(list: &mut Vec<BodyRef>, item: BodyRef) {
-    let exists = list.iter().any(|existing| match (existing, &item) {
-        (BodyRef::Issue { repo: r1, number: n1 }, BodyRef::Issue { repo: r2, number: n2 }) => {
-            n1 == n2 && r1.eq_ignore_ascii_case(r2)
+    for existing in list.iter_mut() {
+        match (&*existing, &item) {
+            (BodyRef::Issue { repo: r1, number: n1 }, BodyRef::Issue { repo: r2, number: n2 })
+                if n1 == n2 && r1.eq_ignore_ascii_case(r2) =>
+            {
+                return;
+            }
+            (BodyRef::Symbolic(a), BodyRef::Symbolic(b) | BodyRef::OptionalSymbolic(b))
+                if a.eq_ignore_ascii_case(b) =>
+            {
+                return;
+            }
+            (BodyRef::OptionalSymbolic(a), BodyRef::OptionalSymbolic(b)) if a.eq_ignore_ascii_case(b) => {
+                return;
+            }
+            (BodyRef::OptionalSymbolic(a), BodyRef::Symbolic(b)) if a.eq_ignore_ascii_case(b) => {
+                *existing = item;
+                return;
+            }
+            (BodyRef::Malformed(a), BodyRef::Malformed(b)) if a.eq_ignore_ascii_case(b) => {
+                return;
+            }
+            _ => {}
         }
-        (BodyRef::Symbolic(a), BodyRef::Symbolic(b)) => a.eq_ignore_ascii_case(b),
-        (BodyRef::Malformed(a), BodyRef::Malformed(b)) => a.eq_ignore_ascii_case(b),
-        _ => false,
-    });
-    if !exists {
-        list.push(item);
     }
+    list.push(item);
 }
 
 fn strip_leading_kw<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
@@ -841,120 +866,6 @@ fn starts_with_explicit_ref(s: &str) -> bool {
     token.split_once('#').is_some_and(|(prefix, _)| {
         prefix.split_once('/').is_some_and(|(o, r)| !r.contains('/') && gh_name(o) && gh_name(r))
     })
-}
-
-fn starts_with_prose_clause_word(s: &str) -> bool {
-    let t = s.trim_start();
-    if t.is_empty() {
-        return false;
-    }
-    let bytes = t.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && (bytes[i].is_ascii_alphabetic() || matches!(bytes[i], b'\'' | b'-' | b'.')) {
-        i += 1;
-    }
-    if i == 0 || bytes.get(i).is_some_and(u8::is_ascii_alphanumeric) {
-        return false;
-    }
-    let word = t[..i].to_ascii_lowercase();
-    let word = word.trim_end_matches('.');
-    matches!(
-        word,
-        "which"
-            | "who"
-            | "whom"
-            | "whose"
-            | "where"
-            | "when"
-            | "while"
-            | "whilst"
-            | "that"
-            | "because"
-            | "since"
-            | "as"
-            | "so"
-            | "then"
-            | "therefore"
-            | "thus"
-            | "hence"
-            | "however"
-            | "otherwise"
-            | "unless"
-            | "until"
-            | "before"
-            | "after"
-            | "if"
-            | "though"
-            | "although"
-            | "but"
-            | "yet"
-            | "or"
-            | "nor"
-            | "once"
-            | "whereas"
-            | "not"
-            | "no"
-            | "never"
-            | "see"
-            | "note"
-            | "also"
-            | "etc"
-            | "eg"
-            | "e.g"
-            | "ie"
-            | "i.e"
-            | "meaning"
-            | "needed"
-            | "required"
-            | "assuming"
-            | "it"
-            | "its"
-            | "it's"
-            | "this"
-            | "these"
-            | "those"
-            | "we"
-            | "we'll"
-            | "we're"
-            | "we've"
-            | "they"
-            | "they'll"
-            | "they're"
-            | "i"
-            | "you"
-            | "there"
-            | "here"
-            | "is"
-            | "are"
-            | "was"
-            | "were"
-            | "be"
-            | "been"
-            | "will"
-            | "would"
-            | "should"
-            | "can"
-            | "could"
-            | "may"
-            | "might"
-            | "must"
-            | "has"
-            | "have"
-            | "had"
-            | "does"
-            | "do"
-            | "did"
-            | "doesn't"
-            | "don't"
-            | "isn't"
-            | "aren't"
-            | "won't"
-            | "can't"
-            | "for"
-            | "to"
-            | "with"
-            | "without"
-    )
 }
 
 fn starts_with_quoted(s: &str) -> bool {
@@ -1200,11 +1111,26 @@ fn scan_unquoted_item_end(tail: &str, start: usize) -> usize {
     tail.len()
 }
 
-fn capture_line_target(rest: &str) -> (&str, &str) {
-    // Line-start blocker directive capture: retains space-separated explicit refs ("#42 #43") and
-    // mixed explicit + unquoted sibling titles ("#42, Setup auth"), while stopping before ordinary
-    // trailing prose clauses (", which adds OAuth support.", "because ...").
+fn parse_line_blocker_refs<'a>(default_repo: &str, rest: &'a str) -> (Vec<BodyRef>, &'a str) {
+    // Line-start blocker directive parser:
+    // - When the directive starts with a structured ref (#N, owner/repo#N, URL, quoted title, or
+    //   bare Phase N), consume structured items (including space-separated `#42 #43`) as hard refs,
+    //   and emit any comma/semicolon-separated unquoted text after them as `OptionalSymbolic` so
+    //   real sibling titles (`After #42, Setup auth`, `Depends on #42, Setup auth`) resolve while
+    //   trailing prose (`Depends on #42, please review before merging.`, `After #42, the board
+    //   renders edges.`) never becomes a false hard blocker.
+    // - When the directive starts with an unquoted title (e.g. `Depends on Setup auth, Do database
+    //   migration`), parse the whole directive tail with `parse_ref_list` (no prose denylist).
     let (tail, after_tail) = slice_directive_tail(rest, false);
+    let starts_structured = starts_with_explicit_ref(tail)
+        || starts_with_quoted(tail)
+        || extract_leading_phase(tail)
+            .is_some_and(|(_, plen)| !tail[plen..].trim_start().starts_with([':', '-', '—', '–']));
+    if !starts_structured {
+        return (parse_ref_list(default_repo, tail, false), after_tail);
+    }
+
+    let mut out = Vec::new();
     let mut end = 0usize;
     let mut pos = 0usize;
     let bytes = tail.as_bytes();
@@ -1252,15 +1178,29 @@ fn capture_line_target(rest: &str) -> (&str, &str) {
             {
                 next_pos = tail.len() - after_item.len() + cp + 1;
             }
+            for r in parse_ref_list(default_repo, &tail[pos..next_pos], false) {
+                push_unique_ref(&mut out, r);
+            }
             end = next_pos;
             pos = next_pos;
         } else {
             let next_pos = scan_unquoted_item_end(tail, pos);
-            let trimmed_end = tail[pos..next_pos].trim_end().len();
-            if trimmed_end == 0 {
+            let raw_item = tail[pos..next_pos].trim().trim_end_matches(['.', '!', '?']).trim();
+            if raw_item.is_empty() {
                 break;
             }
-            end = pos + trimmed_end;
+            if extract_leading_phase(raw_item).is_some() {
+                let sym = strip_wrappers(raw_item).trim();
+                if !sym.is_empty() && !is_placeholder(sym) {
+                    push_unique_ref(&mut out, BodyRef::Symbolic(sym.to_string()));
+                }
+            } else {
+                let sym = strip_wrappers(raw_item).trim();
+                if !sym.is_empty() && !is_placeholder(sym) {
+                    push_unique_ref(&mut out, BodyRef::OptionalSymbolic(sym.to_string()));
+                }
+            }
+            end = pos + tail[pos..next_pos].trim_end().len();
             pos = next_pos;
         }
 
@@ -1280,9 +1220,6 @@ fn capture_line_target(rest: &str) -> (&str, &str) {
             if candidate.is_empty() || starts_with_directive_keyword(candidate) {
                 break;
             }
-            if !starts_with_explicit_or_phase_or_quote(candidate) && starts_with_prose_clause_word(candidate) {
-                break;
-            }
             pos = tail.len() - candidate.len();
             continue;
         } else if let Some(and_rest) = strip_leading_kw(after_ws, "and").or_else(|| after_ws.strip_prefix('&')) {
@@ -1299,7 +1236,8 @@ fn capture_line_target(rest: &str) -> (&str, &str) {
             break;
         }
     }
-    if end == 0 || end == tail.len() { (tail, after_tail) } else { (&tail[..end], &rest[end..]) }
+    let rem = if end == 0 || end == tail.len() { after_tail } else { &rest[end..] };
+    (out, rem)
 }
 
 fn scan_prose_segment(default_repo: &str, segment: &str, line_start: bool, parsed: &mut ParsedBody) -> Option<RefRole> {
@@ -1316,7 +1254,7 @@ fn scan_prose_segment(default_repo: &str, segment: &str, line_start: bool, parse
             let (target, rem) = if starts_with_explicit_ref(rest) || starts_with_quoted(rest) {
                 capture_inline_target(rest, false)
             } else {
-                capture_line_target(rest)
+                slice_directive_tail(rest, false)
             };
             for r in parse_ref_list(default_repo, target, false) {
                 push_unique_ref(&mut parsed.parents, r);
@@ -1337,13 +1275,16 @@ fn scan_prose_segment(default_repo: &str, segment: &str, line_start: bool, parse
                 if rest.is_empty() {
                     return has_colon.then_some(role);
                 }
-                let (target, rem) =
-                    if role == RefRole::Parent && (starts_with_explicit_ref(rest) || starts_with_quoted(rest)) {
+                let (refs, rem) = if role == RefRole::Parent {
+                    let (target, rem) = if starts_with_explicit_ref(rest) || starts_with_quoted(rest) {
                         capture_inline_target(rest, false)
                     } else {
-                        capture_line_target(rest)
+                        slice_directive_tail(rest, false)
                     };
-                let refs = parse_ref_list(default_repo, target, false);
+                    (parse_ref_list(default_repo, target, false), rem)
+                } else {
+                    parse_line_blocker_refs(default_repo, rest)
+                };
                 let dest = match role {
                     RefRole::Blocker => &mut parsed.blockers,
                     RefRole::Parent => &mut parsed.parents,
@@ -1364,9 +1305,8 @@ fn scan_prose_segment(default_repo: &str, segment: &str, line_start: bool, parse
                 return has_colon.then_some(RefRole::Blocker);
             }
             if has_colon || starts_with_explicit_or_phase_or_quote(rest) {
-                let (target, rem) =
-                    if has_colon { capture_line_target(rest) } else { capture_inline_target(rest, false) };
-                for r in parse_ref_list(default_repo, target, false) {
+                let (refs, rem) = parse_line_blocker_refs(default_repo, rest);
+                for r in refs {
                     push_unique_ref(&mut parsed.blockers, r);
                 }
                 if !rem.trim().is_empty() {
@@ -1527,7 +1467,20 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
             containers = active.containers[..matched].to_vec();
             fence = None;
         }
-        let (matched, mut cursor) = match_containers(raw_line, &containers);
+        let was_in_comment = in_comment;
+        let line = strip_html_comments(raw_line, &mut in_comment);
+        if line.trim().is_empty() {
+            if !was_in_comment && !raw_line.trim().is_empty() {
+                // A comment opener at lower indentation (e.g. `<!--` at col 0) can close an
+                // enclosing list item or blockquote without pushing markers from inside the comment.
+                let (matched, _) = match_containers(raw_line, &containers);
+                containers.truncate(matched);
+            }
+            flow_list_key = None;
+            pending_prose_role = None;
+            continue;
+        }
+        let (matched, mut cursor) = match_containers(&line, &containers);
         containers.truncate(matched);
         if !cursor.is_blank() {
             loop {
@@ -1548,12 +1501,6 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
                 fence = Some(ActiveFence { containers: containers.clone(), ch, len });
                 continue;
             }
-        }
-        let line = strip_html_comments(raw_line, &mut in_comment);
-        if line.trim().is_empty() {
-            flow_list_key = None;
-            pending_prose_role = None;
-            continue;
         }
 
         if let Some((level, heading)) = parse_heading(&line) {
@@ -1778,7 +1725,7 @@ fn parse_phase_query(raw: &str) -> Option<(u32, String)> {
     Some((k, subtitle))
 }
 
-fn resolve_in_scope(query: &str, scope: &[&Candidate]) -> ResolveOutcome {
+fn resolve_in_scope(query: &str, scope: &[&Candidate], optional: bool) -> ResolveOutcome {
     if scope.is_empty() {
         return ResolveOutcome::NotFound;
     }
@@ -1836,12 +1783,14 @@ fn resolve_in_scope(query: &str, scope: &[&Candidate]) -> ResolveOutcome {
     }
 
     // Tier 3: word-bounded substring match on normalized title (guard against tiny/generic tokens).
+    // For optional trailing segments after an explicit ref, require a multi-word phrase so a
+    // single prose word never collides with an unrelated title.
     let alnum_len = q_norm.chars().filter(|c| c.is_alphanumeric()).count();
     let generic = matches!(
         q_norm.as_str(),
         "this" | "that" | "work" | "issue" | "task" | "item" | "step" | "part" | "epic" | "phase" | "next" | "prev"
     );
-    if alnum_len >= 4 && !generic {
+    if alnum_len >= 4 && !generic && (!optional || q_norm.contains(' ')) {
         let sub_hits: Vec<&Candidate> =
             scope.iter().copied().filter(|c| contains_word_bounded(&normalize_title(&c.title), &q_norm)).collect();
         if !sub_hits.is_empty() {
@@ -1852,13 +1801,14 @@ fn resolve_in_scope(query: &str, scope: &[&Candidate]) -> ResolveOutcome {
     ResolveOutcome::NotFound
 }
 
-pub(crate) fn resolve_symbolic(
+fn resolve_symbolic_inner(
     query: &str,
     role: RefRole,
     me_repo: &str,
     me_number: u64,
     me_parent_key: Option<&str>,
     candidates: &[Candidate],
+    optional: bool,
 ) -> ResolveOutcome {
     let same_repo: Vec<&Candidate> =
         candidates.iter().filter(|c| c.repo.eq_ignore_ascii_case(me_repo) && c.number != me_number).collect();
@@ -1873,7 +1823,7 @@ pub(crate) fn resolve_symbolic(
                     && !(c.repo.eq_ignore_ascii_case(me_repo) && c.number == me_number)
             })
             .collect();
-        let epic_result = resolve_in_scope(query, &epic_siblings);
+        let epic_result = resolve_in_scope(query, &epic_siblings, optional);
         match epic_result {
             ResolveOutcome::Resolved(_, _) | ResolveOutcome::Ambiguous(_) => return epic_result,
             ResolveOutcome::NotFound => {
@@ -1886,7 +1836,28 @@ pub(crate) fn resolve_symbolic(
         }
     }
 
-    resolve_in_scope(query, &same_repo)
+    resolve_in_scope(query, &same_repo, optional)
+}
+
+pub(crate) fn resolve_symbolic(
+    query: &str,
+    role: RefRole,
+    me_repo: &str,
+    me_number: u64,
+    me_parent_key: Option<&str>,
+    candidates: &[Candidate],
+) -> ResolveOutcome {
+    resolve_symbolic_inner(query, role, me_repo, me_number, me_parent_key, candidates, false)
+}
+
+pub(crate) fn resolve_symbolic_optional(
+    query: &str,
+    me_repo: &str,
+    me_number: u64,
+    me_parent_key: Option<&str>,
+    candidates: &[Candidate],
+) -> ResolveOutcome {
+    resolve_symbolic_inner(query, RefRole::Blocker, me_repo, me_number, me_parent_key, candidates, true)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2250,13 +2221,15 @@ Phase P2 of #1, covering follow-up work.
 After: #13, which ships the migration.
 "#;
         let p = parse_body(REPO, body);
+        let hard_blockers: Vec<&BodyRef> =
+            p.blockers.iter().filter(|r| !matches!(r, BodyRef::OptionalSymbolic(_))).collect();
         assert_eq!(
-            p.blockers,
+            hard_blockers,
             vec![
-                BodyRef::Issue { repo: REPO.into(), number: 10 },
-                BodyRef::Issue { repo: REPO.into(), number: 11 },
-                BodyRef::Issue { repo: REPO.into(), number: 12 },
-                BodyRef::Issue { repo: REPO.into(), number: 13 },
+                &BodyRef::Issue { repo: REPO.into(), number: 10 },
+                &BodyRef::Issue { repo: REPO.into(), number: 11 },
+                &BodyRef::Issue { repo: REPO.into(), number: 12 },
+                &BodyRef::Issue { repo: REPO.into(), number: 13 },
             ]
         );
         assert_eq!(p.parents, vec![BodyRef::Issue { repo: REPO.into(), number: 1 }]);
@@ -2293,13 +2266,32 @@ Depends on #44
 ";
         assert_eq!(parse_body(REPO, indented_inner).blockers, vec![BodyRef::Issue { repo: REPO.into(), number: 44 }]);
 
-        // S6: space-separated explicit refs and mixed explicit + unquoted sibling titles stay intact,
-        // while trailing explanatory prose still stops cleanly.
+        // S8: list markers inside multiline HTML comments never leak into fence container tracking.
+        let comment_list_fence = "\
+<!--
+- Example
+  -->
+  ```
+Depends on #42
+  ```
+Depends on #43
+";
+        assert_eq!(
+            parse_body(REPO, comment_list_fence).blockers,
+            vec![BodyRef::Issue { repo: REPO.into(), number: 43 }]
+        );
+
+        // S6 + S11: space-separated explicit refs, colonless `After #42, Setup auth`, and
+        // unquoted title lists (`Do database migration`) stay intact without any prose denylist,
+        // while trailing unquoted prose after explicit refs stays soft (`OptionalSymbolic`).
         let mixed = "\
 Depends on #42 #43
 Blocked by #44, Setup auth
-Depends on #45, and Migrate DB, which adds the index.
-After: #46, Phase 1: Auth setup, because it defines the schema.
+After #45, Setup auth
+After #46, the board renders edges.
+Depends on Setup auth, Do database migration
+Depends on #47, please review before merging.
+After: #48, Phase 1: Auth setup
 ";
         assert_eq!(
             parse_body(REPO, mixed).blockers,
@@ -2309,10 +2301,24 @@ After: #46, Phase 1: Auth setup, because it defines the schema.
                 BodyRef::Issue { repo: REPO.into(), number: 44 },
                 BodyRef::Symbolic("Setup auth".into()),
                 BodyRef::Issue { repo: REPO.into(), number: 45 },
-                BodyRef::Symbolic("Migrate DB".into()),
                 BodyRef::Issue { repo: REPO.into(), number: 46 },
+                BodyRef::OptionalSymbolic("the board renders edges".into()),
+                BodyRef::Symbolic("Do database migration".into()),
+                BodyRef::Issue { repo: REPO.into(), number: 47 },
+                BodyRef::OptionalSymbolic("please review before merging".into()),
+                BodyRef::Issue { repo: REPO.into(), number: 48 },
                 BodyRef::Symbolic("Phase 1: Auth setup".into()),
             ]
+        );
+        // Standalone colonless After keeps Setup auth as an optional sibling reference.
+        assert_eq!(
+            parse_body(REPO, "After #42, Setup auth\n").blockers,
+            vec![BodyRef::Issue { repo: REPO.into(), number: 42 }, BodyRef::OptionalSymbolic("Setup auth".into())]
+        );
+        // Standalone pure-title list preserves titles starting with "Do" (no clause-word denylist).
+        assert_eq!(
+            parse_body(REPO, "Depends on Setup auth, Do database migration\n").blockers,
+            vec![BodyRef::Symbolic("Setup auth".into()), BodyRef::Symbolic("Do database migration".into())]
         );
     }
 }
