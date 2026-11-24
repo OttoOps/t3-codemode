@@ -588,6 +588,7 @@ class GitlabForgeTests(unittest.TestCase):
                       "projects/<enc path>/merge_requests/<iid>/pipelines",
                       "projects/<enc path>/repository/commits/<sha>/statuses?per_page=100",
                       "`ref` is `refs/merge-requests/<iid>/merge`, the ref a merged-results pipeline runs on",
+                      "when the head is one of the `parent_ids` of its commit", "a `failed` or `canceled` one goes back to the worker",
                       "merge_requests/<iid>/diffs?per_page=100", "until a page holds fewer than 100", "`changes_count`", "`old_path` and `new_path`", "--no-renames", "or the GitLab path set above",
                       "in a repo with no CI there is none", "**Untracked forge:**",
                       "`state` `merged` on a tracked GitLab host", "`squash_commit_sha`"):
@@ -631,6 +632,7 @@ class GitlabForgeTests(unittest.TestCase):
         self.assertIn("`glab mr view <iid> --output json`", link_proto)
         self.assertIn("projects/<enc path>/merge_requests/<iid>/pipelines", link_proto)
         self.assertIn("`refs/merge-requests/<iid>/merge`", link_proto)
+        self.assertIn("with the head among the `parent_ids` of its commit", link_proto)
         self.assertIn("`detailed_merge_status` (`conflict` is a conflict)", link_proto)
         self.assertNotIn("glab ci list", link_proto)
         open_pr = self.flat(self.worker, "## 3. Open the PR and watch it")

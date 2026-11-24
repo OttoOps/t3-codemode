@@ -53,7 +53,10 @@ orchestrator: built, review started, checks green, a skipped slot), `event`
   non-train pipeline from
   `glab api --hostname <host> projects/<enc path>/merge_requests/<iid>/pipelines`
   (`<enc path>` is the full path URL-encoded), whose `sha` is that head or
-  whose `ref` is `refs/merge-requests/<iid>/merge`. Read the MR's notes too,
+  whose `ref` is `refs/merge-requests/<iid>/merge` with the head among the
+  `parent_ids` of its commit
+  (`projects/<enc path>/repository/commits/<pipeline sha>`). Read the MR's
+  notes too,
   as the bot-review step below says, for comments you have not answered. On
   an untracked forge,
   check the MR/PR state with the repo's documented workflow instead of
