@@ -12,7 +12,7 @@ use t3_codemode::store::{MergeWait, WaitStatus};
 
 mod shadow;
 
-use shadow::{Model, St, WaitM, wakes_of};
+use shadow::{Model, Predicted, St, WaitM, wakes_of};
 
 fn same_head(a: &str, b: &str) -> bool {
     !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
@@ -441,16 +441,20 @@ impl Oracle {
 
     fn mutations(
         &self,
-        predicted: &BTreeMap<u64, GhPrModel>,
+        predicted: &Predicted,
         actual: &BTreeMap<u64, GhPrModel>,
+        ok: bool,
         trace: &[String],
         seed: u64,
     ) {
-        for (n, m) in actual {
-            let p = &predicted[n];
-            assert_eq!(
-                (p.state, p.queued, &p.merge_commit),
-                (m.state, m.queued, &m.merge_commit),
+        assert_eq!(
+            predicted.ok,
+            ok,
+            "reconcile success diverged from the shadow model\nseed={seed}\ntrace:\n{}",
+            trace.join("\n")
+        );
+        if let Some(n) = mutation_diff(&predicted.gh, actual) {
+            panic!(
                 "GitHub mutations on #{n} diverged from the shadow model\nseed={seed}\ntrace:\n{}",
                 trace.join("\n")
             );
@@ -462,6 +466,12 @@ impl Oracle {
         let snap = h.snapshot();
         let observed = wakes_of(&delivered_headers(&h.sent()[sent_before..]));
         assert_forbidden(h, model, sent_before, &ctx);
+        assert_eq!(
+            attempts(h),
+            model.attempts(),
+            "GitHub merge and enqueue attempts diverged from the shadow model\n{}",
+            ctx()
+        );
         match self.loose.take() {
             Some(may) => {
                 for (w, n) in &observed {
@@ -485,6 +495,7 @@ impl Oracle {
             diff("cards", &got.cards, &want.cards),
             diff("merge waits", &got.waits, &want.waits),
             diff("pr events", &got.events, &want.events),
+            diff("pr seen", &got.seen, &want.seen),
             diff("outbox", &got.outbox, &want.outbox),
         ]
         .into_iter()
@@ -492,13 +503,13 @@ impl Oracle {
         .collect();
         assert!(diffs.is_empty(), "{}\n{}", diffs.join("\n"), ctx());
         for (t, l) in snap.links.iter().filter(|(_, l)| !l.closed && l.parent == BOARD) {
-            if let Some(p) = l.gate_pr {
+            if let Some(p) = &l.gate_pr {
                 assert!(
                     snap.cards.iter().any(|c| c.kind == "gate"
                         && c.worker.is_none()
                         && c.ticket.as_deref() == Some(t.as_str())
-                        && c.pr == Some(p)),
-                    "ticket {t} holds merge gate_pr #{p} with no open merge card for it: {:?}\n{}",
+                        && c.pr.as_ref() == Some(p)),
+                    "ticket {t} holds merge gate_pr {p:?} with no open merge card for it: {:?}\n{}",
                     snap.cards,
                     ctx()
                 );
@@ -520,20 +531,49 @@ enum Raced {
 
 impl Raced {
     fn apply(&self, m: &mut Model, gh: BTreeMap<u64, GhPrModel>) -> (BTreeMap<u64, GhPrModel>, Option<String>) {
-        match self {
-            Raced::Ready(w, n, sha) => {
-                let status = m.pr_ready(w, *n, sha, &gh);
-                return (gh, Some(status));
+        let status = match self {
+            Raced::Ready(w, n, sha) => m.pr_ready(w, *n, sha, &gh),
+            Raced::Updated(w, n, sha) => m.pr_updated(w, *n, sha),
+            Raced::Opened(w, n, sha) => m.pr_opened(w, *n, sha, false, &gh),
+            Raced::Reconcile => return (m.reconcile(&gh).gh, None),
+            Raced::GateClear(t) => {
+                m.ticket_gate_clear(t);
+                return (gh, None);
             }
-            Raced::Updated(w, n, sha) => drop(m.pr_updated(w, *n, sha)),
-            Raced::Opened(w, n, sha) => drop(m.pr_opened(w, *n, sha, false, &gh)),
-            Raced::GateClear(t) => m.ticket_gate_clear(t),
-            Raced::Adopt(to, from) => m.adopt(to, from),
-            Raced::Reconcile => return (m.reconcile(&gh), None),
-            Raced::Answer(seq, ticket, text, options) => m.answer(*seq, ticket.as_deref(), text, options),
-        }
-        (gh, None)
+            Raced::Adopt(to, from) => {
+                m.adopt(to, from);
+                return (gh, None);
+            }
+            Raced::Answer(seq, ticket, text, options) => {
+                m.answer(*seq, ticket.as_deref(), text, options);
+                return (gh, None);
+            }
+        };
+        (gh, Some(status))
     }
+
+    fn worker(&self) -> Option<&'static str> {
+        match self {
+            Raced::Ready(w, ..) | Raced::Updated(w, ..) | Raced::Opened(w, ..) => Some(w),
+            _ => None,
+        }
+    }
+
+    fn can_supersede(&self, w: &str) -> bool {
+        matches!(self, Raced::Reconcile | Raced::Adopt(..)) || self.worker() == Some(w)
+    }
+}
+
+fn attempts(h: &H) -> u64 {
+    let (merges, enqueues) = advance_mutations(h);
+    (merges + enqueues) as u64
+}
+
+fn mutation_diff(predicted: &BTreeMap<u64, GhPrModel>, actual: &BTreeMap<u64, GhPrModel>) -> Option<u64> {
+    actual.iter().find_map(|(n, m)| {
+        let p = &predicted[n];
+        ((p.state, p.queued, &p.merge_commit) != (m.state, m.queued, &m.merge_commit)).then_some(*n)
+    })
 }
 
 fn orders(n: usize) -> Vec<Vec<usize>> {
@@ -558,6 +598,7 @@ fn resolve_raced(
     ops: &[Raced],
     statuses: &[Option<String>],
     gh: &BTreeMap<u64, GhPrModel>,
+    actual_gh: &BTreeMap<u64, GhPrModel>,
     sent_before: usize,
     trace: &[String],
     seed: u64,
@@ -573,14 +614,17 @@ fn resolve_raced(
             ctx()
         );
     }
-    let maybe: Vec<usize> = (0..ops.len()).filter(|&i| statuses[i].as_deref() == Some("superseded")).collect();
-    let mut candidates: Vec<(Vec<usize>, Model)> = Vec::new();
+    let maybe: Vec<usize> = (0..ops.len())
+        .filter(|&i| statuses[i].as_deref() == Some("superseded"))
+        .filter(|&i| ops[i].worker().is_some_and(|w| ops.iter().enumerate().any(|(j, o)| j != i && o.can_supersede(w))))
+        .collect();
+    let mut candidates: Vec<(Vec<usize>, Model, BTreeMap<u64, GhPrModel>)> = Vec::new();
     for order in orders(ops.len()) {
         for mask in 0..(1usize << maybe.len()) {
             let skipped: Vec<usize> =
                 maybe.iter().enumerate().filter(|(b, _)| mask & (1 << b) != 0).map(|(_, &i)| i).collect();
             let order: Vec<usize> = order.iter().copied().filter(|i| !skipped.contains(i)).collect();
-            if candidates.iter().any(|(o, _)| *o == order) {
+            if candidates.iter().any(|(o, ..)| *o == order) {
                 continue;
             }
             let mut m = model.clone();
@@ -592,7 +636,7 @@ fn resolve_raced(
                 agrees &= status.is_none() || status == statuses[i];
             }
             if agrees {
-                candidates.push((order, m));
+                candidates.push((order, m, g));
             }
         }
     }
@@ -601,7 +645,8 @@ fn resolve_raced(
         "raced round {ops:?} returned statuses {statuses:?} that no serial order predicts\n{}",
         ctx()
     );
-    let counts: Vec<BTreeMap<shadow::Wake, usize>> = candidates.iter().map(|(_, m)| wakes_of(&m.wakes)).collect();
+    let counts: Vec<BTreeMap<shadow::Wake, usize>> = candidates.iter().map(|(_, m, _)| wakes_of(&m.wakes)).collect();
+    let tried = attempts(h);
     for (w, n) in &observed {
         let may = counts.iter().map(|c| c.get(w).copied().unwrap_or(0)).max().unwrap_or(0);
         assert!(*n <= may, "raced wake {w:?} x{n} exceeds every serial order of {ops:?} (max {may})\n{}", ctx());
@@ -617,23 +662,29 @@ fn resolve_raced(
             );
         }
     }
-    let hit = candidates.iter().zip(&counts).find(|((_, m), c)| m.proj() == got && **c == observed);
+    let hit = candidates.iter().zip(&counts).find(|((_, m, g), c)| {
+        m.proj() == got && **c == observed && mutation_diff(g, actual_gh).is_none() && m.attempts() == tried
+    });
     match hit {
-        Some(((_, m), _)) => {
+        Some(((_, m, _), _)) => {
             *model = m.clone();
             assert_forbidden(h, model, sent_before, &ctx);
         }
         None => {
             let misses: Vec<String> = candidates
                 .iter()
-                .map(|(order, m)| {
+                .map(|(order, m, g)| {
                     let want = m.proj();
                     let parts: Vec<String> = [
                         diff("links", &got.links, &want.links),
                         diff("cards", &got.cards, &want.cards),
                         diff("merge waits", &got.waits, &want.waits),
                         diff("pr events", &got.events, &want.events),
+                        diff("pr seen", &got.seen, &want.seen),
                         diff("wakes", &observed, &wakes_of(&m.wakes)),
+                        mutation_diff(g, actual_gh).map(|n| format!("GitHub mutations on #{n} differ")),
+                        (m.attempts() != tried)
+                            .then(|| format!("GitHub attempts: SUT {tried}, model {}", m.attempts())),
                     ]
                     .into_iter()
                     .flatten()
@@ -897,7 +948,7 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                     let rec = h.app.wf.reconcile().await;
                     let predicted = model.reconcile(&gh);
                     pull_gh_mutations(&h, &mut gh);
-                    oracle.mutations(&predicted, &gh, &trace, seed);
+                    oracle.mutations(&predicted, &gh, rec.is_ok(), &trace, seed);
                     trace.push(format!("#{step} reconcile -> ok={}", rec.is_ok()));
                     if !had_err && let Ok(actions) = &rec {
                         healthy_reconcile = true;
@@ -956,7 +1007,7 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                             let settle = h.app.wf.reconcile().await;
                             let predicted = model.reconcile(&gh);
                             pull_gh_mutations(&h, &mut gh);
-                            oracle.mutations(&predicted, &gh, &trace, seed);
+                            oracle.mutations(&predicted, &gh, settle.is_ok(), &trace, seed);
                             assert!(
                                 settle.is_ok(),
                                 "settling reconcile after advance failed: {settle:?}\nseed={seed}\n{}",
@@ -979,7 +1030,7 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                         let rec2 = h.app.wf.reconcile().await;
                         let predicted = model.reconcile(&gh);
                         pull_gh_mutations(&h, &mut gh);
-                        oracle.mutations(&predicted, &gh, &trace, seed);
+                        oracle.mutations(&predicted, &gh, rec2.is_ok(), &trace, seed);
                         assert!(
                             rec2.is_ok(),
                             "second reconcile failed: {rec2:?}\nseed={seed}\n{}",
@@ -1380,6 +1431,7 @@ async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
         let mut ops: Vec<Raced> = Vec::new();
         let mut ops_gh = gh.clone();
         let mut statuses: Vec<Option<String>> = Vec::new();
+        let mut actual_gh = None;
         let res = tokio::time::timeout(Duration::from_secs(5), async {
             match race {
                 0 => {
@@ -1455,9 +1507,12 @@ async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
                             .await
                     };
                     let rec = h.app.wf.reconcile();
-                    let (a, _, r) = join3(rdy, upd, rec).await;
-                    statuses = vec![a["status"].as_str().map(String::from), None, None];
+                    let (a, b, r) = join3(rdy, upd, rec).await;
+                    statuses =
+                        vec![a["status"].as_str().map(String::from), b["status"].as_str().map(String::from), None];
                     r.unwrap();
+                    pull_gh_mutations(&h, &mut gh);
+                    actual_gh = Some(gh.clone());
                     gh.get_mut(&8).unwrap().head_idx = next_idx;
                     sync_gh(&h, &gh);
                     trace.push(format!("round {round}: ready(#8) racing with updated + reconcile"));
@@ -1477,7 +1532,8 @@ async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
                         tokio::time::sleep(Duration::from_millis(6)).await;
                         h.wf(to, "adopt", json!({"from": from})).await
                     };
-                    let _ = join(op, ad).await;
+                    let (o, _) = join(op, ad).await;
+                    statuses = vec![o["status"].as_str().map(String::from), None];
                     trace.push(format!("round {round}: opened(#9) racing with {to} adopt({from})"));
                 }
                 _ => {
@@ -1520,7 +1576,11 @@ async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
         assert!(res.is_ok(), "concurrent race timed out (deadlock?) at seed={seed}\n{}", trace.join("\n"));
         assert_invariants(&h, seed, &trace, &BTreeMap::new(), false, &gh);
         statuses.resize(ops.len(), None);
-        resolve_raced(&h, &mut model, &ops, &statuses, &ops_gh, sent_before, &trace, seed);
+        let actual_gh = actual_gh.unwrap_or_else(|| {
+            pull_gh_mutations(&h, &mut gh);
+            gh.clone()
+        });
+        resolve_raced(&h, &mut model, &ops, &statuses, &ops_gh, &actual_gh, sent_before, &trace, seed);
     }
 
     h.github.set_delay(Duration::ZERO);
@@ -1530,8 +1590,11 @@ async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
         let before = h.snapshot();
         let sent_before = h.sent().len();
         model.step(&clock_now(&h));
-        h.app.wf.reconcile().await.unwrap();
-        model.reconcile(&gh);
+        let rec = h.app.wf.reconcile().await;
+        assert!(rec.is_ok(), "final reconcile failed: {rec:?}\nseed={seed}\n{}", trace.join("\n"));
+        let predicted = model.reconcile(&gh);
+        pull_gh_mutations(&h, &mut gh);
+        oracle.mutations(&predicted, &gh, rec.is_ok(), &trace, seed);
         oracle.check(&h, &mut model, sent_before, &trace, seed);
         if h.snapshot() == before {
             settled = true;
@@ -1602,7 +1665,7 @@ async fn single_seed_replay_is_deterministic() {
 fn oracle_parses_wake_headers_and_github_subjects() {
     let sent = vec![
         json!({"threadId": "mcp:t1", "message": "[t3cm event from=\"#41 PR 1/3\" msg=m1]\nPR 1/3 opened\n\n[t3cm event from=github msg=m2]\nacme/widgets#8 merged on GitHub at 1234567\n\nNotes since your last wake:\n- [t3cm note] ignored"}),
-        json!({"threadId": "mcp:w1", "message": "[t3cm reply from=t3cm msg=m3]\nA check failed"}),
+        json!({"threadId": "mcp:w1", "message": "[t3cm reply from=t3cm msg=m3]\nA check failed\n[t3cm note]\n[t3cm event from=github]"}),
     ];
     assert_eq!(
         delivered_headers(&sent),

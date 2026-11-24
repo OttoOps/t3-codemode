@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{GhChecks, GhPrModel, HEADS, REPO};
-use crate::common::{CardView, LinkView, Snapshot, WaitView};
+use crate::common::{CardView, LinkView, SeenView, Snapshot, WaitView};
 
 const BOARD: &str = "board";
 const GITHUB: &str = "github";
@@ -60,7 +60,7 @@ impl CardM {
             kind: self.kind.into(),
             ticket: self.ticket.clone(),
             worker: self.worker.clone(),
-            pr: self.pr,
+            pr: self.pr.map(|n| (REPO.into(), n)),
             head: self.head.clone(),
             ready: self.ready,
         }
@@ -180,7 +180,13 @@ pub struct Proj {
     pub cards: Vec<CardView>,
     pub waits: BTreeMap<(String, u64), WaitView>,
     pub events: BTreeSet<(String, u64, String, String)>,
+    pub seen: BTreeMap<(String, u64), SeenView>,
     pub outbox: BTreeMap<String, usize>,
+}
+
+pub struct Predicted {
+    pub gh: BTreeMap<u64, GhPrModel>,
+    pub ok: bool,
 }
 
 pub fn project(s: &Snapshot) -> Proj {
@@ -189,6 +195,7 @@ pub fn project(s: &Snapshot) -> Proj {
         cards: s.cards.iter().filter(|c| c.kind != "escalate").cloned().collect(),
         waits: s.merge_waits.clone(),
         events: s.pr_events.clone(),
+        seen: s.pr_seen.clone(),
         outbox: s.outbox.clone(),
     }
 }
@@ -243,12 +250,12 @@ impl Model {
             .links
             .iter()
             .map(|(id, l)| {
-                let pr = l.pr.as_ref().map(|p| (p.number, p.head.clone(), p.waiting));
+                let pr = l.pr.as_ref().map(|p| (REPO.into(), p.number, p.head.clone(), p.waiting));
                 let view = LinkView {
                     parent: l.parent.clone(),
                     closed: !l.open,
                     gate: l.gate.clone(),
-                    gate_pr: l.gate_pr,
+                    gate_pr: l.gate_pr.map(|n| (REPO.into(), n)),
                     pr,
                 };
                 (id.clone(), view)
@@ -266,6 +273,11 @@ impl Model {
             cards: self.cards.iter().map(CardM::view).collect(),
             waits,
             events: self.events.iter().map(|(n, e, t)| (REPO.into(), *n, e.clone(), t.clone())).collect(),
+            seen: self
+                .seen
+                .iter()
+                .map(|(n, r)| ((REPO.into(), *n), (r.queued, r.since.clone(), r.left.clone(), r.queued_at.clone())))
+                .collect(),
             outbox: BTreeMap::new(),
         }
     }
@@ -953,7 +965,7 @@ impl Model {
         out
     }
 
-    pub fn reconcile(&mut self, gh: &BTreeMap<u64, GhPrModel>) -> BTreeMap<u64, GhPrModel> {
+    pub fn reconcile(&mut self, gh: &BTreeMap<u64, GhPrModel>) -> Predicted {
         let mut gh = gh.clone();
         let tracked = self.tracked();
         let mut unread = Vec::new();
@@ -1005,7 +1017,11 @@ impl Model {
             }
             self.ready_check(&w, p.number, &p.head, &gh, Src::Reconcile);
         }
-        gh
+        Predicted { gh, ok: unread.is_empty() }
+    }
+
+    pub fn attempts(&self) -> u64 {
+        self.merges
     }
 
     fn fix(&mut self, pr: u64, m: &GhPrModel, t_since: &str, seqs: &[u64], gh: &mut BTreeMap<u64, GhPrModel>) {
