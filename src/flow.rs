@@ -237,6 +237,18 @@ impl CoveredRepos {
 struct Reads {
     reads: Vec<Read>,
     covered: CoveredRepos,
+    unreadable: CoveredRepos,
+    unreadable_projects: HashSet<String>,
+}
+
+impl Reads {
+    fn capacity_repos(&self) -> CoveredRepos {
+        let mut out = self.covered.clone();
+        for repo in &self.unreadable.all {
+            out.insert(repo.clone());
+        }
+        out
+    }
 }
 
 #[derive(Clone)]
@@ -245,6 +257,7 @@ struct Ticket {
     thread: Option<String>,
     link: Option<String>,
     repo: Option<String>,
+    project: Option<String>,
     issue: Option<String>,
     status: String,
 }
@@ -891,25 +904,31 @@ fn plan_flow(
     write: bool,
 ) -> Result<FlowPlan> {
     let max_tickets = cfg.max_tickets.unwrap_or(0);
+    let capacity_repos = r.capacity_repos();
     let open: HashSet<String> =
-        tickets.iter().filter_map(|t| ticket_repo(&r.covered, t)).map(|(repo, n)| node_key(&repo, n)).collect();
-    let running: Vec<FlowTicket> = tickets
-        .into_iter()
-        .filter_map(|t| {
-            let (repo, number) = ticket_repo(&r.covered, &t)?;
-            if !r.covered.contains(&repo) || closed.contains(&node_key(&repo, number)) {
-                return None;
+        tickets.iter().filter_map(|t| ticket_repo(&capacity_repos, t)).map(|(repo, n)| node_key(&repo, n)).collect();
+    let mut running: Vec<FlowTicket> = Vec::new();
+    let mut extra_unreadable_running = 0usize;
+    for t in tickets {
+        let in_unreadable_project = t.project.as_deref().is_some_and(|p| r.unreadable_projects.contains(p));
+        let Some((repo, number)) = ticket_repo(&capacity_repos, &t) else {
+            if in_unreadable_project {
+                extra_unreadable_running += 1;
             }
-            Some(FlowTicket {
-                url: format!("https://github.com/{repo}/issues/{number}"),
-                label: t.label,
-                repo,
-                number,
-                thread: t.thread,
-                link: t.link,
-            })
-        })
-        .collect();
+            continue;
+        };
+        if (!capacity_repos.contains(&repo) && !in_unreadable_project) || closed.contains(&node_key(&repo, number)) {
+            continue;
+        }
+        running.push(FlowTicket {
+            url: format!("https://github.com/{repo}/issues/{number}"),
+            label: t.label,
+            repo,
+            number,
+            thread: t.thread,
+            link: t.link,
+        });
+    }
     let (mut queue, mut blocked, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
     let mut meta_ops = Vec::new();
     let mut skip_overlay: BTreeMap<String, Option<String>> = BTreeMap::new();
@@ -980,7 +999,7 @@ fn plan_flow(
         enabled: true,
         launch: Some(cfg.launch),
         max_tickets,
-        free: max_tickets.saturating_sub(running.len()),
+        free: max_tickets.saturating_sub(running.len() + extra_unreadable_running),
         running,
         queue,
         blocked,
@@ -1032,11 +1051,14 @@ impl Wf {
             .children(BOARD, true)?
             .into_iter()
             .map(|l| {
-                let link = l.link.clone().or_else(|| self.live_of(&l.child)?["link"].as_str().map(String::from));
+                let live = self.live_of(&l.child);
+                let link = l.link.clone().or_else(|| live.as_ref()?["link"].as_str().map(String::from));
+                let project =
+                    l.project.clone().or_else(|| live.as_ref().and_then(|v| v["project"].as_str().map(String::from)));
                 let v = self.node_view(&l);
                 let repo = v["repo"].as_str().map(String::from);
                 let status = v["status"].as_str().unwrap_or("unknown").to_string();
-                Ticket { label: l.label, thread: Some(l.child), link, repo, issue: l.identity.issue, status }
+                Ticket { label: l.label, thread: Some(l.child), link, repo, project, issue: l.identity.issue, status }
             })
             .collect();
         let seen: HashSet<String> = out.iter().map(|t| t.label.to_ascii_lowercase()).collect();
@@ -1048,12 +1070,14 @@ impl Wf {
                 .map(|p| {
                     let live = p.thread.as_deref().and_then(|t| self.live_of(t));
                     let status = if p.thread.is_none() { "launching" } else { chip(live.as_ref()) };
+                    let project = live.as_ref().and_then(|v| v["project"].as_str().map(String::from));
                     let repo = self.place(None, &live.unwrap_or(Value::Null)).0.as_str().map(String::from);
                     Ticket {
                         label: p.label,
                         thread: p.thread,
                         link: p.link,
                         repo,
+                        project,
                         issue: p.identity.issue,
                         status: status.to_string(),
                     }
@@ -1108,21 +1132,26 @@ impl Wf {
         }
     }
 
-    async fn resolve_repos(&self, cfg: Option<&FlowConfig>) -> Result<Vec<(String, bool)>> {
-        let mut list: Vec<(String, bool)> = match cfg.and_then(|c| c.repos.as_ref()) {
-            Some(explicit) => explicit.iter().map(|r| (r.clone(), true)).collect(),
-            None => self.discovered_github_repos().await?.into_iter().map(|r| (r, false)).collect(),
+    async fn resolve_repos(&self, cfg: Option<&FlowConfig>) -> Result<Vec<(String, bool, Vec<String>)>> {
+        let mut list: Vec<(String, bool, Vec<String>)> = match cfg.and_then(|c| c.repos.as_ref()) {
+            Some(explicit) => explicit.iter().map(|r| (r.clone(), true, Vec::new())).collect(),
+            None => self
+                .discovered_github_repos_with_projects()
+                .await?
+                .into_iter()
+                .map(|(r, pids)| (r, false, pids))
+                .collect(),
         };
         if let Some(cfg) = cfg {
             for repo in &cfg.include_repos {
-                if let Some((_, explicit)) = list.iter_mut().find(|(r, _)| r.eq_ignore_ascii_case(repo)) {
+                if let Some((_, explicit, _)) = list.iter_mut().find(|(r, _, _)| r.eq_ignore_ascii_case(repo)) {
                     *explicit = true;
                 } else {
-                    list.push((repo.clone(), true));
+                    list.push((repo.clone(), true, Vec::new()));
                 }
             }
             if !cfg.exclude_repos.is_empty() {
-                list.retain(|(r, _)| !cfg.exclude_repos.iter().any(|ex| ex.eq_ignore_ascii_case(r)));
+                list.retain(|(r, _, _)| !cfg.exclude_repos.iter().any(|ex| ex.eq_ignore_ascii_case(r)));
             }
         }
         Ok(list)
@@ -1137,22 +1166,41 @@ impl Wf {
                     .filter(|s| !s.is_empty())
             })
             .flatten();
+        let is_excluded =
+            |name: &str| cfg.is_some_and(|c| c.exclude_repos.iter().any(|ex| ex.eq_ignore_ascii_case(name)));
         let repos = self.resolve_repos(cfg).await?;
         let mut reads = Vec::new();
+        let mut seen_issues: HashSet<String> = HashSet::new();
         let mut covered = CoveredRepos::default();
+        let mut unreadable = CoveredRepos::default();
+        let mut unreadable_projects: HashSet<String> = HashSet::new();
         let mut succeeded = 0usize;
         let mut first_discovered_err: Option<anyhow::Error> = None;
-        for (repo, explicit) in repos {
+        for (repo, explicit, project_ids) in repos {
             match self.read_repo(&repo, label).await {
                 Ok((full, rs)) => {
+                    self.record_github_repo_alias(&repo, &full);
+                    if is_excluded(&full) {
+                        continue;
+                    }
                     succeeded += 1;
                     covered.insert(full);
-                    reads.extend(rs);
+                    for r in rs {
+                        if seen_issues.insert(node_key(&r.issue.repo, r.issue.number)) {
+                            reads.push(r);
+                        }
+                    }
                 }
                 Err(RepoReadError::Transport(e)) => return Err(e),
                 Err(RepoReadError::Graphql(e)) if explicit => return Err(e),
                 Err(RepoReadError::Graphql(e)) => {
                     tracing::warn!("flow: skipping discovered repo {repo}: {e:#}");
+                    unreadable.insert(repo.clone());
+                    let canonical = self.canonical_github_repo(&repo);
+                    if !canonical.eq_ignore_ascii_case(&repo) {
+                        unreadable.insert(canonical);
+                    }
+                    unreadable_projects.extend(project_ids);
                     if first_discovered_err.is_none() {
                         first_discovered_err = Some(e);
                     }
@@ -1164,7 +1212,7 @@ impl Wf {
         {
             return Err(e);
         }
-        Ok(Reads { reads, covered })
+        Ok(Reads { reads, covered, unreadable, unreadable_projects })
     }
 
     async fn ticket_reads(&self, r: &Reads, tickets: &[Ticket], full: bool) -> Result<(HashSet<String>, Vec<Read>)> {
@@ -1369,7 +1417,7 @@ impl Wf {
         let reads = self.flow_reads(Some(&cfg), false).await?;
         let (closed, _) = self.ticket_reads(&reads, &self.open_tickets()?, false).await?;
         let g = self.lock.lock().await;
-        let covered = reads.covered.clone();
+        let covered = reads.capacity_repos();
         let view = self.flow_build(&cfg, reads, self.open_tickets()?, &closed, true)?;
         let flow_cards = self.flow_cards()?;
         let card_refs: Vec<(String, FlowPick)> = flow_cards.iter().map(|(c, p)| (c.id.clone(), p.clone())).collect();
@@ -1954,6 +2002,7 @@ mod prop_tests {
                 thread: if u.arbitrary::<bool>()? { Some(format!("mcp:t{t_idx}")) } else { None },
                 link: None,
                 repo: repo_field,
+                project: None,
                 issue: issue_field,
                 status: "running".into(),
             };
@@ -1976,7 +2025,12 @@ mod prop_tests {
 
             let plan = plan_flow(
                 &sc.cfg,
-                Reads { reads: sc.reads.clone(), covered: sc.covered.clone() },
+                Reads {
+                    reads: sc.reads.clone(),
+                    covered: sc.covered.clone(),
+                    unreadable: CoveredRepos::default(),
+                    unreadable_projects: HashSet::new(),
+                },
                 sc.tickets.clone(),
                 &sc.closed,
                 &sc.unheld_done,
@@ -1995,7 +2049,12 @@ mod prop_tests {
             shuffle(u, &mut perm_tickets)?;
             let perm_plan = plan_flow(
                 &sc.cfg,
-                Reads { reads: perm_reads, covered: sc.covered.clone() },
+                Reads {
+                    reads: perm_reads,
+                    covered: sc.covered.clone(),
+                    unreadable: CoveredRepos::default(),
+                    unreadable_projects: HashSet::new(),
+                },
                 perm_tickets,
                 &sc.closed,
                 &sc.unheld_done,
@@ -2095,7 +2154,12 @@ mod prop_tests {
 
             let plan = plan_flow(
                 &sc.cfg,
-                Reads { reads: sc.reads.clone(), covered: sc.covered.clone() },
+                Reads {
+                    reads: sc.reads.clone(),
+                    covered: sc.covered.clone(),
+                    unreadable: CoveredRepos::default(),
+                    unreadable_projects: HashSet::new(),
+                },
                 sc.tickets.clone(),
                 &sc.closed,
                 &sc.unheld_done,

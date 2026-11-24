@@ -49,8 +49,24 @@ const DISPATCH_TOPIC: usize = 40;
 const ANSWER_CAP: usize = 1500;
 const PROJECT_RETRY_MINS: f64 = 30.0;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    Url(String),
+    Absent,
+    Unavailable,
+}
+
 pub trait Remotes: Send + Sync {
     fn origin<'a>(&'a self, root: &'a str) -> BoxFut<'a, Option<String>>;
+
+    fn origin_lookup<'a>(&'a self, root: &'a str) -> BoxFut<'a, Origin> {
+        Box::pin(async move {
+            match self.origin(root).await {
+                Some(url) => Origin::Url(url),
+                None => Origin::Absent,
+            }
+        })
+    }
 }
 
 pub struct GitRemotes;
@@ -58,16 +74,37 @@ pub struct GitRemotes;
 impl Remotes for GitRemotes {
     fn origin<'a>(&'a self, root: &'a str) -> BoxFut<'a, Option<String>> {
         Box::pin(async move {
+            match self.origin_lookup(root).await {
+                Origin::Url(url) => Some(url),
+                Origin::Absent | Origin::Unavailable => None,
+            }
+        })
+    }
+
+    fn origin_lookup<'a>(&'a self, root: &'a str) -> BoxFut<'a, Origin> {
+        Box::pin(async move {
             let run = tokio::process::Command::from(crate::platform::git())
                 .args(["-C", root, "remote", "get-url", "origin"])
                 .env("GIT_TERMINAL_PROMPT", "0")
+                .env("LC_ALL", "C")
                 .stdin(Stdio::null())
-                .stderr(Stdio::null())
                 .kill_on_drop(true)
                 .output();
-            let out = tokio::time::timeout(Duration::from_secs(5), run).await.ok()?.ok()?;
-            let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            (out.status.success() && !url.is_empty()).then_some(url)
+            let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(5), run).await else {
+                return Origin::Unavailable;
+            };
+            if out.status.success() {
+                let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                return if url.is_empty() { Origin::Absent } else { Origin::Url(url) };
+            }
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if (out.status.code() == Some(2) && stderr.contains("No such remote"))
+                || stderr.contains("not a git repository")
+            {
+                Origin::Absent
+            } else {
+                Origin::Unavailable
+            }
         })
     }
 }
@@ -885,10 +922,51 @@ fn github_remote_path(url: &str) -> Option<String> {
     remote.host.eq_ignore_ascii_case("github.com").then_some(remote.path)
 }
 
+fn remote_authority_host(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() || url.bytes().any(|b| b.is_ascii_whitespace()) {
+        return None;
+    }
+    let host = match url.split_once("://") {
+        Some((scheme, rest)) => {
+            if scheme.is_empty()
+                || scheme.eq_ignore_ascii_case("file")
+                || !scheme.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+            {
+                return None;
+            }
+            let (authority, path) = rest.split_once('/')?;
+            if path.trim_matches('/').is_empty() {
+                return None;
+            }
+            let host_port = authority.rsplit('@').next()?;
+            let (host, _) = parse_host_header(host_port)?;
+            host
+        }
+        None => {
+            let (left, path) = url.split_once(':')?;
+            if left.is_empty()
+                || left.contains('/')
+                || left.contains('\\')
+                || (left.len() == 1 && left.as_bytes()[0].is_ascii_alphabetic())
+                || path.trim_matches('/').is_empty()
+            {
+                return None;
+            }
+            let raw_host = left.rsplit('@').next()?;
+            let (host, None) = parse_host_header(raw_host)? else {
+                return None;
+            };
+            host
+        }
+    };
+    is_tracker_host(&host).then_some(host)
+}
+
 fn classify_github_remote(url: &str) -> ProjectGithubRepo {
     match github_remote_path(url) {
         Some(path) => ProjectGithubRepo::Github(path),
-        None if parse_remote(url).is_some() => ProjectGithubRepo::NonGithub,
+        None if parse_remote(url).is_some() || remote_authority_host(url).is_some() => ProjectGithubRepo::NonGithub,
         None => ProjectGithubRepo::Unknown,
     }
 }
@@ -1074,13 +1152,15 @@ impl Wf {
     }
 
     async fn project_github_repo(&self, project: &Value) -> Option<String> {
-        if let Some(root) = project["workspaceRoot"].as_str()
-            && let Some(url) = self.remotes.origin(root).await
-        {
-            match classify_github_remote(&url) {
-                ProjectGithubRepo::Github(r) => return Some(r),
-                ProjectGithubRepo::NonGithub => return None,
-                ProjectGithubRepo::Unknown => {}
+        if let Some(root) = project["workspaceRoot"].as_str() {
+            match self.remotes.origin_lookup(root).await {
+                Origin::Url(url) => match classify_github_remote(&url) {
+                    ProjectGithubRepo::Github(r) => return Some(r),
+                    ProjectGithubRepo::NonGithub => return None,
+                    ProjectGithubRepo::Unknown => {}
+                },
+                Origin::Unavailable => return None,
+                Origin::Absent => {}
             }
         }
         match project_identity_github_repo(project) {
@@ -1089,22 +1169,54 @@ impl Wf {
         }
     }
 
-    pub(crate) async fn discovered_github_repos(&self) -> Result<Vec<String>> {
+    pub(crate) fn record_github_repo_alias(&self, requested: &str, canonical: &str) {
+        let key = requested.to_ascii_lowercase();
+        let mut aliases = self.repo_aliases.lock().unwrap_or_else(|e| e.into_inner());
+        if requested.eq_ignore_ascii_case(canonical) {
+            aliases.remove(&key);
+        } else {
+            aliases.insert(key, canonical.to_string());
+        }
+    }
+
+    pub(crate) fn canonical_github_repo(&self, repo: &str) -> String {
+        let aliases = self.repo_aliases.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cur = repo.to_string();
+        for _ in 0..4 {
+            let Some(next) = aliases.get(&cur.to_ascii_lowercase()) else { break };
+            if next.eq_ignore_ascii_case(&cur) {
+                break;
+            }
+            cur = next.clone();
+        }
+        cur
+    }
+
+    pub(crate) async fn discovered_github_repos_with_projects(&self) -> Result<Vec<(String, Vec<String>)>> {
         let projects = self.projects().await?;
         let resolved = futures_util::future::join_all(projects.iter().map(|p| self.project_github_repo(p))).await;
-        let mut out: Vec<String> = Vec::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut out: Vec<(String, Vec<String>)> = Vec::new();
+        let mut by_key: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for (p, repo) in projects.iter().zip(resolved) {
-            if let Some(repo) = repo {
-                if let Some(id) = p["id"].as_str().filter(|s| !s.is_empty()) {
-                    self.remember_project(id, &p["title"], Some(repo.clone()));
+            let Some(repo) = repo else { continue };
+            let pid = p["id"].as_str().filter(|s| !s.is_empty()).map(String::from);
+            let key = repo.to_ascii_lowercase();
+            let idx = match by_key.get(&key).copied() {
+                Some(i) => i,
+                None => {
+                    let i = out.len();
+                    by_key.insert(key, i);
+                    out.push((repo, Vec::new()));
+                    i
                 }
-                if seen.insert(repo.to_ascii_lowercase()) {
-                    out.push(repo);
-                }
+            };
+            if let Some(pid) = pid
+                && !out[idx].1.contains(&pid)
+            {
+                out[idx].1.push(pid);
             }
         }
-        out.sort_by_key(|r| r.to_ascii_lowercase());
+        out.sort_by_key(|(r, _)| r.to_ascii_lowercase());
         Ok(out)
     }
 
@@ -1632,37 +1744,55 @@ impl Wf {
             && let Some(host) = issue.host.as_deref()
         {
             let issue_web_port = issue.url().and_then(web_port);
-            let mut parsed_origin = Vec::with_capacity(projects.len());
+            let mut origin_states: Vec<(Option<String>, bool)> = Vec::with_capacity(projects.len());
             for p in &projects {
-                let origin = match p["workspaceRoot"].as_str() {
-                    Some(root) => self.remotes.origin(root).await,
-                    None => None,
+                let lookup = match p["workspaceRoot"].as_str() {
+                    Some(root) => self.remotes.origin_lookup(root).await,
+                    None => Origin::Absent,
                 };
-                let parsed = origin.as_deref().and_then(parse_remote);
-                if let (Some(url), Some(remote)) = (origin.as_deref(), parsed.as_ref()) {
-                    let port_ok = match (issue_web_port, web_port(url)) {
-                        (Some(a), Some(b)) => a == b,
-                        _ => true,
-                    };
-                    if port_ok
-                        && remote.host.eq_ignore_ascii_case(host)
-                        && remote.path.eq_ignore_ascii_case(&issue.scope)
-                    {
-                        return Ok(Some(p.clone()));
+                match lookup {
+                    Origin::Url(url) => {
+                        let parsed = parse_remote(&url);
+                        let port_ok = match (issue_web_port, web_port(&url)) {
+                            (Some(a), Some(b)) => a == b,
+                            _ => true,
+                        };
+                        if let Some(remote) = parsed.as_ref()
+                            && port_ok
+                            && remote.host.eq_ignore_ascii_case(host)
+                            && remote.path.eq_ignore_ascii_case(&issue.scope)
+                        {
+                            return Ok(Some(p.clone()));
+                        }
+                        let block_fallback = parsed.is_some() || remote_authority_host(&url).is_some();
+                        let gh_origin = (port_ok
+                            && parsed.as_ref().is_some_and(|r| r.host.eq_ignore_ascii_case("github.com")))
+                        .then(|| parsed.unwrap().path);
+                        origin_states.push((gh_origin, block_fallback));
                     }
+                    Origin::Unavailable => origin_states.push((None, true)),
+                    Origin::Absent => origin_states.push((None, false)),
                 }
-                parsed_origin.push(parsed.is_some());
             }
             if issue.tracker == Tracker::Github
                 && host.eq_ignore_ascii_case("github.com")
                 && issue_web_port.is_none_or(|p| p == 443)
             {
-                for (p, has_parsed_origin) in projects.iter().zip(parsed_origin) {
-                    if has_parsed_origin {
+                let target_canonical = self.canonical_github_repo(&issue.scope);
+                for (p, (gh_origin, _)) in projects.iter().zip(&origin_states) {
+                    if let Some(path) = gh_origin.as_deref()
+                        && self.canonical_github_repo(path).eq_ignore_ascii_case(&target_canonical)
+                    {
+                        return Ok(Some(p.clone()));
+                    }
+                }
+                for (p, (_, block_fallback)) in projects.iter().zip(origin_states) {
+                    if block_fallback {
                         continue;
                     }
                     if let ProjectGithubRepo::Github(repo) = project_identity_github_repo(p)
-                        && repo.eq_ignore_ascii_case(&issue.scope)
+                        && (repo.eq_ignore_ascii_case(&issue.scope)
+                            || self.canonical_github_repo(&repo).eq_ignore_ascii_case(&target_canonical))
                     {
                         return Ok(Some(p.clone()));
                     }
