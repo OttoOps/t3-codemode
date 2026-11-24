@@ -18,8 +18,8 @@ mod ops;
 mod shadow;
 
 use ops::{
-    CardKind, CardSym, GhChecks, GhEndState, GhMergeState, Op, OpKind, OpWeights, PrSym, QueueDropReason, TSym, WSym,
-    decode_ops, deserialize_ops, seed_bytes, serialize_ops,
+    CardKind, CardSym, GhChecks, GhEndState, GhMergeState, Op, OpKind, OpStats, OpWeights, PauseTarget, PrEventKind,
+    PrSym, QueueDropReason, SweepTarget, TSym, WSym, decode_ops, deserialize_ops, seed_bytes, serialize_ops,
 };
 use shadow::{AdvanceRace, Model, Predicted, St, WaitM, wakes_of};
 
@@ -74,6 +74,7 @@ struct GhPrModel {
     checks: GhChecks,
     exists: bool,
     read_err: bool,
+    many_files: bool,
     queue_enabled: bool,
     queued: bool,
     removed: Option<(&'static str, String)>,
@@ -91,6 +92,7 @@ impl Default for GhPrModel {
             checks: GhChecks::Passing,
             exists: true,
             read_err: false,
+            many_files: false,
             queue_enabled: false,
             queued: false,
             removed: None,
@@ -197,7 +199,7 @@ fn sync_gh(h: &H, prs: &BTreeMap<u64, GhPrModel>) {
             pr["mergeQueueEntry"] = json!({"position": 1});
         }
         pr["body"] = json!(GOOD_BODY);
-        pr["files"] = json!({"pageInfo": {"hasNextPage": false}, "nodes": [{"path": "src/lib.rs"}]});
+        pr["files"] = json!({"pageInfo": {"hasNextPage": m.many_files}, "nodes": [{"path": "src/lib.rs"}]});
         if let Some((reason, at)) = &m.removed {
             pr["timelineItems"] = json!({"nodes": [{"reason": reason, "createdAt": at}]});
         }
@@ -236,6 +238,14 @@ fn sent_counts(h: &H) -> BTreeMap<String, usize> {
     m
 }
 
+fn delivered_counts(h: &H) -> BTreeMap<String, usize> {
+    let mut m = BTreeMap::new();
+    for (to, ..) in h.delivered(&h.sent()) {
+        *m.entry(to).or_insert(0) += 1;
+    }
+    m
+}
+
 macro_rules! oracle_assert {
     ($cond:expr, $($arg:tt)+) => {
         if !$cond {
@@ -258,10 +268,12 @@ macro_rules! oracle_assert_eq {
     };
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assert_invariants(
     h: &H,
     seed: impl fmt::Display,
     trace: &[String],
+    closed_tickets: &BTreeMap<String, usize>,
     closed_workers: &BTreeMap<String, usize>,
     after_healthy_reconcile: bool,
     gh: &BTreeMap<u64, GhPrModel>,
@@ -355,8 +367,28 @@ fn assert_invariants(
         }
     }
 
-    // 3. Worker link invariants (no closed-worker wakes, no stuck waits after healthy reconcile)
-    let counts = sent_counts(h);
+    // 3. Closed ticket and worker link invariants (no closed-link wakes, no stuck waits after healthy reconcile)
+    let counts = delivered_counts(h);
+    for (t, &count_at_close) in closed_tickets {
+        let tl = h.app.store.link_get(t).unwrap().unwrap();
+        oracle_assert!(tl.closed, "ticket {t} expected closed\n{}", ctx());
+        oracle_assert!(tl.gate.is_none(), "closed ticket {t} kept gate {:?}\n{}", tl.gate, ctx());
+        oracle_assert!(tl.gate_pr.is_none(), "closed ticket {t} kept gate_pr {:?}\n{}", tl.gate_pr, ctx());
+        let open_for_closed: Vec<&Card> = cards.iter().filter(|c| c.ticket.as_deref() == Some(t.as_str())).collect();
+        oracle_assert!(
+            open_for_closed.is_empty(),
+            "closed ticket {t} still owns open board cards: {open_for_closed:?}\n{}",
+            ctx()
+        );
+        let now_count = counts.get(t).copied().unwrap_or(0);
+        oracle_assert_eq!(
+            now_count,
+            count_at_close,
+            "closed ticket {t} received a message after closing! messages={:?}\n{}",
+            h.sent().into_iter().filter(|s| s["threadId"] == t.as_str()).collect::<Vec<_>>(),
+            ctx()
+        );
+    }
     for (w, &count_at_close) in closed_workers {
         let wl = h.app.store.link_get(w).unwrap().unwrap();
         oracle_assert!(wl.closed, "worker {w} expected closed\n{}", ctx());
@@ -430,12 +462,16 @@ fn github_events(lines: Vec<WakeLine>) -> Vec<(String, u64)> {
 fn assert_forbidden(h: &H, model: &mut Model, sent_before: usize, ctx: &dyn Fn() -> String) {
     let snap = h.snapshot();
     let sent = &h.sent()[sent_before..];
+    let mut allowed_reopen = model.reopen_wakes.clone();
     for (to, kind, from) in h.delivered(sent) {
-        oracle_assert!(
-            snap.links.get(&to).is_none_or(|l| !l.closed),
-            "forbidden wake: {kind} from {from} reached closed link {to}\n{}",
-            ctx()
-        );
+        if snap.links.get(&to).is_some_and(|l| l.closed) {
+            let allowed = if kind == "reply" && from == "parent" {
+                allowed_reopen.get_mut(&to).filter(|n| **n > 0).map(|n| *n -= 1).is_some()
+            } else {
+                false
+            };
+            oracle_assert!(allowed, "forbidden wake: {kind} from {from} reached closed link {to}\n{}", ctx());
+        }
     }
     let forbidden = model.forbidden_github();
     for w in github_events(h.wake_lines(sent)) {
@@ -869,11 +905,11 @@ fn decode_seed_ops(seed: u64) -> Vec<Op> {
     decode_ops(&mut u, &weights)
 }
 
-async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
+async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot, OpStats) {
     run_sequential_seed_with(seed, None).await
 }
 
-async fn run_sequential_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec<String>, ReachSnapshot) {
+async fn run_sequential_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec<String>, ReachSnapshot, OpStats) {
     // Sequential chaos has no reopen or peer ops, so it runs on the in-memory store.
     run_sequential_seed_inner(seed, sentinel, true).await
 }
@@ -882,9 +918,91 @@ async fn run_sequential_seed_inner(
     seed: u64,
     sentinel: Option<Sentinel>,
     in_memory: bool,
-) -> (Vec<String>, ReachSnapshot) {
+) -> (Vec<String>, ReachSnapshot, OpStats) {
     let ops = decode_seed_ops(seed);
     run_sequential_ops(&ops, sentinel, in_memory, &seed.to_string()).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_tick(
+    h: &H,
+    model: &mut Model,
+    oracle: &mut Oracle,
+    closed_workers: &BTreeMap<String, usize>,
+    minutes: u16,
+    trace: &[String],
+    run_id: &str,
+) {
+    let waiting_before: BTreeMap<String, usize> = WORKERS
+        .iter()
+        .copied()
+        .filter(|w| !closed_workers.contains_key(*w))
+        .filter_map(|w| {
+            let wl = h.app.store.link_get(w).unwrap()?;
+            wl.pr.as_ref().filter(|p| p.waiting).map(|_| {
+                let nudges = h
+                    .sent()
+                    .into_iter()
+                    .filter(|s| {
+                        s["threadId"] == w && s["message"].as_str().is_some_and(|m| m.starts_with("[t3cm nudge"))
+                    })
+                    .count();
+                (w.to_string(), nudges)
+            })
+        })
+        .collect();
+    let paused_before: BTreeMap<String, usize> = TICKETS
+        .iter()
+        .chain(WORKERS.iter())
+        .copied()
+        .filter(|id| model.is_paused(id))
+        .map(|id| {
+            let nudges = h
+                .sent()
+                .into_iter()
+                .filter(|s| s["threadId"] == id && s["message"].as_str().is_some_and(|m| m.starts_with("[t3cm nudge")))
+                .count();
+            (id.to_string(), nudges)
+        })
+        .collect();
+    h.advance_tick(i64::from(minutes)).await;
+    model.step(&clock_now(h));
+    model.tick();
+    oracle.loose = Some(model.tick_may());
+    for (w, before) in waiting_before {
+        let after = h
+            .sent()
+            .into_iter()
+            .filter(|s| {
+                s["threadId"] == w.as_str() && s["message"].as_str().is_some_and(|m| m.starts_with("[t3cm nudge"))
+            })
+            .count();
+        oracle_assert_eq!(
+            after,
+            before,
+            "waiting worker {w} was nudged during advance_tick({minutes})\nseed={run_id}\n{}",
+            trace.join("\n")
+        );
+    }
+    for (id, before) in paused_before {
+        let after = h
+            .sent()
+            .into_iter()
+            .filter(|s| {
+                s["threadId"] == id.as_str() && s["message"].as_str().is_some_and(|m| m.starts_with("[t3cm nudge"))
+            })
+            .count();
+        oracle_assert_eq!(
+            after,
+            before,
+            "paused link {id} was nudged during advance_tick({minutes})\nseed={run_id}\n{}",
+            trace.join("\n")
+        );
+    }
+}
+
+fn live_tickets_count(model: &Model) -> usize {
+    TICKETS.iter().filter(|&&t| model.is_open(t) && !model.is_archived_or_gone(t)).count()
 }
 
 async fn run_sequential_ops(
@@ -892,7 +1010,7 @@ async fn run_sequential_ops(
     sentinel: Option<Sentinel>,
     in_memory: bool,
     run_id: &str,
-) -> (Vec<String>, ReachSnapshot) {
+) -> (Vec<String>, ReachSnapshot, OpStats) {
     let (h, mut gh) = setup_chaos(in_memory);
     enable_sentinel(&h, sentinel);
     for (idx, &pr) in PRS.iter().enumerate() {
@@ -903,8 +1021,10 @@ async fn run_sequential_ops(
     sync_gh(&h, &gh);
     let t0 = h.clock.now();
     let mut trace: Vec<String> = Vec::new();
+    let mut closed_tickets: BTreeMap<String, usize> = BTreeMap::new();
     let mut closed_workers: BTreeMap<String, usize> = BTreeMap::new();
     let mut busy_workers: BTreeSet<&'static str> = BTreeSet::new();
+    let mut op_stats = OpStats::default();
     let mut model = Model::new(&clock_now(&h));
     h.app.store.meta_set(LAST_PASS, &clock_now(&h)).unwrap();
     model.set_watcher_alive(true);
@@ -943,7 +1063,7 @@ async fn run_sequential_ops(
                 Op::PrOpened { worker, short_sha, no_ci } => {
                     let Some((w, pr)) = resolve_worker(worker, &closed_workers) else {
                         trace.push(format!("#{step} noop (pr opened {worker:?})"));
-                        return;
+                        return false;
                     };
                     let head = HEADS[gh[&pr].head_idx];
                     let sha = if short_sha { &head[..7] } else { head };
@@ -959,11 +1079,12 @@ async fn run_sequential_ops(
                     trace.push(format!("#{step} {w} pr opened #{pr}@{sha} checks={checks} -> {}", r["status"]));
                     let want = model.pr_opened(w, pr, sha, no_ci, &gh);
                     oracle.status(&r, &want, &trace, run_id);
+                    true
                 }
                 Op::PrUpdated { worker, short_sha } => {
                     let Some((w, pr)) = resolve_worker(worker, &closed_workers) else {
                         trace.push(format!("#{step} noop (pr updated {worker:?})"));
-                        return;
+                        return false;
                     };
                     let head = HEADS[gh[&pr].head_idx];
                     let sha = if short_sha { &head[..7] } else { head };
@@ -971,11 +1092,12 @@ async fn run_sequential_ops(
                     trace.push(format!("#{step} {w} pr updated #{pr}@{sha} -> {}", r["status"]));
                     let want = model.pr_updated(w, pr, sha);
                     oracle.status(&r, &want, &trace, run_id);
+                    true
                 }
                 Op::PrReady { worker, short_sha } => {
                     let Some((w, pr)) = resolve_worker(worker, &closed_workers) else {
                         trace.push(format!("#{step} noop (pr ready {worker:?})"));
-                        return;
+                        return false;
                     };
                     let head = HEADS[gh[&pr].head_idx];
                     let sha = if short_sha { &head[..7] } else { head };
@@ -983,11 +1105,12 @@ async fn run_sequential_ops(
                     trace.push(format!("#{step} {w} pr ready #{pr}@{sha} -> {}", r["status"]));
                     let want = model.pr_ready(w, pr, sha, &gh);
                     oracle.status(&r, &want, &trace, run_id);
+                    true
                 }
                 Op::GhPush { pr } => {
                     let Some(pr_num) = resolve_pr(pr) else {
                         trace.push(format!("#{step} noop (gh push {pr:?})"));
-                        return;
+                        return false;
                     };
                     let changed = {
                         let m = gh.get_mut(&pr_num).unwrap();
@@ -1003,11 +1126,12 @@ async fn run_sequential_ops(
                     if changed {
                         sync_gh(&h, &gh);
                     }
+                    changed
                 }
                 Op::GhStatus { pr, checks, merge_state, draft } => {
                     let Some(pr_num) = resolve_pr(pr) else {
                         trace.push(format!("#{step} noop (gh status {pr:?})"));
-                        return;
+                        return false;
                     };
                     let changed = {
                         let m = gh.get_mut(&pr_num).unwrap();
@@ -1028,11 +1152,12 @@ async fn run_sequential_ops(
                     if changed {
                         sync_gh(&h, &gh);
                     }
+                    changed
                 }
                 Op::GhFinish { pr, state, predates } => {
                     let Some(pr_num) = resolve_pr(pr) else {
                         trace.push(format!("#{step} noop (gh finish {pr:?})"));
-                        return;
+                        return false;
                     };
                     let changed = {
                         let m = gh.get_mut(&pr_num).unwrap();
@@ -1053,11 +1178,12 @@ async fn run_sequential_ops(
                     if changed {
                         sync_gh(&h, &gh);
                     }
+                    changed
                 }
                 Op::GhReadError { pr, fail } => {
                     let Some(pr_num) = resolve_pr(pr) else {
                         trace.push(format!("#{step} noop (gh read_err {pr:?} fail={fail})"));
-                        return;
+                        return false;
                     };
                     let changed = {
                         let m = gh.get_mut(&pr_num).unwrap();
@@ -1073,11 +1199,12 @@ async fn run_sequential_ops(
                     if changed {
                         sync_gh(&h, &gh);
                     }
+                    changed
                 }
                 Op::GhRemovePr { pr } => {
                     let Some(pr_num) = resolve_pr(pr) else {
                         trace.push(format!("#{step} noop (gh remove {pr:?})"));
-                        return;
+                        return false;
                     };
                     let changed = {
                         let m = gh.get_mut(&pr_num).unwrap();
@@ -1093,6 +1220,7 @@ async fn run_sequential_ops(
                     if changed {
                         sync_gh(&h, &gh);
                     }
+                    changed
                 }
                 Op::GhClearReadErrors => {
                     let mut cleared = Vec::new();
@@ -1104,14 +1232,17 @@ async fn run_sequential_ops(
                     }
                     if cleared.is_empty() {
                         trace.push(format!("#{step} noop (clear read_err: none active)"));
+                        false
                     } else {
                         sync_gh(&h, &gh);
                         trace.push(format!("#{step} clear read_err {cleared:?}"));
+                        true
                     }
                 }
                 Op::Reconcile => {
                     let had_err = gh.values().any(|m| m.read_err);
-                    let mutations_before = advance_mutations(&h);
+                    let mut mutations_before = advance_mutations(&h);
+                    let mut live_before = model.live_prs();
                     let rec = h.app.wf.reconcile().await;
                     let predicted = model.reconcile(&gh);
                     pull_gh_mutations(&h, &mut gh);
@@ -1151,16 +1282,19 @@ async fn run_sequential_ops(
                                     .as_deref()
                                     .filter(|q| *q >= seen.since.as_str())
                                     .unwrap_or(&seen.since);
-                                let reported = actions
-                                    .iter()
-                                    .any(|a| a.starts_with(&format!("{label} dropped from the merge queue")));
+                                let reported = actions.iter().any(|a| {
+                                    a.starts_with(&format!("{label} dropped from the merge queue"))
+                                        && !a.ends_with("no reason recorded")
+                                });
                                 if at.as_str() < after {
                                     let event = format!("removed:{at}");
-                                    let marked = h.app.store.pr_event_seen(REPO, number, &event, BOARD).unwrap()
-                                        || seen
-                                            .tickets
-                                            .iter()
-                                            .any(|(t, _)| h.app.store.pr_event_seen(REPO, number, &event, t).unwrap());
+                                    let newly_marked = |target: &str| {
+                                        h.app.store.pr_event_seen(REPO, number, &event, target).unwrap()
+                                            && !before
+                                                .pr_events
+                                                .contains(&(REPO.into(), number, event.clone(), target.into()))
+                                    };
+                                    let marked = newly_marked(BOARD) || seen.tickets.iter().any(|(t, _)| newly_marked(t));
                                     oracle_assert!(
                                         !reported && !marked,
                                         "stale queue drop {label} at {at} (< after {after}) was reported or marked: \
@@ -1170,14 +1304,28 @@ async fn run_sequential_ops(
                                 }
                             }
                         }
-                        if advance_mutations(&h) != mutations_before {
+                        // Settle any external GitHub mutations (merge/enqueue) or newly refreshed
+                        // T3 live PRs (from un-ticked `FakeSetPrs` observed via `read_thread` during
+                        // `retry_ready` or `flush_to`) before asserting strict pass idempotence.
+                        let max_settle = WORKERS.len() + 1;
+                        for pass_idx in 0..=max_settle {
+                            if advance_mutations(&h) == mutations_before && model.live_prs() == live_before {
+                                break;
+                            }
+                            oracle_assert!(
+                                pass_idx < max_settle,
+                                "reconcile did not settle external GitHub/live-PR changes within {max_settle} passes\nseed={run_id}\n{}",
+                                trace.join("\n")
+                            );
+                            mutations_before = advance_mutations(&h);
+                            live_before = model.live_prs();
                             let settle = h.app.wf.reconcile().await;
                             let predicted = model.reconcile(&gh);
                             pull_gh_mutations(&h, &mut gh);
                             oracle.mutations(&predicted, &gh, settle.is_ok(), attempts(&h), &trace, run_id);
                             oracle_assert!(
                                 settle.is_ok(),
-                                "settling reconcile after advance failed: {settle:?}\nseed={run_id}\n{}",
+                                "settling reconcile after advance/live refresh failed: {settle:?}\nseed={run_id}\n{}",
                                 trace.join("\n")
                             );
                         }
@@ -1232,15 +1380,16 @@ async fn run_sequential_ops(
                             trace.join("\n")
                         );
                     }
+                    true
                 }
                 Op::Adopt { to, from } => {
                     let (Some(to_t), Some(from_t)) = (resolve_ticket(to), resolve_ticket(from)) else {
                         trace.push(format!("#{step} noop (adopt {to:?} from {from:?})"));
-                        return;
+                        return false;
                     };
-                    if to_t == from_t {
-                        trace.push(format!("#{step} noop (adopt self {to_t})"));
-                        return;
+                    if to_t == from_t || !model.is_open(to_t) {
+                        trace.push(format!("#{step} noop (adopt {to_t} from {from_t})"));
+                        return false;
                     }
                     let r = h.wf(to_t, "adopt", json!({"from": from_t})).await;
                     model.adopt(to_t, from_t);
@@ -1250,20 +1399,22 @@ async fn run_sequential_ops(
                         "adopt left open children on {from_t}\nseed={run_id}\n{}",
                         trace.join("\n")
                     );
+                    true
                 }
                 Op::TicketGateClear { ticket } => {
-                    let Some(t) = resolve_ticket(ticket) else {
+                    let Some(t) = resolve_ticket(ticket).filter(|t| model.is_open(t)) else {
                         trace.push(format!("#{step} noop (gate clear {ticket:?})"));
-                        return;
+                        return false;
                     };
                     let _ = h.wf(t, "gate", json!({"clear": true})).await;
                     model.ticket_gate_clear(t);
                     trace.push(format!("#{step} {t} gate clear"));
+                    true
                 }
                 Op::TicketSendGate { ticket } => {
-                    let Some(t) = resolve_ticket(ticket) else {
+                    let Some(t) = resolve_ticket(ticket).filter(|t| model.is_open(t)) else {
                         trace.push(format!("#{step} noop (send gate {ticket:?})"));
-                        return;
+                        return false;
                     };
                     let r = h
                         .wf(
@@ -1275,21 +1426,23 @@ async fn run_sequential_ops(
                         .await;
                     model.ticket_send_gate(t, "delivery:verify");
                     trace.push(format!("#{step} {t} open delivery:verify -> {}", r["card"]));
+                    true
                 }
                 Op::TicketGateOpen { ticket } => {
-                    let Some(t) = resolve_ticket(ticket) else {
+                    let Some(t) = resolve_ticket(ticket).filter(|t| model.is_open(t)) else {
                         trace.push(format!("#{step} noop (gate open {ticket:?})"));
-                        return;
+                        return false;
                     };
                     let _ = h.wf(t, "gate", json!({"open": "merge"})).await;
                     model.ticket_gate_open(t, "merge");
                     trace.push(format!("#{step} {t} manual gate open merge"));
+                    true
                 }
                 Op::AnswerCard { card } => {
                     let open = h.app.wf.cards().unwrap();
                     let Some((idx, c)) = resolve_card(&open, card) else {
                         trace.push(format!("#{step} noop (answer {card:?})"));
-                        return;
+                        return false;
                     };
                     let rank = model.card_ref(&before, idx);
                     let ans = c.options.first().map(String::as_str).unwrap_or("ok");
@@ -1297,12 +1450,13 @@ async fn run_sequential_ops(
                     model.answer(rank, c.ticket.as_deref(), ans, &c.options);
                     pull_gh_mutations(&h, &mut gh);
                     trace.push(format!("#{step} answer {} ({card:?}) with {ans:?}", c.id));
+                    true
                 }
                 Op::DismissCard { card } => {
                     let open = h.app.wf.cards().unwrap();
                     let Some((idx, c)) = resolve_card(&open, card) else {
                         trace.push(format!("#{step} noop (dismiss {card:?})"));
-                        return;
+                        return false;
                     };
                     let rank = model.card_ref(&before, idx);
                     let res = h
@@ -1318,6 +1472,7 @@ async fn run_sequential_ops(
                     );
                     model.dismiss(rank, c.ticket.as_deref(), c.worker.is_some());
                     trace.push(format!("#{step} dismiss_at {} ({card:?})", c.id));
+                    true
                 }
                 Op::AnswerReadyAndClearGate { nth } => {
                     // Answer a ready merge card and immediately clear the ticket's gate;
@@ -1326,7 +1481,7 @@ async fn run_sequential_ops(
                     let target = CardSym { kind: CardKind::ReadyMerge, nth };
                     let Some((idx, chosen)) = resolve_card(&open, target) else {
                         trace.push(format!("#{step} noop (answer_ready_and_clear nth={nth})"));
-                        return;
+                        return false;
                     };
                     let rank = model.card_ref(&before, idx);
                     let ticket = chosen.ticket.clone().unwrap();
@@ -1359,11 +1514,12 @@ async fn run_sequential_ops(
                             trace.join("\n")
                         );
                     }
+                    true
                 }
                 Op::WorkerReviewGate { worker } => {
                     let Some((w, _)) = resolve_worker(worker, &closed_workers) else {
                         trace.push(format!("#{step} noop (review gate {worker:?})"));
-                        return;
+                        return false;
                     };
                     let r = h
                         .wf(
@@ -1376,15 +1532,16 @@ async fn run_sequential_ops(
                         .await;
                     model.worker_gate(w, "review", &["fix", "ship"]);
                     trace.push(format!("#{step} {w} relayed review gate -> {}", r["card"]));
+                    true
                 }
                 Op::WorkerClose { worker } => {
                     let Some((w, _)) = resolve_worker(worker, &closed_workers) else {
                         trace.push(format!("#{step} noop (close {worker:?})"));
-                        return;
+                        return false;
                     };
                     if WORKERS.len() - closed_workers.len() <= 1 {
                         trace.push(format!("#{step} noop (close last worker {w})"));
-                        return;
+                        return false;
                     }
                     let parent = h.app.store.link_get(w).unwrap().unwrap().parent;
                     oracle_assert_eq!(
@@ -1395,76 +1552,41 @@ async fn run_sequential_ops(
                     );
                     h.wf(&parent, "close", json!({"child": w})).await;
                     model.close(w);
-                    let count = sent_counts(&h).get(w).copied().unwrap_or(0);
+                    let count = delivered_counts(&h).get(w).copied().unwrap_or(0);
                     closed_workers.insert(w.to_string(), count);
                     trace.push(format!("#{step} {parent} close {w} (sent_at_close={count})"));
+                    true
                 }
                 Op::WorkerHandoff { worker } => {
                     let Some((w, _)) = resolve_worker(worker, &closed_workers) else {
                         trace.push(format!("#{step} noop (handoff {worker:?})"));
-                        return;
+                        return false;
                     };
                     if WORKERS.len() - closed_workers.len() <= 1 {
                         trace.push(format!("#{step} noop (handoff last worker {w})"));
-                        return;
+                        return false;
                     }
                     h.wf(w, "send", json!({"kind": "handoff", "body": "chaos handoff"})).await;
                     model.handoff(w);
-                    let count = sent_counts(&h).get(w).copied().unwrap_or(0);
+                    let count = delivered_counts(&h).get(w).copied().unwrap_or(0);
                     closed_workers.insert(w.to_string(), count);
                     trace.push(format!("#{step} {w} handoff (sent_at_close={count})"));
+                    true
                 }
                 Op::AdvanceTick { minutes } => {
-                    let waiting_before: BTreeMap<String, usize> = WORKERS
-                        .iter()
-                        .copied()
-                        .filter(|w| !closed_workers.contains_key(*w))
-                        .filter_map(|w| {
-                            let wl = h.app.store.link_get(w).unwrap()?;
-                            wl.pr.as_ref().filter(|p| p.waiting).map(|_| {
-                                let nudges = h
-                                    .sent()
-                                    .into_iter()
-                                    .filter(|s| {
-                                        s["threadId"] == w
-                                            && s["message"].as_str().is_some_and(|m| m.starts_with("[t3cm nudge"))
-                                    })
-                                    .count();
-                                (w.to_string(), nudges)
-                            })
-                        })
-                        .collect();
-                    h.advance_tick(i64::from(minutes)).await;
-                    model.step(&clock_now(&h));
-                    model.tick();
-                    oracle.loose = Some(model.tick_may());
                     trace.push(format!("#{step} advance_tick({minutes})"));
-                    for (w, before) in waiting_before {
-                        let after = h
-                            .sent()
-                            .into_iter()
-                            .filter(|s| {
-                                s["threadId"] == w.as_str()
-                                    && s["message"].as_str().is_some_and(|m| m.starts_with("[t3cm nudge"))
-                            })
-                            .count();
-                        oracle_assert_eq!(
-                            after,
-                            before,
-                            "waiting worker {w} was nudged during advance_tick({minutes})\nseed={run_id}\n{}",
-                            trace.join("\n")
-                        );
-                    }
+                    run_tick(&h, &mut model, &mut oracle, &closed_workers, minutes, &trace, run_id).await;
+                    true
                 }
                 Op::MergeWaitPut { pr, ticket, reassigned_id } => {
                     let (Some(pr_num), Some(t)) = (resolve_pr(pr), resolve_ticket(ticket)) else {
                         trace.push(format!("#{step} noop (merge_wait_put {pr:?} {ticket:?})"));
-                        return;
+                        return false;
                     };
                     let m = &gh[&pr_num];
                     if !m.exists || m.state != "OPEN" {
                         trace.push(format!("#{step} noop (merge_wait_put #{pr_num} closed/missing)"));
-                        return;
+                        return false;
                     }
                     let head = HEADS[m.head_idx].to_string();
                     let pull_request_id = if reassigned_id {
@@ -1498,11 +1620,12 @@ async fn run_sequential_ops(
                         "#{step} merge_wait_put{} #{pr_num}@{head} for {t}",
                         if reassigned_id { "(reassigned_id)" } else { "" }
                     ));
+                    true
                 }
                 Op::GhQueueConfig { pr, enabled, queued } => {
                     let Some(pr_num) = resolve_pr(pr) else {
                         trace.push(format!("#{step} noop (gh queue {pr:?})"));
-                        return;
+                        return false;
                     };
                     let changed = {
                         let m = gh.get_mut(&pr_num).unwrap();
@@ -1523,11 +1646,12 @@ async fn run_sequential_ops(
                     if changed {
                         sync_gh(&h, &gh);
                     }
+                    changed
                 }
                 Op::GhQueueDrop { pr, reason, predates } => {
                     let Some(pr_num) = resolve_pr(pr) else {
                         trace.push(format!("#{step} noop (gh queue drop {pr:?})"));
-                        return;
+                        return false;
                     };
                     let changed = {
                         let m = gh.get_mut(&pr_num).unwrap();
@@ -1545,24 +1669,26 @@ async fn run_sequential_ops(
                     if changed {
                         sync_gh(&h, &gh);
                     }
+                    changed
                 }
                 Op::FakeSetPrs { worker, pr } => {
                     let (Some((w, _)), Some(pr_num)) = (resolve_worker(worker, &closed_workers), resolve_pr(pr)) else {
                         trace.push(format!("#{step} noop (fake.set_prs {worker:?} {pr:?})"));
-                        return;
+                        return false;
                     };
                     h.fake.set_prs(w, vec![pull_request(REPO, pr_num, "open")]);
                     model.set_prs(w, pr_num);
                     trace.push(format!("#{step} fake.set_prs({w}, #{pr_num})"));
+                    true
                 }
                 Op::WorkerSetBusy { worker, busy } => {
                     let Some((w, _)) = resolve_worker(worker, &closed_workers) else {
                         trace.push(format!("#{step} noop (set_busy {worker:?})"));
-                        return;
+                        return false;
                     };
                     if busy_workers.contains(w) == busy {
                         trace.push(format!("#{step} noop ({w} already busy={busy})"));
-                        return;
+                        return false;
                     }
                     let status = if busy { "running" } else { "idle" };
                     h.fake.update(w, json!({"status": status, "updatedAt": clock_now(&h)}));
@@ -1573,40 +1699,392 @@ async fn run_sequential_ops(
                     }
                     model.set_busy(w, busy);
                     trace.push(format!("#{step} {w} status={status}"));
+                    true
                 }
                 Op::ParentReply { worker } => {
                     let Some((w, _)) = resolve_worker(worker, &closed_workers) else {
                         trace.push(format!("#{step} noop (parent reply {worker:?})"));
-                        return;
+                        return false;
                     };
                     let parent = h.app.store.link_get(w).unwrap().unwrap().parent;
                     let r = h.wf(&parent, "reply", json!({"to": w, "body": "chaos reply"})).await;
                     model.reply(w);
                     trace.push(format!("#{step} {parent} reply {w} -> {}", r["delivery"]));
+                    true
+                }
+                Op::TicketClose { ticket, by_board } => {
+                    let Some(t) = resolve_ticket(ticket).filter(|t| model.is_open(t)) else {
+                        trace.push(format!("#{step} noop (ticket close {ticket:?})"));
+                        return false;
+                    };
+                    if !model.is_archived_or_gone(t) && live_tickets_count(&model) <= 1 {
+                        trace.push(format!("#{step} noop (ticket close last live ticket {t})"));
+                        return false;
+                    }
+                    if by_board {
+                        let r = h.app.wf.close_ticket(t, false).await.unwrap();
+                        oracle_assert_eq!(
+                            r["closed"].as_bool(),
+                            Some(true),
+                            "close_ticket failed for {t}: {r}\nseed={run_id}\n{}",
+                            trace.join("\n")
+                        );
+                    } else {
+                        let r = h.wf(t, "send", json!({"kind": "closed", "body": "chaos ticket close"})).await;
+                        oracle_assert_eq!(
+                            r["closed"].as_bool(),
+                            Some(true),
+                            "ticket send closed failed for {t}: {r}\nseed={run_id}\n{}",
+                            trace.join("\n")
+                        );
+                    }
+                    model.close_ticket(t, by_board);
+                    trace.push(format!("#{step} ticket close {t} (by_board={by_board})"));
+                    true
+                }
+                Op::TicketArchive { ticket, tick } => {
+                    let Some(t) = resolve_ticket(ticket) else {
+                        trace.push(format!("#{step} noop (ticket archive {ticket:?})"));
+                        return false;
+                    };
+                    if !model.is_open(t) || model.is_archived_or_gone(t) || live_tickets_count(&model) <= 1 {
+                        trace.push(format!("#{step} noop (ticket archive {t})"));
+                        return false;
+                    }
+                    h.fake.update(t, json!({"archived": true}));
+                    model.mark_archived(t);
+                    trace.push(format!("#{step} ticket archive {t} (tick={tick})"));
+                    if tick {
+                        run_tick(&h, &mut model, &mut oracle, &closed_workers, 0, &trace, run_id).await;
+                    }
+                    true
+                }
+                Op::TicketThreadGone { ticket, tick } => {
+                    let Some(t) = resolve_ticket(ticket) else {
+                        trace.push(format!("#{step} noop (ticket thread_gone {ticket:?})"));
+                        return false;
+                    };
+                    if !model.is_open(t) || model.is_archived_or_gone(t) || live_tickets_count(&model) <= 1 {
+                        trace.push(format!("#{step} noop (ticket thread_gone {t})"));
+                        return false;
+                    }
+                    h.fake.remove(t);
+                    model.mark_gone(t);
+                    trace.push(format!("#{step} ticket thread_gone {t} (tick={tick})"));
+                    if tick {
+                        run_tick(&h, &mut model, &mut oracle, &closed_workers, 0, &trace, run_id).await;
+                    }
+                    true
+                }
+                Op::WfReply { worker, by_label, reopen } => {
+                    let Some(&w) = WORKERS.get(worker.0) else {
+                        trace.push(format!("#{step} noop (wf.reply {worker:?})"));
+                        return false;
+                    };
+                    let parent = h.app.store.link_get(w).unwrap().unwrap().parent;
+                    oracle_assert_eq!(
+                        parent,
+                        model.parent(w),
+                        "worker {w} parent drifted from the model\nseed={run_id}\n{}",
+                        trace.join("\n")
+                    );
+                    let label = model.label(w);
+                    let to = if by_label { label.as_str() } else { w };
+                    if !model.is_open(w) && !reopen {
+                        let err = h
+                            .wf_err(&parent, "reply", json!({"to": to, "body": "chaos wf.reply", "reopen": false}))
+                            .await;
+                        oracle_assert!(
+                            err.contains("closed") && err.contains("reopen"),
+                            "wf.reply to closed {w} without reopen gave unexpected error: {err}\nseed={run_id}\n{}",
+                            trace.join("\n")
+                        );
+                        trace.push(format!("#{step} {parent} wf.reply to={to:?} reopen=false -> refused (closed)"));
+                    } else {
+                        let r =
+                            h.wf(&parent, "reply", json!({"to": to, "body": "chaos wf.reply", "reopen": reopen})).await;
+                        model.reply_with_reopen(w, reopen);
+                        trace.push(format!(
+                            "#{step} {parent} wf.reply to={to:?} reopen={reopen} -> {}",
+                            r["delivery"]
+                        ));
+                    }
+                    true
+                }
+                Op::Pause { target, paused } => {
+                    let (id, r) = match target {
+                        PauseTarget::Ticket { ticket } => {
+                            let Some(t) = resolve_ticket(ticket).filter(|t| model.is_open(t)) else {
+                                trace.push(format!("#{step} noop (pause {target:?} paused={paused})"));
+                                return false;
+                            };
+                            (t, h.wf(t, "pause", json!({"paused": paused})).await)
+                        }
+                        PauseTarget::WorkerSelf { worker } => {
+                            let Some((w, _)) = resolve_worker(worker, &closed_workers) else {
+                                trace.push(format!("#{step} noop (pause {target:?} paused={paused})"));
+                                return false;
+                            };
+                            (w, h.wf(w, "pause", json!({"paused": paused})).await)
+                        }
+                        PauseTarget::WorkerByParent { worker } => {
+                            let Some((w, _)) = resolve_worker(worker, &closed_workers) else {
+                                trace.push(format!("#{step} noop (pause {target:?} paused={paused})"));
+                                return false;
+                            };
+                            let parent = model.parent(w);
+                            (w, h.wf(&parent, "pause", json!({"child": w, "paused": paused})).await)
+                        }
+                        PauseTarget::BoardTicket { ticket } => {
+                            let Some(t) = resolve_ticket(ticket).filter(|t| model.is_open(t)) else {
+                                trace.push(format!("#{step} noop (pause {target:?} paused={paused})"));
+                                return false;
+                            };
+                            (t, h.app.wf.pause_link(t, paused).await.unwrap())
+                        }
+                        PauseTarget::BoardWorker { worker } => {
+                            let Some((w, _)) = resolve_worker(worker, &closed_workers) else {
+                                trace.push(format!("#{step} noop (pause {target:?} paused={paused})"));
+                                return false;
+                            };
+                            (w, h.app.wf.pause_link(w, paused).await.unwrap())
+                        }
+                    };
+                    oracle_assert_eq!(
+                        r["paused"].as_bool(),
+                        Some(paused),
+                        "pause response diverged for {id}: {r}\nseed={run_id}\n{}",
+                        trace.join("\n")
+                    );
+                    model.set_paused(id, paused);
+                    trace.push(format!("#{step} pause {id} ({target:?}) paused={paused}"));
+                    true
+                }
+                Op::Sweep { target } => {
+                    let id = match target {
+                        SweepTarget::Ticket { ticket } => {
+                            let Some(t) = resolve_ticket(ticket) else {
+                                trace.push(format!("#{step} noop (sweep {ticket:?})"));
+                                return false;
+                            };
+                            t
+                        }
+                        SweepTarget::Worker { worker } => {
+                            let Some(&w) = WORKERS.get(worker.0) else {
+                                trace.push(format!("#{step} noop (sweep {worker:?})"));
+                                return false;
+                            };
+                            w
+                        }
+                    };
+                    let r = h.wf(id, "sweep", json!({})).await;
+                    let mut got_open: Vec<String> = r["open"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect();
+                    got_open.sort();
+                    let got_dropped: Vec<String> = r["dropped"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect();
+                    let (want_open, want_parent_open) = model.sweep(id);
+                    trace.push(format!("#{step} {id} sweep -> open={got_open:?} parentOpen={}", r["parentOpen"]));
+                    oracle_assert_eq!(
+                        got_open,
+                        want_open,
+                        "wf.sweep open children diverged for {id}\nseed={run_id}\n{}",
+                        trace.join("\n")
+                    );
+                    oracle_assert!(
+                        got_dropped.is_empty(),
+                        "wf.sweep unexpectedly dropped {got_dropped:?} for {id}\nseed={run_id}\n{}",
+                        trace.join("\n")
+                    );
+                    oracle_assert_eq!(
+                        r["parentOpen"].as_bool(),
+                        Some(want_parent_open),
+                        "wf.sweep parentOpen diverged for {id}\nseed={run_id}\n{}",
+                        trace.join("\n")
+                    );
+                    true
+                }
+                Op::SetRelay { relay } => {
+                    if model.relay() == relay {
+                        trace.push(format!("#{step} noop (set_relay already {relay})"));
+                        return false;
+                    }
+                    let cfg = json!({"roles": {"ticket": {"children": {"worker": {"relay": relay}}}}});
+                    std::fs::write(h.dir.path().join("t3cm-config.json"), cfg.to_string()).unwrap();
+                    let reloaded = h.app.wf.reload_config().await.unwrap();
+                    oracle_assert!(
+                        reloaded.restart.is_empty(),
+                        "reloading worker relay unexpectedly required restart: {:?}\nseed={run_id}\n{}",
+                        reloaded.restart,
+                        trace.join("\n")
+                    );
+                    model.set_relay(relay);
+                    trace.push(format!("#{step} set_relay({relay})"));
+                    true
+                }
+                Op::WorkerSetMergeOnly { worker, merge_only } => {
+                    let Some((w, _)) = resolve_worker(worker, &closed_workers) else {
+                        trace.push(format!("#{step} noop (set_merge_only {worker:?})"));
+                        return false;
+                    };
+                    let parent = model.parent(w);
+                    if model.merge_only(w) == merge_only || !model.is_open(&parent) {
+                        trace.push(format!("#{step} noop (set_merge_only {w} merge_only={merge_only})"));
+                        return false;
+                    }
+                    let ln = h.app.store.link_get(w).unwrap().unwrap();
+                    let part = ln.identity.part.unwrap_or_else(|| "1/3".into());
+                    h.wf(
+                        &parent,
+                        "openChild",
+                        json!({"role": "worker", "label": ln.label, "issue": "acme/widgets#41", "part": part,
+                               "pr": {"format": "pr", "mergeOnly": merge_only}}),
+                    )
+                    .await;
+                    h.wf(w, "join", json!({"parent": parent, "label": ln.label, "role": "worker"})).await;
+                    model.set_merge_only(w, merge_only);
+                    trace.push(format!("#{step} {w} set_merge_only({merge_only})"));
+                    true
+                }
+                Op::PrFollowup { worker, pr, event, short_sha, no_ci } => {
+                    let (Some((w, _)), Some(pr_num)) = (resolve_worker(worker, &closed_workers), resolve_pr(pr)) else {
+                        trace.push(format!("#{step} noop (pr followup {worker:?} {pr:?})"));
+                        return false;
+                    };
+                    let Some(primary) = model.primary_pr(w) else {
+                        trace.push(format!("#{step} noop (pr followup {w} has no primary PR yet)"));
+                        return false;
+                    };
+                    if primary == pr_num {
+                        trace.push(format!("#{step} noop (pr followup {w} #{pr_num} matches primary)"));
+                        return false;
+                    }
+                    let head = HEADS[gh[&pr_num].head_idx];
+                    let sha = if short_sha { &head[..7] } else { head };
+                    let (r, want, ev_str) = match event {
+                        PrEventKind::Opened => {
+                            let checks = if no_ci { "none" } else { "pending" };
+                            let r = h
+                                .wf(
+                                    w,
+                                    "pr",
+                                    json!({"event": "opened", "repo": REPO, "pr": pr_num, "head": sha,
+                                           "publishing": PUBLISHING, "checks": checks}),
+                                )
+                                .await;
+                            let want = model.pr_opened(w, pr_num, sha, no_ci, &gh);
+                            (r, want, "opened")
+                        }
+                        PrEventKind::Updated => {
+                            let r = h
+                                .wf(w, "pr", json!({"event": "updated", "repo": REPO, "pr": pr_num, "head": sha}))
+                                .await;
+                            let want = model.pr_updated(w, pr_num, sha);
+                            (r, want, "updated")
+                        }
+                        PrEventKind::Ready => {
+                            let r =
+                                h.wf(w, "pr", json!({"event": "ready", "repo": REPO, "pr": pr_num, "head": sha})).await;
+                            let want = model.pr_ready(w, pr_num, sha, &gh);
+                            (r, want, "ready")
+                        }
+                    };
+                    trace.push(format!("#{step} {w} pr followup {ev_str} #{pr_num}@{sha} -> {}", r["status"]));
+                    oracle.status(&r, &want, &trace, run_id);
+                    true
+                }
+                Op::GhFilesPaginated { pr, paginated } => {
+                    let Some(pr_num) = resolve_pr(pr) else {
+                        trace.push(format!("#{step} noop (gh files_paginated {pr:?})"));
+                        return false;
+                    };
+                    let changed = {
+                        let m = gh.get_mut(&pr_num).unwrap();
+                        if m.exists && m.state == "OPEN" && m.many_files != paginated {
+                            m.many_files = paginated;
+                            trace.push(format!("#{step} gh files_paginated #{pr_num} paginated={paginated}"));
+                            true
+                        } else {
+                            trace.push(format!("#{step} noop (gh files_paginated #{pr_num} paginated={paginated})"));
+                            false
+                        }
+                    };
+                    if changed {
+                        sync_gh(&h, &gh);
+                    }
+                    changed
+                }
+                Op::GhReopen { pr } => {
+                    let Some(pr_num) = resolve_pr(pr) else {
+                        trace.push(format!("#{step} noop (gh reopen {pr:?})"));
+                        return false;
+                    };
+                    let changed = {
+                        let m = gh.get_mut(&pr_num).unwrap();
+                        if m.exists && m.state == "CLOSED" {
+                            m.state = "OPEN";
+                            m.ended_at = None;
+                            m.queued = false;
+                            trace.push(format!("#{step} gh reopen #{pr_num}"));
+                            true
+                        } else {
+                            trace.push(format!("#{step} noop (gh reopen #{pr_num} not closed)"));
+                            false
+                        }
+                    };
+                    if changed {
+                        sync_gh(&h, &gh);
+                    }
+                    changed
                 }
             }
         })
         .await;
-        assert!(res.is_ok(), "step timed out (possible deadlock) at seed={run_id}\n{}", trace.join("\n"));
-        assert_invariants(&h, run_id, &trace, &closed_workers, healthy_reconcile, &gh);
+        let executed =
+            res.unwrap_or_else(|_| panic!("step timed out (possible deadlock) at seed={run_id}\n{}", trace.join("\n")));
+        op_stats.record(op.kind(), executed);
+        for (w, &n) in &model.reopen_wakes {
+            if let Some(count) = closed_workers.get_mut(w) {
+                *count += n;
+            }
+        }
+        let now_counts = delivered_counts(&h);
+        for &t in TICKETS {
+            if !model.is_open(t) && !closed_tickets.contains_key(t) {
+                closed_tickets.insert(t.to_string(), now_counts.get(t).copied().unwrap_or(0));
+            }
+        }
+        assert_invariants(&h, run_id, &trace, &closed_tickets, &closed_workers, healthy_reconcile, &gh);
         oracle.check(&h, &mut model, sent_before, &trace, run_id);
     }
-    (trace, h.app.wf.reach().snapshot())
+    (trace, h.app.wf.reach().snapshot(), op_stats)
 }
 
 #[tokio::test]
 async fn seeded_sequential_chaos_holds_all_invariants() {
     let range = chaos_seed_range(DEFAULT_SEQ_SEEDS);
     let mut reach = ReachSnapshot::default();
+    let mut op_stats = OpStats::default();
     for seed in range.seeds() {
-        let (_, snap) = run_sequential_seed(seed).await;
+        let (_, snap, stats) = run_sequential_seed(seed).await;
         reach.merge(&snap);
+        op_stats.merge(&stats);
     }
     if std::env::var_os("CHAOS_REACH").is_some() {
-        eprintln!("{reach}");
+        eprintln!("{reach}\n{op_stats}");
     }
     if range.count >= DEFAULT_SEQ_SEEDS {
-        reach.assert_tier1(&format!("seeded_sequential_chaos ({})", range.describe()));
+        let ctx = format!("seeded_sequential_chaos ({})", range.describe());
+        reach.assert_tier1(&ctx);
+        op_stats.assert_all_executed(&ctx);
     }
 }
 
@@ -1938,7 +2416,7 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
         })
         .await;
         assert!(res.is_ok(), "concurrent race timed out (deadlock?) at seed={seed}\n{}", trace.join("\n"));
-        assert_invariants(&h, seed, &trace, &BTreeMap::new(), false, &gh);
+        assert_invariants(&h, seed, &trace, &BTreeMap::new(), &BTreeMap::new(), false, &gh);
         if let Some(race) = advance_race {
             let predicted = model.reconcile_racing_advance(&ops_gh, &race);
             pull_gh_mutations(&h, &mut gh);
@@ -1975,7 +2453,7 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
         }
     }
     oracle_assert!(settled, "reconcile did not reach a fixpoint in 4 passes\nseed={seed}\n{}", trace.join("\n"));
-    assert_invariants(&h, seed, &trace, &BTreeMap::new(), true, &gh);
+    assert_invariants(&h, seed, &trace, &BTreeMap::new(), &BTreeMap::new(), true, &gh);
     (trace, h)
 }
 
@@ -2201,6 +2679,17 @@ fn op_serialization_round_trips_and_decodes_edge_cases() {
         Op::FakeSetPrs { worker: WSym(0), pr: PrSym(2) },
         Op::WorkerSetBusy { worker: WSym(1), busy: true },
         Op::ParentReply { worker: WSym(2) },
+        Op::TicketClose { ticket: TSym(0), by_board: true },
+        Op::TicketArchive { ticket: TSym(1), tick: true },
+        Op::TicketThreadGone { ticket: TSym(2), tick: false },
+        Op::WfReply { worker: WSym(0), by_label: true, reopen: true },
+        Op::Pause { target: PauseTarget::WorkerByParent { worker: WSym(1) }, paused: true },
+        Op::Sweep { target: SweepTarget::Ticket { ticket: TSym(0) } },
+        Op::SetRelay { relay: false },
+        Op::WorkerSetMergeOnly { worker: WSym(2), merge_only: true },
+        Op::PrFollowup { worker: WSym(0), pr: PrSym(1), event: PrEventKind::Ready, short_sha: true, no_ci: false },
+        Op::GhFilesPaginated { pr: PrSym(2), paginated: true },
+        Op::GhReopen { pr: PrSym(0) },
     ];
     for (idx, &kind) in OpKind::ALL.iter().enumerate() {
         assert_eq!(kind as usize, idx, "OpKind::ALL order drifted at {kind:?}");
@@ -2212,6 +2701,38 @@ fn op_serialization_round_trips_and_decodes_edge_cases() {
     let decoded = deserialize_ops(&encoded).unwrap();
     assert_eq!(decoded, all_variants);
     assert!(deserialize_ops("{\"op\":\"unknown\"}\n").is_err());
+
+    // Backward compatibility: legacy NDJSON lines from the initial 27-op schema still deserialize identically.
+    let legacy_ndjson = concat!(
+        "{\"op\":\"pr_opened\",\"worker\":0,\"short_sha\":true,\"no_ci\":false}\n",
+        "{\"op\":\"pr_updated\",\"worker\":1,\"short_sha\":false}\n",
+        "{\"op\":\"pr_ready\",\"worker\":2,\"short_sha\":true}\n",
+        "{\"op\":\"gh_push\",\"pr\":0}\n",
+        "{\"op\":\"gh_status\",\"pr\":1,\"checks\":\"pending\",\"merge_state\":\"unknown\",\"draft\":true}\n",
+        "{\"op\":\"gh_finish\",\"pr\":2,\"state\":\"merged\",\"predates\":true}\n",
+        "{\"op\":\"gh_read_error\",\"pr\":0,\"fail\":true}\n",
+        "{\"op\":\"gh_remove_pr\",\"pr\":1}\n",
+        "{\"op\":\"gh_clear_read_errors\"}\n",
+        "{\"op\":\"reconcile\"}\n",
+        "{\"op\":\"adopt\",\"to\":2,\"from\":0}\n",
+        "{\"op\":\"ticket_gate_clear\",\"ticket\":0}\n",
+        "{\"op\":\"ticket_send_gate\",\"ticket\":1}\n",
+        "{\"op\":\"ticket_gate_open\",\"ticket\":2}\n",
+        "{\"op\":\"answer_card\",\"card\":{\"kind\":\"relayed\",\"nth\":0}}\n",
+        "{\"op\":\"dismiss_card\",\"card\":{\"kind\":\"any\",\"nth\":1}}\n",
+        "{\"op\":\"answer_ready_and_clear_gate\",\"nth\":0}\n",
+        "{\"op\":\"worker_review_gate\",\"worker\":0}\n",
+        "{\"op\":\"worker_close\",\"worker\":1}\n",
+        "{\"op\":\"worker_handoff\",\"worker\":2}\n",
+        "{\"op\":\"advance_tick\",\"minutes\":35}\n",
+        "{\"op\":\"merge_wait_put\",\"pr\":0,\"ticket\":1,\"reassigned_id\":true}\n",
+        "{\"op\":\"gh_queue_config\",\"pr\":1,\"enabled\":true,\"queued\":false}\n",
+        "{\"op\":\"gh_queue_drop\",\"pr\":2,\"reason\":\"merge_conflict\",\"predates\":false}\n",
+        "{\"op\":\"fake_set_prs\",\"worker\":0,\"pr\":2}\n",
+        "{\"op\":\"worker_set_busy\",\"worker\":1,\"busy\":true}\n",
+        "{\"op\":\"parent_reply\",\"worker\":2}\n",
+    );
+    assert_eq!(deserialize_ops(legacy_ndjson).unwrap(), all_variants[..27]);
 
     // Edge cases for decode_ops: empty input, tiny input, all-zero weights, and single-kind weights.
     let mut empty = Unstructured::new(&[]);
@@ -2332,12 +2853,24 @@ async fn op_prefix_and_subsequence_replay_holds_invariants() {
         Op::FakeSetPrs { worker: WSym(0), pr: PrSym(0) }, // closed worker -> noop
         Op::WorkerSetBusy { worker: WSym(0), busy: true }, // closed worker -> noop
         Op::ParentReply { worker: WSym(0) },              // closed worker -> noop
+        Op::TicketClose { ticket: TSym(99), by_board: true },
+        Op::TicketArchive { ticket: TSym(99), tick: true },
+        Op::TicketThreadGone { ticket: TSym(99), tick: false },
+        Op::WfReply { worker: WSym(99), by_label: true, reopen: true },
+        Op::Pause { target: PauseTarget::Ticket { ticket: TSym(99) }, paused: true },
+        Op::Pause { target: PauseTarget::WorkerSelf { worker: WSym(0) }, paused: true }, // closed worker -> noop
+        Op::Sweep { target: SweepTarget::Ticket { ticket: TSym(99) } },
+        Op::SetRelay { relay: true },                                 // already true -> noop
+        Op::WorkerSetMergeOnly { worker: WSym(0), merge_only: true }, // closed worker -> noop
+        Op::PrFollowup { worker: WSym(2), pr: PrSym(0), event: PrEventKind::Opened, short_sha: false, no_ci: false }, // no primary PR yet -> noop
+        Op::GhFilesPaginated { pr: PrSym(99), paginated: true },
+        Op::GhReopen { pr: PrSym(0) }, // already open -> noop
         Op::Reconcile,
     ];
-    let (trace, _) = run_sequential_ops(&out_of_range, None, true, "out-of-range").await;
+    let (trace, _, _) = run_sequential_ops(&out_of_range, None, true, "out-of-range").await;
     let noop_count = trace.iter().filter(|line| line.contains(" noop (")).count();
     assert!(
-        noop_count >= 25,
+        noop_count >= 37,
         "expected out-of-range and closed targets to record no-ops, got {noop_count}:\n{}",
         trace.join("\n")
     );
@@ -2353,7 +2886,7 @@ async fn op_prefix_and_subsequence_replay_holds_invariants() {
         Op::GhReadError { pr: PrSym(1), fail: false },
         Op::Reconcile,
     ];
-    let (err_trace, _) = run_sequential_ops(&partial_err, None, true, "partial-read-err").await;
+    let (err_trace, _, _) = run_sequential_ops(&partial_err, None, true, "partial-read-err").await;
     assert!(
         err_trace.iter().any(|l| l.contains("reconcile -> ok=false"))
             && err_trace.iter().any(|l| l.contains("reconcile -> ok=true")),
@@ -2398,7 +2931,7 @@ async fn moved_ready_card_under_non_merge_gate_reconciles_idempotently() {
         Op::GhPush { pr: PrSym(0) },
         Op::Reconcile,
     ];
-    let (trace, _) = run_sequential_ops(&five_ops, None, true, "issue-282").await;
+    let (trace, _, _) = run_sequential_ops(&five_ops, None, true, "issue-282").await;
     assert!(trace.iter().any(|l| l.contains("reconcile -> ok=true")), "trace:\n{}", trace.join("\n"));
 
     let queued_ops = vec![
@@ -2409,10 +2942,105 @@ async fn moved_ready_card_under_non_merge_gate_reconciles_idempotently() {
         Op::GhQueueConfig { pr: PrSym(0), enabled: true, queued: true },
         Op::Reconcile,
     ];
-    let (queued_trace, _) = run_sequential_ops(&queued_ops, None, true, "issue-282-queued").await;
+    let (queued_trace, _, _) = run_sequential_ops(&queued_ops, None, true, "issue-282-queued").await;
     assert!(
         queued_trace.iter().any(|l| l.contains("reconcile -> ok=true")),
         "queued trace:\n{}",
         queued_trace.join("\n")
     );
+}
+
+#[tokio::test]
+async fn un_ticked_fake_set_prs_discovered_during_reconcile_settles_cleanly() {
+    // Reproduces the harness flaw previously hit by seeds 500 (flush_to) and 1080 (retry_ready):
+    // FakeSetPrs links a finished PR on FakeT3 without an intervening tick, and pass 1 of
+    // Reconcile refreshes that worker's live cache via read_thread so a settling pass discovers it.
+    let via_retry_ready = vec![
+        Op::GhFinish { pr: PrSym(2), state: GhEndState::Closed, predates: false },
+        Op::GhStatus { pr: PrSym(1), checks: GhChecks::Pending, merge_state: GhMergeState::Clean, draft: false },
+        Op::PrReady { worker: WSym(1), short_sha: false },
+        Op::GhStatus { pr: PrSym(1), checks: GhChecks::Passing, merge_state: GhMergeState::Clean, draft: false },
+        Op::FakeSetPrs { worker: WSym(1), pr: PrSym(2) },
+        Op::Reconcile,
+    ];
+    let (_, snap1, _) = run_sequential_ops(&via_retry_ready, None, true, "fake-set-prs-retry-ready").await;
+    assert!(snap1.get(t3_codemode::reach::ReachPoint::ReadyWaitingRetried) >= 1);
+    assert!(snap1.get(t3_codemode::reach::ReachPoint::FinishedEventReported) >= 1);
+
+    let via_flush_to = vec![
+        Op::GhFinish { pr: PrSym(0), state: GhEndState::Merged, predates: false },
+        Op::PrReady { worker: WSym(2), short_sha: false },
+        Op::GhFinish { pr: PrSym(2), state: GhEndState::Merged, predates: true },
+        Op::FakeSetPrs { worker: WSym(2), pr: PrSym(0) },
+        Op::Reconcile,
+    ];
+    let (_, snap2, _) = run_sequential_ops(&via_flush_to, None, true, "fake-set-prs-flush-to").await;
+    assert!(snap2.get(t3_codemode::reach::ReachPoint::ReadyWaitingRetried) >= 1);
+    assert!(snap2.get(t3_codemode::reach::ReachPoint::FinishedEventReported) >= 1);
+}
+
+#[tokio::test]
+async fn widened_alphabet_ops_exercise_new_workflow_transitions() {
+    let ops = vec![
+        // Follow-up PRs, >100-file pagination, mergeOnly, relay: false, and PR reopen.
+        Op::PrOpened { worker: WSym(0), short_sha: false, no_ci: false },
+        Op::PrFollowup { worker: WSym(0), pr: PrSym(1), event: PrEventKind::Opened, short_sha: true, no_ci: false },
+        Op::PrFollowup { worker: WSym(0), pr: PrSym(1), event: PrEventKind::Ready, short_sha: false, no_ci: false },
+        Op::GhFilesPaginated { pr: PrSym(0), paginated: true },
+        Op::PrReady { worker: WSym(0), short_sha: false },
+        Op::GhFilesPaginated { pr: PrSym(0), paginated: false },
+        Op::WorkerSetMergeOnly { worker: WSym(1), merge_only: true },
+        Op::PrReady { worker: WSym(1), short_sha: false },
+        Op::WorkerSetMergeOnly { worker: WSym(1), merge_only: false },
+        Op::SetRelay { relay: false },
+        Op::WorkerReviewGate { worker: WSym(0) },
+        Op::PrReady { worker: WSym(1), short_sha: false },
+        Op::SetRelay { relay: true },
+        // PR close -> reconcile -> reopen -> reconcile -> close again.
+        Op::FakeSetPrs { worker: WSym(2), pr: PrSym(2) },
+        Op::AdvanceTick { minutes: 1 },
+        Op::GhFinish { pr: PrSym(2), state: GhEndState::Closed, predates: false },
+        Op::Reconcile,
+        Op::GhReopen { pr: PrSym(2) },
+        Op::Reconcile,
+        // Pause suppresses tick nudges, sweep reports open children, wf.reply reopens closed worker.
+        Op::Pause { target: PauseTarget::WorkerByParent { worker: WSym(2) }, paused: true },
+        Op::Pause { target: PauseTarget::BoardTicket { ticket: TSym(2) }, paused: true },
+        Op::AdvanceTick { minutes: 60 },
+        Op::Sweep { target: SweepTarget::Ticket { ticket: TSym(0) } },
+        Op::WorkerSetBusy { worker: WSym(0), busy: true },
+        Op::WorkerClose { worker: WSym(0) },
+        Op::WfReply { worker: WSym(0), by_label: true, reopen: false },
+        Op::WfReply { worker: WSym(0), by_label: true, reopen: true },
+        Op::AdvanceTick { minutes: 35 },
+        // Ticket close, archive, and thread-gone (leaving at least one live ticket).
+        Op::TicketClose { ticket: TSym(0), by_board: true },
+        Op::Adopt { to: TSym(2), from: TSym(0) },
+        Op::Sweep { target: SweepTarget::Ticket { ticket: TSym(2) } },
+        Op::TicketArchive { ticket: TSym(1), tick: true },
+    ];
+    let (_, reach, _) = run_sequential_ops(&ops, None, true, "widened-alphabet-smoke").await;
+    use t3_codemode::reach::ReachPoint;
+    for p in [
+        ReachPoint::TicketClosed,
+        ReachPoint::TicketArchived,
+        ReachPoint::ReplyReopenedClosed,
+        ReachPoint::PausedLinkSkipped,
+        ReachPoint::SweepExecuted,
+        ReachPoint::RelayOffFallback,
+        ReachPoint::MergeOnlyFallback,
+        ReachPoint::PrFollowupRecorded,
+        ReachPoint::PrFilesPaginatedFallback,
+        ReachPoint::PrReopenedReconciled,
+    ] {
+        assert!(reach.get(p) >= 1, "expected smoke program to hit {}:\n{reach}", p.name());
+    }
+
+    let gone_ops = vec![
+        Op::TicketSendGate { ticket: TSym(0) },
+        Op::TicketThreadGone { ticket: TSym(0), tick: true },
+        Op::Sweep { target: SweepTarget::Ticket { ticket: TSym(0) } },
+    ];
+    let (_, gone_reach, _) = run_sequential_ops(&gone_ops, None, true, "widened-alphabet-gone").await;
+    assert!(gone_reach.get(ReachPoint::TicketThreadGone) >= 1, "expected thread-gone:\n{gone_reach}");
 }

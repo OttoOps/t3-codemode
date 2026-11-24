@@ -608,7 +608,12 @@ impl Wf {
                     merged = self.finished(t, &o, &cards, wait.as_ref(), &live_tickets, since, pass)?;
                     None
                 }
-                "OPEN" => self.open(t, &o, &cards, wait, &live_tickets, after, left.as_deref(), pass)?,
+                "OPEN" => {
+                    if prev.as_ref().is_some_and(|p| p.state == "CLOSED") {
+                        self.reach.hit(ReachPoint::PrReopenedReconciled);
+                    }
+                    self.open(t, &o, &cards, wait, &live_tickets, after, left.as_deref(), pass)?
+                }
                 _ => None,
             };
             let queued_at = match &prev {

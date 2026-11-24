@@ -56,6 +56,28 @@ pub enum ReachPoint {
     RelayedGateAnswered,
     /// Closing a link (or flushing a closed link's outbox) purged at least one held outbox wake.
     OutboxHeldThenClosed,
+    /// A board ticket link closed via board close or ticket self-close.
+    TicketClosed,
+    /// Watcher closed a board ticket link after T3 reported its thread archived.
+    TicketArchived,
+    /// Watcher closed a board ticket link after T3 reported its thread gone.
+    TicketThreadGone,
+    /// `wf.reply` delivered or queued a wake with `reopen: true` on a closed child link.
+    ReplyReopenedClosed,
+    /// Watcher skipped nudging/reporting a link because `paused_at` was set.
+    PausedLinkSkipped,
+    /// `wf.sweep` inspected a thread's open children, pending launches, and parent link state.
+    SweepExecuted,
+    /// A worker's PR event or relayable gate fell back to its parent ticket because `relay: false`.
+    RelayOffFallback,
+    /// `wf.pr ready` fell back to its parent ticket because the worker brief set `mergeOnly: true`.
+    MergeOnlyFallback,
+    /// `wf.pr` recorded a follow-up PR number on a worker that already tracked a primary PR.
+    PrFollowupRecorded,
+    /// `wf.pr ready` fell back to its parent ticket because the PR changed more than 100 files.
+    PrFilesPaginatedFallback,
+    /// `reconcile::fix` reconciled a previously `CLOSED` PR after GitHub showed it reopened (`OPEN`).
+    PrReopenedReconciled,
 }
 
 impl ReachPoint {
@@ -77,6 +99,17 @@ impl ReachPoint {
         Self::ReadyCardDroppedHeadMoved,
         Self::RelayedGateAnswered,
         Self::OutboxHeldThenClosed,
+        Self::TicketClosed,
+        Self::TicketArchived,
+        Self::TicketThreadGone,
+        Self::ReplyReopenedClosed,
+        Self::PausedLinkSkipped,
+        Self::SweepExecuted,
+        Self::RelayOffFallback,
+        Self::MergeOnlyFallback,
+        Self::PrFollowupRecorded,
+        Self::PrFilesPaginatedFallback,
+        Self::PrReopenedReconciled,
     ];
 
     pub const COUNT: usize = Self::ALL.len();
@@ -100,12 +133,23 @@ impl ReachPoint {
             Self::ReadyCardDroppedHeadMoved => "ready_card_dropped_head_moved",
             Self::RelayedGateAnswered => "relayed_gate_answered",
             Self::OutboxHeldThenClosed => "outbox_held_then_closed",
+            Self::TicketClosed => "ticket_closed",
+            Self::TicketArchived => "ticket_archived",
+            Self::TicketThreadGone => "ticket_thread_gone",
+            Self::ReplyReopenedClosed => "reply_reopened_closed",
+            Self::PausedLinkSkipped => "paused_link_skipped",
+            Self::SweepExecuted => "sweep_executed",
+            Self::RelayOffFallback => "relay_off_fallback",
+            Self::MergeOnlyFallback => "merge_only_fallback",
+            Self::PrFollowupRecorded => "pr_followup_recorded",
+            Self::PrFilesPaginatedFallback => "pr_files_paginated_fallback",
+            Self::PrReopenedReconciled => "pr_reopened_reconciled",
         }
     }
 
     pub const fn tier(self) -> ReachTier {
         match self {
-            Self::OutboxHeldThenClosed => ReachTier::Tier2,
+            Self::OutboxHeldThenClosed | Self::PrReopenedReconciled => ReachTier::Tier2,
             _ => ReachTier::Tier1,
         }
     }
@@ -282,6 +326,7 @@ mod tests {
         let snap = reach.snapshot();
         assert!(snap.missing_tier1().is_empty());
         assert_eq!(snap.get(ReachPoint::OutboxHeldThenClosed), 0);
+        assert_eq!(snap.get(ReachPoint::PrReopenedReconciled), 0);
         snap.assert_tier1("tier1-only");
     }
 

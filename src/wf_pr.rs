@@ -543,6 +543,7 @@ impl Wf {
                 self.to_ticket(me, &ln, &e, why, None, true).await
             }
             Kind::Ready if ln.brief.as_ref().is_some_and(|b| b.merge_only) => {
+                self.reach.hit(ReachPoint::MergeOnlyFallback);
                 let why = "the ticket launched this as a targeted fix PR, which takes merge-only delivery";
                 self.to_ticket(me, &ln, &e, why, None, true).await
             }
@@ -564,6 +565,7 @@ impl Wf {
         let why = if ln.parent == BOARD {
             Some("this thread reports to the board itself".to_string())
         } else if !policy.relay {
+            self.reach.hit(ReachPoint::RelayOffFallback);
             Some("relay is off for this link in t3cm's roles config".into())
         } else if ticket.is_none() {
             Some("the ticket reports to an overseer thread, not to the board".into())
@@ -597,6 +599,7 @@ impl Wf {
                 }
             }
             Some(p) => {
+                self.reach.hit(ReachPoint::PrFollowupRecorded);
                 let other = (e.repo.clone(), e.number);
                 if !p.followups.contains(&other) {
                     p.followups.push(other);
@@ -979,6 +982,7 @@ impl Wf {
         let nodes = pr["files"]["nodes"].as_array().cloned().unwrap_or_default();
         let files: Vec<String> = nodes.iter().filter_map(|f| f["path"].as_str().map(String::from)).collect();
         if pr["files"]["pageInfo"]["hasNextPage"] == true {
+            self.reach.hit(ReachPoint::PrFilesPaginatedFallback);
             return self
                 .fallback(me, ln, e, "the PR changes more than 100 files, past what t3cm reads", None, true)
                 .await;

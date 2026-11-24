@@ -942,6 +942,13 @@ impl Wf {
             }
         }
         if wake
+            && !policy.relay
+            && relays(&a.kind, ln.gate.as_deref())
+            && self.store.link_get(&ln.parent)?.is_some_and(|t| !t.closed && t.parent == BOARD)
+        {
+            self.reach.hit(ReachPoint::RelayOffFallback);
+        }
+        if wake
             && policy.relay
             && relays(&a.kind, ln.gate.as_deref())
             && let Some(ticket) = self.store.link_get(&ln.parent)?.filter(|t| !t.closed && t.parent == BOARD)
@@ -959,6 +966,7 @@ impl Wf {
         }
         if ln.parent == BOARD {
             if closing {
+                self.reach.hit(ReachPoint::TicketClosed);
                 self.flow_soon();
             }
             self.store.link_save(&ln)?;
@@ -1124,7 +1132,11 @@ impl Wf {
             header("reply", "parent", &handle, None),
             capped(&a.body, &handle, self.config().reply_cap)
         );
-        self.send_wake_inner(&ln.child, &text, &handle, ln.closed && a.reopen).await
+        let allow_closed = ln.closed && a.reopen;
+        if allow_closed {
+            self.reach.hit(ReachPoint::ReplyReopenedClosed);
+        }
+        self.send_wake_inner(&ln.child, &text, &handle, allow_closed).await
     }
 
     async fn gate(&self, me: &str, a: GateArgs) -> Result<Value> {
@@ -1435,6 +1447,7 @@ impl Wf {
 
     async fn sweep(&self, me: &str) -> Result<Value> {
         let _g = self.lock.lock().await;
+        self.reach.hit(ReachPoint::SweepExecuted);
         let open: Vec<String> = self.store.children(me, true)?.into_iter().map(|l| l.label).collect();
         let mut dropped = Vec::new();
         for p in self.store.pending_all()?.into_iter().filter(|p| p.parent == me) {
@@ -1644,6 +1657,7 @@ impl Wf {
                 let body = format!("{}'s thread is gone; its link is closed.", ln.label);
                 let h = self.store.msg_new(WATCHER, &ln.parent, "note", &body, &now)?;
                 if ln.parent == BOARD {
+                    self.reach.hit(ReachPoint::TicketThreadGone);
                     self.flow_soon();
                     self.resolve_ticket_cards(&ln.child, "ticket thread gone")?;
                 } else {
@@ -1666,6 +1680,7 @@ impl Wf {
                 self.reach.hit(ReachPoint::OutboxHeldThenClosed);
             }
             if ln.parent == BOARD {
+                self.reach.hit(ReachPoint::TicketArchived);
                 self.flow_soon();
                 self.resolve_ticket_cards(&ln.child, "ticket archived")?;
             } else {
@@ -1680,6 +1695,7 @@ impl Wf {
         let updated = th["updatedAt"].as_str();
         ln.last_seen = updated.map(String::from);
         if ln.paused_at.is_some() {
+            self.reach.hit(ReachPoint::PausedLinkSkipped);
             return Ok(());
         }
         let status = th["status"].as_str().unwrap_or("");
