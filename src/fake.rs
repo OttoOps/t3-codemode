@@ -638,6 +638,10 @@ impl FakeGitHub {
         self.st().repo_aliases.insert(from.to_ascii_lowercase(), to.to_string());
     }
 
+    pub fn unalias_repo(&self, from: &str) {
+        self.st().repo_aliases.remove(&from.to_ascii_lowercase());
+    }
+
     pub fn set_delay(&self, delay: Duration) {
         self.st().delay = delay;
     }
@@ -730,6 +734,9 @@ fn operation(query: &str) -> &'static str {
     if query.starts_with("query Reconcile(") {
         return "reconcile";
     }
+    if query.starts_with("query RepoCanonical(") {
+        return "repoCanonical";
+    }
     if query.starts_with("query FlowIssues(") {
         return "flowIssues";
     }
@@ -818,20 +825,44 @@ fn flow_issues(st: &GhState, variables: &Value) -> Value {
     }}}})
 }
 
+fn repo_canonical(st: &GhState, variables: &Value) -> Value {
+    let raw = format!("{}/{}", variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap());
+    let key = raw.to_ascii_lowercase();
+    let canonical = st.repo_aliases.get(&key).cloned();
+    let lookup = canonical.as_deref().map(str::to_ascii_lowercase).unwrap_or(key);
+    if !st.repos.contains_key(&lookup) {
+        return json!({"data": {"repository": null}, "errors": [{"type": "NOT_FOUND", "message": format!("Could not resolve to a Repository with the name '{raw}'.")}]});
+    }
+    let name = st
+        .issues
+        .iter()
+        .find_map(|((r, _), i)| (*r == lookup).then(|| i["nameWithOwner"].as_str()).flatten())
+        .or(canonical.as_deref())
+        .unwrap_or(&raw)
+        .to_string();
+    json!({"data": {"repository": {"nameWithOwner": name}}})
+}
+
 fn flow_tickets(st: &GhState, variables: &Value) -> Value {
     let mut data = serde_json::Map::new();
     let mut errs = Vec::new();
     for i in 0.. {
         let Some(owner) = variables[format!("o{i}")].as_str() else { break };
-        let repo = format!("{owner}/{}", variables[format!("r{i}")].as_str().unwrap()).to_ascii_lowercase();
+        let raw_repo = format!("{owner}/{}", variables[format!("r{i}")].as_str().unwrap());
+        let raw_key = raw_repo.to_ascii_lowercase();
+        let canonical = st.repo_aliases.get(&raw_key).cloned();
+        let repo = canonical.as_deref().map(str::to_ascii_lowercase).unwrap_or(raw_key);
         let number = variables[format!("n{i}")].as_u64().unwrap();
         let alias = format!("t{i}");
         let issue = st.issues.get(&issue_key(&repo, number)).map(|i| full_issue_node(st, i));
         if issue.is_none() {
             errs.push(json!({"type": "NOT_FOUND", "path": [alias, "issue"], "message": "no issue"}));
         }
-        let name =
-            issue.as_ref().map_or(json!(repo), |_| st.issues[&issue_key(&repo, number)]["nameWithOwner"].clone());
+        let name = issue
+            .as_ref()
+            .and_then(|_| st.issues.get(&issue_key(&repo, number)).and_then(|v| v["nameWithOwner"].as_str()))
+            .or(canonical.as_deref())
+            .unwrap_or(&raw_repo);
         data.insert(alias, json!({"nameWithOwner": name, "issue": issue}));
     }
     let mut out = json!({"data": data});
@@ -856,6 +887,9 @@ impl crate::github::GitHub for FakeGitHub {
             }
             if let Some(message) = st.errors.get(op) {
                 return Ok(gh_error(message));
+            }
+            if op == "repoCanonical" {
+                return Ok(repo_canonical(&st, &variables));
             }
             if op == "flowIssues" {
                 return Ok(flow_issues(&st, &variables));

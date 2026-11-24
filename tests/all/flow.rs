@@ -2059,3 +2059,180 @@ async fn unreadable_discovered_repo_preserves_running_ticket_capacity() {
     assert_eq!(pick["picked"], json!([]), "{pick}");
     assert!(h.fake.launched().is_empty());
 }
+
+#[tokio::test]
+async fn unavailable_origin_keeps_auto_launch_retryable_until_git_recovers() {
+    let cfg = Config::from_value(json!({"flow": {"repos": [REPO], "maxTickets": 1, "launch": "auto"}})).unwrap();
+    let h = H::build(Vec::new(), cfg.clone());
+    let mut timeout_proj = project("p-timeout", "/src/timeout");
+    timeout_proj["repositoryIdentity"] = json!({"owner": "acme", "name": "widgets"});
+    h.fake.set_projects(vec![timeout_proj]);
+    h.remotes.set_unavailable("/src/timeout");
+    issue(&h, REPO, 1, &[], 1);
+
+    let pick1 = next(&h).await;
+    assert_eq!(pick1["picked"][0]["launched"]["ok"], false, "{pick1}");
+    assert_eq!(pick1["picked"][0]["launched"]["retryable"], true, "{pick1}");
+    assert!(h.fake.launched().is_empty());
+    let f = flow(&h).await;
+    assert_eq!(labels(&f["skipped"]), Vec::<String>::new(), "unavailable origin must not save skip: {f}");
+    assert_eq!(labels(&f["queue"]), ["widgets#1"], "{f}");
+
+    // Once git recovers, auto-launch retries and launches without any label/blocker change.
+    h.remotes.set("/src/timeout", "git@github.com:acme/widgets.git");
+    let pick2 = next(&h).await;
+    assert_eq!(pick2["picked"][0]["launched"]["ok"], true, "{pick2}");
+    assert_eq!(h.fake.launched()[0]["projectId"], "p-timeout");
+
+    // Confirmed mismatch still saves a skip as before.
+    let h_mismatch = H::build(Vec::new(), cfg);
+    let mut ssh_proj = project("p-ssh", "/src/ssh");
+    ssh_proj["repositoryIdentity"] = json!({"owner": "acme", "name": "widgets"});
+    h_mismatch.fake.set_projects(vec![ssh_proj]);
+    h_mismatch.remotes.set("/src/ssh", "ssh://git@git.example.com/widgets.git");
+    issue(&h_mismatch, REPO, 2, &[], 1);
+
+    let pick_m = next(&h_mismatch).await;
+    assert_eq!(pick_m["picked"][0]["launched"]["ok"], false, "{pick_m}");
+    assert_ne!(pick_m["picked"][0]["launched"]["retryable"], true, "{pick_m}");
+    assert_eq!(labels(&flow(&h_mismatch).await["skipped"]), ["widgets#2"]);
+}
+
+#[tokio::test]
+async fn recreated_old_repo_evicts_cached_alias_during_launch_routing() {
+    let old = "acme/old";
+    let h = H::build(Vec::new(), Config::default());
+    h.fake.set_projects(vec![project("p-old", "/src/old")]);
+    h.remotes.set("/src/old", "https://github.com/acme/old.git");
+    h.github.alias_repo(old, REPO);
+    issue(&h, REPO, 1, &[], 1);
+
+    // Graph read caches acme/old -> acme/widgets.
+    let g = graph(&h).await;
+    assert_eq!(node(&g, "acme/widgets#1")["repo"], REPO);
+
+    // Owner later recreates an unrelated repo at acme/old, ending the redirect.
+    h.github.unalias_repo(old);
+    h.github.add_repo(old);
+
+    let res = h
+        .app
+        .wf
+        .launch_ticket(t3_codemode::board::LaunchArgs {
+            issue: format!("{REPO}#7"),
+            parent_issue: None,
+            part: None,
+            project: None,
+            title: None,
+            model: None,
+            effort: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(res["ok"], false, "recreated old repo must not match stale alias: {res}");
+    assert!(h.fake.launched().is_empty());
+}
+
+#[tokio::test]
+async fn pre_rename_open_ticket_matches_canonical_issue_in_plan_graph_and_launch_guard() {
+    let old = "acme/old";
+    let cfg = Config::from_value(json!({"flow": {"maxTickets": 1, "launch": "auto"}})).unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.fake.set_projects(vec![project("p-old", "/src/old")]);
+    h.remotes.set("/src/old", "https://github.com/acme/old.git");
+    h.github.alias_repo(old, REPO);
+    issue(&h, REPO, 1, &[], 1);
+    issue(&h, REPO, 2, &[], 2);
+
+    // Existing open ticket still stores the pre-rename URL acme/old#1.
+    let mut th = t3_codemode::fake::thread("mcp:old1", "running", T0);
+    th["projectId"] = json!("p-old");
+    h.fake.put(th);
+    h.wf(
+        "mcp:old1",
+        "join",
+        json!({"parent": BOARD, "label": "old#1", "role": "ticket", "issue": "https://github.com/acme/old/issues/1"}),
+    )
+    .await;
+
+    let g = graph(&h).await;
+    assert_eq!(g["running"].as_array().unwrap().len(), 1, "{g}");
+    assert_eq!(g["running"][0]["repo"], REPO, "{g}");
+    assert_eq!(g["free"], 0, "{g}");
+    assert_eq!(labels(&g["queue"]), ["widgets#2"], "widgets#1 must not re-enter queue: {g}");
+    assert_eq!(node(&g, "acme/widgets#1")["ticket"]["thread"], "mcp:old1", "{g}");
+    assert!(
+        g["graph"]["nodes"].as_array().unwrap().iter().all(|n| n["id"] != "acme/old#1"),
+        "graph must attach ticket to canonical node without duplicate orphan: {g}"
+    );
+
+    // Duplicate-launch guard also blocks launching acme/widgets#1 while acme/old#1 is open.
+    let dup = h
+        .app
+        .wf
+        .launch_ticket(t3_codemode::board::LaunchArgs {
+            issue: format!("{REPO}#1"),
+            parent_issue: None,
+            part: None,
+            project: None,
+            title: None,
+            model: None,
+            effort: None,
+        })
+        .await;
+    assert!(dup.is_err(), "duplicate launch of renamed issue must fail: {dup:?}");
+    assert!(h.fake.launched().is_empty());
+}
+
+#[tokio::test]
+async fn ambiguous_legacy_ticket_without_metadata_reserves_capacity_without_attaching() {
+    let cfg = Config::from_value(json!({"flow": {"maxTickets": 1, "launch": "auto"}})).unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.fake.set_projects(vec![project("p-acme", "/src/acme"), project("p-fork", "/src/fork")]);
+    h.remotes.set("/src/acme", "git@github.com:acme/widgets.git");
+    h.remotes.set("/src/fork", "git@github.com:fork/widgets.git");
+    // Only acme/widgets is readable; fork/widgets returns a GraphQL error.
+    issue(&h, REPO, 41, &[], 1);
+    issue(&h, REPO, 42, &[], 2);
+
+    // Legacy running ticket has no stored issue, repo, or project metadata.
+    ticket(&h, "mcp:ambig41", "widgets#41").await;
+
+    let f = flow(&h).await;
+    assert_eq!(f["free"], 0, "ambiguous legacy ticket must reserve capacity: {f}");
+    assert_eq!(labels(&f["queue"]), ["widgets#41", "widgets#42"], "ambiguous ticket must not attach to acme#41: {f}");
+    let pick = next(&h).await;
+    assert_eq!(pick["free"], 0, "{pick}");
+    assert_eq!(pick["picked"], json!([]), "{pick}");
+    assert!(h.fake.launched().is_empty());
+}
+
+#[tokio::test]
+async fn unavailable_origin_during_discovery_preserves_running_ticket_capacity() {
+    let cfg = Config::from_value(json!({"flow": {"maxTickets": 1, "launch": "auto"}})).unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets"), project("p-tools", "/src/tools")]);
+    h.remotes.set_unavailable("/src/widgets");
+    h.remotes.set("/src/tools", "git@github.com:acme/tools.git");
+    issue(&h, TOOLS, 2, &[], 1);
+
+    // Open running ticket occupies the single slot on p-widgets whose origin lookup timed out.
+    let mut th = t3_codemode::fake::thread("mcp:w1", "running", T0);
+    th["projectId"] = json!("p-widgets");
+    h.fake.put(th);
+    h.wf(
+        "mcp:w1",
+        "join",
+        json!({"parent": BOARD, "label": "widgets#1", "role": "ticket", "issue": "https://github.com/acme/widgets/issues/1"}),
+    )
+    .await;
+
+    // Partial graph still renders acme/tools#2, while capacity stays occupied so nothing launches.
+    let g = graph(&h).await;
+    assert_eq!(node(&g, "acme/tools#2")["title"], "Issue 2", "{g}");
+    assert_eq!(g["free"], 0, "unavailable discovery must preserve running ticket slot: {g}");
+    let pick = next(&h).await;
+    assert_eq!(pick["free"], 0, "{pick}");
+    assert_eq!(pick["picked"], json!([]), "{pick}");
+    assert!(h.fake.launched().is_empty());
+}
