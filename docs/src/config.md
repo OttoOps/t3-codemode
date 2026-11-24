@@ -626,7 +626,7 @@ is not tracked, and its ticket follows the repository's own documented steps.
 
 | Key | Default | Does |
 |---|---|---|
-| `updateCheck` | `true` | Check GitHub for a newer release: the service every 12 hours, the CLI at most once a day. `false` turns off the CLI notice, the board's update button and the service's checks; `t3cm update` still works. See [Update](getting-started.md#update). |
+| `updateCheck` | `true` | Check GitHub for a newer release: the service every hour, the CLI at most once a day. `false` turns off the CLI notice, the board's update button and the service's checks; `t3cm update` still works. See [Update](getting-started.md#update). |
 
 ### Upstreams
 
