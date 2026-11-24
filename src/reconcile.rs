@@ -843,7 +843,7 @@ impl Wf {
         }
         for (ticket, base, seqs) in &moved {
             if wait.as_ref().is_some_and(|w| w.thread == *ticket && w.head == o.head) {
-                self.resolve_cards(|c| seqs.contains(&c.seq), "superseded by a newer merge approval")?;
+                self.resolve_releasing(seqs, ticket.as_deref().as_slice(), "superseded by a newer merge approval")?;
                 continue;
             }
             let approval = wait.as_ref().filter(|w| w.thread == *ticket).map(|w| w.approval.as_str());
