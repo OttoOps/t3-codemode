@@ -1027,8 +1027,14 @@ fn flow_branch_merged(st: &GhState, variables: &Value) -> Value {
         merged.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
         let nodes: Vec<Value> = merged
             .into_iter()
-            .take(1)
-            .map(|(n, p)| json!({"number": n, "headRefOid": p["headRefOid"].as_str().unwrap_or("")}))
+            .take(10)
+            .map(|(n, p)| {
+                json!({
+                    "number": n,
+                    "isCrossRepository": p["isCrossRepository"].as_bool().unwrap_or(false),
+                    "headRefOid": p["headRefOid"].as_str().unwrap_or("")
+                })
+            })
             .collect();
         data.insert(alias, json!({"pullRequests": {"nodes": nodes}}));
     }

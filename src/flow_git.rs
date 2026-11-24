@@ -1033,14 +1033,17 @@ pub(crate) fn reduce_ancestry_stacks(edges: Vec<PrStackEdge>) -> Vec<PrStackEdge
     kept
 }
 
-pub(crate) async fn is_local_branch_ahead_of_commit(root: &Path, merged_oid: &str, local_oid: &str) -> bool {
-    if merged_oid.is_empty() || local_oid.is_empty() || merged_oid == local_oid {
+pub(crate) async fn is_local_branch_covered_by_merged_commit(root: &Path, local_oid: &str, merged_oid: &str) -> bool {
+    if merged_oid.is_empty() || local_oid.is_empty() {
         return false;
+    }
+    if merged_oid.eq_ignore_ascii_case(local_oid) {
+        return true;
     }
     let Some(resolved) = resolve_commit_oid(root, merged_oid).await else {
         return false;
     };
-    is_strict_ancestor(root, &resolved, local_oid).await
+    is_strict_ancestor(root, local_oid, &resolved).await
 }
 
 fn reachable(adj: &BTreeMap<String, Vec<String>>, start: &str, target: &str) -> bool {
