@@ -159,7 +159,16 @@ pub(crate) fn format_triage_context(snap: &TriageSnapshot) -> (String, Vec<Triag
         }
     }
 
-    let open_nodes: Vec<_> = snap.graph.nodes.iter().filter(|n| n.tracked && n.state != Some("closed")).collect();
+    let covered_set: HashSet<String> = snap.covered_repos.iter().map(|r| r.to_ascii_lowercase()).collect();
+    let in_covered_id = |id: &str| -> bool {
+        id.rsplit_once('#').is_some_and(|(repo, _)| covered_set.contains(&repo.to_ascii_lowercase()))
+    };
+    let open_nodes: Vec<_> = snap
+        .graph
+        .nodes
+        .iter()
+        .filter(|n| n.tracked && n.state != Some("closed") && covered_set.contains(&n.repo.to_ascii_lowercase()))
+        .collect();
     let shown_count = open_nodes.len().min(MAX_TRIAGE_ISSUES);
     let mut snapshot_nodes = Vec::with_capacity(shown_count);
 
@@ -204,7 +213,12 @@ pub(crate) fn format_triage_context(snap: &TriageSnapshot) -> (String, Vec<Triag
         }
     }
 
-    let non_native: Vec<_> = snap.graph.edges.iter().filter(|e| e.source != SOURCE_GITHUB).collect();
+    let non_native: Vec<_> = snap
+        .graph
+        .edges
+        .iter()
+        .filter(|e| e.source != SOURCE_GITHUB && in_covered_id(&e.from) && in_covered_id(&e.to))
+        .collect();
     if !non_native.is_empty() {
         lines.push(String::new());
         lines.push("## Existing inferred or advisory edges".to_string());
@@ -568,7 +582,35 @@ pub fn triage_view(seq: i64, data: &Value) -> Value {
     v
 }
 
+fn can_reach(adj: &HashMap<String, HashSet<String>>, start: &str, goal: &str) -> bool {
+    let mut stack = vec![start];
+    let mut visited = HashSet::new();
+    while let Some(cur) = stack.pop() {
+        if cur == goal {
+            return true;
+        }
+        if !visited.insert(cur) {
+            continue;
+        }
+        if let Some(nexts) = adj.get(cur) {
+            for nxt in nexts {
+                if !visited.contains(nxt.as_str()) {
+                    stack.push(nxt.as_str());
+                }
+            }
+        }
+    }
+    false
+}
+
 impl Wf {
+    fn canon_issue_key(&self, raw: &str) -> Option<String> {
+        let parsed = parse_github_issue_only(raw.trim())?;
+        let (owner, repo, number) = parsed.github_parts()?;
+        let canon = self.canonical_github_repo(&format!("{owner}/{repo}"));
+        Some(node_key(&canon, number))
+    }
+
     pub fn flow_triage_view(&self) -> Result<Value> {
         match self.store.triage_latest_active()? {
             Some((seq, _, data)) => Ok(triage_view(seq, &data)),
@@ -610,12 +652,6 @@ impl Wf {
         let thread = r["threadId"].as_str().ok_or_else(|| anyhow!("t3_thread_launch returned no threadId"))?;
 
         let now = self.now();
-        // Settle any previous closed triage runs so the new run becomes the active one.
-        for (old_seq, mut old_data) in self.store.triage_unsettled_closed()? {
-            old_data["settledAt"] = json!(&now);
-            let _ = self.store.ask_update(old_seq, false, &old_data);
-        }
-
         let mut data = json!({
             "kind": TRIAGE_KIND,
             "thread": thread,
@@ -666,6 +702,14 @@ impl Wf {
             self.changed();
             return Err(e.into());
         }
+        // Only settle previous closed triage reviews once the replacement prompt has been accepted.
+        for (old_seq, mut old_data) in self.store.triage_unsettled_closed()? {
+            if old_seq == seq {
+                continue;
+            }
+            old_data["settledAt"] = json!(&now);
+            let _ = self.store.ask_update(old_seq, false, &old_data);
+        }
         let mut out = triage_view(seq, &data);
         if let Some(p) = &resolved.picked {
             self.note_pool_launch(&mut out, p, "Triage DAG", thread);
@@ -683,6 +727,9 @@ impl Wf {
         let (open, mut data) = self.store.triage_get(seq)?.ok_or_else(|| anyhow!("no triage {id:?}"))?;
         if open {
             bail!("triage {id} is still running; wait for proposals before applying");
+        }
+        if !data["settledAt"].is_null() {
+            bail!("triage {id} has already been dismissed or superseded");
         }
         if data["status"] != "ready" {
             let st = data["status"].as_str().unwrap_or("unknown");
@@ -704,6 +751,27 @@ impl Wf {
             }
             idxs
         };
+
+        let needs_graph_cycle_check = selected.iter().any(|&i| {
+            matches!(changes[i].status.as_str(), "pending" | "error")
+                && matches!(changes[i].kind.as_str(), BLOCKED_BY | PARENT)
+        });
+        let mut blocked_adj: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut parent_adj: HashMap<String, HashSet<String>> = HashMap::new();
+        if needs_graph_cycle_check {
+            let live_flow = self.flow_view(true).await?;
+            if let Some(g) = live_flow.graph {
+                for e in g.edges {
+                    if let (Some(fk), Some(tk)) = (self.canon_issue_key(&e.from), self.canon_issue_key(&e.to)) {
+                        if e.kind == BLOCKED_BY {
+                            blocked_adj.entry(fk).or_default().insert(tk);
+                        } else if e.kind == PARENT {
+                            parent_adj.entry(fk).or_default().insert(tk);
+                        }
+                    }
+                }
+            }
+        }
 
         let mut caches = WireCaches::new();
         let mut results = Vec::with_capacity(selected.len());
@@ -755,6 +823,14 @@ impl Wf {
             };
             let (owner, repo, number) = parsed_issue.github_parts().expect("GitHub issue has parts");
             let from_repo = format!("{owner}/{repo}");
+            let is_label_edit = matches!(c.kind.as_str(), "track" | "priority");
+            let _issue_guard =
+                if is_label_edit { Some(self.issue_edit_lock(&from_repo, number).lock_owned().await) } else { None };
+            if is_label_edit {
+                caches.nodes.remove(&node_cache_key(&from_repo, number));
+                let canon_repo = self.canonical_github_repo(&from_repo);
+                caches.nodes.remove(&node_cache_key(&canon_repo, number));
+            }
             let from_node = match self.resolve_issue_cached(&mut caches, &from_repo, number).await {
                 Ok(n) => n,
                 Err(e) => {
@@ -807,29 +883,65 @@ impl Wf {
                         });
                         continue;
                     };
-                    let plan = WiringPlan {
-                        blocked_by: vec![(t_repo.clone(), t_num)],
-                        parent: None,
-                        replace_parent: false,
-                        labels: Vec::new(),
+                    let from_key = node_key(&self.canonical_github_repo(&from_node.repo), from_node.number);
+                    let to_key = match self.resolve_issue_cached(&mut caches, &t_repo, t_num).await {
+                        Ok(to_node) => {
+                            let tk = node_key(&self.canonical_github_repo(&to_node.repo), to_node.number);
+                            for b in &to_node.blocked_by {
+                                blocked_adj
+                                    .entry(tk.clone())
+                                    .or_default()
+                                    .insert(node_key(&self.canonical_github_repo(&b.repo), b.number));
+                            }
+                            tk
+                        }
+                        Err(_) => node_key(&self.canonical_github_repo(&t_repo), t_num),
                     };
-                    let report = self.wire_issue_node(&from_node, &plan, &mut caches).await;
-                    let lr = report.blocked_by.into_iter().next().expect("blockedBy report");
-                    if lr.status == "error" {
+                    if from_key == to_key || can_reach(&blocked_adj, &to_key, &from_key) {
                         new_status = "error".into();
-                        err_msg = lr.error;
-                        perm = lr.permission;
+                        err_msg = Some(format!(
+                            "would create a blockedBy cycle between {} and {}",
+                            ref_slug(&from_node.repo, from_node.number),
+                            ref_slug(&t_repo, t_num)
+                        ));
                         failed += 1;
-                    } else if lr.status == "alreadyLinked" {
-                        new_status = "alreadySet".into();
-                        already_set += 1;
-                        let _ =
-                            self.clear_dismissed_edge(BLOCKED_BY, &from_node.repo, from_node.number, &t_repo, t_num);
                     } else {
-                        applied += 1;
-                        any_mutated = true;
-                        let _ =
-                            self.clear_dismissed_edge(BLOCKED_BY, &from_node.repo, from_node.number, &t_repo, t_num);
+                        let plan = WiringPlan {
+                            blocked_by: vec![(t_repo.clone(), t_num)],
+                            parent: None,
+                            replace_parent: false,
+                            labels: Vec::new(),
+                        };
+                        let report = self.wire_issue_node(&from_node, &plan, &mut caches).await;
+                        let lr = report.blocked_by.into_iter().next().expect("blockedBy report");
+                        if lr.status == "error" {
+                            new_status = "error".into();
+                            err_msg = lr.error;
+                            perm = lr.permission;
+                            failed += 1;
+                        } else if lr.status == "alreadyLinked" {
+                            new_status = "alreadySet".into();
+                            already_set += 1;
+                            blocked_adj.entry(from_key).or_default().insert(to_key);
+                            let _ = self.clear_dismissed_edge(
+                                BLOCKED_BY,
+                                &from_node.repo,
+                                from_node.number,
+                                &t_repo,
+                                t_num,
+                            );
+                        } else {
+                            applied += 1;
+                            any_mutated = true;
+                            blocked_adj.entry(from_key).or_default().insert(to_key);
+                            let _ = self.clear_dismissed_edge(
+                                BLOCKED_BY,
+                                &from_node.repo,
+                                from_node.number,
+                                &t_repo,
+                                t_num,
+                            );
+                        }
                     }
                 }
                 PARENT => {
@@ -854,31 +966,68 @@ impl Wf {
                         });
                         continue;
                     };
-                    let plan = WiringPlan {
-                        blocked_by: Vec::new(),
-                        parent: Some((t_repo.clone(), t_num)),
-                        replace_parent: args.replace_parent,
-                        labels: Vec::new(),
+                    let from_key = node_key(&self.canonical_github_repo(&from_node.repo), from_node.number);
+                    let to_key = match self.resolve_issue_cached(&mut caches, &t_repo, t_num).await {
+                        Ok(to_node) => {
+                            let tk = node_key(&self.canonical_github_repo(&to_node.repo), to_node.number);
+                            if let Some(p) = &to_node.parent {
+                                parent_adj
+                                    .entry(tk.clone())
+                                    .or_default()
+                                    .insert(node_key(&self.canonical_github_repo(&p.repo), p.number));
+                            }
+                            tk
+                        }
+                        Err(_) => node_key(&self.canonical_github_repo(&t_repo), t_num),
                     };
-                    let report = self.wire_issue_node(&from_node, &plan, &mut caches).await;
-                    let lr = report.parent.expect("parent report");
-                    if lr.status == "error" {
+                    if from_key == to_key || can_reach(&parent_adj, &to_key, &from_key) {
                         new_status = "error".into();
-                        let msg = lr.error.unwrap_or_else(|| "GitHub returned an error".to_string());
-                        let existing = from_node.parent.as_ref().map(|p| ref_slug(&p.repo, p.number));
-                        conflict = !lr.permission && (github::is_parent_conflict_message(&msg) || existing.is_some());
-                        existing_parent = conflict.then_some(existing).flatten();
-                        perm = lr.permission;
-                        err_msg = Some(msg);
+                        err_msg = Some(format!(
+                            "would create a parent cycle between {} and {}",
+                            ref_slug(&from_node.repo, from_node.number),
+                            ref_slug(&t_repo, t_num)
+                        ));
                         failed += 1;
-                    } else if lr.status == "alreadyLinked" {
-                        new_status = "alreadySet".into();
-                        already_set += 1;
-                        let _ = self.clear_dismissed_edge(PARENT, &from_node.repo, from_node.number, &t_repo, t_num);
                     } else {
-                        applied += 1;
-                        any_mutated = true;
-                        let _ = self.clear_dismissed_edge(PARENT, &from_node.repo, from_node.number, &t_repo, t_num);
+                        let plan = WiringPlan {
+                            blocked_by: Vec::new(),
+                            parent: Some((t_repo.clone(), t_num)),
+                            replace_parent: args.replace_parent,
+                            labels: Vec::new(),
+                        };
+                        let report = self.wire_issue_node(&from_node, &plan, &mut caches).await;
+                        let lr = report.parent.expect("parent report");
+                        if lr.status == "error" {
+                            new_status = "error".into();
+                            let msg = lr.error.unwrap_or_else(|| "GitHub returned an error".to_string());
+                            let existing = from_node.parent.as_ref().map(|p| ref_slug(&p.repo, p.number));
+                            conflict =
+                                !lr.permission && (github::is_parent_conflict_message(&msg) || existing.is_some());
+                            existing_parent = conflict.then_some(existing).flatten();
+                            perm = lr.permission;
+                            err_msg = Some(msg);
+                            failed += 1;
+                        } else if lr.status == "alreadyLinked" {
+                            new_status = "alreadySet".into();
+                            already_set += 1;
+                            if args.replace_parent {
+                                parent_adj.insert(from_key, HashSet::from([to_key]));
+                            } else {
+                                parent_adj.entry(from_key).or_default().insert(to_key);
+                            }
+                            let _ =
+                                self.clear_dismissed_edge(PARENT, &from_node.repo, from_node.number, &t_repo, t_num);
+                        } else {
+                            applied += 1;
+                            any_mutated = true;
+                            if args.replace_parent {
+                                parent_adj.insert(from_key, HashSet::from([to_key]));
+                            } else {
+                                parent_adj.entry(from_key).or_default().insert(to_key);
+                            }
+                            let _ =
+                                self.clear_dismissed_edge(PARENT, &from_node.repo, from_node.number, &t_repo, t_num);
+                        }
                     }
                 }
                 "track" => {

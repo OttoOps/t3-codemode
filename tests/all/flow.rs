@@ -6334,3 +6334,205 @@ return {{ depTextBefore, fcFrom2, fcFrom3, reqsBeforeFcPreview, reqsAfterFcPrevi
     );
     assert!(reqs.iter().any(|x| x["url"] == "/api/flow/triage/t1/apply" && x["payload"]["all"] == true));
 }
+
+#[tokio::test]
+async fn board_triage_dag_safety_guards_cycles_vars_and_scope() {
+    let cfg = Config::from_value(json!({
+        "flow": {"repos": [REPO], "optIn": {"label": FLOW}, "maxTickets": 4, "launch": "ask"}
+    }))
+    .unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.github.add_repo(REPO);
+    h.github.add_repo("acme/other");
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+
+    issue(&h, REPO, 1, &[FLOW, "priority: high"], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    issue(&h, "acme/other", 9, &[FLOW], 3);
+    h.github.set_body("acme/other", 9, "TOP_SECRET_OTHER_REPO\n- Blocked by: #1\n");
+    h.fake.put(t3_codemode::fake::thread("t-other-repo", "running", "2026-10-18T10:00:00Z"));
+    h.wf(
+        "t-other-repo",
+        "join",
+        json!({"parent": BOARD, "label": "other#9", "role": "ticket", "issue": "acme/other#9"}),
+    )
+    .await;
+
+    let s = crate::board::start(h).await;
+
+    // 1. Start triage t1: uncovered repo acme/other#9 must not leak into the triage prompt (CR#7).
+    let start1: Value = s
+        .http
+        .post(format!("{}/api/flow/triage", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(start1["id"], "t1");
+    let prompt = s.h.fake.sent()[0]["message"].as_str().unwrap().to_string();
+    assert!(!prompt.contains("TOP_SECRET_OTHER_REPO"), "uncovered repo body leaked into triage prompt: {prompt}");
+    assert!(!prompt.contains("acme/other#9"), "uncovered repo node/edge leaked into triage prompt: {prompt}");
+
+    // 2. Session vars persistence is blocked for both the triage thread and caller-less runs while triage is live (CR#1).
+    let _ = s.h.exec_as("launch:1", "async () => { vars.pwn = 1; return 1; }").await;
+    assert!(
+        s.h.app.store.kv_get("thread:launch:1", "__vars").unwrap().is_none(),
+        "triage thread must not persist session vars"
+    );
+    let _ = s.h.exec("async () => { vars.anon = 1; return 1; }").await;
+    assert!(
+        s.h.app.store.kv_get("default", "__vars").unwrap().is_none(),
+        "anonymous run must not persist session vars while triage is live"
+    );
+
+    // 3. Omitted blockedOnThreadWait / pendingBackgroundTasks in terminal thread reply keeps triage open (CR#10).
+    s.h.fake.put(json!({
+        "threadId": "launch:1", "status": "completed", "updatedAt": "2026-10-18T10:01:00Z",
+        "link": "https://t3/launch:1", "pendingRequestCount": 0, "archived": false, "title": "launch:1"
+    }));
+    let proposal = r##"{"summary":"Cycle test","changes":[
+        {"kind":"blockedBy","issue":"acme/widgets#1","target":"acme/widgets#2","reason":"first"},
+        {"kind":"blockedBy","issue":"acme/widgets#2","target":"acme/widgets#1","reason":"cycle"},
+        {"kind":"parent","issue":"acme/widgets#1","target":"acme/widgets#2","reason":"first parent"},
+        {"kind":"parent","issue":"acme/widgets#2","target":"acme/widgets#1","reason":"parent cycle"}
+    ]}"##;
+    s.h.fake.set_items("launch:1", vec![json!({"type": "assistant_message", "position": 1, "text": proposal})]);
+    assert!(
+        s.h.app.wf.check_asks(None).await.unwrap(),
+        "omitted blockedOnThreadWait/pendingBackgroundTasks must keep triage open"
+    );
+    let (open1, _) = s.h.app.store.triage_get(1).unwrap().unwrap();
+    assert!(open1);
+
+    // Explicitly empty pending-work fields allow completion.
+    s.h.fake.put(t3_codemode::fake::thread("launch:1", "completed", "2026-10-18T10:01:00Z"));
+    assert!(!s.h.app.wf.check_asks(None).await.unwrap());
+
+    // 4. Applying conflicting cycle proposals applies first edge and rejects cycle edge before GitHub write (CR#6).
+    let applied: Value = s
+        .http
+        .post(format!("{}/api/flow/triage/t1/apply", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({"all": true}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(applied["applied"], 2, "{applied}");
+    assert_eq!(applied["failed"], 2, "{applied}");
+    let results = applied["results"].as_array().unwrap();
+    assert_eq!(results[0]["status"], "applied", "{results:?}");
+    assert_eq!(results[1]["status"], "error", "{results:?}");
+    assert!(results[1]["error"].as_str().unwrap().contains("cycle"), "{results:?}");
+    assert_eq!(results[2]["status"], "applied", "{results:?}");
+    assert_eq!(results[3]["status"], "error", "{results:?}");
+    assert!(results[3]["error"].as_str().unwrap().contains("cycle"), "{results:?}");
+
+    // 5. Failed replacement triage send preserves existing ready review t1 (CR#4).
+    s.h.fake.set_send_fails(true);
+    let fail_start = s
+        .http
+        .post(format!("{}/api/flow/triage", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert!(!fail_start.status().is_success(), "send failure must fail triage start");
+    s.h.fake.set_send_fails(false);
+    assert_eq!(s.get("/api/state").await["flowTriage"]["id"], "t1", "previous ready triage must stay active");
+
+    // 6. Dismissing t1 settles it; retrying failed change on settled t1 is rejected with 400 (CR#5).
+    let dis = s
+        .http
+        .post(format!("{}/api/flow/triage/t1/dismiss", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({"all": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dis.status(), 200);
+    let stale_apply = s
+        .http
+        .post(format!("{}/api/flow/triage/t1/apply", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({"changeIds": ["c2"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_apply.status(), 400, "settled triage must reject confirmation");
+
+    // 7. Non-404 read failure past deadline still stops and times out triage (CR#3).
+    let start3: Value = s
+        .http
+        .post(format!("{}/api/flow/triage", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let tid3 = start3["seq"].as_i64().unwrap();
+    s.h.fake.set_read_fails(true);
+    s.h.clock.set(&at(120));
+    // Read fails so stop_triage_thread cannot confirm via t3_thread_read -> closes as timed out with threadStopped=false and keeps polling.
+    assert!(s.h.app.wf.check_asks(None).await.unwrap());
+    let (open3, data3) = s.h.app.store.triage_get(tid3).unwrap().unwrap();
+    assert!(!open3, "{data3}");
+    assert_eq!(data3["status"], "timed out", "{data3}");
+    assert_eq!(data3["threadStopped"], false, "{data3}");
+    s.h.fake.set_read_fails(false);
+    assert!(!s.h.app.wf.check_asks(None).await.unwrap());
+    let (_, data3_after) = s.h.app.store.triage_get(tid3).unwrap().unwrap();
+    assert_eq!(data3_after["threadStopped"], true, "{data3_after}");
+
+    // 8. Concurrent priority updates on the same issue serialize so only one priority label remains (CR#9).
+    s.h.github.set_delay(std::time::Duration::from_millis(20));
+    let post_prio = |prio: &'static str| {
+        let http = s.http.clone();
+        let url = format!("{}/api/flow/issue", s.base);
+        let origin = s.base.clone();
+        let csrf = s.csrf().to_string();
+        async move {
+            http.post(url)
+                .header("Origin", origin)
+                .header("X-T3CM-CSRF", csrf)
+                .json(&json!({"issue": "acme/widgets#1", "priority": prio}))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let (r_med, r_low) = tokio::join!(post_prio("medium"), post_prio("low"));
+    s.h.github.set_delay(std::time::Duration::ZERO);
+    assert_eq!(r_med["ok"], true, "{r_med}");
+    assert_eq!(r_low["ok"], true, "{r_low}");
+    let fresh = s.get("/api/flow").await;
+    let n1 = fresh["graph"]["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "acme/widgets#1").unwrap();
+    let prios: Vec<&str> = n1["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|l| l.starts_with("priority:"))
+        .collect();
+    assert_eq!(prios.len(), 1, "serialized edits must leave exactly one priority label: {n1}");
+}
