@@ -223,13 +223,21 @@ pub struct WakeLine {
     pub subject: String,
 }
 
-pub fn wake_lines(sent: &[Value], known: &dyn Fn(&str, &str, &str) -> bool) -> Vec<WakeLine> {
+pub type Known<'a> = &'a dyn Fn(&str, &str, &str) -> Option<String>;
+
+fn carries(after: &str, body: &str) -> bool {
+    after.starts_with(body) || after.find("\n... (").is_some_and(|k| k > 0 && body.starts_with(&after[..k]))
+}
+
+pub fn wake_lines(sent: &[Value], known: Known) -> Vec<WakeLine> {
     let mut out = Vec::new();
     for s in sent {
         let to = s["threadId"].as_str().unwrap_or_default();
-        let mut handles = BTreeSet::new();
-        let mut lines = s["message"].as_str().unwrap_or_default().lines().peekable();
-        while let Some(line) = lines.next() {
+        let text = s["message"].as_str().unwrap_or_default();
+        let mut at = 0;
+        for raw in text.split_inclusive('\n') {
+            at += raw.len();
+            let line = raw.strip_suffix('\n').unwrap_or(raw);
             let Some(rest) = line.strip_prefix("[t3cm ").and_then(|r| r.strip_suffix(']')) else { continue };
             let Some((head, tail)) = rest.rsplit_once(" msg=") else { continue };
             let handle = tail.split(' ').next().unwrap_or_default();
@@ -243,40 +251,41 @@ pub fn wake_lines(sent: &[Value], known: &dyn Fn(&str, &str, &str) -> bool) -> V
                 Some(from.to_string()).filter(|f| !f.contains(' '))
             };
             let Some(from) = from.filter(|f| !f.is_empty()) else { continue };
-            if !known(to, kind, handle) || !handles.insert(handle.to_string()) {
+            let after = &text[at..];
+            if !known(to, kind, handle).is_some_and(|body| carries(after, &body)) {
                 continue;
             }
-            let subject = lines.peek().copied().unwrap_or_default().to_string();
+            let subject = after.lines().next().unwrap_or_default().to_string();
             out.push(WakeLine { to: to.into(), kind: kind.into(), from, subject });
         }
     }
     out
 }
 
-pub fn delivered_headers(sent: &[Value], known: &dyn Fn(&str, &str, &str) -> bool) -> Vec<(String, String, String)> {
+pub fn delivered_headers(sent: &[Value], known: Known) -> Vec<(String, String, String)> {
     wake_lines(sent, known).into_iter().map(|w| (w.to, w.kind, w.from)).collect()
 }
 
-fn message_known(db: &rusqlite::Connection, to: &str, kind: &str, handle: &str) -> bool {
-    let Some(seq) = handle.strip_prefix('m').and_then(|n| n.parse::<i64>().ok()) else { return false };
+fn message_body(db: &rusqlite::Connection, to: &str, kind: &str, handle: &str) -> Option<String> {
+    let seq = handle.strip_prefix('m')?.parse::<i64>().ok()?;
     db.query_row(
-        "SELECT 1 FROM messages WHERE seq = ?1 AND to_id = ?2 AND kind = ?3",
+        "SELECT body FROM messages WHERE seq = ?1 AND to_id = ?2 AND kind = ?3",
         rusqlite::params![seq, to, kind],
-        |_| Ok(()),
+        |r| r.get(0),
     )
-    .is_ok()
+    .ok()
 }
 
 impl H {
     pub fn delivered(&self, sent: &[Value]) -> Vec<(String, String, String)> {
         let db = rusqlite::Connection::open(self.app.store.path()).unwrap();
-        let known = |to: &str, kind: &str, handle: &str| message_known(&db, to, kind, handle);
+        let known = |to: &str, kind: &str, handle: &str| message_body(&db, to, kind, handle);
         delivered_headers(sent, &known)
     }
 
     pub fn wake_lines(&self, sent: &[Value]) -> Vec<WakeLine> {
         let db = rusqlite::Connection::open(self.app.store.path()).unwrap();
-        let known = |to: &str, kind: &str, handle: &str| message_known(&db, to, kind, handle);
+        let known = |to: &str, kind: &str, handle: &str| message_body(&db, to, kind, handle);
         wake_lines(sent, &known)
     }
 
