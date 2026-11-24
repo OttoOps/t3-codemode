@@ -8,7 +8,7 @@ The eval sets for the skills in `skills/`, in the format Anthropic's
 | `<skill>/triggers.json` | Trigger evals: `{"query", "should_trigger"}` items, plus `form` (`plain` or `brief`) on each should-trigger item and `env: "plain"` on a prompt that runs outside T3 Code. |
 | `<skill>/evals.json` | Behavior evals for the roles and setup: skill-creator's `evals.json` shape, with a `checks` list that matches `expectations` one to one, and the `setup` the sandbox needs. |
 | `live.py` | The live runner. |
-| `stub_t3_mcp.py`, `stub_t3cm_mcp.py`, `fake_gh.py`, `guard_hook.py` | The stub T3 MCP server, the stub t3cm server, the fake `gh` and the PreToolUse guard a sandbox runs with. |
+| `stub_t3_mcp.py`, `stub_t3cm_mcp.py`, `fake_gh.py`, `fake_glab.py`, `guard_hook.py` | The stub T3 MCP server, the stub t3cm server, the fake `gh` and `glab`, and the PreToolUse guard a sandbox runs with. |
 
 The sets live here rather than in each skill's folder because
 `npx skills add` copies a skill's whole folder onto the user's machine, and
@@ -20,8 +20,9 @@ nothing at run time reads them.
 checks the shape of every eval set, that every skill has trigger evals with
 both kinds and a plain-language trigger, that no prompt starts with a slash,
 that `t3-ticket` and `t3-worker` trigger from a launch brief, and that a
-worker eval configures a slash-only pass. It also checks the sandbox, the
-stub server, the fake `gh` and the check matchers. None of it calls a model.
+worker eval configures a slash-only pass, and that a ticket and a worker
+eval run on a GitLab host listed under `forges`. It also checks the sandbox,
+the stub server, the fake `gh` and `glab`, and the check matchers. None of it calls a model.
 
 ## Live runs
 
@@ -30,8 +31,8 @@ gets its own sandbox under `--out` (a temporary folder by default):
 
 - its own `HOME`, XDG config and state, and T3 home, so it reads and writes
   its own copies of `~/.claude`, `~/.agents`, `~/.codex` and T3 Code;
-- `PATH` set to the sandbox's `bin` (a fake `gh`, stub `t3cm`, `python3` and `claude`)
-  then `/usr/bin:/bin`;
+- `PATH` set to the sandbox's `bin` (a fake `gh` and `glab`, stub `t3cm`,
+  `python3` and `claude`) then `/usr/bin:/bin`;
 - a stub `t3-code` MCP server that logs each call and a T3 Code runtime note
   in the sandbox's `CLAUDE.md`, so a prompt runs as it would in a T3 Code
   thread (`env: "plain"` drops both);
@@ -40,9 +41,12 @@ gets its own sandbox under `--out` (a temporary folder by default):
   first rule whose `match` regular expression finds the submitted code, and a
   rule's `results` list answers its calls in turn, so a pool eval can hand
   each `wf.pick` its own pick;
-- a git repo whose `origin` is `https://github.com/acme/widgets.git`, rewritten
-  with `insteadOf` to a local bare repo, and `GIT_ALLOW_PROTOCOL=file`, so no
-  fetch or push leaves the machine.
+- a git repo whose `origin` is `https://github.com/acme/widgets.git`, or the
+  eval's `setup.origin` (such as `https://gitlab.acme.example/acme/widgets.git`),
+  rewritten with `insteadOf` to a local bare repo, and `GIT_ALLOW_PROTOCOL=file`,
+  so no fetch or push leaves the machine;
+- `t3cm config get forges` answering with the eval's `setup.forges` (`{}` by
+  default), so a GitLab eval can list its host as tracked.
 
 A PreToolUse hook (`guard_hook.py`) refuses, before it runs, any tool call
 that names the real `~/.claude`, `~/.agents`, `~/.codex` or `~/.t3`, a local
@@ -80,12 +84,12 @@ To try a new description before editing `SKILL.md`, pass `--skill <name>
 python3 tests/skills/evals/live.py behavior [--skill t3-worker] [--eval 2]
 ```
 
-Each eval runs twice: with every skill from `skills/` installed and with
-none. The `checks` read the run's tool calls, its final text, the stub
-server's and fake `gh`'s logs, and the repo's files. A `repo` check compares
-every file in the repo against the snapshot the sandbox took before the run,
-so it sees a change made by any tool. An eval passes when every
-check holds with the skill and at least one fails without it.
+Each eval runs twice: with every skill from `skills/` installed and with none.
+The `checks` read the run's tool calls, its final text, the stub server's, the
+fake `gh`'s and the fake `glab`'s logs, and the repo's files. A `repo` check
+compares every file in the repo against the snapshot the sandbox took before
+the run, so it sees a change made by any tool. An eval passes when every check
+holds with the skill and at least one fails without it.
 
 After changing a check, score the transcripts a past run saved again, with
 no model calls: `live.py behavior --rescore <out>`.

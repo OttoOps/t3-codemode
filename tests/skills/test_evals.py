@@ -19,7 +19,7 @@ ROLES_AND_SETUP = ["t3-overseer", "t3-ticket", "t3-worker", "setup-t3-workflow"]
 BRIEF_SKILLS = ["t3-ticket", "t3-worker"]
 TRIGGER_KEYS = {"query", "should_trigger", "form", "env"}
 CHECK_EXTRAS = {"input", "none", "contains"}
-SETUP_KEYS = {"issues", "t3", "t3cm", "config", "home_skills", "repo_files", "link", "branch"}
+SETUP_KEYS = {"issues", "t3", "t3cm", "config", "home_skills", "repo_files", "link", "branch", "origin", "forges"}
 
 
 class EvalSets(unittest.TestCase):
@@ -95,7 +95,7 @@ class EvalSets(unittest.TestCase):
                     kinds = [k for k in live.CHECK_KINDS if k in check]
                     self.assertEqual(len(kinds), 1, check)
                     self.assertLessEqual(set(check) - {kinds[0]}, CHECK_EXTRAS, check)
-                    for key in ("input", "contains", *(k for k in ("bash", "text", "gh", "repo") if k in check)):
+                    for key in ("input", "contains", *(k for k in ("bash", "text", "gh", "glab", "repo") if k in check)):
                         if key in check:
                             re.compile(check[key])
                 if "{link_block}" in ev["prompt"]:
@@ -123,6 +123,16 @@ class EvalSets(unittest.TestCase):
         worker = live.load("t3-worker", "evals")["evals"]
         self.assertTrue(any(c.get("tool") == "*" and "wf\\.renewal" in c.get("input", "")
                             for e in worker for c in e["checks"]), "no worker eval exercises wf.renewal")
+
+    def test_a_tracked_gitlab_host_is_covered_for_tickets_and_workers(self):
+        for skill in BRIEF_SKILLS:
+            evs = [e for e in live.load(skill, "evals")["evals"]
+                   if "://gitlab." in e["setup"].get("origin", "")
+                   and e["setup"]["origin"].split("/")[2] in e["setup"].get("forges", {})]
+            self.assertTrue(evs, f"{skill} has no eval on a GitLab host listed under forges")
+            self.assertTrue(any("glab" in c for e in evs for c in e["checks"]), skill)
+        worker = [e for e in live.load("t3-worker", "evals")["evals"] if "forges" in e["setup"]]
+        self.assertTrue(any(c.get("tool") == "*" and "wf\\.pr" in c.get("input", "") for e in worker for c in e["checks"]))
 
     def test_the_worker_runs_a_slash_only_pass(self):
         evs = [e for e in live.load("t3-worker", "evals")["evals"]
@@ -162,7 +172,7 @@ class SandboxHarness(unittest.TestCase):
         self.assertTrue(env["PATH"].startswith(str(box.bin) + ":"))
         self.assertEqual(env["PATH"], f"{box.bin}:/usr/bin:/bin")
         for tool in box.bin.iterdir():
-            self.assertIn(tool.name, ("python3", "claude", "gh", "t3cm", "systemctl"))
+            self.assertIn(tool.name, ("python3", "claude", "gh", "glab", "t3cm", "systemctl"))
         self.assertEqual(env["T3CODE_THREAD_ID"], live.SELF)
         self.assertEqual(env["GIT_ALLOW_PROTOCOL"], "file")
         self.assertFalse({"CLAUDE_CONFIG_DIR", "CODEX_HOME", "GH_TOKEN", "GITHUB_TOKEN"} & set(env))
@@ -193,6 +203,37 @@ class SandboxHarness(unittest.TestCase):
         log = live.read_jsonl(box.gh_log)
         self.assertEqual(log[-1]["body"], "Refs #42\n")
         self.assertEqual(self.run_in(box, "gh", "api", "user", "-q", ".login").stdout.strip(), "eval-user")
+
+    def test_glab_answers_from_fixtures_and_logs(self):
+        box = self.box(setup={"issues": {"42": {"iid": 42, "title": "Quiet flag"}}})
+        r = self.run_in(box, "glab", "issue", "view", "42", "--output", "json")
+        self.assertEqual(json.loads(r.stdout)["title"], "Quiet flag")
+        self.assertNotEqual(self.run_in(box, "glab", "issue", "view", "7").returncode, 0)
+        r = self.run_in(box, "glab", "mr", "create", "--source-branch", "feat/x", "--target-branch", "main",
+                        "--title", "feat: x", "--description", "Refs #42\n", "--yes")
+        self.assertIn("/-/merge_requests/", r.stdout)
+        self.assertEqual(live.read_jsonl(box.glab_log)[-1]["body"], "Refs #42\n")
+        r = self.run_in(box, "glab", "mr", "list", "--source-branch", "feat/x", "--all", "--output", "json")
+        self.assertEqual(json.loads(r.stdout), [])
+        r = self.run_in(box, "glab", "api", "--hostname", "gitlab.acme.example", "projects/acme%2Fwidgets/merge_requests/7")
+        self.assertEqual(json.loads(r.stdout)["state"], "opened")
+        self.assertEqual(self.run_in(box, "glab", "api", "user", "-q", ".username").stdout.strip(), "eval-user")
+        self.assertEqual(live.read_jsonl(box.gh_log), [], "glab calls never reach the fake gh")
+
+    def test_a_gitlab_origin_pushes_to_its_own_bare_repo_and_lists_its_forge(self):
+        origin = "https://gitlab.acme.example/acme/widgets.git"
+        forges = {"gitlab.acme.example": {"kind": "gitlab", "cli": "glab"}}
+        box = self.box(setup={"origin": origin, "forges": forges, "branch": "feat/x"})
+        self.assertEqual(self.run_in(box, "git", "config", "remote.origin.url").stdout.strip(), origin)
+        self.assertEqual(self.run_in(box, "git", "push", "-q", "origin", "feat/x").returncode, 0)
+        bare = box.root / "gitlab.acme.example" / "acme" / "widgets.git"
+        heads = subprocess.run(["git", "--git-dir", str(bare), "branch"], capture_output=True, text=True).stdout
+        self.assertIn("feat/x", heads)
+        r = self.run_in(box, "t3cm", "config", "get", "forges")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), forges)
+        plain = live.Sandbox(self.tmp / "plain")
+        self.assertEqual(json.loads(self.run_in(plain, "t3cm", "config", "get", "forges").stdout), {})
 
     def test_pushes_land_in_the_local_bare_repo(self):
         box = self.box(setup={"branch": "feat/x"})
@@ -302,6 +343,8 @@ class Checks(unittest.TestCase):
         (self.root / "repo" / "out.md").write_text("Unslopped: 2 rules applied.\n")
         (self.root / "gh.log").write_text(json.dumps({"argv": ["pr", "create", "--title", "t"],
                                                       "body": "Unslopped: 2 rules applied."}) + "\n")
+        (self.root / "glab.log").write_text(json.dumps({"argv": ["mr", "create", "--title", "t"],
+                                                        "body": "Refs #42"}) + "\n")
         (self.root / "t3-calls.jsonl").write_text(json.dumps({"tool": "t3_worktree_status", "input": {}}) + "\n")
         self.facts = live.transcript_facts(json.dumps(e) for e in self.STREAM)
 
@@ -321,6 +364,8 @@ class Checks(unittest.TestCase):
         self.assertTrue(self.passes({"tool": "*", "input": r"unslop/SKILL\.md"}))
         self.assertTrue(self.passes({"text": "approve this PR split"}))
         self.assertTrue(self.passes({"gh": "pr create", "input": "Unslopped"}))
+        self.assertTrue(self.passes({"glab": "mr create", "input": "Refs #42"}))
+        self.assertFalse(self.passes({"glab": "pr create"}))
         self.assertTrue(self.passes({"t3": "t3_worktree_status"}))
         self.assertTrue(self.passes({"file": "out.md", "contains": "Unslopped"}))
         self.assertFalse(self.passes({"gh": "pr create", "input": "robust"}))

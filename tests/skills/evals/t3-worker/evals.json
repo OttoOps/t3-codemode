@@ -235,6 +235,94 @@
       },
       "max_turns": 40,
       "timeout": 900
+    },
+    {
+      "id": 4,
+      "name": "gitlab-mr-through-wf-pr",
+      "prompt": "# #46: Add a loud() helper\n\nTracker: gitlab-issues\nIssue: https://gitlab.acme.example/acme/widgets/-/issues/46\nSub-issue: none\nPR 1 of 1: feat: add loud()\nAcceptance: widgets.py has a `loud(name)` function that returns `widget(name) + \"!\"`, covered by a test in tests/test_widgets.py\nBranch: feat/46-loud\nDelivery: merge. The orchestrator merges and deploys; you\nnever merge, tag, or deploy.\nLater PRs (out of scope): none\nPasses: none\n\n## Previous handoff\nnone\n\n{link_block}\n\n## Repo rules\nFollow AGENTS.md, CLAUDE.md, CONTRIBUTING.md, README.md and docs/agents/ in\nthis repo. They set the identity, commit trailers, tests, version bump, and\ndone-checks, and they outrank this brief.\nIdentity: the user's own: Eval User <eval-user@example.invalid>, glab login eval-user.\nChecks: python3 -m unittest discover -s tests.\nPR format: no format set by the repo. Write\nthe description through the Publishing section of the procedure.\n\n## Procedure\nInvoke the t3-worker skill and follow the t3-worker procedure\ninline, in this thread, from step 1.\n",
+      "expected_output": "Builds the change on a GitLab origin whose host t3cm lists under forges, opens a merge request with glab, and reports it with wf.pr opened using the GitLab project path, not as a plain event.",
+      "files": [],
+      "expectations": [
+        "Builds the change the brief asks for: loud('a') returns 'widget a!'",
+        "Opens the merge request with glab, with a Refs line for the GitLab issue",
+        "Opens no GitHub pull request",
+        "Reports the opened merge request with wf.pr, naming the GitLab project as <host>/<full path> or by its URL",
+        "Does not fall back to reporting the merge request as a plain wf.send event",
+        "Merges nothing"
+      ],
+      "checks": [
+        {
+          "file": "widgets.py",
+          "contains": "def loud\\(name\\):\\s*\\n\\s+return widget\\(name\\) \\+ [\"']!"
+        },
+        {
+          "glab": "mr create",
+          "input": "Refs (https://gitlab\\.acme\\.example/acme/widgets/-/issues/46|gitlab\\.acme\\.example/acme/widgets#46)"
+        },
+        {
+          "gh": "pr create",
+          "none": true
+        },
+        {
+          "tool": "*",
+          "input": "wf\\.pr\\([^)]*opened[^)]*(gitlab\\.acme\\.example/acme/widgets|merge_requests/7)"
+        },
+        {
+          "tool": "*",
+          "input": "wf\\.send\\([^)]*kind: *[\\\\\"']*event[^)]*PR opened",
+          "none": true
+        },
+        {
+          "bash": "(glab mr merge|gh pr merge)",
+          "none": true
+        }
+      ],
+      "setup": {
+        "link": "gitlab.acme.example/acme/widgets#46 PR 1/1",
+        "branch": "feat/46-loud",
+        "origin": "https://gitlab.acme.example/acme/widgets.git",
+        "forges": {
+          "gitlab.acme.example": {
+            "kind": "gitlab",
+            "cli": "glab"
+          }
+        },
+        "issues": {
+          "46": {
+            "iid": 46,
+            "title": "Add a loud() helper",
+            "state": "opened",
+            "description": "Add loud(name), which returns widget(name) followed by '!', with a test.",
+            "labels": [],
+            "web_url": "https://gitlab.acme.example/acme/widgets/-/issues/46"
+          }
+        },
+        "config": {
+          "version": 1,
+          "review": null
+        },
+        "t3cm": [
+          {
+            "match": "wf\\.pr\\(",
+            "result": {
+              "status": "open"
+            }
+          }
+        ],
+        "t3": {
+          "t3_worktree_status": {
+            "attached": true,
+            "worktreePath": "{repo}",
+            "branch": "feat/46-loud",
+            "projectWorkspaceRoot": "{repo}-main",
+            "defaultStartFromOrigin": true
+          }
+        },
+        "repo_files": {
+          "tests/__init__.py": "",
+          "tests/test_widgets.py": "import unittest\n\nfrom widgets import widget\n\n\nclass WidgetTests(unittest.TestCase):\n    def test_widget(self):\n        self.assertEqual(widget(\"a\"), \"widget a\")\n"
+        }
+      }
     }
   ]
 }
