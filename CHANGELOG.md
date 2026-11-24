@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/OttoOps/t3-codemode/compare/v0.9.3...v0.10.0) - 2026-11-24
+
+### Added
+
+- discover graph repos from T3 projects
+
+### Fixed
+
+- use saved project for pending flow tickets
+- revalidate aliases and preserve capacity
+- harden repo discovery, renames, and capacity
+
+### Other
+
+- check raced forbidden wakes per op boundary
+- parse wakes by delivery record boundaries
+- require stored body after each wake header
+- check GitHub attempts per reconcile pass
+- match wake headers to message records
+- tighten shadow oracle per review
+- add shadow-model oracle to pr chaos
+
 ## [0.9.3](https://github.com/OttoOps/t3-codemode/compare/v0.9.2...v0.9.3) - 2026-11-24
 
 ### Other
