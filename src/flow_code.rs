@@ -393,12 +393,24 @@ fn matches_workspace_glob(pattern: &str, dir: &str) -> bool {
 }
 
 fn glob_segs_match(pat: &[&str], path: &[&str]) -> bool {
-    match (pat.first(), path.first()) {
-        (None, None) => true,
-        (Some(&"**"), _) => glob_segs_match(&pat[1..], path) || (!path.is_empty() && glob_segs_match(pat, &path[1..])),
-        (Some(p), Some(s)) => wildcard_match(p.as_bytes(), s.as_bytes()) && glob_segs_match(&pat[1..], &path[1..]),
-        _ => false,
+    let n = path.len();
+    let mut dp = vec![false; n + 1];
+    dp[0] = true;
+    for &p in pat {
+        if p == "**" {
+            for j in 1..=n {
+                if dp[j - 1] {
+                    dp[j] = true;
+                }
+            }
+        } else {
+            for j in (1..=n).rev() {
+                dp[j] = dp[j - 1] && wildcard_match(p.as_bytes(), path[j - 1].as_bytes());
+            }
+            dp[0] = false;
+        }
     }
+    dp[n]
 }
 
 fn wildcard_match(pat: &[u8], text: &[u8]) -> bool {
@@ -2159,7 +2171,11 @@ fn strip_python_comments_and_strings(src: &str) -> String {
                         break;
                     }
                     if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                        i += 2;
+                        let ch = src[i + 1..].chars().next().expect("valid utf-8");
+                        if ch == '\n' {
+                            out.push('\n');
+                        }
+                        i += 1 + ch.len_utf8();
                         continue;
                     }
                     if bytes[i] == b'\n' {
@@ -2176,7 +2192,11 @@ fn strip_python_comments_and_strings(src: &str) -> String {
             out.push(' ');
             while i < bytes.len() && bytes[i] != b'\n' {
                 if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    i += 2;
+                    let ch = src[i + 1..].chars().next().expect("valid utf-8");
+                    if ch == '\n' {
+                        out.push('\n');
+                    }
+                    i += 1 + ch.len_utf8();
                     continue;
                 }
                 if bytes[i] == q {
@@ -3979,5 +3999,25 @@ mod tests {
         // S8: `const value = x++ / require('./storage');` treats `/` as division and finds require('./storage')
         let e78 = find(7, 8).expect("postfix_div (#7) -> storage (#8)");
         assert!(e78.modules.contains(&"js/postfix_div.js -> js/storage.js".to_string()), "{e78:?}");
+    }
+
+    #[test]
+    fn recursive_workspace_globs_stay_bounded_and_python_utf8_escapes_do_not_panic() {
+        // Zero-directory and multi-directory `**` matches preserve exact semantics.
+        assert!(matches_workspace_glob("packages/**/pkg", "packages/pkg"));
+        assert!(matches_workspace_glob("packages/**/pkg", "packages/a/b/c/pkg"));
+        assert!(matches_workspace_glob("**", ""));
+        assert!(matches_workspace_glob("**", "a/b"));
+        assert!(!matches_workspace_glob("packages/**/pkg", "packages/a/b/other"));
+
+        // Pathological repeated `**` segments before a non-matching suffix must finish in polynomial time.
+        let pat = format!("{}/missing", vec!["**"; 24].join("/"));
+        let deep = vec!["dir"; 24].join("/");
+        assert!(!matches_workspace_glob(&pat, &deep));
+
+        // Backslash before multibyte UTF-8 in single-quoted and triple-quoted Python strings must not panic.
+        let py = "x = r\"\\é\"\ny = r\"\"\"\\é\"\"\"\nfrom pkg.core import LedgerEntry\n";
+        let stripped = strip_python_comments_and_strings(py);
+        assert!(stripped.contains("from pkg.core import LedgerEntry"), "{stripped:?}");
     }
 }

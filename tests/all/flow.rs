@@ -5060,6 +5060,88 @@ async fn code_dep_js_ts_workspaces_and_python_imports() {
 }
 
 #[tokio::test]
+async fn code_dep_survives_python_utf8_escapes_and_repeated_workspace_globs() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = td.path().join("repo");
+    for d in ["src/pkg", "packages/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/lib", "packages/app/src"] {
+        std::fs::create_dir_all(repo.join(d)).unwrap();
+    }
+    run_git(&repo, &["init", "-b", "main"]);
+    let pathological = format!("packages/{}/missing", vec!["**"; 20].join("/"));
+    std::fs::write(
+        repo.join("package.json"),
+        format!(r#"{{"private": true, "workspaces": ["{pathological}", "packages/**/lib", "packages/app"]}}"#),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("packages/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/lib/package.json"),
+        r#"{"name": "@acme/deep-lib", "main": "index.js"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("packages/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/lib/index.js"),
+        "export const DEEP_TOKEN = 1;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("packages/app/package.json"),
+        r#"{"name": "@acme/app", "dependencies": {"@acme/deep-lib": "workspace:*"}}"#,
+    )
+    .unwrap();
+    std::fs::write(repo.join("packages/app/src/index.js"), "import { DEEP_TOKEN } from '@acme/deep-lib';\n").unwrap();
+    std::fs::write(repo.join("pyproject.toml"), "[project]\nname = \"pkg\"\n").unwrap();
+    std::fs::write(repo.join("src/pkg/__init__.py"), "").unwrap();
+    std::fs::write(repo.join("src/pkg/core.py"), "class SafeLedger:\n    pass\n").unwrap();
+    std::fs::write(repo.join("src/pkg/escapes.py"), "SINGLE = r\"\\é\"\nTRIPLE = r\"\"\"\\é\"\"\"\n").unwrap();
+    std::fs::write(repo.join("src/pkg/consumer.py"), "from pkg.core import SafeLedger\n").unwrap();
+    run_git(&repo, &["add", "."]);
+    run_git(&repo, &["commit", "-m", "init"]);
+
+    let cfg = Config::from_value(json!({
+        "flow": {
+            "repos": [REPO],
+            "optIn": {"label": FLOW},
+            "maxTickets": 4,
+            "launch": "ask"
+        }
+    }))
+    .unwrap();
+    let h = H::build(Vec::new(), cfg);
+    h.github.add_repo(REPO);
+    h.fake.set_projects(vec![project("p-widgets", repo.to_str().unwrap())]);
+    h.remotes.set(repo.to_str().unwrap(), "git@github.com:acme/widgets.git");
+
+    for n in 1u64..=5 {
+        issue(&h, REPO, n, &[FLOW], n as u32);
+    }
+    h.github.set_body(REPO, 1, "## Flow\n- Touches: `src/pkg/escapes.py`\n");
+    h.github.set_body(REPO, 2, "## Flow\n- Touches: `src/pkg/core.py`\n");
+    h.github.set_body(REPO, 3, "## Flow\n- Touches: `src/pkg/consumer.py`\n");
+    h.github.set_body(REPO, 4, "## Flow\n- Touches: `packages/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/lib/index.js`\n");
+    h.github.set_body(REPO, 5, "## Flow\n- Touches: `packages/app/src/index.js`\n");
+
+    let g = result(&h.exec("async () => wf.flow({ graph: true })").await);
+    let code_deps: Vec<&Value> =
+        g["graph"]["edges"].as_array().unwrap().iter().filter(|e| e["kind"] == "codeDep").collect();
+    let find_cd = |from: u64, to: u64| {
+        let f = format!("{REPO}#{from}");
+        let t = format!("{REPO}#{to}");
+        code_deps.iter().copied().find(|e| e["from"] == f && e["to"] == t)
+    };
+
+    let py_edge = find_cd(3, 2).expect("separate Python import edge #3 -> #2 must survive escapes.py");
+    assert!(
+        py_edge["modules"].as_array().unwrap().iter().any(|m| m == "src/pkg/consumer.py -> src/pkg/core.py"),
+        "{py_edge}"
+    );
+    let js_edge = find_cd(5, 4).expect("JS workspace edge #5 -> #4 must resolve with bounded glob matching");
+    assert!(
+        js_edge["modules"].as_array().unwrap().iter().any(|m| m == "workspace @acme/app -> @acme/deep-lib"),
+        "{js_edge}"
+    );
+}
+
+#[tokio::test]
 async fn graph_tab_renders_code_dep_dashed_edge_legend_tooltip_hover_and_inspector() {
     let td = tempfile::tempdir().unwrap();
     let repo = td.path().join("repo");
