@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::Value;
 use t3_codemode::app::{App, ExecuteRequest, ToolOutput};
@@ -256,6 +257,39 @@ fn body_len(after: &str, body: &str, handle: &str) -> Option<usize> {
     capped.or_else(|| after.starts_with(body).then_some(body.len()))
 }
 
+tokio::task_local! {
+    static ORACLE_VIOLATION: Arc<AtomicBool>;
+}
+
+pub fn oracle_fail(msg: String) -> ! {
+    let _ = ORACLE_VIOLATION.try_with(|flag| flag.store(true, Ordering::Relaxed));
+    panic!("{msg}");
+}
+
+#[cfg(feature = "test-sentinels")]
+pub async fn caught_by_oracle<F>(fut: F) -> bool
+where
+    F: std::future::Future + Send + 'static,
+{
+    let flag = Arc::new(AtomicBool::new(false));
+    let seen = flag.clone();
+    match tokio::spawn(ORACLE_VIOLATION.scope(flag, async move {
+        let _ = fut.await;
+    }))
+    .await
+    {
+        Ok(()) => false,
+        Err(e) if e.is_panic() => {
+            if seen.load(Ordering::Relaxed) {
+                true
+            } else {
+                std::panic::resume_unwind(e.into_panic());
+            }
+        }
+        Err(e) => panic!("sentinel task aborted unexpectedly: {e}"),
+    }
+}
+
 pub fn wake_lines(sent: &[Value], known: Known) -> Vec<WakeLine> {
     let mut out = Vec::new();
     for s in sent {
@@ -264,14 +298,16 @@ pub fn wake_lines(sent: &[Value], known: Known) -> Vec<WakeLine> {
         loop {
             let (line, after) = rest.split_once('\n').unwrap_or((rest, ""));
             let Some((kind, from, handle)) = header_line(line) else { break };
-            let r = known(&handle).unwrap_or_else(|| panic!("{to} got a wake header for unknown message {handle}"));
-            assert_eq!(
-                (r.to.as_str(), r.kind.as_str()),
-                (to, kind.as_str()),
-                "message {handle} was delivered to the wrong recipient or as the wrong kind"
-            );
+            let r = known(&handle)
+                .unwrap_or_else(|| oracle_fail(format!("{to} got a wake header for unknown message {handle}")));
+            if (r.to.as_str(), r.kind.as_str()) != (to, kind.as_str()) {
+                oracle_fail(format!(
+                    "message {handle} was delivered to the wrong recipient or as the wrong kind: expected ({:?}, {:?}), got ({to:?}, {kind:?})",
+                    r.to, r.kind
+                ));
+            }
             let used = body_len(after, &r.body, &handle)
-                .unwrap_or_else(|| panic!("{to} got {handle} with a body that differs from its record"));
+                .unwrap_or_else(|| oracle_fail(format!("{to} got {handle} with a body that differs from its record")));
             let subject = after.lines().next().unwrap_or_default().to_string();
             out.push(WakeLine { to: to.into(), kind, from, subject });
             match after[used..].strip_prefix("\n\n") {
@@ -348,7 +384,12 @@ impl H {
             .map(|row| {
                 let (repo, pr, data) = row.unwrap();
                 let w: MergeWait = serde_json::from_str(&data).unwrap();
-                assert_eq!((&w.repo, w.pr), (&repo, pr), "merge wait row key disagrees with its payload");
+                if (&w.repo, w.pr) != (&repo, pr) {
+                    oracle_fail(format!(
+                        "merge wait row key ({repo}, {pr}) disagrees with its payload ({}, {})",
+                        w.repo, w.pr
+                    ));
+                }
                 ((repo, pr), (format!("{:?}", w.status), w.head, w.thread, w.failures))
             })
             .collect();

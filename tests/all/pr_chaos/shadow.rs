@@ -8,13 +8,24 @@ const GITHUB: &str = "github";
 const T3CM: &str = "t3cm";
 const MAX_FAILURES: u32 = 3;
 const EXIT_WINDOW_MINS: i64 = 30;
+const MAX_HOLD_MINS: f64 = 30.0;
 const WAKE_KINDS: &[&str] = &["event", "gate", "blocker", "handoff", "closed", "report", "escalate", "reply"];
 
 pub type Wake = (String, String, String);
 type Tracked = BTreeMap<u64, (String, Vec<(String, String)>, Vec<u64>)>;
 
+#[derive(Clone, Debug)]
+pub enum AdvanceRace {
+    FailAndReplace { pr: u64, new_head_idx: usize, replacement: WaitM },
+    SucceedAndReplace { pr: u64, replacement: Option<WaitM> },
+}
+
 fn ts(s: &str) -> jiff::Timestamp {
     s.parse().unwrap_or_else(|e| panic!("model timestamp {s:?}: {e}"))
+}
+
+fn mins(now: &str, then: &str) -> f64 {
+    ts(now).duration_since(ts(then)).as_secs_f64() / 60.0
 }
 
 fn later(event: &str, since: &str) -> bool {
@@ -220,6 +231,11 @@ pub struct Model {
     now: String,
     pub wakes: Vec<Wake>,
     pub retired: BTreeSet<(String, u64)>,
+    busy: BTreeSet<String>,
+    outbox: Vec<(String, String, String, String)>,
+    watcher_alive: bool,
+    defer_flush: bool,
+    deferred_woken: Vec<String>,
 }
 
 impl Model {
@@ -238,7 +254,28 @@ impl Model {
             now: floor.into(),
             wakes: Vec::new(),
             retired: BTreeSet::new(),
+            busy: BTreeSet::new(),
+            outbox: Vec::new(),
+            watcher_alive: false,
+            defer_flush: false,
+            deferred_woken: Vec::new(),
         }
+    }
+
+    pub fn set_watcher_alive(&mut self, alive: bool) {
+        self.watcher_alive = alive;
+    }
+
+    pub fn set_busy(&mut self, id: &str, busy: bool) {
+        if busy {
+            self.busy.insert(id.into());
+        } else {
+            self.busy.remove(id);
+        }
+    }
+
+    pub fn reply(&mut self, w: &str) {
+        self.deliver(w, "reply", "parent");
     }
 
     pub fn step(&mut self, now: &str) {
@@ -269,6 +306,10 @@ impl Model {
                 ((REPO.into(), *n), (format!("{:?}", w.status), w.head.clone(), Some(w.thread.clone()), w.failures))
             })
             .collect();
+        let mut outbox = BTreeMap::new();
+        for (to, ..) in &self.outbox {
+            *outbox.entry(to.clone()).or_insert(0) += 1;
+        }
         Proj {
             links,
             cards: self.cards.iter().map(CardM::view).collect(),
@@ -279,7 +320,7 @@ impl Model {
                 .iter()
                 .map(|(n, r)| ((REPO.into(), *n), (r.queued, r.since.clone(), r.left.clone(), r.queued_at.clone())))
                 .collect(),
-            outbox: BTreeMap::new(),
+            outbox,
         }
     }
 
@@ -292,8 +333,42 @@ impl Model {
     }
 
     fn deliver(&mut self, to: &str, kind: &str, from: &str) {
-        if self.is_open(to) {
-            self.wakes.push((to.into(), kind.into(), from.into()));
+        self.outbox.push((to.into(), kind.into(), from.into(), self.now.clone()));
+        if self.defer_flush {
+            self.deferred_woken.push(to.into());
+        } else {
+            self.flush_outbox(Some(to), !self.watcher_alive);
+        }
+    }
+
+    fn flush_outbox(&mut self, only_to: Option<&str>, force: bool) {
+        let mut targets: Vec<String> = Vec::new();
+        for (to, ..) in &self.outbox {
+            if only_to.is_some_and(|o| o != to) {
+                continue;
+            }
+            if !targets.contains(to) {
+                targets.push(to.clone());
+            }
+        }
+        for to in targets {
+            if !self.is_open(&to) {
+                self.outbox.retain(|(t, ..)| *t != to);
+                continue;
+            }
+            if !force {
+                self.refresh(&to);
+                let first = self.outbox.iter().find(|(t, ..)| *t == to).map(|(_, _, _, q)| q.as_str()).unwrap();
+                if self.busy.contains(&to) && mins(&self.now, first) < MAX_HOLD_MINS {
+                    continue;
+                }
+            }
+            let (sent, kept): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut self.outbox).into_iter().partition(|(t, ..)| *t == to);
+            self.outbox = kept;
+            for (t, kind, from, _) in sent {
+                self.wakes.push((t, kind, from));
+            }
         }
     }
 
@@ -500,6 +575,7 @@ impl Model {
             l.open = false;
             l.gate = None;
             l.gate_pr = None;
+            self.outbox.retain(|(to, ..)| to != w);
         }
         let label = self.label(w);
         self.deliver(&parent, kind, &label);
@@ -747,6 +823,7 @@ impl Model {
         l.open = false;
         l.gate = None;
         l.gate_pr = None;
+        self.outbox.retain(|(to, ..)| to != w);
         self.drop_relayed(w, &parent);
     }
 
@@ -815,6 +892,12 @@ impl Model {
             if !l.open || l.gate.is_some() {
                 continue;
             }
+            if self.busy.contains(id) {
+                if l.parent != BOARD {
+                    may.push((l.parent.clone(), "report".into(), l.label.clone()));
+                }
+                continue;
+            }
             if l.pr.as_ref().is_some_and(|p| p.waiting) {
                 continue;
             }
@@ -836,6 +919,7 @@ impl Model {
         for w in open {
             self.refresh(&w);
         }
+        self.flush_outbox(None, false);
     }
 
     pub fn set_prs(&mut self, w: &str, pr: u64) {
@@ -967,9 +1051,19 @@ impl Model {
     }
 
     pub fn reconcile(&mut self, gh: &BTreeMap<u64, GhPrModel>) -> Predicted {
+        self.reconcile_inner(gh, None)
+    }
+
+    pub fn reconcile_racing_advance(&mut self, gh: &BTreeMap<u64, GhPrModel>, race: &AdvanceRace) -> Predicted {
+        self.reconcile_inner(gh, Some(race))
+    }
+
+    fn reconcile_inner(&mut self, gh: &BTreeMap<u64, GhPrModel>, race: Option<&AdvanceRace>) -> Predicted {
         let mut gh = gh.clone();
         let tracked = self.tracked();
         let mut unread = Vec::new();
+        self.defer_flush = true;
+        self.deferred_woken.clear();
         for (&pr, (t_since, _, seqs)) in &tracked {
             let m = gh[&pr].clone();
             if !m.exists {
@@ -983,7 +1077,7 @@ impl Model {
                 unread.push(pr);
                 continue;
             }
-            self.fix(pr, &m, t_since, seqs, &mut gh);
+            self.fix(pr, &m, t_since, seqs, &mut gh, race);
         }
         self.seen.retain(|p, _| tracked.contains_key(p));
         let waiting: Vec<(String, PrM)> = self
@@ -1018,6 +1112,14 @@ impl Model {
             }
             self.ready_check(&w, p.number, &p.head, &gh, Src::Reconcile);
         }
+        self.defer_flush = false;
+        let mut woken = std::mem::take(&mut self.deferred_woken);
+        woken.sort();
+        woken.dedup();
+        let force = !self.watcher_alive;
+        for t in woken {
+            self.flush_outbox(Some(&t), force);
+        }
         Predicted { gh, ok: unread.is_empty(), attempts: self.merges }
     }
 
@@ -1025,7 +1127,15 @@ impl Model {
         self.merges
     }
 
-    fn fix(&mut self, pr: u64, m: &GhPrModel, t_since: &str, seqs: &[u64], gh: &mut BTreeMap<u64, GhPrModel>) {
+    fn fix(
+        &mut self,
+        pr: u64,
+        m: &GhPrModel,
+        t_since: &str,
+        seqs: &[u64],
+        gh: &mut BTreeMap<u64, GhPrModel>,
+        race: Option<&AdvanceRace>,
+    ) {
         let head = gh_head(m);
         let wait = self.waits.get(&pr).cloned();
         let sent = wait.as_ref().filter(|w| w.status == St::Sent).map(|w| w.at.clone());
@@ -1085,7 +1195,35 @@ impl Model {
             self.after_merge(pr, &c.ticket);
         }
         if let Some(w) = advance {
-            self.advance(pr, m, w, gh);
+            match race {
+                Some(AdvanceRace::FailAndReplace { pr: target, new_head_idx, replacement }) if *target == pr => {
+                    self.merges += 1;
+                    gh.get_mut(&pr).unwrap().head_idx = *new_head_idx;
+                    self.waits.insert(pr, replacement.clone());
+                    self.failed(pr, w, None);
+                }
+                Some(AdvanceRace::SucceedAndReplace { pr: target, replacement }) if *target == pr => {
+                    self.merges += 1;
+                    let g = gh.get_mut(&pr).unwrap();
+                    if m.queue_enabled {
+                        g.queued = true;
+                    } else {
+                        g.state = "MERGED";
+                        g.queued = false;
+                        g.merge_commit = Some(format!("{:040x}", self.merges));
+                        g.ended_at = None;
+                    }
+                    match replacement {
+                        Some(next) => {
+                            self.waits.insert(pr, next.clone());
+                        }
+                        None => {
+                            self.waits.remove(&pr);
+                        }
+                    }
+                }
+                _ => self.advance(pr, m, w, gh),
+            }
         }
     }
 
@@ -1312,12 +1450,16 @@ impl Model {
     fn failed(&mut self, pr: u64, mut w: WaitM, event: Option<&str>) {
         w.failures += 1;
         if w.failures < MAX_FAILURES {
-            self.waits.insert(pr, w);
+            if self.waits.get(&pr).is_some_and(|cur| cur.approval == w.approval) {
+                self.waits.insert(pr, w);
+            }
             return;
         }
         let head = w.head.clone();
         self.raise(pr, Some(&w.thread), "report", &head, event, Tag::Plain);
-        self.waits.remove(&pr);
+        if self.waits.get(&pr).is_some_and(|cur| cur.approval == w.approval) {
+            self.waits.remove(&pr);
+        }
     }
 
     fn dropped(&mut self, pr: u64, m: &GhPrModel, live: &[(String, String)], after: &str) -> bool {

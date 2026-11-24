@@ -9,6 +9,7 @@ use crate::clock::{local_clock, parse_ts};
 use crate::github::errors;
 use crate::merge::{CHECKS, ENQUEUE_PR, MERGE_PR, Ready, checks, ready};
 use crate::reach::ReachPoint;
+use crate::sentinels::Sentinel;
 use crate::store::{MergeWait, PrSeen, WaitStatus, Wake};
 use crate::wf::{Wf, header};
 
@@ -552,7 +553,9 @@ impl Wf {
                 add_ticket(Some(&wl.parent), &wl.opened);
             }
         }
-        if let Some(p) = prev {
+        if !self.sentinel(Sentinel::ReconcileSkipsIndependentPrSeen)
+            && let Some(p) = prev
+        {
             for (ticket, since) in &p.tickets {
                 add_ticket(Some(ticket), since);
             }
@@ -734,7 +737,7 @@ impl Wf {
         let gated: Vec<&str> = stale.iter().filter(|c| c.kind == "gate").filter_map(|c| c.ticket.as_deref()).collect();
         let resolved = self.resolve_releasing(&seqs, &gated, &note)?;
         if let Some(w) = wait {
-            self.store.merge_wait_retire(w)?;
+            self.retire_merge_wait(w)?;
         }
         if on_feed {
             self.feed_note(None, &body)?;
@@ -778,7 +781,7 @@ impl Wf {
         if self.dropped(t, o, wait.as_ref(), live_tickets, after, pass)?
             && let Some(w) = wait.take()
         {
-            self.store.merge_wait_retire(&w)?;
+            self.retire_merge_wait(&w)?;
         }
         let this_pr = |c: &Card| c.pr.as_ref().is_some_and(|p| p.repo == t.repo && p.number == t.number);
         let behind = |c: &Card| {
@@ -846,7 +849,7 @@ impl Wf {
             let approval = wait.as_ref().filter(|w| w.thread == *ticket).map(|w| w.approval.as_str());
             self.moved(t, o, ticket.as_deref(), base, seqs, approval, pass)?;
             if let Some(w) = wait.take_if(|w| w.thread == *ticket) {
-                self.store.merge_wait_retire(&w)?;
+                self.retire_merge_wait(&w)?;
             }
         }
         let Some(mut w) = wait.filter(|w| w.head == o.head) else { return Ok(None) };
@@ -881,7 +884,7 @@ impl Wf {
                     ),
                 };
                 self.raise(t, w.thread.as_deref(), "report", &ask, &o.head, None, Some(&w.approval), pass)?;
-                self.store.merge_wait_retire(&w)?;
+                self.retire_merge_wait(&w)?;
                 Ok(None)
             }
             (WaitStatus::Sent, true) if w.failures > 0 => {
@@ -1093,7 +1096,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
         sent.status = WaitStatus::Sent;
         sent.failures = 0;
         sent.last_error = None;
-        if !self.store.merge_wait_swap(&sent)? {
+        if !self.store.merge_wait_swap(&sent)? && !self.sentinel(Sentinel::AdvanceIgnoresSwapResult) {
             return Ok(());
         }
         self.reach.hit(if o.queue { ReachPoint::AdvanceEnqueued } else { ReachPoint::AdvanceMerged });
@@ -1138,7 +1141,7 @@ head has passed or ended cancelled, skipped or neutral. A push drops the approva
             context: format!("It was approved at head {}. GitHub refused {MAX_FAILURES} checks in a row.", w.head),
         };
         self.raise(t, w.thread.as_deref(), "report", &ask, &w.head, event, Some(&w.approval), pass)?;
-        self.store.merge_wait_retire(&w)?;
+        self.retire_merge_wait(&w)?;
         self.feed_note(w.thread.as_deref(), &format!("{} could not be queued: {why}", t.label()))?;
         pass.actions.push(format!("{} could not be queued: {why}", t.label()));
         Ok(())

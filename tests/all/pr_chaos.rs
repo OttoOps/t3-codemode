@@ -8,11 +8,13 @@ use t3_codemode::board::{BOARD, CardRef};
 use t3_codemode::clock::{Clock, iso, plus_minutes};
 use t3_codemode::fake::{check_run, github_pr, project, pull_request, thread};
 use t3_codemode::reach::ReachSnapshot;
+use t3_codemode::sentinels::Sentinel;
 use t3_codemode::store::{MergeWait, WaitStatus};
+use t3_codemode::wf::LAST_PASS;
 
 mod shadow;
 
-use shadow::{Model, Predicted, St, WaitM, wakes_of};
+use shadow::{AdvanceRace, Model, Predicted, St, WaitM, wakes_of};
 
 fn same_head(a: &str, b: &str) -> bool {
     !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
@@ -236,6 +238,28 @@ fn sent_counts(h: &H) -> BTreeMap<String, usize> {
     m
 }
 
+macro_rules! oracle_assert {
+    ($cond:expr, $($arg:tt)+) => {
+        if !$cond {
+            oracle_fail(format!($($arg)+));
+        }
+    };
+}
+
+macro_rules! oracle_assert_eq {
+    ($left:expr, $right:expr, $($arg:tt)+) => {
+        match (&$left, &$right) {
+            (left, right) if *left != *right => {
+                oracle_fail(format!(
+                    "assertion `left == right` failed: {}\n  left: {left:?}\n right: {right:?}",
+                    format_args!($($arg)+)
+                ));
+            }
+            _ => {}
+        }
+    };
+}
+
 fn assert_invariants(
     h: &H,
     seed: u64,
@@ -254,13 +278,13 @@ fn assert_invariants(
             let tlink = h.app.store.link_get(ticket).unwrap();
             if c.worker.is_none() {
                 if let Some(tl) = &tlink {
-                    assert_eq!(
+                    oracle_assert_eq!(
                         c.label.as_deref(),
                         Some(tl.label.as_str()),
                         "ticket-owned card label drifted from owner: card={c:?} link={tl:?}\n{}",
                         ctx()
                     );
-                    assert_eq!(
+                    oracle_assert_eq!(
                         c.link.as_deref(),
                         tl.link.as_deref(),
                         "ticket-owned card link drifted from owner: card={c:?} link={tl:?}\n{}",
@@ -271,7 +295,7 @@ fn assert_invariants(
                     && let Some(p) = c.pr.as_ref().filter(|p| p.ready)
                 {
                     let key = (ticket.to_string(), p.repo.clone(), p.number);
-                    assert!(
+                    oracle_assert!(
                         ready_seen.insert(key.clone()),
                         "duplicate open ready merge card for {key:?}: {cards:?}\n{}",
                         ctx()
@@ -279,8 +303,12 @@ fn assert_invariants(
                 }
             } else if let Some(w) = &c.worker {
                 let wl = h.app.store.link_get(&w.thread).unwrap().expect("relayed worker link");
-                assert!(!wl.closed, "open relayed card points to closed worker: card={c:?} wl={wl:?}\n{}", ctx());
-                assert_eq!(
+                oracle_assert!(
+                    !wl.closed,
+                    "open relayed card points to closed worker: card={c:?} wl={wl:?}\n{}",
+                    ctx()
+                );
+                oracle_assert_eq!(
                     wl.parent,
                     ticket,
                     "relayed card ticket does not match worker parent: card={c:?} wl={wl:?}\n{}",
@@ -304,17 +332,21 @@ fn assert_invariants(
         });
         let has_relayed = cards.iter().any(|c| c.worker.is_some() && c.ticket.as_deref() == Some(t));
         if has_ready {
-            assert!(
+            oracle_assert!(
                 tl.gate.is_some(),
                 "ticket {t} has open ready merge card but gate is None: cards={cards:?}\n{}",
                 ctx()
             );
         }
         if has_relayed {
-            assert!(tl.gate.is_some(), "ticket {t} has open relayed card but gate is None: cards={cards:?}\n{}", ctx());
+            oracle_assert!(
+                tl.gate.is_some(),
+                "ticket {t} has open relayed card but gate is None: cards={cards:?}\n{}",
+                ctx()
+            );
         }
         if tl.gate_pr.is_some() {
-            assert_eq!(
+            oracle_assert_eq!(
                 tl.gate.as_deref(),
                 Some("merge"),
                 "ticket {t} has gate_pr={:?} while gate={:?}\n{}",
@@ -329,11 +361,11 @@ fn assert_invariants(
     let counts = sent_counts(h);
     for (w, &count_at_close) in closed_workers {
         let wl = h.app.store.link_get(w).unwrap().unwrap();
-        assert!(wl.closed, "worker {w} expected closed\n{}", ctx());
-        assert!(wl.gate.is_none(), "closed worker {w} kept gate {:?}\n{}", wl.gate, ctx());
-        assert!(wl.gate_pr.is_none(), "closed worker {w} kept gate_pr {:?}\n{}", wl.gate_pr, ctx());
+        oracle_assert!(wl.closed, "worker {w} expected closed\n{}", ctx());
+        oracle_assert!(wl.gate.is_none(), "closed worker {w} kept gate {:?}\n{}", wl.gate, ctx());
+        oracle_assert!(wl.gate_pr.is_none(), "closed worker {w} kept gate_pr {:?}\n{}", wl.gate_pr, ctx());
         let now_count = counts.get(w).copied().unwrap_or(0);
-        assert_eq!(
+        oracle_assert_eq!(
             now_count,
             count_at_close,
             "closed worker {w} received a message after closing! messages={:?}\n{}",
@@ -355,7 +387,7 @@ fn assert_invariants(
                     && same_head(HEADS[m.head_idx], &p.head)
                     && (m.checks == GhChecks::Pending
                         || (matches!(m.checks, GhChecks::Passing | GhChecks::Cancelled) && m.merge_state == "UNKNOWN"));
-                assert!(
+                oracle_assert!(
                     should_keep_waiting,
                     "worker {w} stayed stuck in pr.waiting=true after healthy reconcile: pr={p:?} gh={m:?}\n{}",
                     ctx()
@@ -373,7 +405,7 @@ fn wait_model(w: &MergeWait, id_ok: bool) -> WaitM {
         at: w.at.clone(),
         status: if w.status == WaitStatus::Sent { St::Sent } else { St::Waiting },
         approval: w.approval.clone(),
-        failures: 0,
+        failures: w.failures,
     }
 }
 
@@ -391,7 +423,7 @@ fn github_events(lines: Vec<WakeLine>) -> Vec<(String, u64)> {
                 .strip_prefix(&format!("{REPO}#"))
                 .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
                 .and_then(|d| d.parse().ok())
-                .unwrap_or_else(|| panic!("github event wake without a PR subject: {:?}", w.subject));
+                .unwrap_or_else(|| oracle_fail(format!("github event wake without a PR subject: {:?}", w.subject)));
             (w.to, n)
         })
         .collect()
@@ -401,7 +433,7 @@ fn assert_forbidden(h: &H, model: &mut Model, sent_before: usize, ctx: &dyn Fn()
     let snap = h.snapshot();
     let sent = &h.sent()[sent_before..];
     for (to, kind, from) in h.delivered(sent) {
-        assert!(
+        oracle_assert!(
             snap.links.get(&to).is_none_or(|l| !l.closed),
             "forbidden wake: {kind} from {from} reached closed link {to}\n{}",
             ctx()
@@ -409,7 +441,7 @@ fn assert_forbidden(h: &H, model: &mut Model, sent_before: usize, ctx: &dyn Fn()
     }
     let forbidden = model.forbidden_github();
     for w in github_events(h.wake_lines(sent)) {
-        assert!(
+        oracle_assert!(
             !forbidden.contains(&w),
             "forbidden wake: GitHub told {} about #{} after it let go of it\n{}",
             w.0,
@@ -426,7 +458,7 @@ struct Oracle {
 
 impl Oracle {
     fn status(&self, r: &Value, want: &str, trace: &[String], seed: u64) {
-        assert_eq!(
+        oracle_assert_eq!(
             r["status"].as_str(),
             Some(want),
             "wf.pr status diverged from the shadow model: {r}\nseed={seed}\ntrace:\n{}",
@@ -443,23 +475,23 @@ impl Oracle {
         trace: &[String],
         seed: u64,
     ) {
-        assert_eq!(
+        oracle_assert_eq!(
             predicted.attempts,
             tried,
             "GitHub merge and enqueue attempts in this reconcile diverged from the shadow model\nseed={seed}\ntrace:\n{}",
             trace.join("\n")
         );
-        assert_eq!(
+        oracle_assert_eq!(
             predicted.ok,
             ok,
             "reconcile success diverged from the shadow model\nseed={seed}\ntrace:\n{}",
             trace.join("\n")
         );
         if let Some(n) = mutation_diff(&predicted.gh, actual) {
-            panic!(
+            oracle_fail(format!(
                 "GitHub mutations on #{n} diverged from the shadow model\nseed={seed}\ntrace:\n{}",
                 trace.join("\n")
-            );
+            ));
         }
     }
 
@@ -468,7 +500,7 @@ impl Oracle {
         let snap = h.snapshot();
         let observed = wakes_of(&h.delivered(&h.sent()[sent_before..]));
         assert_forbidden(h, model, sent_before, &ctx);
-        assert_eq!(
+        oracle_assert_eq!(
             attempts(h),
             model.attempts(),
             "GitHub merge and enqueue attempts diverged from the shadow model\n{}",
@@ -476,17 +508,24 @@ impl Oracle {
         );
         match self.loose.take() {
             Some(may) => {
+                let must = wakes_of(&model.wakes);
+                let extra = wakes_of(&may);
                 for (w, n) in &observed {
-                    assert!(
-                        *n == 1 && may.contains(w),
-                        "wake {w:?} x{n} is outside what the shadow model allows ({may:?})\n{}",
+                    let max = must.get(w).copied().unwrap_or(0) + extra.get(w).copied().unwrap_or(0);
+                    oracle_assert!(
+                        *n <= max,
+                        "wake {w:?} x{n} is outside what the shadow model allows (must={must:?}, extra={extra:?})\n{}",
                         ctx()
                     );
+                }
+                for (w, m) in &must {
+                    let seen = observed.get(w).copied().unwrap_or(0);
+                    oracle_assert!(seen >= *m, "expected flushed wake {w:?} x{m}, saw x{seen}\n{}", ctx());
                 }
             }
             None => {
                 if let Some(d) = diff("wakes", &observed, &wakes_of(&model.wakes)) {
-                    panic!("{d}\n{}", ctx());
+                    oracle_fail(format!("{d}\n{}", ctx()));
                 }
             }
         }
@@ -503,10 +542,10 @@ impl Oracle {
         .into_iter()
         .flatten()
         .collect();
-        assert!(diffs.is_empty(), "{}\n{}", diffs.join("\n"), ctx());
+        oracle_assert!(diffs.is_empty(), "{}\n{}", diffs.join("\n"), ctx());
         for (t, l) in snap.links.iter().filter(|(_, l)| !l.closed && l.parent == BOARD) {
             if let Some(p) = &l.gate_pr {
-                assert!(
+                oracle_assert!(
                     snap.cards.iter().any(|c| c.kind == "gate"
                         && c.worker.is_none()
                         && c.ticket.as_deref() == Some(t.as_str())
@@ -618,7 +657,11 @@ fn resolve_raced(
     let observed = wakes_of(&h.delivered(&h.sent()[sent_before..]));
     let (_, closed_before) = boundary(model);
     for (to, kind, from) in observed.keys() {
-        assert!(!closed_before.contains(to), "forbidden wake: {kind} from {from} reached closed link {to}\n{}", ctx());
+        oracle_assert!(
+            !closed_before.contains(to),
+            "forbidden wake: {kind} from {from} reached closed link {to}\n{}",
+            ctx()
+        );
     }
     let maybe: Vec<usize> = (0..ops.len())
         .filter(|&i| statuses[i].as_deref() == Some("superseded"))
@@ -650,7 +693,7 @@ fn resolve_raced(
             }
         }
     }
-    assert!(
+    oracle_assert!(
         !candidates.is_empty(),
         "raced round {ops:?} returned statuses {statuses:?} that no serial order predicts\n{}",
         ctx()
@@ -659,13 +702,13 @@ fn resolve_raced(
     let tried = attempts(h);
     for (w, n) in &observed {
         let may = counts.iter().map(|c| c.get(w).copied().unwrap_or(0)).max().unwrap_or(0);
-        assert!(*n <= may, "raced wake {w:?} x{n} exceeds every serial order of {ops:?} (max {may})\n{}", ctx());
+        oracle_assert!(*n <= may, "raced wake {w:?} x{n} exceeds every serial order of {ops:?} (max {may})\n{}", ctx());
     }
     for c in &counts {
         for (w, n) in c {
             let must = counts.iter().map(|o| o.get(w).copied().unwrap_or(0)).min().unwrap_or(0);
             let seen = observed.get(w).copied().unwrap_or(0);
-            assert!(
+            oracle_assert!(
                 seen >= must,
                 "raced wake {w:?} is owed x{must} by every serial order of {ops:?}, saw x{seen} (of {n})\n{}",
                 ctx()
@@ -681,14 +724,14 @@ fn resolve_raced(
             model.forbidden_github();
             let sent = &h.sent()[sent_before..];
             for (to, kind, from) in h.delivered(sent) {
-                assert!(
+                oracle_assert!(
                     !closed.contains(&to),
                     "forbidden wake: {kind} from {from} reached {to}, closed throughout the round\n{}",
                     ctx()
                 );
             }
             for w in github_events(h.wake_lines(sent)) {
-                assert!(
+                oracle_assert!(
                     !forbid.contains(&w),
                     "forbidden wake: GitHub told {} about #{}, which it let go of before the round and never regained\n{}",
                     w.0,
@@ -719,7 +762,7 @@ fn resolve_raced(
                     format!("order {order:?}:\n{}", parts.join("\n"))
                 })
                 .collect();
-            panic!("raced round {ops:?} matches no serial order\n{}\n{}", misses.join("\n"), ctx());
+            oracle_fail(format!("raced round {ops:?} matches no serial order\n{}\n{}", misses.join("\n"), ctx()));
         }
     }
 }
@@ -788,9 +831,23 @@ fn has_explicit_seed_env() -> bool {
         .any(|k| std::env::var(k).ok().is_some_and(|v| !v.trim().is_empty()))
 }
 
+fn enable_sentinel(h: &H, sentinel: Option<Sentinel>) {
+    #[cfg(feature = "test-sentinels")]
+    if let Some(s) = sentinel {
+        h.app.wf.sentinels().set(s);
+    }
+    #[cfg(not(feature = "test-sentinels"))]
+    let _ = (h, sentinel);
+}
+
 async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
+    run_sequential_seed_with(seed, None).await
+}
+
+async fn run_sequential_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec<String>, ReachSnapshot) {
     let mut rng = Rng::new(seed);
     let (h, mut gh) = setup_chaos();
+    enable_sentinel(&h, sentinel);
     for m in gh.values_mut() {
         m.queue_enabled = rng.coin();
     }
@@ -798,7 +855,10 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
     let t0 = h.clock.now();
     let mut trace: Vec<String> = Vec::new();
     let mut closed_workers: BTreeMap<String, usize> = BTreeMap::new();
+    let mut busy_workers: BTreeSet<&'static str> = BTreeSet::new();
     let mut model = Model::new(&clock_now(&h));
+    h.app.store.meta_set(LAST_PASS, &clock_now(&h)).unwrap();
+    model.set_watcher_alive(true);
 
     for (i, &t) in TICKETS.iter().enumerate() {
         let label = format!("widgets#{}", 41 + i);
@@ -825,7 +885,8 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
     let mut oracle = Oracle::default();
     for step in 0..45 {
         h.clock.advance_minutes(1);
-        let op = rng.pick(20);
+        h.app.store.meta_set(LAST_PASS, &clock_now(&h)).unwrap();
+        let op = rng.pick(23);
         let mut healthy_reconcile = false;
         let sent_before = h.sent().len();
         let before = h.snapshot();
@@ -993,7 +1054,7 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                                         || a.starts_with(&format!("{label} closed on GitHub"))
                                 });
                                 if at < seen.since.as_str() {
-                                    assert!(
+                                    oracle_assert!(
                                         !reported,
                                         "stale finished event {label} at {at} (< since {}) was reported: \
                                          actions={actions:?}\nseed={seed}\n{}",
@@ -1021,7 +1082,7 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                                             .tickets
                                             .iter()
                                             .any(|(t, _)| h.app.store.pr_event_seen(REPO, number, &event, t).unwrap());
-                                    assert!(
+                                    oracle_assert!(
                                         !reported && !marked,
                                         "stale queue drop {label} at {at} (< after {after}) was reported or marked: \
                                          actions={actions:?}\nseed={seed}\n{}",
@@ -1035,7 +1096,7 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                             let predicted = model.reconcile(&gh);
                             pull_gh_mutations(&h, &mut gh);
                             oracle.mutations(&predicted, &gh, settle.is_ok(), attempts(&h), &trace, seed);
-                            assert!(
+                            oracle_assert!(
                                 settle.is_ok(),
                                 "settling reconcile after advance failed: {settle:?}\nseed={seed}\n{}",
                                 trace.join("\n")
@@ -1058,7 +1119,7 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                         let predicted = model.reconcile(&gh);
                         pull_gh_mutations(&h, &mut gh);
                         oracle.mutations(&predicted, &gh, rec2.is_ok(), attempts(&h), &trace, seed);
-                        assert!(
+                        oracle_assert!(
                             rec2.is_ok(),
                             "second reconcile failed: {rec2:?}\nseed={seed}\n{}",
                             trace.join("\n")
@@ -1079,13 +1140,13 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                             })
                             .map(|c| c.id)
                             .collect();
-                        assert_eq!(
+                        oracle_assert_eq!(
                             h.sent().len(),
                             before_msgs,
                             "reconcile was not idempotent (sent extra messages)\nseed={seed}\n{}",
                             trace.join("\n")
                         );
-                        assert_eq!(
+                        oracle_assert_eq!(
                             after_cards,
                             before_cards,
                             "reconcile was not idempotent (changed cards outside retrying waits {retrying_prs:?})\nseed={seed}\n{}",
@@ -1102,7 +1163,7 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                     let r = h.wf(to, "adopt", json!({"from": from})).await;
                     model.adopt(to, from);
                     trace.push(format!("#{step} {to} adopt from {from} -> {r}"));
-                    assert!(
+                    oracle_assert!(
                         h.app.store.children(from, true).unwrap().is_empty(),
                         "adopt left open children on {from}\nseed={seed}\n{}",
                         trace.join("\n")
@@ -1145,7 +1206,7 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                                 .wf
                                 .dismiss_at(&c.id, &CardRef { at: Some(&c.at), token: Some(&c.token) })
                                 .await;
-                            assert!(
+                            oracle_assert!(
                                 res.is_ok(),
                                 "dismiss_at rejected freshly read card {}: {res:?}\nseed={seed}\n{}",
                                 c.id,
@@ -1179,7 +1240,12 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                         let wi = active_workers.remove(pos);
                         let w = WORKERS[wi];
                         let parent = h.app.store.link_get(w).unwrap().unwrap().parent;
-                        assert_eq!(parent, model.parent(w), "worker {w} parent drifted from the model\nseed={seed}\n{}", trace.join("\n"));
+                        oracle_assert_eq!(
+                            parent,
+                            model.parent(w),
+                            "worker {w} parent drifted from the model\nseed={seed}\n{}",
+                            trace.join("\n")
+                        );
                         h.wf(&parent, "close", json!({"child": w})).await;
                         model.close(w);
                         let count = sent_counts(&h).get(w).copied().unwrap_or(0);
@@ -1220,7 +1286,7 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                                     && s["message"].as_str().is_some_and(|m| m.starts_with("[t3cm nudge"))
                             })
                             .count();
-                        assert_eq!(
+                        oracle_assert_eq!(
                             after,
                             before,
                             "waiting worker {w} was nudged during advance_tick(200)\nseed={seed}\n{}",
@@ -1343,7 +1409,7 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                         trace.push(format!("#{step} {w} handoff (sent_at_close={count})"));
                     }
                 }
-                _ => {
+                19 => {
                     // Answer a ready merge card and immediately clear the ticket's gate;
                     // every other unanswered ready merge card on that ticket must survive!
                     let ready_cards: Vec<_> = h
@@ -1382,13 +1448,73 @@ async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
                         let after_ids: BTreeSet<String> =
                             h.app.wf.cards().unwrap().into_iter().map(|c| c.id).collect();
                         for other in &others {
-                            assert!(
+                            oracle_assert!(
                                 after_ids.contains(other),
                                 "answering {} and clearing gate wiped unanswered ready card {other}!\nseed={seed}\n{}",
                                 chosen.id,
                                 trace.join("\n")
                             );
                         }
+                    }
+                }
+                20 | 21 => {
+                    // Busy-worker toggle or parent reply while a worker is active,
+                    // exercising held outbox wakes and close-time purges.
+                    if !active_workers.is_empty() {
+                        let busy_active: Vec<usize> = active_workers
+                            .iter()
+                            .copied()
+                            .filter(|&wi| busy_workers.contains(WORKERS[wi]))
+                            .collect();
+                        if !busy_active.is_empty() && rng.pick(3) != 0 {
+                            let wi = busy_active[rng.pick(busy_active.len())];
+                            let w = WORKERS[wi];
+                            if rng.pick(3) != 0 {
+                                let parent = h.app.store.link_get(w).unwrap().unwrap().parent;
+                                let r = h.wf(&parent, "reply", json!({"to": w, "body": "chaos reply"})).await;
+                                model.reply(w);
+                                trace.push(format!("#{step} {parent} reply {w} -> {}", r["delivery"]));
+                            } else {
+                                h.fake.update(w, json!({"status": "idle", "updatedAt": clock_now(&h)}));
+                                busy_workers.remove(w);
+                                model.set_busy(w, false);
+                                trace.push(format!("#{step} {w} status=idle"));
+                            }
+                        } else {
+                            let wi = active_workers[rng.pick(active_workers.len())];
+                            let w = WORKERS[wi];
+                            if busy_workers.contains(w) {
+                                let parent = h.app.store.link_get(w).unwrap().unwrap().parent;
+                                let r = h.wf(&parent, "reply", json!({"to": w, "body": "chaos reply"})).await;
+                                model.reply(w);
+                                trace.push(format!("#{step} {parent} reply {w} -> {}", r["delivery"]));
+                            } else {
+                                h.fake.update(w, json!({"status": "running", "updatedAt": clock_now(&h)}));
+                                busy_workers.insert(w);
+                                model.set_busy(w, true);
+                                trace.push(format!("#{step} {w} status=running"));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // Exercise queued PRs and independent pr_seen ticket tracking across worker closes.
+                    let pr = PRS[rng.pick(PRS.len())];
+                    if rng.coin() {
+                        let m = gh.get_mut(&pr).unwrap();
+                        if m.exists && m.state == "OPEN" {
+                            m.queue_enabled = true;
+                            m.queued = true;
+                            m.removed = None;
+                            sync_gh(&h, &gh);
+                            trace.push(format!("#{step} gh enter queue #{pr}"));
+                        }
+                    } else if !active_workers.is_empty() {
+                        let wi = active_workers[rng.pick(active_workers.len())];
+                        let w = WORKERS[wi];
+                        h.fake.set_prs(w, vec![pull_request(REPO, pr, "open")]);
+                        model.set_prs(w, pr);
+                        trace.push(format!("#{step} fake.set_prs({w}, #{pr})"));
                     }
                 }
             }
@@ -1418,8 +1544,13 @@ async fn seeded_sequential_chaos_holds_all_invariants() {
 }
 
 async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
+    run_concurrent_seed_with(seed, None).await
+}
+
+async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec<String>, H) {
     let mut rng = Rng::new(seed ^ 0x55aa_1234_9876_fedc);
     let (h, mut gh) = setup_chaos();
+    enable_sentinel(&h, sentinel);
     for m in gh.values_mut() {
         m.queue_enabled = rng.coin();
     }
@@ -1449,9 +1580,10 @@ async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
     }
 
     h.github.set_delay(Duration::from_millis(15));
+    let mut oracle = Oracle::default();
     for round in 0..6 {
         h.clock.advance_minutes(1);
-        let race = rng.pick(5);
+        let race = rng.pick(7);
         model.step(&clock_now(&h));
         let sent_before = h.sent().len();
         let before = h.snapshot();
@@ -1459,6 +1591,7 @@ async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
         let mut ops_gh = gh.clone();
         let mut statuses: Vec<Option<String>> = Vec::new();
         let mut actual_gh = None;
+        let mut advance_race: Option<AdvanceRace> = None;
         let res = tokio::time::timeout(Duration::from_secs(5), async {
             match race {
                 0 => {
@@ -1563,7 +1696,7 @@ async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
                     statuses = vec![o["status"].as_str().map(String::from), None];
                     trace.push(format!("round {round}: opened(#9) racing with {to} adopt({from})"));
                 }
-                _ => {
+                4 => {
                     // pending ready + reconcile + answer open cards concurrently
                     {
                         let m = gh.get_mut(&9).unwrap();
@@ -1597,28 +1730,174 @@ async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
                     r.unwrap();
                     trace.push(format!("round {round}: ready(#9) + reconcile + answer"));
                 }
+                5 => {
+                    // Reconcile advance fails its 3rd attempt while a newer approval replaces the wait;
+                    // CAS retire must preserve the newer approval.
+                    let pr = PRS[0];
+                    if gh[&pr].state == "OPEN" {
+                        let head_idx = gh[&pr].head_idx;
+                        let head = HEADS[head_idx].to_string();
+                        {
+                            let m = gh.get_mut(&pr).unwrap();
+                            m.draft = false;
+                            m.checks = GhChecks::Passing;
+                            m.merge_state = "CLEAN";
+                            m.queued = false;
+                            m.removed = None;
+                        }
+                        sync_gh(&h, &gh);
+                        ops_gh = gh.clone();
+                        let w1 = MergeWait {
+                            repo: REPO.into(),
+                            pr,
+                            head: head.clone(),
+                            pull_request_id: format!("PR_{REPO}_{pr}"),
+                            method: None,
+                            thread: Some(TICKETS[0].into()),
+                            label: Some(format!("widgets#{pr}")),
+                            merge_state: "CLEAN".into(),
+                            at: clock_now(&h),
+                            status: WaitStatus::Waiting,
+                            approval: format!("appr-cas-{seed}-{round}-old"),
+                            failures: 2,
+                            last_error: Some("earlier transient error".into()),
+                        };
+                        h.app.store.merge_wait_put(&w1).unwrap();
+                        model.wait_put(pr, wait_model(&w1, true));
+                        let next_idx = (head_idx + 1) % HEADS.len();
+                        let next_head = HEADS[next_idx].to_string();
+                        let w2 = MergeWait {
+                            repo: REPO.into(),
+                            pr,
+                            head: next_head.clone(),
+                            pull_request_id: format!("PR_{REPO}_{pr}"),
+                            method: None,
+                            thread: Some(TICKETS[0].into()),
+                            label: Some(format!("widgets#{pr}")),
+                            merge_state: "CLEAN".into(),
+                            at: clock_now(&h),
+                            status: WaitStatus::Waiting,
+                            approval: format!("appr-cas-{seed}-{round}-new"),
+                            failures: 0,
+                            last_error: None,
+                        };
+                        let w2_model = wait_model(&w2, true);
+                        let rec = h.app.wf.reconcile();
+                        let replace = async {
+                            tokio::time::sleep(Duration::from_millis(22)).await;
+                            h.github.update_pr(REPO, pr, json!({"headRefOid": next_head}));
+                            h.app.store.merge_wait_put(&w2).unwrap();
+                        };
+                        let (r, _) = join(rec, replace).await;
+                        r.unwrap();
+                        gh.get_mut(&pr).unwrap().head_idx = next_idx;
+                        advance_race =
+                            Some(AdvanceRace::FailAndReplace { pr, new_head_idx: next_idx, replacement: w2_model });
+                        trace.push(format!(
+                            "round {round}: advance(#{pr}) fails on push while newer approval replaces wait"
+                        ));
+                    }
+                }
+                _ => {
+                    // Reconcile advance enqueues on GitHub while the wait is replaced or removed mid-flight;
+                    // advance must honor the false merge_wait_swap CAS result instead of mutating pr_seen.
+                    let pr = PRS[0];
+                    if gh[&pr].state == "OPEN" {
+                        let head = HEADS[gh[&pr].head_idx].to_string();
+                        {
+                            let m = gh.get_mut(&pr).unwrap();
+                            m.draft = false;
+                            m.checks = GhChecks::Passing;
+                            m.merge_state = "CLEAN";
+                            m.queue_enabled = true;
+                            m.queued = false;
+                            m.removed = None;
+                        }
+                        sync_gh(&h, &gh);
+                        ops_gh = gh.clone();
+                        let w1 = MergeWait {
+                            repo: REPO.into(),
+                            pr,
+                            head: head.clone(),
+                            pull_request_id: format!("PR_{REPO}_{pr}"),
+                            method: None,
+                            thread: Some(TICKETS[0].into()),
+                            label: Some(format!("widgets#{pr}")),
+                            merge_state: "CLEAN".into(),
+                            at: clock_now(&h),
+                            status: WaitStatus::Waiting,
+                            approval: format!("appr-swap-{seed}-{round}-old"),
+                            failures: 0,
+                            last_error: None,
+                        };
+                        h.app.store.merge_wait_put(&w1).unwrap();
+                        model.wait_put(pr, wait_model(&w1, true));
+                        let replacement = rng.coin().then(|| MergeWait {
+                            repo: REPO.into(),
+                            pr,
+                            head: head.clone(),
+                            pull_request_id: format!("PR_{REPO}_{pr}"),
+                            method: None,
+                            thread: Some(TICKETS[0].into()),
+                            label: Some(format!("widgets#{pr}")),
+                            merge_state: "CLEAN".into(),
+                            at: clock_now(&h),
+                            status: WaitStatus::Waiting,
+                            approval: format!("appr-swap-{seed}-{round}-new"),
+                            failures: 0,
+                            last_error: None,
+                        });
+                        let rep_model = replacement.as_ref().map(|w| wait_model(w, true));
+                        let rec = h.app.wf.reconcile();
+                        let swap_out = async {
+                            tokio::time::sleep(Duration::from_millis(22)).await;
+                            match &replacement {
+                                Some(w2) => h.app.store.merge_wait_put(w2).unwrap(),
+                                None => {
+                                    h.app.store.merge_wait_remove(REPO, pr).unwrap();
+                                }
+                            }
+                        };
+                        let (r, _) = join(rec, swap_out).await;
+                        r.unwrap();
+                        advance_race = Some(AdvanceRace::SucceedAndReplace { pr, replacement: rep_model });
+                        trace.push(format!(
+                            "round {round}: advance(#{pr}) races with wait {} during enqueue",
+                            if replacement.is_some() { "replacement" } else { "removal" }
+                        ));
+                    }
+                }
             }
         })
         .await;
         assert!(res.is_ok(), "concurrent race timed out (deadlock?) at seed={seed}\n{}", trace.join("\n"));
         assert_invariants(&h, seed, &trace, &BTreeMap::new(), false, &gh);
-        statuses.resize(ops.len(), None);
-        let actual_gh = actual_gh.unwrap_or_else(|| {
+        if let Some(race) = advance_race {
+            let predicted = model.reconcile_racing_advance(&ops_gh, &race);
             pull_gh_mutations(&h, &mut gh);
-            gh.clone()
-        });
-        resolve_raced(&h, &mut model, &ops, &statuses, &ops_gh, &actual_gh, sent_before, &trace, seed);
+            oracle.mutations(&predicted, &gh, true, attempts(&h), &trace, seed);
+            oracle.check(&h, &mut model, sent_before, &trace, seed);
+            if matches!(race, AdvanceRace::FailAndReplace { .. }) {
+                sync_gh(&h, &gh);
+            }
+        } else if !ops.is_empty() {
+            statuses.resize(ops.len(), None);
+            let actual_gh = actual_gh.unwrap_or_else(|| {
+                pull_gh_mutations(&h, &mut gh);
+                gh.clone()
+            });
+            resolve_raced(&h, &mut model, &ops, &statuses, &ops_gh, &actual_gh, sent_before, &trace, seed);
+        }
     }
 
     h.github.set_delay(Duration::ZERO);
-    let mut oracle = Oracle::default();
     let mut settled = false;
     for _ in 0..4 {
         let before = h.snapshot();
         let sent_before = h.sent().len();
         model.step(&clock_now(&h));
         let rec = h.app.wf.reconcile().await;
-        assert!(rec.is_ok(), "final reconcile failed: {rec:?}\nseed={seed}\n{}", trace.join("\n"));
+        oracle_assert!(rec.is_ok(), "final reconcile failed: {rec:?}\nseed={seed}\n{}", trace.join("\n"));
         let predicted = model.reconcile(&gh);
         pull_gh_mutations(&h, &mut gh);
         oracle.mutations(&predicted, &gh, rec.is_ok(), attempts(&h), &trace, seed);
@@ -1628,7 +1907,7 @@ async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
             break;
         }
     }
-    assert!(settled, "reconcile did not reach a fixpoint in 4 passes\nseed={seed}\n{}", trace.join("\n"));
+    oracle_assert!(settled, "reconcile did not reach a fixpoint in 4 passes\nseed={seed}\n{}", trace.join("\n"));
     assert_invariants(&h, seed, &trace, &BTreeMap::new(), true, &gh);
     (trace, h)
 }
@@ -1639,6 +1918,83 @@ async fn concurrent_chaos_races_never_deadlock_or_violate_invariants() {
     for seed in range.seeds() {
         let _ = run_concurrent_seed(seed).await;
     }
+}
+
+#[cfg(feature = "test-sentinels")]
+#[tokio::test(start_paused = true)]
+async fn sentinel_acceptance() {
+    // Baseline: Tier 1 chaos must pass cleanly with all sentinels off before we grade any sentinel.
+    for seed in 0..DEFAULT_SEQ_SEEDS {
+        let _ = run_sequential_seed_with(seed, None).await;
+    }
+    for seed in 0..DEFAULT_CONCURRENT_SEEDS {
+        let _ = run_concurrent_seed_with(seed, None).await;
+    }
+
+    let mut caught: Vec<(Sentinel, String)> = Vec::new();
+    let mut missed: Vec<Sentinel> = Vec::new();
+    for &sentinel in Sentinel::ALL {
+        let mut found: Option<String> = None;
+        for seed in 0..DEFAULT_SEQ_SEEDS {
+            if caught_by_oracle(run_sequential_seed_with(seed, Some(sentinel))).await {
+                found = Some(format!("sequential seed {seed}"));
+                break;
+            }
+        }
+        if found.is_none() {
+            for seed in 0..DEFAULT_CONCURRENT_SEEDS {
+                if caught_by_oracle(run_concurrent_seed_with(seed, Some(sentinel))).await {
+                    found = Some(format!("concurrent seed {seed}"));
+                    break;
+                }
+            }
+        }
+        match found {
+            Some(where_) => caught.push((sentinel, where_)),
+            None => missed.push(sentinel),
+        }
+    }
+    assert!(missed.is_empty(), "Tier 1 chaos missed planted sentinels: {missed:?}\ncaught: {caught:?}");
+    eprintln!("sentinel_acceptance caught all {} sentinels:", caught.len());
+    for (s, where_) in &caught {
+        eprintln!("  {:<36} -> {where_}", s.name());
+    }
+}
+
+const WAKE_RECORDS: &[(&str, &str, &str, &str)] = &[
+    ("m1", "mcp:t1", "event", "PR 1/3 opened"),
+    ("m2", "mcp:t1", "event", "acme/widgets#8 merged on GitHub at 1234567"),
+    ("m3", "mcp:w1", "reply", "A check failed"),
+    ("m4", "mcp:w1", "reply", "Quoting it:\n[t3cm reply from=t3cm msg=m3]\nA check failed\n\n[t3cm note]"),
+    ("m5", "mcp:w1", "reply", "abcdefghij"),
+];
+
+fn sample_wake_record(handle: &str) -> Option<Record> {
+    WAKE_RECORDS.iter().find(|r| r.0 == handle).map(|r| Record { to: r.1.into(), kind: r.2.into(), body: r.3.into() })
+}
+
+fn misrouted_wake_sent() -> Vec<Value> {
+    vec![json!({"threadId": "mcp:w2", "message": "[t3cm reply from=t3cm msg=m3]\nA check failed"})]
+}
+
+#[cfg(feature = "test-sentinels")]
+#[tokio::test(start_paused = true)]
+async fn sentinel_catcher_propagates_non_oracle_panics() {
+    assert!(caught_by_oracle(async { oracle_assert!(false, "expected oracle check failure") }).await);
+    assert!(
+        caught_by_oracle(async {
+            let sent = misrouted_wake_sent();
+            let _ = delivered_headers(&sent, &sample_wake_record);
+        })
+        .await,
+        "misrouted wake delivery must be counted as an oracle failure"
+    );
+    let err = tokio::spawn(caught_by_oracle(async {
+        panic!("unrelated fixture unwrap");
+    }))
+    .await
+    .unwrap_err();
+    assert!(err.is_panic(), "non-oracle panic must propagate instead of counting as a sentinel catch");
 }
 
 #[test]
@@ -1665,41 +2021,40 @@ fn chaos_seed_range_parses_single_offset_and_count() {
     assert!(parse_seed_range(60, None, Some(&u64::MAX.to_string()), Some("2")).is_err());
 }
 
-#[tokio::test(start_paused = true)]
-async fn single_seed_replay_is_deterministic() {
+#[test]
+fn single_seed_replay_is_deterministic() {
     if has_explicit_seed_env() {
         return;
     }
-    for seed in [0, 7, 42] {
-        let seq1 = run_sequential_seed(seed).await;
-        let seq2 = run_sequential_seed(seed).await;
-        assert_eq!(seq1, seq2, "sequential replay diverged on seed={seed}");
+    // Single blocking thread keeps concurrent `spawn_blocking` slot reads FIFO on replay.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        for seed in [0, 7, 42] {
+            let seq1 = run_sequential_seed(seed).await;
+            let seq2 = run_sequential_seed(seed).await;
+            assert_eq!(seq1, seq2, "sequential replay diverged on seed={seed}");
 
-        let (t1, h1) = run_concurrent_seed(seed).await;
-        let (t2, h2) = run_concurrent_seed(seed).await;
-        assert_eq!(t1, t2, "concurrent trace diverged on seed={seed}");
-        assert_eq!(
-            h1.app.wf.reach().snapshot(),
-            h2.app.wf.reach().snapshot(),
-            "concurrent reach diverged on seed={seed}"
-        );
-        assert_eq!(h1.github.operations(), h2.github.operations(), "concurrent gh ops diverged on seed={seed}");
-        assert_eq!(sent_counts(&h1), sent_counts(&h2), "concurrent sends diverged on seed={seed}");
-    }
+            let (t1, h1) = run_concurrent_seed(seed).await;
+            let (t2, h2) = run_concurrent_seed(seed).await;
+            assert_eq!(t1, t2, "concurrent trace diverged on seed={seed}");
+            assert_eq!(
+                h1.app.wf.reach().snapshot(),
+                h2.app.wf.reach().snapshot(),
+                "concurrent reach diverged on seed={seed}"
+            );
+            assert_eq!(h1.github.operations(), h2.github.operations(), "concurrent gh ops diverged on seed={seed}");
+            assert_eq!(sent_counts(&h1), sent_counts(&h2), "concurrent sends diverged on seed={seed}");
+        }
+    });
 }
 
 #[test]
 fn oracle_parses_wake_headers_and_github_subjects() {
-    let records = [
-        ("m1", "mcp:t1", "event", "PR 1/3 opened"),
-        ("m2", "mcp:t1", "event", "acme/widgets#8 merged on GitHub at 1234567"),
-        ("m3", "mcp:w1", "reply", "A check failed"),
-        ("m4", "mcp:w1", "reply", "Quoting it:\n[t3cm reply from=t3cm msg=m3]\nA check failed\n\n[t3cm note]"),
-        ("m5", "mcp:w1", "reply", "abcdefghij"),
-    ];
-    let known = |handle: &str| {
-        records.iter().find(|r| r.0 == handle).map(|r| Record { to: r.1.into(), kind: r.2.into(), body: r.3.into() })
-    };
     let sent = vec![
         json!({"threadId": "mcp:t1", "message": "[t3cm event from=\"#41 PR 1/3\" msg=m1]\nPR 1/3 opened\n\n[t3cm event from=github msg=m2]\nacme/widgets#8 merged on GitHub at 1234567\n\nNotes since your last wake:\n- [t3cm note] ignored"}),
         json!({"threadId": "mcp:w1", "message": "[t3cm reply from=t3cm msg=m3]\nA check failed"}),
@@ -1707,7 +2062,7 @@ fn oracle_parses_wake_headers_and_github_subjects() {
         json!({"threadId": "mcp:w1", "message": "[t3cm reply from=t3cm msg=m5]\nabcd\n... (6 more chars; full: wf.show(\"m5\"))"}),
     ];
     assert_eq!(
-        delivered_headers(&sent, &known),
+        delivered_headers(&sent, &sample_wake_record),
         vec![
             ("mcp:t1".into(), "event".into(), "#41 PR 1/3".into()),
             ("mcp:t1".into(), "event".into(), "github".into()),
@@ -1716,8 +2071,8 @@ fn oracle_parses_wake_headers_and_github_subjects() {
             ("mcp:w1".into(), "reply".into(), "t3cm".into()),
         ]
     );
-    assert_eq!(github_events(wake_lines(&sent, &known)), vec![("mcp:t1".to_string(), 8)]);
-    let misrouted = vec![json!({"threadId": "mcp:w2", "message": "[t3cm reply from=t3cm msg=m3]\nA check failed"})];
-    let caught = std::panic::catch_unwind(|| delivered_headers(&misrouted, &known));
+    assert_eq!(github_events(wake_lines(&sent, &sample_wake_record)), vec![("mcp:t1".to_string(), 8)]);
+    let misrouted = misrouted_wake_sent();
+    let caught = std::panic::catch_unwind(|| delivered_headers(&misrouted, &sample_wake_record));
     assert!(caught.is_err(), "a delivery to the wrong recipient must fail, not be filtered out");
 }

@@ -118,7 +118,7 @@ impl Wf {
                     .merge_wait_get(&p.repo, p.number)?
                     .filter(|w| card.approval.as_ref() == Some(&w.approval))
                 {
-                    self.store.merge_wait_retire(&w)?;
+                    self.retire_merge_wait(&w)?;
                 }
                 return Ok(None);
             }
