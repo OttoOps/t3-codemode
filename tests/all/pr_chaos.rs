@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use crate::common::*;
+use futures_util::future::{join, join3};
 use serde_json::{Value, json};
 use t3_codemode::board::{BOARD, CardRef};
 use t3_codemode::clock::{Clock, iso, plus_minutes};
@@ -360,745 +361,862 @@ fn assert_invariants(
     }
 }
 
-fn chaos_seeds(default: usize) -> usize {
-    std::env::var("CHAOS_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+const DEFAULT_SEQ_SEEDS: u64 = 60;
+const DEFAULT_CONCURRENT_SEEDS: u64 = 30;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SeedRange {
+    start: u64,
+    count: u64,
 }
 
-#[tokio::test]
-async fn seeded_sequential_chaos_holds_all_invariants() {
-    let seeds = chaos_seeds(60);
-    let mut reach = ReachSnapshot::default();
-    for seed in 0..seeds as u64 {
-        let mut rng = Rng::new(seed);
-        let (h, mut gh) = setup_chaos();
-        for m in gh.values_mut() {
-            m.queue_enabled = rng.coin();
-        }
-        sync_gh(&h, &gh);
-        let t0 = h.clock.now();
-        let mut trace: Vec<String> = Vec::new();
-        let mut closed_workers: BTreeMap<String, usize> = BTreeMap::new();
+impl SeedRange {
+    fn seeds(self) -> impl Iterator<Item = u64> {
+        (0..self.count).map(move |offset| self.start + offset)
+    }
 
-        for (i, &t) in TICKETS.iter().enumerate() {
-            h.wf(t, "join", json!({"parent": BOARD, "label": format!("widgets#{}", 41 + i), "role": "ticket"})).await;
+    fn describe(self) -> String {
+        if self.count == 0 {
+            return "0 seeds".into();
         }
-        let mut active_workers: Vec<usize> = vec![0, 1, 2];
-        for (i, &w) in WORKERS.iter().enumerate() {
-            let owner = TICKETS[rng.pick(2)];
-            let part = format!("{}/3", i + 1);
-            let label = format!("#41 PR {part}");
-            h.wf(
-                owner,
-                "openChild",
-                json!({"role": "worker", "label": label, "issue": "acme/widgets#41", "part": part,
-                       "pr": {"format": "pr"}}),
-            )
-            .await;
-            h.wf(w, "join", json!({"parent": owner, "label": label, "role": "worker"})).await;
-            trace.push(format!("init {w} under {owner} -> PR #{}", PRS[i]));
+        let end = self.start + (self.count - 1);
+        if self.count == 1 {
+            format!("seed {}", self.start)
+        } else {
+            format!("seeds {}..={} ({} seeds)", self.start, end, self.count)
         }
+    }
+}
 
-        for step in 0..45 {
-            h.clock.advance_minutes(1);
-            let op = rng.pick(20);
-            let mut healthy_reconcile = false;
-            let res = tokio::time::timeout(Duration::from_secs(5), async {
-                match op {
-                    0 => {
-                        if active_workers.is_empty() {
-                            return;
-                        }
-                        let wi = active_workers[rng.pick(active_workers.len())];
-                        let w = WORKERS[wi];
-                        let pr = PRS[wi];
-                        let head = HEADS[gh[&pr].head_idx];
-                        let sha = if rng.coin() { &head[..7] } else { head };
-                        let checks = if rng.pick(8) == 0 { "none" } else { "pending" };
-                        let r = h
-                            .wf(
-                                w,
-                                "pr",
-                                json!({"event": "opened", "repo": REPO, "pr": pr, "head": sha,
-                                       "publishing": PUBLISHING, "checks": checks}),
-                            )
-                            .await;
-                        trace.push(format!("#{step} {w} pr opened #{pr}@{sha} checks={checks} -> {}", r["status"]));
+fn parse_env_u64(name: &str, raw: Option<&str>) -> Result<Option<u64>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    raw.parse::<u64>().map(Some).map_err(|e| format!("invalid {name}={raw:?}: {e}"))
+}
+
+fn parse_seed_range(
+    default: u64,
+    single: Option<&str>,
+    start: Option<&str>,
+    count: Option<&str>,
+) -> Result<SeedRange, String> {
+    if let Some(seed) = parse_env_u64("CHAOS_SEED", single)? {
+        return Ok(SeedRange { start: seed, count: 1 });
+    }
+    let start = parse_env_u64("CHAOS_SEED_START", start)?.unwrap_or(0);
+    let count = parse_env_u64("CHAOS_SEEDS", count)?.unwrap_or(default);
+    if count > 0 && start.checked_add(count - 1).is_none() {
+        return Err(format!("CHAOS_SEED_START={start} + CHAOS_SEEDS={count} overflows u64"));
+    }
+    Ok(SeedRange { start, count })
+}
+
+fn chaos_seed_range(default: u64) -> SeedRange {
+    let single = std::env::var("CHAOS_SEED").ok();
+    let start = std::env::var("CHAOS_SEED_START").ok();
+    let count = std::env::var("CHAOS_SEEDS").ok();
+    parse_seed_range(default, single.as_deref(), start.as_deref(), count.as_deref()).unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn has_explicit_seed_env() -> bool {
+    ["CHAOS_SEED", "CHAOS_SEED_START", "CHAOS_SEEDS"]
+        .iter()
+        .any(|k| std::env::var(k).ok().is_some_and(|v| !v.trim().is_empty()))
+}
+
+async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot) {
+    let mut rng = Rng::new(seed);
+    let (h, mut gh) = setup_chaos();
+    for m in gh.values_mut() {
+        m.queue_enabled = rng.coin();
+    }
+    sync_gh(&h, &gh);
+    let t0 = h.clock.now();
+    let mut trace: Vec<String> = Vec::new();
+    let mut closed_workers: BTreeMap<String, usize> = BTreeMap::new();
+
+    for (i, &t) in TICKETS.iter().enumerate() {
+        h.wf(t, "join", json!({"parent": BOARD, "label": format!("widgets#{}", 41 + i), "role": "ticket"})).await;
+    }
+    let mut active_workers: Vec<usize> = vec![0, 1, 2];
+    for (i, &w) in WORKERS.iter().enumerate() {
+        let owner = TICKETS[rng.pick(2)];
+        let part = format!("{}/3", i + 1);
+        let label = format!("#41 PR {part}");
+        h.wf(
+            owner,
+            "openChild",
+            json!({"role": "worker", "label": label, "issue": "acme/widgets#41", "part": part,
+                   "pr": {"format": "pr"}}),
+        )
+        .await;
+        h.wf(w, "join", json!({"parent": owner, "label": label, "role": "worker"})).await;
+        trace.push(format!("init {w} under {owner} -> PR #{}", PRS[i]));
+    }
+
+    for step in 0..45 {
+        h.clock.advance_minutes(1);
+        let op = rng.pick(20);
+        let mut healthy_reconcile = false;
+        let res = tokio::time::timeout(Duration::from_secs(5), async {
+            match op {
+                0 => {
+                    if active_workers.is_empty() {
+                        return;
                     }
-                    1 => {
-                        if active_workers.is_empty() {
-                            return;
-                        }
-                        let wi = active_workers[rng.pick(active_workers.len())];
-                        let w = WORKERS[wi];
-                        let pr = PRS[wi];
-                        let head = HEADS[gh[&pr].head_idx];
-                        let sha = if rng.coin() { &head[..7] } else { head };
-                        let r = h.wf(w, "pr", json!({"event": "updated", "repo": REPO, "pr": pr, "head": sha})).await;
-                        trace.push(format!("#{step} {w} pr updated #{pr}@{sha} -> {}", r["status"]));
+                    let wi = active_workers[rng.pick(active_workers.len())];
+                    let w = WORKERS[wi];
+                    let pr = PRS[wi];
+                    let head = HEADS[gh[&pr].head_idx];
+                    let sha = if rng.coin() { &head[..7] } else { head };
+                    let checks = if rng.pick(8) == 0 { "none" } else { "pending" };
+                    let r = h
+                        .wf(
+                            w,
+                            "pr",
+                            json!({"event": "opened", "repo": REPO, "pr": pr, "head": sha,
+                                   "publishing": PUBLISHING, "checks": checks}),
+                        )
+                        .await;
+                    trace.push(format!("#{step} {w} pr opened #{pr}@{sha} checks={checks} -> {}", r["status"]));
+                }
+                1 => {
+                    if active_workers.is_empty() {
+                        return;
                     }
-                    2 | 3 => {
-                        if active_workers.is_empty() {
-                            return;
-                        }
-                        let wi = active_workers[rng.pick(active_workers.len())];
-                        let w = WORKERS[wi];
-                        let pr = PRS[wi];
-                        let head = HEADS[gh[&pr].head_idx];
-                        let sha = if rng.coin() { &head[..7] } else { head };
-                        let r = h.wf(w, "pr", json!({"event": "ready", "repo": REPO, "pr": pr, "head": sha})).await;
-                        trace.push(format!("#{step} {w} pr ready #{pr}@{sha} -> {}", r["status"]));
+                    let wi = active_workers[rng.pick(active_workers.len())];
+                    let w = WORKERS[wi];
+                    let pr = PRS[wi];
+                    let head = HEADS[gh[&pr].head_idx];
+                    let sha = if rng.coin() { &head[..7] } else { head };
+                    let r = h.wf(w, "pr", json!({"event": "updated", "repo": REPO, "pr": pr, "head": sha})).await;
+                    trace.push(format!("#{step} {w} pr updated #{pr}@{sha} -> {}", r["status"]));
+                }
+                2 | 3 => {
+                    if active_workers.is_empty() {
+                        return;
                     }
-                    4 => {
-                        let pr = PRS[rng.pick(PRS.len())];
-                        let changed = {
-                            let m = gh.get_mut(&pr).unwrap();
-                            if m.exists && m.state == "OPEN" {
-                                m.head_idx = (m.head_idx + 1) % HEADS.len();
-                                trace.push(format!("#{step} gh push #{pr} -> head {}", &HEADS[m.head_idx][..7]));
-                                true
-                            } else {
-                                false
-                            }
-                        };
-                        if changed {
-                            sync_gh(&h, &gh);
-                        }
-                    }
-                    5 => {
-                        let pr = PRS[rng.pick(PRS.len())];
-                        let changed = {
-                            let m = gh.get_mut(&pr).unwrap();
-                            if m.exists && m.state == "OPEN" {
-                                m.checks = match rng.pick(5) {
-                                    0 => GhChecks::Pending,
-                                    1 => GhChecks::Passing,
-                                    2 => GhChecks::Failing,
-                                    3 => GhChecks::Cancelled,
-                                    _ => GhChecks::Unread,
-                                };
-                                m.merge_state = match rng.pick(5) {
-                                    0 => "CLEAN",
-                                    1 => "UNKNOWN",
-                                    2 => "BLOCKED",
-                                    3 => "BEHIND",
-                                    _ => "DIRTY",
-                                };
-                                if rng.pick(4) == 0 {
-                                    m.draft = !m.draft;
-                                }
-                                trace.push(format!(
-                                    "#{step} gh status #{pr} checks={:?} merge={} draft={}",
-                                    m.checks, m.merge_state, m.draft
-                                ));
-                                true
-                            } else {
-                                false
-                            }
-                        };
-                        if changed {
-                            sync_gh(&h, &gh);
-                        }
-                    }
-                    6 => {
-                        let pr = PRS[rng.pick(PRS.len())];
-                        let changed = {
-                            let m = gh.get_mut(&pr).unwrap();
-                            if m.exists && m.state == "OPEN" {
-                                match rng.pick(4) {
-                                    0 => {
-                                        m.state = "MERGED";
-                                        m.queued = false;
-                                        let predates = rng.coin();
-                                        m.ended_at =
-                                            Some(if predates { before_tracking(t0) } else { clock_now(&h) });
-                                    }
-                                    1 => {
-                                        m.state = "CLOSED";
-                                        m.queued = false;
-                                        let predates = rng.coin();
-                                        m.ended_at =
-                                            Some(if predates { before_tracking(t0) } else { clock_now(&h) });
-                                    }
-                                    2 => m.read_err = !m.read_err,
-                                    _ => m.exists = false,
-                                }
-                                trace.push(format!(
-                                    "#{step} gh lifecycle #{pr} state={} exists={} err={} ended_at={:?}",
-                                    m.state, m.exists, m.read_err, m.ended_at
-                                ));
-                                true
-                            } else {
-                                false
-                            }
-                        };
-                        if changed {
-                            sync_gh(&h, &gh);
-                        }
-                    }
-                    7 | 8 => {
-                        let had_err = gh.values().any(|m| m.read_err);
-                        let mutations_before = advance_mutations(&h);
-                        let rec = h.app.wf.reconcile().await;
-                        pull_gh_mutations(&h, &mut gh);
-                        trace.push(format!("#{step} reconcile -> ok={}", rec.is_ok()));
-                        if !had_err && let Ok(actions) = &rec {
-                            healthy_reconcile = true;
-                            for (&number, m) in &gh {
-                                let Some(seen) = h.app.store.pr_seen_get(REPO, number).unwrap() else {
-                                    continue;
-                                };
-                                let label = format!("{REPO}#{number}");
-                                if seen.state != "OPEN"
-                                    && seen.state == m.state
-                                    && let Some(at) = m.ended_at.as_deref()
-                                {
-                                    let reported = actions.iter().any(|a| {
-                                        a.starts_with(&format!("{label} merged on GitHub"))
-                                            || a.starts_with(&format!("{label} closed on GitHub"))
-                                    });
-                                    if at < seen.since.as_str() {
-                                        assert!(
-                                            !reported,
-                                            "stale finished event {label} at {at} (< since {}) was reported: \
-                                             actions={actions:?}\nseed={seed}\n{}",
-                                            seen.since,
-                                            trace.join("\n")
-                                        );
-                                    }
-                                }
-                                if seen.state == "OPEN"
-                                    && !seen.queued
-                                    && let Some((_, at)) = &m.removed
-                                {
-                                    let after = seen
-                                        .queued_at
-                                        .as_deref()
-                                        .filter(|q| *q >= seen.since.as_str())
-                                        .unwrap_or(&seen.since);
-                                    let reported = actions
-                                        .iter()
-                                        .any(|a| a.starts_with(&format!("{label} dropped from the merge queue")));
-                                    if at.as_str() < after {
-                                        let event = format!("removed:{at}");
-                                        let marked = h.app.store.pr_event_seen(REPO, number, &event, BOARD).unwrap()
-                                            || seen
-                                                .tickets
-                                                .iter()
-                                                .any(|(t, _)| h.app.store.pr_event_seen(REPO, number, &event, t).unwrap());
-                                        assert!(
-                                            !reported && !marked,
-                                            "stale queue drop {label} at {at} (< after {after}) was reported or marked: \
-                                             actions={actions:?}\nseed={seed}\n{}",
-                                            trace.join("\n")
-                                        );
-                                    }
-                                }
-                            }
-                            if advance_mutations(&h) != mutations_before {
-                                let settle = h.app.wf.reconcile().await;
-                                pull_gh_mutations(&h, &mut gh);
-                                assert!(
-                                    settle.is_ok(),
-                                    "settling reconcile after advance failed: {settle:?}\nseed={seed}\n{}",
-                                    trace.join("\n")
-                                );
-                            }
-                            let retrying_prs: BTreeSet<(String, u64)> = h
-                                .app
-                                .store
-                                .merge_waits()
-                                .unwrap()
-                                .into_iter()
-                                .filter(|w| w.failures > 0)
-                                .map(|w| (w.repo, w.pr))
-                                .collect();
-                            let before_msgs = h.sent().len();
-                            let before_cards: Vec<String> =
-                                h.app.wf.cards().unwrap().into_iter().map(|c| c.id).collect();
-                            let before_set: BTreeSet<String> = before_cards.iter().cloned().collect();
-                            let rec2 = h.app.wf.reconcile().await;
-                            pull_gh_mutations(&h, &mut gh);
-                            assert!(
-                                rec2.is_ok(),
-                                "second reconcile failed: {rec2:?}\nseed={seed}\n{}",
-                                trace.join("\n")
-                            );
-                            let after_cards: Vec<String> = h
-                                .app
-                                .wf
-                                .cards()
-                                .unwrap()
-                                .into_iter()
-                                .filter(|c| {
-                                    before_set.contains(&c.id)
-                                        || !(c.kind == "report"
-                                            && c.text.contains("GitHub would not ")
-                                            && c.pr
-                                                .as_ref()
-                                                .is_some_and(|p| retrying_prs.contains(&(p.repo.clone(), p.number))))
-                                })
-                                .map(|c| c.id)
-                                .collect();
-                            assert_eq!(
-                                h.sent().len(),
-                                before_msgs,
-                                "reconcile was not idempotent (sent extra messages)\nseed={seed}\n{}",
-                                trace.join("\n")
-                            );
-                            assert_eq!(
-                                after_cards,
-                                before_cards,
-                                "reconcile was not idempotent (changed cards outside retrying waits {retrying_prs:?})\nseed={seed}\n{}",
-                                trace.join("\n")
-                            );
-                        }
-                    }
-                    9 => {
-                        let from = TICKETS[rng.pick(TICKETS.len())];
-                        let mut to = TICKETS[rng.pick(TICKETS.len())];
-                        if to == from {
-                            to = TICKETS[(TICKETS.iter().position(|x| *x == from).unwrap() + 1) % TICKETS.len()];
-                        }
-                        let r = h.wf(to, "adopt", json!({"from": from})).await;
-                        trace.push(format!("#{step} {to} adopt from {from} -> {r}"));
-                        assert!(
-                            h.app.store.children(from, true).unwrap().is_empty(),
-                            "adopt left open children on {from}\nseed={seed}\n{}",
-                            trace.join("\n")
-                        );
-                    }
-                    10 => {
-                        let t = TICKETS[rng.pick(TICKETS.len())];
-                        if rng.coin() {
-                            let _ = h.wf(t, "gate", json!({"clear": true})).await;
-                            trace.push(format!("#{step} {t} gate clear"));
-                        } else {
-                            let r = h
-                                .wf(
-                                    t,
-                                    "send",
-                                    json!({"kind": "gate", "gate": "delivery:verify",
-                                           "body": "**ACTION NEEDED:** verify: reply \"ok\"", "options": ["ok"]}),
-                                )
-                                .await;
-                            trace.push(format!("#{step} {t} open delivery:verify -> {}", r["card"]));
-                        }
-                    }
-                    11 => {
-                        let open = h.app.wf.cards().unwrap();
-                        if !open.is_empty() {
-                            let c = &open[rng.pick(open.len())];
-                            if rng.coin() {
-                                let ans = c.options.first().map(String::as_str).unwrap_or("ok");
-                                let _ = h.app.wf.answer(&c.id, ans).await;
-                                pull_gh_mutations(&h, &mut gh);
-                                trace.push(format!("#{step} answer {} with {ans:?}", c.id));
-                            } else {
-                                let res = h
-                                    .app
-                                    .wf
-                                    .dismiss_at(&c.id, &CardRef { at: Some(&c.at), token: Some(&c.token) })
-                                    .await;
-                                assert!(
-                                    res.is_ok(),
-                                    "dismiss_at rejected freshly read card {}: {res:?}\nseed={seed}\n{}",
-                                    c.id,
-                                    trace.join("\n")
-                                );
-                                trace.push(format!("#{step} dismiss_at {}", c.id));
-                            }
-                        }
-                    }
-                    12 => {
-                        if !active_workers.is_empty() {
-                            let wi = active_workers[rng.pick(active_workers.len())];
-                            let w = WORKERS[wi];
-                            let r = h
-                                .wf(
-                                    w,
-                                    "send",
-                                    json!({"kind": "gate", "gate": "review",
-                                           "body": "**ACTION NEEDED:** decide review: reply \"fix\" or \"ship\"",
-                                           "options": ["fix", "ship"]}),
-                                )
-                                .await;
-                            trace.push(format!("#{step} {w} relayed review gate -> {}", r["card"]));
-                        }
-                    }
-                    13 => {
-                        if active_workers.len() > 1 {
-                            let pos = rng.pick(active_workers.len());
-                            let wi = active_workers.remove(pos);
-                            let w = WORKERS[wi];
-                            let parent = h.app.store.link_get(w).unwrap().unwrap().parent;
-                            h.wf(&parent, "close", json!({"child": w})).await;
-                            let count = sent_counts(&h).get(w).copied().unwrap_or(0);
-                            closed_workers.insert(w.to_string(), count);
-                            trace.push(format!("#{step} {parent} close {w} (sent_at_close={count})"));
-                        }
-                    }
-                    14 => {
-                        let waiting_before: BTreeMap<String, usize> = active_workers
-                            .iter()
-                            .filter_map(|&wi| {
-                                let w = WORKERS[wi];
-                                let wl = h.app.store.link_get(w).unwrap()?;
-                                wl.pr.as_ref().filter(|p| p.waiting).map(|_| {
-                                    let nudges = h
-                                        .sent()
-                                        .into_iter()
-                                        .filter(|s| {
-                                            s["threadId"] == w
-                                                && s["message"].as_str().is_some_and(|m| m.starts_with("[t3cm nudge"))
-                                        })
-                                        .count();
-                                    (w.to_string(), nudges)
-                                })
-                            })
-                            .collect();
-                        h.advance_tick(200).await;
-                        trace.push(format!("#{step} advance_tick(200)"));
-                        for (w, before) in waiting_before {
-                            let after = h
-                                .sent()
-                                .into_iter()
-                                .filter(|s| {
-                                    s["threadId"] == w.as_str()
-                                        && s["message"].as_str().is_some_and(|m| m.starts_with("[t3cm nudge"))
-                                })
-                                .count();
-                            assert_eq!(
-                                after,
-                                before,
-                                "waiting worker {w} was nudged during advance_tick(200)\nseed={seed}\n{}",
-                                trace.join("\n")
-                            );
-                        }
-                    }
-                    15 => {
-                        let mut cleared = false;
-                        for (&n, m) in gh.iter_mut() {
-                            if m.read_err {
-                                m.read_err = false;
-                                cleared = true;
-                                trace.push(format!("#{step} clear read_err #{n}"));
-                            }
-                        }
-                        if cleared {
-                            sync_gh(&h, &gh);
-                        }
-                    }
-                    16 => {
-                        // Exercise MergeWait and merge queue state transitions
-                        let pr = PRS[rng.pick(PRS.len())];
-                        let ticket = TICKETS[rng.pick(TICKETS.len())];
+                    let wi = active_workers[rng.pick(active_workers.len())];
+                    let w = WORKERS[wi];
+                    let pr = PRS[wi];
+                    let head = HEADS[gh[&pr].head_idx];
+                    let sha = if rng.coin() { &head[..7] } else { head };
+                    let r = h.wf(w, "pr", json!({"event": "ready", "repo": REPO, "pr": pr, "head": sha})).await;
+                    trace.push(format!("#{step} {w} pr ready #{pr}@{sha} -> {}", r["status"]));
+                }
+                4 => {
+                    let pr = PRS[rng.pick(PRS.len())];
+                    let changed = {
                         let m = gh.get_mut(&pr).unwrap();
                         if m.exists && m.state == "OPEN" {
-                            match rng.pick(7) {
-                                0 | 1 => {
-                                    let head = HEADS[m.head_idx].to_string();
-                                    let w = MergeWait {
-                                        repo: REPO.into(),
-                                        pr,
-                                        head: head.clone(),
-                                        pull_request_id: format!("PR_{REPO}_{pr}"),
-                                        method: None,
-                                        thread: Some(ticket.into()),
-                                        label: Some(format!("widgets#{pr}")),
-                                        merge_state: m.merge_state.into(),
-                                        at: clock_now(&h),
-                                        status: if m.queued { WaitStatus::Sent } else { WaitStatus::Waiting },
-                                        approval: format!("appr-{seed}-{step}"),
-                                        failures: 0,
-                                        last_error: None,
-                                    };
-                                    h.app.store.merge_wait_put(&w).unwrap();
-                                    trace.push(format!("#{step} merge_wait_put #{pr}@{head} for {ticket}"));
-                                }
-                                2 => {
-                                    // Deliberate reassigned-ID mismatch to exercise reconcile's node-ID rejection path
-                                    let head = HEADS[m.head_idx].to_string();
-                                    let w = MergeWait {
-                                        repo: REPO.into(),
-                                        pr,
-                                        head: head.clone(),
-                                        pull_request_id: format!("PR_{REPO}_{pr}_reassigned"),
-                                        method: None,
-                                        thread: Some(ticket.into()),
-                                        label: Some(format!("widgets#{pr}")),
-                                        merge_state: m.merge_state.into(),
-                                        at: clock_now(&h),
-                                        status: if m.queued { WaitStatus::Sent } else { WaitStatus::Waiting },
-                                        approval: format!("appr-{seed}-{step}-reassigned"),
-                                        failures: 0,
-                                        last_error: None,
-                                    };
-                                    h.app.store.merge_wait_put(&w).unwrap();
-                                    trace.push(format!(
-                                        "#{step} merge_wait_put(reassigned_id) #{pr}@{head} for {ticket}"
-                                    ));
-                                }
-                                3 => {
-                                    m.queue_enabled = !m.queue_enabled;
-                                    m.queued = m.queue_enabled && rng.coin();
-                                    m.removed = None;
-                                    trace.push(format!(
-                                        "#{step} gh queue #{pr} enabled={} queued={}",
-                                        m.queue_enabled, m.queued
-                                    ));
-                                    sync_gh(&h, &gh);
-                                }
-                                4 | 5 => {
+                            m.head_idx = (m.head_idx + 1) % HEADS.len();
+                            trace.push(format!("#{step} gh push #{pr} -> head {}", &HEADS[m.head_idx][..7]));
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if changed {
+                        sync_gh(&h, &gh);
+                    }
+                }
+                5 => {
+                    let pr = PRS[rng.pick(PRS.len())];
+                    let changed = {
+                        let m = gh.get_mut(&pr).unwrap();
+                        if m.exists && m.state == "OPEN" {
+                            m.checks = match rng.pick(5) {
+                                0 => GhChecks::Pending,
+                                1 => GhChecks::Passing,
+                                2 => GhChecks::Failing,
+                                3 => GhChecks::Cancelled,
+                                _ => GhChecks::Unread,
+                            };
+                            m.merge_state = match rng.pick(5) {
+                                0 => "CLEAN",
+                                1 => "UNKNOWN",
+                                2 => "BLOCKED",
+                                3 => "BEHIND",
+                                _ => "DIRTY",
+                            };
+                            if rng.pick(4) == 0 {
+                                m.draft = !m.draft;
+                            }
+                            trace.push(format!(
+                                "#{step} gh status #{pr} checks={:?} merge={} draft={}",
+                                m.checks, m.merge_state, m.draft
+                            ));
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if changed {
+                        sync_gh(&h, &gh);
+                    }
+                }
+                6 => {
+                    let pr = PRS[rng.pick(PRS.len())];
+                    let changed = {
+                        let m = gh.get_mut(&pr).unwrap();
+                        if m.exists && m.state == "OPEN" {
+                            match rng.pick(4) {
+                                0 => {
+                                    m.state = "MERGED";
                                     m.queued = false;
-                                    let reason = if rng.coin() { "failed_checks" } else { "merge_conflict" };
                                     let predates = rng.coin();
-                                    let at = if predates { before_tracking(t0) } else { clock_now(&h) };
-                                    m.removed = Some((reason, at));
-                                    trace.push(format!("#{step} gh queue drop #{pr} removed={:?}", m.removed));
-                                    sync_gh(&h, &gh);
+                                    m.ended_at =
+                                        Some(if predates { before_tracking(t0) } else { clock_now(&h) });
                                 }
-                                _ => {
-                                    // Attach PR directly to a worker's live_of to populate pr_seen independently
-                                    if !active_workers.is_empty() {
-                                        let wi = active_workers[rng.pick(active_workers.len())];
-                                        let w = WORKERS[wi];
-                                        h.fake.set_prs(w, vec![pull_request(REPO, pr, "open")]);
-                                        trace.push(format!("#{step} fake.set_prs({w}, #{pr})"));
-                                    }
+                                1 => {
+                                    m.state = "CLOSED";
+                                    m.queued = false;
+                                    let predates = rng.coin();
+                                    m.ended_at =
+                                        Some(if predates { before_tracking(t0) } else { clock_now(&h) });
+                                }
+                                2 => m.read_err = !m.read_err,
+                                _ => m.exists = false,
+                            }
+                            trace.push(format!(
+                                "#{step} gh lifecycle #{pr} state={} exists={} err={} ended_at={:?}",
+                                m.state, m.exists, m.read_err, m.ended_at
+                            ));
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if changed {
+                        sync_gh(&h, &gh);
+                    }
+                }
+                7 | 8 => {
+                    let had_err = gh.values().any(|m| m.read_err);
+                    let mutations_before = advance_mutations(&h);
+                    let rec = h.app.wf.reconcile().await;
+                    pull_gh_mutations(&h, &mut gh);
+                    trace.push(format!("#{step} reconcile -> ok={}", rec.is_ok()));
+                    if !had_err && let Ok(actions) = &rec {
+                        healthy_reconcile = true;
+                        for (&number, m) in &gh {
+                            let Some(seen) = h.app.store.pr_seen_get(REPO, number).unwrap() else {
+                                continue;
+                            };
+                            let label = format!("{REPO}#{number}");
+                            if seen.state != "OPEN"
+                                && seen.state == m.state
+                                && let Some(at) = m.ended_at.as_deref()
+                            {
+                                let reported = actions.iter().any(|a| {
+                                    a.starts_with(&format!("{label} merged on GitHub"))
+                                        || a.starts_with(&format!("{label} closed on GitHub"))
+                                });
+                                if at < seen.since.as_str() {
+                                    assert!(
+                                        !reported,
+                                        "stale finished event {label} at {at} (< since {}) was reported: \
+                                         actions={actions:?}\nseed={seed}\n{}",
+                                        seen.since,
+                                        trace.join("\n")
+                                    );
+                                }
+                            }
+                            if seen.state == "OPEN"
+                                && !seen.queued
+                                && let Some((_, at)) = &m.removed
+                            {
+                                let after = seen
+                                    .queued_at
+                                    .as_deref()
+                                    .filter(|q| *q >= seen.since.as_str())
+                                    .unwrap_or(&seen.since);
+                                let reported = actions
+                                    .iter()
+                                    .any(|a| a.starts_with(&format!("{label} dropped from the merge queue")));
+                                if at.as_str() < after {
+                                    let event = format!("removed:{at}");
+                                    let marked = h.app.store.pr_event_seen(REPO, number, &event, BOARD).unwrap()
+                                        || seen
+                                            .tickets
+                                            .iter()
+                                            .any(|(t, _)| h.app.store.pr_event_seen(REPO, number, &event, t).unwrap());
+                                    assert!(
+                                        !reported && !marked,
+                                        "stale queue drop {label} at {at} (< after {after}) was reported or marked: \
+                                         actions={actions:?}\nseed={seed}\n{}",
+                                        trace.join("\n")
+                                    );
                                 }
                             }
                         }
-                    }
-                    17 => {
-                        let t = TICKETS[rng.pick(TICKETS.len())];
-                        let _ = h.wf(t, "gate", json!({"open": "merge"})).await;
-                        trace.push(format!("#{step} {t} manual gate open merge"));
-                    }
-                    18 => {
-                        if active_workers.len() > 1 {
-                            let pos = rng.pick(active_workers.len());
-                            let wi = active_workers.remove(pos);
-                            let w = WORKERS[wi];
-                            h.wf(w, "send", json!({"kind": "handoff", "body": "chaos handoff"})).await;
-                            let count = sent_counts(&h).get(w).copied().unwrap_or(0);
-                            closed_workers.insert(w.to_string(), count);
-                            trace.push(format!("#{step} {w} handoff (sent_at_close={count})"));
+                        if advance_mutations(&h) != mutations_before {
+                            let settle = h.app.wf.reconcile().await;
+                            pull_gh_mutations(&h, &mut gh);
+                            assert!(
+                                settle.is_ok(),
+                                "settling reconcile after advance failed: {settle:?}\nseed={seed}\n{}",
+                                trace.join("\n")
+                            );
                         }
-                    }
-                    _ => {
-                        // Answer a ready merge card and immediately clear the ticket's gate;
-                        // every other unanswered ready merge card on that ticket must survive!
-                        let ready_cards: Vec<_> = h
+                        let retrying_prs: BTreeSet<(String, u64)> = h
+                            .app
+                            .store
+                            .merge_waits()
+                            .unwrap()
+                            .into_iter()
+                            .filter(|w| w.failures > 0)
+                            .map(|w| (w.repo, w.pr))
+                            .collect();
+                        let before_msgs = h.sent().len();
+                        let before_cards: Vec<String> =
+                            h.app.wf.cards().unwrap().into_iter().map(|c| c.id).collect();
+                        let before_set: BTreeSet<String> = before_cards.iter().cloned().collect();
+                        let rec2 = h.app.wf.reconcile().await;
+                        pull_gh_mutations(&h, &mut gh);
+                        assert!(
+                            rec2.is_ok(),
+                            "second reconcile failed: {rec2:?}\nseed={seed}\n{}",
+                            trace.join("\n")
+                        );
+                        let after_cards: Vec<String> = h
                             .app
                             .wf
                             .cards()
                             .unwrap()
                             .into_iter()
                             .filter(|c| {
-                                c.kind == "gate"
-                                    && c.worker.is_none()
-                                    && c.ticket.is_some()
-                                    && c.pr.as_ref().is_some_and(|p| p.ready)
+                                before_set.contains(&c.id)
+                                    || !(c.kind == "report"
+                                        && c.text.contains("GitHub would not ")
+                                        && c.pr
+                                            .as_ref()
+                                            .is_some_and(|p| retrying_prs.contains(&(p.repo.clone(), p.number))))
                             })
+                            .map(|c| c.id)
                             .collect();
-                        if !ready_cards.is_empty() {
-                            let chosen = &ready_cards[rng.pick(ready_cards.len())];
-                            let ticket = chosen.ticket.clone().unwrap();
-                            let others: Vec<String> = ready_cards
-                                .iter()
-                                .filter(|c| c.ticket.as_deref() == Some(ticket.as_str()) && c.id != chosen.id)
-                                .map(|c| c.id.clone())
-                                .collect();
-                            let opt = chosen.options.first().map(String::as_str).unwrap_or("merge");
-                            let _ = h.app.wf.answer(&chosen.id, opt).await;
+                        assert_eq!(
+                            h.sent().len(),
+                            before_msgs,
+                            "reconcile was not idempotent (sent extra messages)\nseed={seed}\n{}",
+                            trace.join("\n")
+                        );
+                        assert_eq!(
+                            after_cards,
+                            before_cards,
+                            "reconcile was not idempotent (changed cards outside retrying waits {retrying_prs:?})\nseed={seed}\n{}",
+                            trace.join("\n")
+                        );
+                    }
+                }
+                9 => {
+                    let from = TICKETS[rng.pick(TICKETS.len())];
+                    let mut to = TICKETS[rng.pick(TICKETS.len())];
+                    if to == from {
+                        to = TICKETS[(TICKETS.iter().position(|x| *x == from).unwrap() + 1) % TICKETS.len()];
+                    }
+                    let r = h.wf(to, "adopt", json!({"from": from})).await;
+                    trace.push(format!("#{step} {to} adopt from {from} -> {r}"));
+                    assert!(
+                        h.app.store.children(from, true).unwrap().is_empty(),
+                        "adopt left open children on {from}\nseed={seed}\n{}",
+                        trace.join("\n")
+                    );
+                }
+                10 => {
+                    let t = TICKETS[rng.pick(TICKETS.len())];
+                    if rng.coin() {
+                        let _ = h.wf(t, "gate", json!({"clear": true})).await;
+                        trace.push(format!("#{step} {t} gate clear"));
+                    } else {
+                        let r = h
+                            .wf(
+                                t,
+                                "send",
+                                json!({"kind": "gate", "gate": "delivery:verify",
+                                       "body": "**ACTION NEEDED:** verify: reply \"ok\"", "options": ["ok"]}),
+                            )
+                            .await;
+                        trace.push(format!("#{step} {t} open delivery:verify -> {}", r["card"]));
+                    }
+                }
+                11 => {
+                    let open = h.app.wf.cards().unwrap();
+                    if !open.is_empty() {
+                        let c = &open[rng.pick(open.len())];
+                        if rng.coin() {
+                            let ans = c.options.first().map(String::as_str).unwrap_or("ok");
+                            let _ = h.app.wf.answer(&c.id, ans).await;
                             pull_gh_mutations(&h, &mut gh);
-                            let _ = h.wf(&ticket, "gate", json!({"clear": true})).await;
-                            trace.push(format!(
-                                "#{step} answer ready {} ({opt}) + {ticket} gate clear (others={others:?})",
-                                chosen.id
-                            ));
-                            let after_ids: BTreeSet<String> =
-                                h.app.wf.cards().unwrap().into_iter().map(|c| c.id).collect();
-                            for other in &others {
-                                assert!(
-                                    after_ids.contains(other),
-                                    "answering {} and clearing gate wiped unanswered ready card {other}!\nseed={seed}\n{}",
-                                    chosen.id,
-                                    trace.join("\n")
-                                );
+                            trace.push(format!("#{step} answer {} with {ans:?}", c.id));
+                        } else {
+                            let res = h
+                                .app
+                                .wf
+                                .dismiss_at(&c.id, &CardRef { at: Some(&c.at), token: Some(&c.token) })
+                                .await;
+                            assert!(
+                                res.is_ok(),
+                                "dismiss_at rejected freshly read card {}: {res:?}\nseed={seed}\n{}",
+                                c.id,
+                                trace.join("\n")
+                            );
+                            trace.push(format!("#{step} dismiss_at {}", c.id));
+                        }
+                    }
+                }
+                12 => {
+                    if !active_workers.is_empty() {
+                        let wi = active_workers[rng.pick(active_workers.len())];
+                        let w = WORKERS[wi];
+                        let r = h
+                            .wf(
+                                w,
+                                "send",
+                                json!({"kind": "gate", "gate": "review",
+                                       "body": "**ACTION NEEDED:** decide review: reply \"fix\" or \"ship\"",
+                                       "options": ["fix", "ship"]}),
+                            )
+                            .await;
+                        trace.push(format!("#{step} {w} relayed review gate -> {}", r["card"]));
+                    }
+                }
+                13 => {
+                    if active_workers.len() > 1 {
+                        let pos = rng.pick(active_workers.len());
+                        let wi = active_workers.remove(pos);
+                        let w = WORKERS[wi];
+                        let parent = h.app.store.link_get(w).unwrap().unwrap().parent;
+                        h.wf(&parent, "close", json!({"child": w})).await;
+                        let count = sent_counts(&h).get(w).copied().unwrap_or(0);
+                        closed_workers.insert(w.to_string(), count);
+                        trace.push(format!("#{step} {parent} close {w} (sent_at_close={count})"));
+                    }
+                }
+                14 => {
+                    let waiting_before: BTreeMap<String, usize> = active_workers
+                        .iter()
+                        .filter_map(|&wi| {
+                            let w = WORKERS[wi];
+                            let wl = h.app.store.link_get(w).unwrap()?;
+                            wl.pr.as_ref().filter(|p| p.waiting).map(|_| {
+                                let nudges = h
+                                    .sent()
+                                    .into_iter()
+                                    .filter(|s| {
+                                        s["threadId"] == w
+                                            && s["message"].as_str().is_some_and(|m| m.starts_with("[t3cm nudge"))
+                                    })
+                                    .count();
+                                (w.to_string(), nudges)
+                            })
+                        })
+                        .collect();
+                    h.advance_tick(200).await;
+                    trace.push(format!("#{step} advance_tick(200)"));
+                    for (w, before) in waiting_before {
+                        let after = h
+                            .sent()
+                            .into_iter()
+                            .filter(|s| {
+                                s["threadId"] == w.as_str()
+                                    && s["message"].as_str().is_some_and(|m| m.starts_with("[t3cm nudge"))
+                            })
+                            .count();
+                        assert_eq!(
+                            after,
+                            before,
+                            "waiting worker {w} was nudged during advance_tick(200)\nseed={seed}\n{}",
+                            trace.join("\n")
+                        );
+                    }
+                }
+                15 => {
+                    let mut cleared = false;
+                    for (&n, m) in gh.iter_mut() {
+                        if m.read_err {
+                            m.read_err = false;
+                            cleared = true;
+                            trace.push(format!("#{step} clear read_err #{n}"));
+                        }
+                    }
+                    if cleared {
+                        sync_gh(&h, &gh);
+                    }
+                }
+                16 => {
+                    // Exercise MergeWait and merge queue state transitions
+                    let pr = PRS[rng.pick(PRS.len())];
+                    let ticket = TICKETS[rng.pick(TICKETS.len())];
+                    let m = gh.get_mut(&pr).unwrap();
+                    if m.exists && m.state == "OPEN" {
+                        match rng.pick(7) {
+                            0 | 1 => {
+                                let head = HEADS[m.head_idx].to_string();
+                                let w = MergeWait {
+                                    repo: REPO.into(),
+                                    pr,
+                                    head: head.clone(),
+                                    pull_request_id: format!("PR_{REPO}_{pr}"),
+                                    method: None,
+                                    thread: Some(ticket.into()),
+                                    label: Some(format!("widgets#{pr}")),
+                                    merge_state: m.merge_state.into(),
+                                    at: clock_now(&h),
+                                    status: if m.queued { WaitStatus::Sent } else { WaitStatus::Waiting },
+                                    approval: format!("appr-{seed}-{step}"),
+                                    failures: 0,
+                                    last_error: None,
+                                };
+                                h.app.store.merge_wait_put(&w).unwrap();
+                                trace.push(format!("#{step} merge_wait_put #{pr}@{head} for {ticket}"));
+                            }
+                            2 => {
+                                // Deliberate reassigned-ID mismatch to exercise reconcile's node-ID rejection path
+                                let head = HEADS[m.head_idx].to_string();
+                                let w = MergeWait {
+                                    repo: REPO.into(),
+                                    pr,
+                                    head: head.clone(),
+                                    pull_request_id: format!("PR_{REPO}_{pr}_reassigned"),
+                                    method: None,
+                                    thread: Some(ticket.into()),
+                                    label: Some(format!("widgets#{pr}")),
+                                    merge_state: m.merge_state.into(),
+                                    at: clock_now(&h),
+                                    status: if m.queued { WaitStatus::Sent } else { WaitStatus::Waiting },
+                                    approval: format!("appr-{seed}-{step}-reassigned"),
+                                    failures: 0,
+                                    last_error: None,
+                                };
+                                h.app.store.merge_wait_put(&w).unwrap();
+                                trace.push(format!(
+                                    "#{step} merge_wait_put(reassigned_id) #{pr}@{head} for {ticket}"
+                                ));
+                            }
+                            3 => {
+                                m.queue_enabled = !m.queue_enabled;
+                                m.queued = m.queue_enabled && rng.coin();
+                                m.removed = None;
+                                trace.push(format!(
+                                    "#{step} gh queue #{pr} enabled={} queued={}",
+                                    m.queue_enabled, m.queued
+                                ));
+                                sync_gh(&h, &gh);
+                            }
+                            4 | 5 => {
+                                m.queued = false;
+                                let reason = if rng.coin() { "failed_checks" } else { "merge_conflict" };
+                                let predates = rng.coin();
+                                let at = if predates { before_tracking(t0) } else { clock_now(&h) };
+                                m.removed = Some((reason, at));
+                                trace.push(format!("#{step} gh queue drop #{pr} removed={:?}", m.removed));
+                                sync_gh(&h, &gh);
+                            }
+                            _ => {
+                                // Attach PR directly to a worker's live_of to populate pr_seen independently
+                                if !active_workers.is_empty() {
+                                    let wi = active_workers[rng.pick(active_workers.len())];
+                                    let w = WORKERS[wi];
+                                    h.fake.set_prs(w, vec![pull_request(REPO, pr, "open")]);
+                                    trace.push(format!("#{step} fake.set_prs({w}, #{pr})"));
+                                }
                             }
                         }
                     }
                 }
-            })
-            .await;
-            assert!(res.is_ok(), "step timed out (possible deadlock) at seed={seed}\n{}", trace.join("\n"));
-            assert_invariants(&h, seed, &trace, &closed_workers, healthy_reconcile, &gh);
-        }
-        reach.merge(&h.app.wf.reach().snapshot());
+                17 => {
+                    let t = TICKETS[rng.pick(TICKETS.len())];
+                    let _ = h.wf(t, "gate", json!({"open": "merge"})).await;
+                    trace.push(format!("#{step} {t} manual gate open merge"));
+                }
+                18 => {
+                    if active_workers.len() > 1 {
+                        let pos = rng.pick(active_workers.len());
+                        let wi = active_workers.remove(pos);
+                        let w = WORKERS[wi];
+                        h.wf(w, "send", json!({"kind": "handoff", "body": "chaos handoff"})).await;
+                        let count = sent_counts(&h).get(w).copied().unwrap_or(0);
+                        closed_workers.insert(w.to_string(), count);
+                        trace.push(format!("#{step} {w} handoff (sent_at_close={count})"));
+                    }
+                }
+                _ => {
+                    // Answer a ready merge card and immediately clear the ticket's gate;
+                    // every other unanswered ready merge card on that ticket must survive!
+                    let ready_cards: Vec<_> = h
+                        .app
+                        .wf
+                        .cards()
+                        .unwrap()
+                        .into_iter()
+                        .filter(|c| {
+                            c.kind == "gate"
+                                && c.worker.is_none()
+                                && c.ticket.is_some()
+                                && c.pr.as_ref().is_some_and(|p| p.ready)
+                        })
+                        .collect();
+                    if !ready_cards.is_empty() {
+                        let chosen = &ready_cards[rng.pick(ready_cards.len())];
+                        let ticket = chosen.ticket.clone().unwrap();
+                        let others: Vec<String> = ready_cards
+                            .iter()
+                            .filter(|c| c.ticket.as_deref() == Some(ticket.as_str()) && c.id != chosen.id)
+                            .map(|c| c.id.clone())
+                            .collect();
+                        let opt = chosen.options.first().map(String::as_str).unwrap_or("merge");
+                        let _ = h.app.wf.answer(&chosen.id, opt).await;
+                        pull_gh_mutations(&h, &mut gh);
+                        let _ = h.wf(&ticket, "gate", json!({"clear": true})).await;
+                        trace.push(format!(
+                            "#{step} answer ready {} ({opt}) + {ticket} gate clear (others={others:?})",
+                            chosen.id
+                        ));
+                        let after_ids: BTreeSet<String> =
+                            h.app.wf.cards().unwrap().into_iter().map(|c| c.id).collect();
+                        for other in &others {
+                            assert!(
+                                after_ids.contains(other),
+                                "answering {} and clearing gate wiped unanswered ready card {other}!\nseed={seed}\n{}",
+                                chosen.id,
+                                trace.join("\n")
+                            );
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+        assert!(res.is_ok(), "step timed out (possible deadlock) at seed={seed}\n{}", trace.join("\n"));
+        assert_invariants(&h, seed, &trace, &closed_workers, healthy_reconcile, &gh);
+    }
+    (trace, h.app.wf.reach().snapshot())
+}
+
+#[tokio::test]
+async fn seeded_sequential_chaos_holds_all_invariants() {
+    let range = chaos_seed_range(DEFAULT_SEQ_SEEDS);
+    let mut reach = ReachSnapshot::default();
+    for seed in range.seeds() {
+        let (_, snap) = run_sequential_seed(seed).await;
+        reach.merge(&snap);
     }
     if std::env::var_os("CHAOS_REACH").is_some() {
         eprintln!("{reach}");
     }
-    if seeds >= 60 {
-        reach.assert_tier1(&format!("seeded_sequential_chaos ({seeds} seeds)"));
+    if range.count >= DEFAULT_SEQ_SEEDS {
+        reach.assert_tier1(&format!("seeded_sequential_chaos ({})", range.describe()));
     }
 }
 
-#[tokio::test]
-async fn concurrent_chaos_races_never_deadlock_or_violate_invariants() {
-    let seeds = chaos_seeds(30);
-    for seed in 0..seeds as u64 {
-        let mut rng = Rng::new(seed ^ 0x55aa_1234_9876_fedc);
-        let (h, mut gh) = setup_chaos();
-        for m in gh.values_mut() {
-            m.queue_enabled = rng.coin();
-        }
-        sync_gh(&h, &gh);
-        let t0 = h.clock.now();
-        let mut trace = Vec::new();
+async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
+    let mut rng = Rng::new(seed ^ 0x55aa_1234_9876_fedc);
+    let (h, mut gh) = setup_chaos();
+    for m in gh.values_mut() {
+        m.queue_enabled = rng.coin();
+    }
+    sync_gh(&h, &gh);
+    let t0 = h.clock.now();
+    let mut trace = Vec::new();
 
-        for (i, &t) in TICKETS.iter().enumerate() {
-            h.wf(t, "join", json!({"parent": BOARD, "label": format!("widgets#{}", 41 + i), "role": "ticket"})).await;
-        }
-        for (i, &w) in WORKERS.iter().enumerate() {
-            let owner = TICKETS[0];
-            let part = format!("{}/3", i + 1);
-            let label = format!("#41 PR {part}");
-            h.wf(
-                owner,
-                "openChild",
-                json!({"role": "worker", "label": label, "issue": "acme/widgets#41", "part": part,
-                       "pr": {"format": "pr"}}),
-            )
-            .await;
-            h.wf(w, "join", json!({"parent": owner, "label": label, "role": "worker"})).await;
-        }
+    for (i, &t) in TICKETS.iter().enumerate() {
+        h.wf(t, "join", json!({"parent": BOARD, "label": format!("widgets#{}", 41 + i), "role": "ticket"})).await;
+    }
+    for (i, &w) in WORKERS.iter().enumerate() {
+        let owner = TICKETS[0];
+        let part = format!("{}/3", i + 1);
+        let label = format!("#41 PR {part}");
+        h.wf(
+            owner,
+            "openChild",
+            json!({"role": "worker", "label": label, "issue": "acme/widgets#41", "part": part,
+                   "pr": {"format": "pr"}}),
+        )
+        .await;
+        h.wf(w, "join", json!({"parent": owner, "label": label, "role": "worker"})).await;
+    }
 
-        h.github.set_delay(Duration::from_millis(15));
-        for round in 0..6 {
-            h.clock.advance_minutes(1);
-            let race = rng.pick(5);
-            let res = tokio::time::timeout(Duration::from_secs(5), async {
-                match race {
-                    0 => {
-                        // Two workers call ready concurrently while ticket adopts/clears gate
-                        let r1 = h.wf(
-                            WORKERS[0],
-                            "pr",
-                            json!({"event": "ready", "repo": REPO, "pr": 7, "head": HEADS[gh[&7].head_idx]}),
-                        );
-                        let r2 = h.wf(
-                            WORKERS[1],
-                            "pr",
-                            json!({"event": "ready", "repo": REPO, "pr": 8, "head": HEADS[gh[&8].head_idx]}),
-                        );
-                        let clr = async {
-                            tokio::time::sleep(Duration::from_millis(8)).await;
-                            h.wf(TICKETS[0], "gate", json!({"clear": true})).await
-                        };
-                        let _ = tokio::join!(r1, r2, clr);
-                        trace.push(format!("round {round}: concurrent ready(#7,#8) + gate clear"));
-                    }
-                    1 => {
-                        // Reconcile races with adopt + PR merge/move
-                        {
-                            let m = gh.get_mut(&7).unwrap();
-                            if m.state == "OPEN" {
-                                if rng.coin() {
-                                    m.head_idx = (m.head_idx + 1) % HEADS.len();
-                                } else {
-                                    m.state = "MERGED";
-                                    m.queued = false;
-                                    let predates = rng.pick(4) == 0;
-                                    m.ended_at = Some(if predates { before_tracking(t0) } else { clock_now(&h) });
-                                }
-                            }
-                        }
-                        sync_gh(&h, &gh);
-                        let from = TICKETS[rng.pick(2)];
-                        let to = if from == TICKETS[0] { TICKETS[1] } else { TICKETS[2] };
-                        let rec = h.app.wf.reconcile();
-                        let ad = async {
-                            tokio::time::sleep(Duration::from_millis(6)).await;
-                            h.wf(to, "adopt", json!({"from": from})).await
-                        };
-                        let (r, _) = tokio::join!(rec, ad);
-                        r.unwrap();
-                        trace.push(format!("round {round}: reconcile racing with {to} adopt({from})"));
-                    }
-                    2 => {
-                        // ready races with updated to new head + reconcile
-                        let old_head = HEADS[gh[&8].head_idx];
-                        let next_idx = (gh[&8].head_idx + 1) % HEADS.len();
-                        let new_head = HEADS[next_idx];
-                        let rdy =
-                            h.wf(WORKERS[1], "pr", json!({"event": "ready", "repo": REPO, "pr": 8, "head": old_head}));
-                        let upd = async {
-                            tokio::time::sleep(Duration::from_millis(7)).await;
-                            h.wf(WORKERS[1], "pr", json!({"event": "updated", "repo": REPO, "pr": 8, "head": new_head}))
-                                .await
-                        };
-                        let rec = h.app.wf.reconcile();
-                        let (_, _, r) = tokio::join!(rdy, upd, rec);
-                        r.unwrap();
-                        gh.get_mut(&8).unwrap().head_idx = next_idx;
-                        sync_gh(&h, &gh);
-                        trace.push(format!("round {round}: ready(#8) racing with updated + reconcile"));
-                    }
-                    3 => {
-                        // opened races with adopt
-                        let from = TICKETS[rng.pick(2)];
-                        let to = TICKETS[2];
-                        let op = h.wf(
-                            WORKERS[2],
-                            "pr",
-                            json!({"event": "opened", "repo": REPO, "pr": 9, "head": HEADS[gh[&9].head_idx],
-                                   "publishing": PUBLISHING}),
-                        );
-                        let ad = async {
-                            tokio::time::sleep(Duration::from_millis(6)).await;
-                            h.wf(to, "adopt", json!({"from": from})).await
-                        };
-                        let _ = tokio::join!(op, ad);
-                        trace.push(format!("round {round}: opened(#9) racing with {to} adopt({from})"));
-                    }
-                    _ => {
-                        // pending ready + reconcile + answer open cards concurrently
-                        {
-                            let m = gh.get_mut(&9).unwrap();
-                            if m.state == "OPEN" {
-                                m.checks =
-                                    if m.checks == GhChecks::Pending { GhChecks::Passing } else { GhChecks::Pending };
-                            }
-                        }
-                        sync_gh(&h, &gh);
-                        let rdy = h.wf(
-                            WORKERS[2],
-                            "pr",
-                            json!({"event": "ready", "repo": REPO, "pr": 9, "head": HEADS[gh[&9].head_idx]}),
-                        );
-                        let rec = h.app.wf.reconcile();
-                        let open = h.app.wf.cards().unwrap();
-                        let ans = async {
-                            if let Some(c) = open.first() {
-                                let opt = c.options.first().map(String::as_str).unwrap_or("ok");
-                                let _ = h.app.wf.answer(&c.id, opt).await;
-                            }
-                        };
-                        let (_, r, _) = tokio::join!(rdy, rec, ans);
-                        r.unwrap();
-                        trace.push(format!("round {round}: ready(#9) + reconcile + answer"));
-                    }
+    h.github.set_delay(Duration::from_millis(15));
+    for round in 0..6 {
+        h.clock.advance_minutes(1);
+        let race = rng.pick(5);
+        let res = tokio::time::timeout(Duration::from_secs(5), async {
+            match race {
+                0 => {
+                    // Two workers call ready concurrently while ticket adopts/clears gate
+                    let r1 = h.wf(
+                        WORKERS[0],
+                        "pr",
+                        json!({"event": "ready", "repo": REPO, "pr": 7, "head": HEADS[gh[&7].head_idx]}),
+                    );
+                    let r2 = h.wf(
+                        WORKERS[1],
+                        "pr",
+                        json!({"event": "ready", "repo": REPO, "pr": 8, "head": HEADS[gh[&8].head_idx]}),
+                    );
+                    let clr = async {
+                        tokio::time::sleep(Duration::from_millis(8)).await;
+                        h.wf(TICKETS[0], "gate", json!({"clear": true})).await
+                    };
+                    let _ = join3(r1, r2, clr).await;
+                    trace.push(format!("round {round}: concurrent ready(#7,#8) + gate clear"));
                 }
-            })
-            .await;
-            assert!(res.is_ok(), "concurrent race timed out (deadlock?) at seed={seed}\n{}", trace.join("\n"));
-            assert_invariants(&h, seed, &trace, &BTreeMap::new(), false, &gh);
-        }
+                1 => {
+                    // Reconcile races with adopt + PR merge/move
+                    {
+                        let m = gh.get_mut(&7).unwrap();
+                        if m.state == "OPEN" {
+                            if rng.coin() {
+                                m.head_idx = (m.head_idx + 1) % HEADS.len();
+                            } else {
+                                m.state = "MERGED";
+                                m.queued = false;
+                                let predates = rng.pick(4) == 0;
+                                m.ended_at = Some(if predates { before_tracking(t0) } else { clock_now(&h) });
+                            }
+                        }
+                    }
+                    sync_gh(&h, &gh);
+                    let from = TICKETS[rng.pick(2)];
+                    let to = if from == TICKETS[0] { TICKETS[1] } else { TICKETS[2] };
+                    let rec = h.app.wf.reconcile();
+                    let ad = async {
+                        tokio::time::sleep(Duration::from_millis(6)).await;
+                        h.wf(to, "adopt", json!({"from": from})).await
+                    };
+                    let (r, _) = join(rec, ad).await;
+                    r.unwrap();
+                    trace.push(format!("round {round}: reconcile racing with {to} adopt({from})"));
+                }
+                2 => {
+                    // ready races with updated to new head + reconcile
+                    let old_head = HEADS[gh[&8].head_idx];
+                    let next_idx = (gh[&8].head_idx + 1) % HEADS.len();
+                    let new_head = HEADS[next_idx];
+                    let rdy =
+                        h.wf(WORKERS[1], "pr", json!({"event": "ready", "repo": REPO, "pr": 8, "head": old_head}));
+                    let upd = async {
+                        tokio::time::sleep(Duration::from_millis(7)).await;
+                        h.wf(WORKERS[1], "pr", json!({"event": "updated", "repo": REPO, "pr": 8, "head": new_head}))
+                            .await
+                    };
+                    let rec = h.app.wf.reconcile();
+                    let (_, _, r) = join3(rdy, upd, rec).await;
+                    r.unwrap();
+                    gh.get_mut(&8).unwrap().head_idx = next_idx;
+                    sync_gh(&h, &gh);
+                    trace.push(format!("round {round}: ready(#8) racing with updated + reconcile"));
+                }
+                3 => {
+                    // opened races with adopt
+                    let from = TICKETS[rng.pick(2)];
+                    let to = TICKETS[2];
+                    let op = h.wf(
+                        WORKERS[2],
+                        "pr",
+                        json!({"event": "opened", "repo": REPO, "pr": 9, "head": HEADS[gh[&9].head_idx],
+                               "publishing": PUBLISHING}),
+                    );
+                    let ad = async {
+                        tokio::time::sleep(Duration::from_millis(6)).await;
+                        h.wf(to, "adopt", json!({"from": from})).await
+                    };
+                    let _ = join(op, ad).await;
+                    trace.push(format!("round {round}: opened(#9) racing with {to} adopt({from})"));
+                }
+                _ => {
+                    // pending ready + reconcile + answer open cards concurrently
+                    {
+                        let m = gh.get_mut(&9).unwrap();
+                        if m.state == "OPEN" {
+                            m.checks =
+                                if m.checks == GhChecks::Pending { GhChecks::Passing } else { GhChecks::Pending };
+                        }
+                    }
+                    sync_gh(&h, &gh);
+                    let rdy = h.wf(
+                        WORKERS[2],
+                        "pr",
+                        json!({"event": "ready", "repo": REPO, "pr": 9, "head": HEADS[gh[&9].head_idx]}),
+                    );
+                    let rec = h.app.wf.reconcile();
+                    let open = h.app.wf.cards().unwrap();
+                    let ans = async {
+                        if let Some(c) = open.first() {
+                            let opt = c.options.first().map(String::as_str).unwrap_or("ok");
+                            let _ = h.app.wf.answer(&c.id, opt).await;
+                        }
+                    };
+                    let (_, r, _) = join3(rdy, rec, ans).await;
+                    r.unwrap();
+                    trace.push(format!("round {round}: ready(#9) + reconcile + answer"));
+                }
+            }
+        })
+        .await;
+        assert!(res.is_ok(), "concurrent race timed out (deadlock?) at seed={seed}\n{}", trace.join("\n"));
+        assert_invariants(&h, seed, &trace, &BTreeMap::new(), false, &gh);
+    }
 
-        h.github.set_delay(Duration::ZERO);
-        h.app.wf.reconcile().await.unwrap();
-        assert_invariants(&h, seed, &trace, &BTreeMap::new(), true, &gh);
+    h.github.set_delay(Duration::ZERO);
+    h.app.wf.reconcile().await.unwrap();
+    assert_invariants(&h, seed, &trace, &BTreeMap::new(), true, &gh);
+    (trace, h)
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_chaos_races_never_deadlock_or_violate_invariants() {
+    let range = chaos_seed_range(DEFAULT_CONCURRENT_SEEDS);
+    for seed in range.seeds() {
+        let _ = run_concurrent_seed(seed).await;
+    }
+}
+
+#[test]
+fn chaos_seed_range_parses_single_offset_and_count() {
+    assert_eq!(parse_seed_range(60, None, None, None), Ok(SeedRange { start: 0, count: 60 }));
+    assert_eq!(parse_seed_range(60, Some("42"), None, None), Ok(SeedRange { start: 42, count: 1 }));
+    assert_eq!(parse_seed_range(60, Some("42"), Some("100"), Some("200")), Ok(SeedRange { start: 42, count: 1 }));
+    assert_eq!(parse_seed_range(60, Some("  "), Some("100"), Some("25")), Ok(SeedRange { start: 100, count: 25 }));
+    assert_eq!(parse_seed_range(60, None, Some("100"), None), Ok(SeedRange { start: 100, count: 60 }));
+    assert_eq!(parse_seed_range(60, None, None, Some("10")), Ok(SeedRange { start: 0, count: 10 }));
+    assert_eq!(
+        parse_seed_range(60, Some(&u64::MAX.to_string()), None, None).unwrap().seeds().collect::<Vec<_>>(),
+        vec![u64::MAX]
+    );
+    assert_eq!(
+        parse_seed_range(60, None, Some("10"), Some("3")).unwrap().seeds().collect::<Vec<_>>(),
+        vec![10, 11, 12]
+    );
+    assert_eq!(
+        parse_seed_range(60, None, Some("10"), Some("0")).unwrap().seeds().collect::<Vec<_>>(),
+        Vec::<u64>::new()
+    );
+    assert!(parse_seed_range(60, Some("abc"), None, None).is_err());
+    assert!(parse_seed_range(60, None, Some(&u64::MAX.to_string()), Some("2")).is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn single_seed_replay_is_deterministic() {
+    if has_explicit_seed_env() {
+        return;
+    }
+    for seed in [0, 7, 42] {
+        let seq1 = run_sequential_seed(seed).await;
+        let seq2 = run_sequential_seed(seed).await;
+        assert_eq!(seq1, seq2, "sequential replay diverged on seed={seed}");
+
+        let (t1, h1) = run_concurrent_seed(seed).await;
+        let (t2, h2) = run_concurrent_seed(seed).await;
+        assert_eq!(t1, t2, "concurrent trace diverged on seed={seed}");
+        assert_eq!(
+            h1.app.wf.reach().snapshot(),
+            h2.app.wf.reach().snapshot(),
+            "concurrent reach diverged on seed={seed}"
+        );
+        assert_eq!(h1.github.operations(), h2.github.operations(), "concurrent gh ops diverged on seed={seed}");
+        assert_eq!(sent_counts(&h1), sent_counts(&h2), "concurrent sends diverged on seed={seed}");
     }
 }

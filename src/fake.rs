@@ -503,6 +503,7 @@ impl T3Client for FakeT3 {
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
+            tokio::task::yield_now().await;
             if tool == "sleep" {
                 self.st().calls.push("sleep".into());
                 return Ok(args);
@@ -821,6 +822,7 @@ impl crate::github::GitHub for FakeGitHub {
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
+            tokio::task::yield_now().await;
             let mut st = self.st();
             let op = operation(query);
             st.calls.push(json!({"operation": op, "query": query, "variables": variables}));
@@ -1156,13 +1158,70 @@ pub fn copy_executable(src: &std::path::Path, dst: &std::path::Path) {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
+    #[tokio::test]
+    async fn zero_delay_fakes_yield_so_joined_tasks_interleave() {
+        use crate::github::GitHub;
+        use futures_util::future::join;
+        use std::sync::Arc;
+
+        let t3 = FakeT3::new();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let a = {
+            let log = log.clone();
+            let t3 = &t3;
+            async move {
+                log.lock().unwrap().push("a:start");
+                t3.call("echo", json!({})).await.unwrap();
+                log.lock().unwrap().push("a:end");
+            }
+        };
+        let b = {
+            let log = log.clone();
+            let t3 = &t3;
+            async move {
+                log.lock().unwrap().push("b:start");
+                t3.call("echo", json!({})).await.unwrap();
+                log.lock().unwrap().push("b:end");
+            }
+        };
+        join(a, b).await;
+        assert_eq!(*log.lock().unwrap(), vec!["a:start", "b:start", "a:end", "b:end"]);
+
+        let gh = FakeGitHub::default();
+        gh.set_pr("acme/widgets", 7, github_pr("1111111", "CLEAN", false));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let vars = json!({"owner": "acme", "name": "widgets", "number": 7});
+        let a = {
+            let log = log.clone();
+            let gh = &gh;
+            let vars = vars.clone();
+            async move {
+                log.lock().unwrap().push("a:start");
+                gh.graphql("query { repository { pullRequest { state } } }", vars).await.unwrap();
+                log.lock().unwrap().push("a:end");
+            }
+        };
+        let b = {
+            let log = log.clone();
+            let gh = &gh;
+            async move {
+                log.lock().unwrap().push("b:start");
+                gh.graphql("query { repository { pullRequest { state } } }", vars).await.unwrap();
+                log.lock().unwrap().push("b:end");
+            }
+        };
+        join(a, b).await;
+        assert_eq!(*log.lock().unwrap(), vec!["a:start", "b:start", "a:end", "b:end"]);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn write_executable_and_copy_executable_preserve_content_and_exec() {
+        use std::process::Command;
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("nested/script");
         let body = "#!/bin/sh\nprintf '%s\\n' '-n \\\\ hello'\n";
