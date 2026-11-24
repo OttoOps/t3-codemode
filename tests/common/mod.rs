@@ -276,13 +276,119 @@ fn body_len(after: &str, body: &str, handle: &str) -> Option<usize> {
     capped.or_else(|| after.starts_with(body).then_some(body.len()))
 }
 
+struct OracleCapture {
+    is_oracle: AtomicBool,
+    silent_all: bool,
+    message: std::sync::Mutex<Option<String>>,
+    location: std::sync::Mutex<Option<String>>,
+}
+
 tokio::task_local! {
-    static ORACLE_VIOLATION: Arc<AtomicBool>;
+    static ORACLE_CAPTURE: Arc<OracleCapture>;
+}
+
+static PANIC_HOOK_INIT: std::sync::Once = std::sync::Once::new();
+
+fn install_quiet_oracle_panic_hook() {
+    PANIC_HOOK_INIT.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let quiet = ORACLE_CAPTURE
+                .try_with(|cap| {
+                    if let Some(loc) = info.location()
+                        && let Ok(mut slot) = cap.location.lock()
+                    {
+                        *slot = Some(format!("{}:{}:{}", loc.file(), loc.line(), loc.column()));
+                    }
+                    cap.silent_all || cap.is_oracle.load(Ordering::Relaxed)
+                })
+                .unwrap_or(false);
+            if !quiet {
+                prev(info);
+            }
+        }));
+    });
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
 }
 
 pub fn oracle_fail(msg: String) -> ! {
-    let _ = ORACLE_VIOLATION.try_with(|flag| flag.store(true, Ordering::Relaxed));
+    let _ = ORACLE_CAPTURE.try_with(|cap| {
+        cap.is_oracle.store(true, Ordering::Relaxed);
+        if let Ok(mut slot) = cap.message.lock() {
+            *slot = Some(msg.clone());
+        }
+    });
     panic!("{msg}");
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProbeResult<T> {
+    Ok(T),
+    OracleFailure(String),
+    OtherPanic { message: String, location: Option<String> },
+}
+
+enum CaptureOutcome<T> {
+    Ok(T),
+    OracleFailure(String),
+    OtherPanic { payload: Box<dyn std::any::Any + Send>, location: Option<String> },
+}
+
+async fn run_captured<T, F>(fut: F, silent_all: bool) -> CaptureOutcome<T>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = T> + Send + 'static,
+{
+    install_quiet_oracle_panic_hook();
+    let cap = Arc::new(OracleCapture {
+        is_oracle: AtomicBool::new(false),
+        silent_all,
+        message: std::sync::Mutex::new(None),
+        location: std::sync::Mutex::new(None),
+    });
+    let seen = cap.clone();
+    match tokio::spawn(ORACLE_CAPTURE.scope(cap, fut)).await {
+        Ok(value) => CaptureOutcome::Ok(value),
+        Err(e) if e.is_panic() => {
+            let payload = e.into_panic();
+            if seen.is_oracle.load(Ordering::Relaxed) {
+                let msg = seen
+                    .message
+                    .lock()
+                    .ok()
+                    .and_then(|mut g| g.take())
+                    .unwrap_or_else(|| panic_payload_message(payload.as_ref()));
+                CaptureOutcome::OracleFailure(msg)
+            } else {
+                let location = seen.location.lock().ok().and_then(|mut g| g.take());
+                CaptureOutcome::OtherPanic { payload, location }
+            }
+        }
+        Err(e) => panic!("oracle task aborted unexpectedly: {e}"),
+    }
+}
+
+pub async fn probe_oracle<T, F>(fut: F) -> ProbeResult<T>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = T> + Send + 'static,
+{
+    match run_captured(fut, true).await {
+        CaptureOutcome::Ok(value) => ProbeResult::Ok(value),
+        CaptureOutcome::OracleFailure(msg) => ProbeResult::OracleFailure(msg),
+        CaptureOutcome::OtherPanic { payload, location } => {
+            ProbeResult::OtherPanic { message: panic_payload_message(payload.as_ref()), location }
+        }
+    }
 }
 
 #[cfg(feature = "test-sentinels")]
@@ -290,22 +396,17 @@ pub async fn caught_by_oracle<F>(fut: F) -> bool
 where
     F: std::future::Future + Send + 'static,
 {
-    let flag = Arc::new(AtomicBool::new(false));
-    let seen = flag.clone();
-    match tokio::spawn(ORACLE_VIOLATION.scope(flag, async move {
-        let _ = fut.await;
-    }))
+    match run_captured(
+        async move {
+            let _ = fut.await;
+        },
+        false,
+    )
     .await
     {
-        Ok(()) => false,
-        Err(e) if e.is_panic() => {
-            if seen.load(Ordering::Relaxed) {
-                true
-            } else {
-                std::panic::resume_unwind(e.into_panic());
-            }
-        }
-        Err(e) => panic!("sentinel task aborted unexpectedly: {e}"),
+        CaptureOutcome::Ok(()) => false,
+        CaptureOutcome::OracleFailure(_) => true,
+        CaptureOutcome::OtherPanic { payload, .. } => std::panic::resume_unwind(payload),
     }
 }
 

@@ -1,0 +1,7 @@
+# source: issue #282 (moved ready card under non-merge gate)
+# failure: reconcile was not idempotent (sent extra messages)
+{"op":"ticket_send_gate","ticket":0}
+{"op":"pr_ready","worker":0,"short_sha":false}
+{"op":"merge_wait_put","pr":0,"ticket":0,"reassigned_id":false}
+{"op":"gh_push","pr":0}
+{"op":"reconcile"}
