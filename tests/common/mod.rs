@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -8,7 +9,7 @@ use t3_codemode::clock::FakeClock;
 use t3_codemode::config::Config;
 use t3_codemode::drift::Home;
 use t3_codemode::fake::{FakeDesktop, FakeGitHub, FakeRemotes, FakeT3, FakeTailscale, provider, thread};
-use t3_codemode::store::Store;
+use t3_codemode::store::{Link, MergeWait, Store};
 
 pub const BOSS: &str = "mcp:boss";
 pub const TICKET: &str = "mcp:ticket";
@@ -179,4 +180,113 @@ pub fn result(out: &ToolOutput) -> Value {
 pub fn err_text(out: &ToolOutput) -> &str {
     assert!(out.is_error, "expected an error, got: {}", out.text);
     &out.text
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CardView {
+    pub kind: String,
+    pub ticket: Option<String>,
+    pub worker: Option<(String, String)>,
+    pub pr: Option<u64>,
+    pub head: Option<String>,
+    pub ready: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkView {
+    pub parent: String,
+    pub closed: bool,
+    pub gate: Option<String>,
+    pub gate_pr: Option<u64>,
+    pub pr: Option<(u64, String, bool)>,
+}
+
+pub type WaitView = (String, String, Option<String>, u32);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    pub cards: Vec<CardView>,
+    pub links: BTreeMap<String, LinkView>,
+    pub merge_waits: BTreeMap<(String, u64), WaitView>,
+    pub pr_events: BTreeSet<(String, u64, String, String)>,
+    pub outbox: BTreeMap<String, usize>,
+    pub delivered: Vec<(String, String, String)>,
+}
+
+pub fn delivered_headers(sent: &[Value]) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for s in sent {
+        let to = s["threadId"].as_str().unwrap_or_default();
+        for line in s["message"].as_str().unwrap_or_default().lines() {
+            let Some(rest) = line.strip_prefix("[t3cm ") else { continue };
+            let kind = rest.split(' ').next().unwrap_or_default();
+            let from = rest.split_once(" from=").map(|(_, f)| f).unwrap_or_default();
+            let from = if from.starts_with('"') {
+                serde_json::Deserializer::from_str(from).into_iter::<String>().next().and_then(Result::ok)
+            } else {
+                from.split([' ', ']']).next().map(String::from)
+            };
+            out.push((to.to_string(), kind.to_string(), from.unwrap_or_default()));
+        }
+    }
+    out
+}
+
+impl H {
+    pub fn snapshot(&self) -> Snapshot {
+        let cards: Vec<CardView> = self
+            .app
+            .wf
+            .cards()
+            .unwrap()
+            .into_iter()
+            .map(|c| CardView {
+                kind: c.kind,
+                ticket: c.ticket,
+                worker: c.worker.map(|w| (w.thread, w.gate)),
+                pr: c.pr.as_ref().map(|p| p.number),
+                head: c.pr.as_ref().and_then(|p| p.head.clone()),
+                ready: c.pr.as_ref().is_some_and(|p| p.ready),
+            })
+            .collect();
+        let db = rusqlite::Connection::open(self.app.store.path()).unwrap();
+        let mut st = db.prepare("SELECT data FROM links").unwrap();
+        let links = st
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|row| {
+                let l: Link = serde_json::from_str(&row.unwrap()).unwrap();
+                let view = LinkView {
+                    parent: l.parent,
+                    closed: l.closed,
+                    gate: l.gate,
+                    gate_pr: l.gate_pr.map(|(_, n)| n),
+                    pr: l.pr.map(|p| (p.number, p.head, p.waiting)),
+                };
+                (l.child, view)
+            })
+            .collect();
+        let mut st = db.prepare("SELECT repo, pr, data FROM merge_waits").unwrap();
+        let merge_waits = st
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get::<_, String>(2)?)))
+            .unwrap()
+            .map(|row| {
+                let (repo, pr, data) = row.unwrap();
+                let w: MergeWait = serde_json::from_str(&data).unwrap();
+                assert_eq!((&w.repo, w.pr), (&repo, pr), "merge wait row key disagrees with its payload");
+                ((repo, pr), (format!("{:?}", w.status), w.head, w.thread, w.failures))
+            })
+            .collect();
+        let mut st = db.prepare("SELECT repo, pr, event, ticket FROM pr_events").unwrap();
+        let pr_events = st
+            .query_map([], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let mut outbox = BTreeMap::new();
+        for item in self.app.store.outbox_all().unwrap() {
+            *outbox.entry(item.to).or_insert(0) += 1;
+        }
+        Snapshot { cards, links, merge_waits, pr_events, outbox, delivered: delivered_headers(&self.sent()) }
+    }
 }
