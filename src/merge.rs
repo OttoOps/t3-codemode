@@ -5,27 +5,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::board::{gh_name, random_id};
-use crate::github::errors;
+use crate::codehost::{Change, ChangeRef, Landed, Landing, State, Viewed};
 use crate::store::{MergeWait, WaitStatus};
 use crate::wf::Wf;
 
-const SETTLED: &[&str] = &["SUCCESS", "CANCELLED", "SKIPPED", "NEUTRAL"];
 const METHODS: &[&str] = &["MERGE", "SQUASH", "REBASE"];
 const REFUSED: &[&str] = &["BEHIND", "DIRTY"];
 const UNKNOWN_READS: usize = 3;
 const UNKNOWN_WAIT: Duration = Duration::from_secs(1);
-
-pub const CHECKS: &str = "fragment Checks on PullRequest { commits(last: 1) { nodes { commit { oid \
-statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage } nodes { __typename \
-... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } } }";
-pub const READ_PR: &str = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { \
-viewerDefaultMergeMethod pullRequest(number: $number) { id state isDraft headRefOid mergeStateStatus \
-isMergeQueueEnabled isInMergeQueue mergeQueueEntry { position } mergeCommit { oid } ...Checks } } }";
-pub const ENQUEUE_PR: &str = "mutation($id: ID!, $head: GitObjectID!) { enqueuePullRequest(input: { \
-pullRequestId: $id, expectedHeadOid: $head }) { mergeQueueEntry { position } } }";
-pub const MERGE_PR: &str = "mutation($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!) { \
-mergePullRequest(input: { pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method }) { \
-pullRequest { mergeCommit { oid } } } }";
 
 #[derive(Debug, PartialEq)]
 pub enum Ready {
@@ -34,50 +21,11 @@ pub enum Ready {
     Failing(String),
 }
 
-struct Tally {
-    failing: Vec<String>,
-    pending: Vec<String>,
-    settled: Vec<String>,
-    complete: bool,
-}
-
-fn tally(pr: &Value) -> Option<Tally> {
-    let commit = &pr["commits"]["nodes"][0]["commit"];
-    let contexts = &commit["statusCheckRollup"]["contexts"];
-    let head = pr["headRefOid"].as_str().unwrap_or_default();
-    let at_head = commit["oid"].as_str().is_some_and(|o| !o.is_empty() && o.eq_ignore_ascii_case(head));
-    let nodes = contexts["nodes"].as_array().filter(|_| at_head)?;
-    let mut failing = Vec::new();
-    let mut pending = Vec::new();
-    let mut settled = Vec::new();
-    for c in nodes {
-        let text = |k: &str| c[k].as_str().unwrap_or("unknown");
-        if c["__typename"] == "StatusContext" {
-            match text("state") {
-                "SUCCESS" => {}
-                "PENDING" | "EXPECTED" => pending.push(text("context").to_string()),
-                s => failing.push(format!("{} ({s})", text("context"))),
-            }
-        } else if c["status"] != "COMPLETED" {
-            pending.push(text("name").to_string());
-        } else {
-            let conclusion = text("conclusion");
-            if !SETTLED.contains(&conclusion) {
-                failing.push(format!("{} ({conclusion})", text("name")));
-            } else if conclusion != "SUCCESS" {
-                settled.push(format!("{} ({conclusion})", text("name")));
-            }
-        }
-    }
-    let complete = !nodes.is_empty() && contexts["pageInfo"]["hasNextPage"] != true;
-    Some(Tally { failing, pending, settled, complete })
-}
-
-pub fn ready(pr: &Value) -> Ready {
-    let state = pr["mergeStateStatus"].as_str().unwrap_or("UNKNOWN");
+pub fn ready(c: &Change) -> Ready {
+    let state = c.merge_state.as_str();
     match state {
         "CLEAN" | "HAS_HOOKS" => {
-            return match tally(pr) {
+            return match &c.checks {
                 Some(t) if !t.failing.is_empty() => Ready::Failing(t.failing.join(", ")),
                 Some(t) if !t.pending.is_empty() => {
                     Ready::Not(format!("merge state {state}, checks still running: {}", t.pending.join(", ")))
@@ -89,7 +37,7 @@ pub fn ready(pr: &Value) -> Ready {
         s => return Ready::Not(format!("merge state {s}")),
     }
     let unread = || Ready::Not("merge state UNSTABLE, and its checks could not be read".into());
-    let Some(t) = tally(pr) else { return unread() };
+    let Some(t) = &c.checks else { return unread() };
     if !t.failing.is_empty() {
         Ready::Failing(t.failing.join(", "))
     } else if !t.complete {
@@ -109,8 +57,8 @@ pub enum CheckState {
     Unread,
 }
 
-pub fn check_state(pr: &Value) -> CheckState {
-    let Some(t) = tally(pr) else { return CheckState::Unread };
+pub fn check_state(c: &Change) -> CheckState {
+    let Some(t) = &c.checks else { return CheckState::Unread };
     if !t.failing.is_empty() {
         CheckState::Failing(t.failing.join(", "))
     } else if !t.complete {
@@ -118,12 +66,12 @@ pub fn check_state(pr: &Value) -> CheckState {
     } else if !t.pending.is_empty() {
         CheckState::Pending(t.pending.join(", "))
     } else {
-        CheckState::Passed(t.settled)
+        CheckState::Passed(t.settled.clone())
     }
 }
 
-pub fn checks(pr: &Value) -> Option<&'static str> {
-    let t = tally(pr)?;
+pub fn checks(c: &Change) -> Option<&'static str> {
+    let t = c.checks.as_ref()?;
     if !t.failing.is_empty() {
         Some("failing")
     } else if !t.complete {
@@ -185,27 +133,24 @@ impl Wf {
         };
         let out = Outcome { repo: format!("{owner}/{name}").to_ascii_lowercase(), pr: a.pr, head: head.clone() };
 
-        let query = format!("{READ_PR} {CHECKS}");
-        let mut read = Value::Null;
+        let r = ChangeRef::github(&format!("{owner}/{name}"), a.pr);
+        let mut viewed = Viewed::NotFound;
         for attempt in 0..UNKNOWN_READS {
             if attempt > 0 {
                 tokio::time::sleep(UNKNOWN_WAIT).await;
             }
-            read = self.github.graphql(&query, json!({"owner": owner, "name": name, "number": a.pr})).await?;
-            let pr = &read["data"]["repository"]["pullRequest"];
-            if errors(&read).is_some() || pr["state"] != "OPEN" || pr["mergeStateStatus"] != "UNKNOWN" {
+            viewed = self.host.view(&r).await?;
+            let Viewed::Found(d) = &viewed else { break };
+            if d.change.state != State::Open || d.change.merge_state != "UNKNOWN" {
                 break;
             }
         }
-        if let Some(e) = errors(&read) {
-            return Ok(out.refused(e));
-        }
-        let repo = &read["data"]["repository"];
-        let pr = &repo["pullRequest"];
-        if pr.is_null() {
-            return Ok(out.refused(format!("{}#{} is not a pull request", out.repo, out.pr)));
-        }
-        let now = pr["headRefOid"].as_str().unwrap_or_default().to_ascii_lowercase();
+        let pr = match viewed {
+            Viewed::Refused(e) => return Ok(out.refused(e)),
+            Viewed::NotFound => return Ok(out.refused(format!("{}#{} is not a pull request", out.repo, out.pr))),
+            Viewed::Found(d) => d.change,
+        };
+        let now = pr.head.clone();
         let merged = |commit: &str| -> Result<()> {
             self.store.merge_wait_remove(&out.repo, out.pr)?;
             if let Some(c) = caller {
@@ -213,29 +158,27 @@ impl Wf {
             }
             Ok(())
         };
-        match pr["state"].as_str() {
-            Some("MERGED") => {
+        match pr.state {
+            State::Merged => {
                 if now != head {
                     self.store.merge_wait_remove(&out.repo, out.pr)?;
                     return Ok(out.refused(format!("already merged, at head {now}")));
                 }
-                merged(pr["mergeCommit"]["oid"].as_str().unwrap_or_default())?;
-                return Ok(out.with("merged", json!({"commit": pr["mergeCommit"]["oid"]})));
+                merged(pr.commit())?;
+                return Ok(out.with("merged", json!({"commit": pr.commit})));
             }
-            Some("OPEN") => {}
-            other => {
-                return Ok(out.refused(format!("the pull request is {}", other.unwrap_or("unknown").to_lowercase())));
-            }
+            State::Open => {}
+            State::Closed => return Ok(out.refused("the pull request is closed")),
         }
-        if pr["isDraft"] == true {
+        if pr.draft {
             return Ok(out.refused("the pull request is a draft"));
         }
         if now != head {
             return Ok(out.refused(format!("head moved: the pull request is at {now}")));
         }
-        let id = pr["id"].as_str().ok_or_else(|| anyhow!("GitHub returned no pull request id"))?;
-        let state = pr["mergeStateStatus"].as_str().unwrap_or("UNKNOWN");
-        let ready = ready(pr);
+        let id = pr.id.as_deref().ok_or_else(|| anyhow!("GitHub returned no pull request id"))?;
+        let state = pr.merge_state.as_str();
+        let ready = ready(&pr);
         let failing = |f: &str| out.refused(format!("a check failed at head {}: {f}", &head[..7]));
         let record = |status: WaitStatus| -> Result<String> {
             let approval = random_id();
@@ -261,12 +204,10 @@ impl Wf {
             Ok(approval)
         };
 
-        if pr["isMergeQueueEnabled"] == true {
-            if pr["isInMergeQueue"] == true {
+        if pr.queue {
+            if pr.queued {
                 let approval = record(WaitStatus::Sent)?;
-                return Ok(
-                    out.with("queued", json!({"position": pr["mergeQueueEntry"]["position"], "approval": approval}))
-                );
+                return Ok(out.with("queued", json!({"position": pr.position, "approval": approval})));
             }
             if let Ready::Failing(f) = &ready {
                 return Ok(failing(f));
@@ -275,34 +216,39 @@ impl Wf {
                 let approval = record(WaitStatus::Waiting)?;
                 return Ok(out.with("waiting", json!({"mergeState": state, "approval": approval})));
             }
-            let r = self.github.graphql(ENQUEUE_PR, json!({"id": id, "head": head})).await?;
-            if let Some(e) = errors(&r) {
-                return Ok(out.refused(e));
-            }
-            let approval = record(WaitStatus::Sent)?;
-            let position = &r["data"]["enqueuePullRequest"]["mergeQueueEntry"]["position"];
-            return Ok(out.with("queued", json!({"position": position, "approval": approval})));
+            return match self.host.merge(&r, id, &head, Landing::Queue).await? {
+                Landed::Refused(e) => Ok(out.refused(e)),
+                Landed::Queued { position } => {
+                    let approval = record(WaitStatus::Sent)?;
+                    Ok(out.with("queued", json!({"position": position, "approval": approval})))
+                }
+                Landed::Merged { commit } => {
+                    merged(commit.as_deref().unwrap_or_default())?;
+                    Ok(out.with("merged", json!({"commit": commit})))
+                }
+            };
         }
 
         match &ready {
             Ready::Yes => {}
             Ready::Failing(f) => return Ok(failing(f)),
-            Ready::Not(_) if !REFUSED.contains(&state) && check_state(pr) != CheckState::Unread => {
+            Ready::Not(_) if !REFUSED.contains(&state) && check_state(&pr) != CheckState::Unread => {
                 let approval = record(WaitStatus::Waiting)?;
                 return Ok(out.with("waiting", json!({"mergeState": state, "approval": approval})));
             }
             Ready::Not(why) => return Ok(out.refused(format!("not mergeable yet ({why})"))),
         }
-        let method = method
-            .clone()
-            .or_else(|| repo["viewerDefaultMergeMethod"].as_str().map(String::from))
-            .unwrap_or_else(|| "MERGE".into());
-        let r = self.github.graphql(MERGE_PR, json!({"id": id, "head": head, "method": method})).await?;
-        if let Some(e) = errors(&r) {
-            return Ok(out.refused(e));
+        let method = method.clone().or_else(|| pr.method.clone()).unwrap_or_else(|| "MERGE".into());
+        match self.host.merge(&r, id, &head, Landing::Merge { method: &method }).await? {
+            Landed::Refused(e) => Ok(out.refused(e)),
+            Landed::Merged { commit } => {
+                merged(commit.as_deref().unwrap_or_default())?;
+                Ok(out.with("merged", json!({"commit": commit, "method": method.to_lowercase()})))
+            }
+            Landed::Queued { position } => {
+                let approval = record(WaitStatus::Sent)?;
+                Ok(out.with("queued", json!({"position": position, "approval": approval})))
+            }
         }
-        let commit = &r["data"]["mergePullRequest"]["pullRequest"]["mergeCommit"]["oid"];
-        merged(commit.as_str().unwrap_or_default())?;
-        Ok(out.with("merged", json!({"commit": commit, "method": method.to_lowercase()})))
     }
 }
