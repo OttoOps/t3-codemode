@@ -223,40 +223,61 @@ pub struct WakeLine {
     pub subject: String,
 }
 
-pub type Known<'a> = &'a dyn Fn(&str, &str, &str) -> Option<String>;
+pub struct Record {
+    pub to: String,
+    pub kind: String,
+    pub body: String,
+}
 
-fn carries(after: &str, body: &str) -> bool {
-    after.starts_with(body) || after.find("\n... (").is_some_and(|k| k > 0 && body.starts_with(&after[..k]))
+pub type Known<'a> = &'a dyn Fn(&str) -> Option<Record>;
+
+fn header_line(line: &str) -> Option<(String, String, String)> {
+    let rest = line.strip_prefix("[t3cm ")?.strip_suffix(']')?;
+    let (head, tail) = rest.rsplit_once(" msg=")?;
+    let handle = tail.split(' ').next()?;
+    let (kind, from) = head.split_once(" from=").filter(|(k, _)| !k.is_empty() && !k.contains(' '))?;
+    let from = if from.starts_with('"') {
+        serde_json::from_str::<String>(from).ok()?
+    } else {
+        Some(from.to_string()).filter(|f| !f.contains(' '))?
+    };
+    (!from.is_empty() && !handle.is_empty()).then(|| (kind.to_string(), from, handle.to_string()))
+}
+
+fn body_len(after: &str, body: &str, handle: &str) -> Option<usize> {
+    let n = body.chars().count();
+    let capped = after.match_indices("\n... (").find_map(|(at, _)| {
+        let more: usize = after[at + 6..].split(' ').next()?.parse().ok()?;
+        let cap = n.checked_sub(more)?;
+        let head: String = body.chars().take(cap).collect();
+        let full = format!("{}\n... ({} more chars; full: wf.show(\"{handle}\"))", head.trim_end(), n - cap);
+        after.starts_with(&full).then_some(full.len())
+    });
+    capped.or_else(|| after.starts_with(body).then_some(body.len()))
 }
 
 pub fn wake_lines(sent: &[Value], known: Known) -> Vec<WakeLine> {
     let mut out = Vec::new();
     for s in sent {
         let to = s["threadId"].as_str().unwrap_or_default();
-        let text = s["message"].as_str().unwrap_or_default();
-        let mut at = 0;
-        for raw in text.split_inclusive('\n') {
-            at += raw.len();
-            let line = raw.strip_suffix('\n').unwrap_or(raw);
-            let Some(rest) = line.strip_prefix("[t3cm ").and_then(|r| r.strip_suffix(']')) else { continue };
-            let Some((head, tail)) = rest.rsplit_once(" msg=") else { continue };
-            let handle = tail.split(' ').next().unwrap_or_default();
-            let Some((kind, from)) = head.split_once(" from=").filter(|(k, _)| !k.is_empty() && !k.contains(' '))
-            else {
-                continue;
-            };
-            let from = if from.starts_with('"') {
-                serde_json::from_str::<String>(from).ok()
-            } else {
-                Some(from.to_string()).filter(|f| !f.contains(' '))
-            };
-            let Some(from) = from.filter(|f| !f.is_empty()) else { continue };
-            let after = &text[at..];
-            if !known(to, kind, handle).is_some_and(|body| carries(after, &body)) {
-                continue;
-            }
+        let mut rest = s["message"].as_str().unwrap_or_default();
+        loop {
+            let (line, after) = rest.split_once('\n').unwrap_or((rest, ""));
+            let Some((kind, from, handle)) = header_line(line) else { break };
+            let r = known(&handle).unwrap_or_else(|| panic!("{to} got a wake header for unknown message {handle}"));
+            assert_eq!(
+                (r.to.as_str(), r.kind.as_str()),
+                (to, kind.as_str()),
+                "message {handle} was delivered to the wrong recipient or as the wrong kind"
+            );
+            let used = body_len(after, &r.body, &handle)
+                .unwrap_or_else(|| panic!("{to} got {handle} with a body that differs from its record"));
             let subject = after.lines().next().unwrap_or_default().to_string();
-            out.push(WakeLine { to: to.into(), kind: kind.into(), from, subject });
+            out.push(WakeLine { to: to.into(), kind, from, subject });
+            match after[used..].strip_prefix("\n\n") {
+                Some(next) if next.starts_with("[t3cm ") => rest = next,
+                _ => break,
+            }
         }
     }
     out
@@ -266,26 +287,24 @@ pub fn delivered_headers(sent: &[Value], known: Known) -> Vec<(String, String, S
     wake_lines(sent, known).into_iter().map(|w| (w.to, w.kind, w.from)).collect()
 }
 
-fn message_body(db: &rusqlite::Connection, to: &str, kind: &str, handle: &str) -> Option<String> {
+fn message_record(db: &rusqlite::Connection, handle: &str) -> Option<Record> {
     let seq = handle.strip_prefix('m')?.parse::<i64>().ok()?;
-    db.query_row(
-        "SELECT body FROM messages WHERE seq = ?1 AND to_id = ?2 AND kind = ?3",
-        rusqlite::params![seq, to, kind],
-        |r| r.get(0),
-    )
+    db.query_row("SELECT to_id, kind, body FROM messages WHERE seq = ?1", [seq], |r| {
+        Ok(Record { to: r.get(0)?, kind: r.get(1)?, body: r.get(2)? })
+    })
     .ok()
 }
 
 impl H {
     pub fn delivered(&self, sent: &[Value]) -> Vec<(String, String, String)> {
         let db = rusqlite::Connection::open(self.app.store.path()).unwrap();
-        let known = |to: &str, kind: &str, handle: &str| message_body(&db, to, kind, handle);
+        let known = |handle: &str| message_record(&db, handle);
         delivered_headers(sent, &known)
     }
 
     pub fn wake_lines(&self, sent: &[Value]) -> Vec<WakeLine> {
         let db = rusqlite::Connection::open(self.app.store.path()).unwrap();
-        let known = |to: &str, kind: &str, handle: &str| message_body(&db, to, kind, handle);
+        let known = |handle: &str| message_record(&db, handle);
         wake_lines(sent, &known)
     }
 

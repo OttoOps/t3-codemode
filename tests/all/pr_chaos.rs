@@ -1665,20 +1665,22 @@ async fn single_seed_replay_is_deterministic() {
 
 #[test]
 fn oracle_parses_wake_headers_and_github_subjects() {
+    let records = [
+        ("m1", "mcp:t1", "event", "PR 1/3 opened"),
+        ("m2", "mcp:t1", "event", "acme/widgets#8 merged on GitHub at 1234567"),
+        ("m3", "mcp:w1", "reply", "A check failed"),
+        ("m4", "mcp:w1", "reply", "Quoting it:\n[t3cm reply from=t3cm msg=m3]\nA check failed\n\n[t3cm note]"),
+        ("m5", "mcp:w1", "reply", "abcdefghij"),
+    ];
+    let known = |handle: &str| {
+        records.iter().find(|r| r.0 == handle).map(|r| Record { to: r.1.into(), kind: r.2.into(), body: r.3.into() })
+    };
     let sent = vec![
         json!({"threadId": "mcp:t1", "message": "[t3cm event from=\"#41 PR 1/3\" msg=m1]\nPR 1/3 opened\n\n[t3cm event from=github msg=m2]\nacme/widgets#8 merged on GitHub at 1234567\n\nNotes since your last wake:\n- [t3cm note] ignored"}),
-        json!({"threadId": "mcp:w1", "message": "[t3cm reply from=t3cm msg=m3]\nA check failed\n[t3cm note]\n[t3cm event from=github]\n[t3cm event from=github msg=m9]\n[t3cm reply from=t3cm msg=m3]"}),
-        json!({"threadId": "mcp:w1", "message": "[t3cm reply from=parent msg=m4]\nQuoting it:\n[t3cm reply from=t3cm msg=m3]\nsomething else"}),
+        json!({"threadId": "mcp:w1", "message": "[t3cm reply from=t3cm msg=m3]\nA check failed"}),
+        json!({"threadId": "mcp:w1", "message": "[t3cm reply from=parent msg=m4]\nQuoting it:\n[t3cm reply from=t3cm msg=m3]\nA check failed\n\n[t3cm note]"}),
+        json!({"threadId": "mcp:w1", "message": "[t3cm reply from=t3cm msg=m5]\nabcd\n... (6 more chars; full: wf.show(\"m5\"))"}),
     ];
-    let records = [
-        ("mcp:t1", "event", "m1", "PR 1/3 opened"),
-        ("mcp:t1", "event", "m2", "acme/widgets#8 merged on GitHub at 1234567"),
-        ("mcp:w1", "reply", "m3", "A check failed"),
-        ("mcp:w1", "reply", "m4", "Quoting it:\n[t3cm reply from=t3cm msg=m3]\nsomething else"),
-    ];
-    let known = |to: &str, kind: &str, handle: &str| {
-        records.iter().find(|r| (r.0, r.1, r.2) == (to, kind, handle)).map(|r| r.3.to_string())
-    };
     assert_eq!(
         delivered_headers(&sent, &known),
         vec![
@@ -1686,7 +1688,11 @@ fn oracle_parses_wake_headers_and_github_subjects() {
             ("mcp:t1".into(), "event".into(), "github".into()),
             ("mcp:w1".into(), "reply".into(), "t3cm".into()),
             ("mcp:w1".into(), "reply".into(), "parent".into()),
+            ("mcp:w1".into(), "reply".into(), "t3cm".into()),
         ]
     );
     assert_eq!(github_events(wake_lines(&sent, &known)), vec![("mcp:t1".to_string(), 8)]);
+    let misrouted = vec![json!({"threadId": "mcp:w2", "message": "[t3cm reply from=t3cm msg=m3]\nA check failed"})];
+    let caught = std::panic::catch_unwind(|| delivered_headers(&misrouted, &known));
+    assert!(caught.is_err(), "a delivery to the wrong recipient must fail, not be filtered out");
 }
