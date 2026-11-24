@@ -1120,6 +1120,38 @@ fixes the others, and that pull request keeps its approval for the next check.
 A read error for one pull request, other than GitHub's `NOT_FOUND`, changes
 nothing for it either.
 
+### GitLab merge requests
+
+The reconcile follows a merge request on a host listed under
+[`forges`](config.md#forges) the same way. It tracks a link of the form
+`https://<host>/<group>[/<subgroup>...]/<project>/-/merge_requests/<iid>` from
+a worker's thread, a card or a gate, and keys it by host and full path, so
+`acme/widgets` on github.com and on a GitLab host never share a record. It
+reads with `glab api` as the user the service runs as, with prompts off and a
+30-second limit per call:
+
+- one GraphQL query for every 10 tracked merge requests on a host, for the
+  state, draft flag, head, `detailedMergeStatus`, merge time, merge commit and
+  merge train car,
+- the merge request's own pipelines for an open one, so readiness is judged on
+  the newest pipeline at its head whose ref is not a merge train's,
+- the merge request over REST for a merged one GraphQL gives no merge commit,
+  such as a squash merge, and for a closed one, to read `squash_commit_sha`
+  and `closed_at`.
+
+The board shows `detailedMergeStatus` as GitHub's merge state words:
+`mergeable` is `CLEAN`, `conflict` is `DIRTY`, `need_rebase` is `BEHIND`,
+`draft_status` is `DRAFT`, `checking`, `unchecked`, `preparing` and
+`approvals_syncing` are `UNKNOWN`, and every other status, pending pipelines
+included, is `BLOCKED`. A merge request in a merge train shows as `queued`.
+A merge, through a train or by hand, squash or not, wakes each ticket with
+one `event` from `gitlab` that says "merged on GitLab" and names the commit on
+the target branch. A close wakes it the same way. When `glab` fails, the
+pull requests on GitHub are still checked.
+
+`wf.pr` and `wf.merge` do not take a merge request yet, so the board opens no
+merge card for one and never merges one.
+
 ## Settling
 
 The board settles finished tickets and answered asks and never deletes them. A ticket that

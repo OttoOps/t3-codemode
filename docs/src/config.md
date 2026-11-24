@@ -211,8 +211,8 @@ All under `board`:
 | `askTimeoutMinutes` | `15` | How long an ask may run |
 | `feed` | `50` | Activity feed entries kept on the page |
 | `settleAfterHours` | `24` | Hours a done ticket or closed ask stays in the main lists; `0` turns auto-settle off |
-| `reconcileActiveMinutes` | `2` | Minutes between GitHub checks while any tracked pull request is queued or waiting to be queued. From 1 to `reconcileIdleMinutes`. |
-| `reconcileIdleMinutes` | `10` | Minutes between GitHub checks otherwise; `0` turns the check off, page loads included. See [The board](board.md#github-reconcile). |
+| `reconcileActiveMinutes` | `2` | Minutes between pull request checks, on GitHub and on the GitLab hosts in `forges`, while any tracked pull request is queued or waiting to be queued. From 1 to `reconcileIdleMinutes`. |
+| `reconcileIdleMinutes` | `10` | Minutes between pull request checks otherwise; `0` turns the check off, page loads included. See [The board](board.md#github-reconcile). |
 | `openLinks` | `desktop` | `desktop`: thread links open in the running T3 Code desktop app, or in a new tab when it is not running. The app check needs Windows, natively or through WSL, so macOS and Linux without WSL always get a tab. `tab`: always a new tab. |
 | `remote` | `null` | Opt-in HTTPS remote board access behind a reverse proxy. `null` or `{"mode": "off"}` keeps the board loopback-only. See [Remote board](#remote-board). |
 
@@ -599,6 +599,28 @@ keeps origin-remote and explicit-project matching. Jira keys check
 |---|---|---|
 | `jira` | `{}` | Maps a Jira project key such as `PROJ`, matched ignoring case, to a T3 project id or title. |
 | `hosts` | `{}` | Maps a tracker hostname without scheme, port or path, matched ignoring case, to a T3 project id or title. |
+
+### Forges
+
+`forges` names the git hosts, other than github.com, whose merge requests the
+board follows. The [reconcile](board.md#gitlab-merge-requests) tracks a merge
+request link on a listed host and wakes its ticket when it merges or closes.
+github.com is built in and takes no entry. A link on a host that is not listed
+is not tracked, and its ticket follows the repository's own documented steps.
+
+```json
+{
+  "forges": {
+    "gitlab.acme.example": { "kind": "gitlab", "cli": "glab" }
+  }
+}
+```
+
+| Key | Default | Does |
+|---|---|---|
+| `<host>` | | A hostname without scheme, port or path, matched ignoring case. |
+| `<host>.kind` | | `gitlab`, the only kind so far. |
+| `<host>.cli` | `glab` | The command the service runs as `<cli> api --hostname <host>`. Its sign-in for that host decides what the board can read. t3cm holds no GitLab token. |
 
 ### Updates
 
