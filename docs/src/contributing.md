@@ -77,6 +77,43 @@ under `tests/chaos_corpus/` during plain `cargo test --locked`. The NDJSON
 loader ignores blank lines and `#` comment lines, so a file can carry
 `# source:` and `# failure:` headers above its ops.
 
+### Nightly chaos
+
+`.github/workflows/chaos-nightly.yml` runs every night on Linux, and on demand
+from the Actions tab. It has three parts:
+
+- **Swarm sweep.** 200,000 sequential seeds in a release build, split across
+  the runner's cores with each shard's temporary files on `/dev/shm`. The first
+  seed is the last eight digits of the run ID times the seed count, so runs
+  sweep different ranges until those digits repeat. A
+  failing shard's seed is shrunk with `CHAOS_SHRINK=1`, and the
+  `chaos-failures` artifact holds one `<hash>/` folder per distinct
+  shrunk `.ops` file. Each folder has the `.ops` file, the shrink log, a replay
+  trace and the seeds that shrank to it. The job summary lists each hash and
+  the `Reach` hit rates per 1,000 seeds.
+- **Coverage and reach.** `cargo-llvm-cov` line and region coverage of `src/`
+  by the `pr_chaos` tests, with the text summary and the `Reach` table in the
+  job summary and an `lcov.info` in the `chaos-coverage` artifact.
+- **Mutation grading.** `cargo-mutants`, configured in `.cargo/mutants.toml`,
+  mutates `src/reconcile.rs`, `src/wf_pr.rs`, `src/merge.rs`, `src/board.rs`
+  and `src/wf.rs` and grades each mutant with the `pr_chaos` tests only, so a
+  survivor is a change the chaos oracle does not notice. Eight shards run in
+  parallel, and the `mutants-survivors` artifact collects `missed.txt` and
+  `timeout.txt`.
+
+A dispatch can set the seed count, the first seed, and a planted sentinel. A
+sentinel builds with `test-sentinels`, so the sweep fails on purpose and shows
+the shrink path working. To promote a failure, download its `.ops` file, check
+that it replays, and commit it under `tests/chaos_corpus/` with the fix:
+
+```bash
+CHAOS_OPS=<hash>.ops cargo test --locked --test all pr_chaos::seeded_sequential_chaos_holds_all_invariants -- --exact --nocapture
+```
+
+The workflow does not file issues. A later job could read the hashes from the
+`chaos-failures` artifact and open or comment on one tracking issue per hash,
+with `issues: write` granted to that job alone.
+
 ## This site
 
 `docs/build.sh` generates the [API reference](api.md) page from `t3cm types`,
