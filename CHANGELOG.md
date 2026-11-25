@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.4](https://github.com/OttoOps/t3-codemode/compare/v0.13.3...v0.13.4) - 2026-11-25
+
+### Other
+
+- add project avatar and social preview
+
 ## [0.13.3](https://github.com/OttoOps/t3-codemode/compare/v0.13.2...v0.13.3) - 2026-11-25
 
 ### Fixed
