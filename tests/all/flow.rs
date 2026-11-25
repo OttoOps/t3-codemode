@@ -6388,6 +6388,118 @@ return {{ depTextBefore, fcFrom2, fcFrom3, reqsBeforeFcPreview, reqsAfterFcPrevi
 }
 
 #[tokio::test]
+async fn a_triage_repaint_keeps_the_proposal_list_scroll_and_focus() {
+    let h = flowing(4);
+    issue(&h, REPO, 1, &[FLOW], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    let (html, st, view) = panel_page(h).await;
+
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        r##"
+const triage = (statuses) => {
+  const changes = statuses.map((status, i) => ({
+    id: "c" + (i + 1), kind: "track", issue: "acme/widgets#2", issueLabel: "widgets#2",
+    value: "lane" + (i + 1), reason: "Lane " + (i + 1), status,
+  }));
+  const pending = statuses.filter((s) => s === "pending").length;
+  return { id: "t1", seq: 1, status: "ready", issueCount: 2, repos: ["acme/widgets"], changes,
+    counts: { total: changes.length, pending, applied: statuses.filter((s) => s === "applied").length,
+      dismissed: statuses.filter((s) => s === "dismissed").length, failed: 0 } };
+};
+let next = null;
+fetchReply = (url) => {
+  if (url === "/api/flow") return reply(200, view);
+  if (url === "/api/flow/triage/t1/apply") return reply(200, { ok: true, applied: 1, alreadySet: 0, failed: 0, results: [], triage: next });
+  if (url === "/api/flow/triage/t1/dismiss") return reply(200, { ok: true, dismissed: false, id: "t1", triage: next });
+  return new Promise(() => {});
+};
+const list = () => q("#graph-triage-box .gtriage-list");
+const act = (kind, id) => q('#graph-triage-box [data-triage-act="' + kind + '"][data-change-id="' + id + '"]');
+const where = () => {
+  const a = document.activeElement;
+  return { top: list().scrollTop, act: a.dataset.triageAct || null, row: a.dataset.changeId || null };
+};
+emitState(base);
+await tick();
+selectTab("graph");
+const ready = triage(["pending", "pending", "pending", "pending", "pending"]);
+emitState({ ...base, flowTriage: ready });
+await tick();
+list().scrollTop = 120;
+act("apply", "c2").focus();
+emitState({ ...base, flowTriage: ready });
+await tick();
+const afterPoll = where();
+const chipIn = (id) => q('#graph-triage-box .gtriage-row[data-change-id="' + id + '"] .gtriage-diff button');
+chipIn("c1").focus();
+emitState({ ...base, flowTriage: ready });
+await tick();
+const chipKept = { top: list().scrollTop, same: document.activeElement === chipIn("c1"), act: document.activeElement.dataset.triageAct || null };
+const gone = triage(["pending", "pending", "pending", "pending", "pending"]);
+gone.changes[0].issue = "acme/widgets#99";
+emitState({ ...base, flowTriage: gone });
+await tick();
+const chipGone = { top: list().scrollTop, act: document.activeElement.dataset.triageAct || null };
+emitState({ ...base, flowTriage: ready });
+await tick();
+act("apply", "c2").focus();
+
+next = triage(["pending", "applied", "pending", "pending", "pending"]);
+act("apply", "c2").dispatch("click");
+await tick();
+const afterConfirm = where();
+
+act("dismiss", "c3").focus();
+next = triage(["pending", "applied", "dismissed", "error", "pending"]);
+act("dismiss", "c3").dispatch("click");
+await tick();
+const afterSkip = where();
+
+act("dismiss", "c5").focus();
+next = triage(["pending", "applied", "dismissed", "error", "dismissed"]);
+act("dismiss", "c5").dispatch("click");
+await tick();
+const afterLastSkip = where();
+return { afterPoll, chipKept, chipGone, afterConfirm, afterSkip, afterLastSkip };
+"##,
+    );
+
+    assert_eq!(
+        r["afterPoll"],
+        json!({"top": 120, "act": "apply", "row": "c2"}),
+        "a state-poll repaint must keep the list's scroll and the focused button: {r}"
+    );
+    assert_eq!(
+        r["chipKept"],
+        json!({"top": 120, "same": true, "act": null}),
+        "a focused issue chip must stay focused, not move to a write button: {r}"
+    );
+    assert_eq!(
+        r["chipGone"],
+        json!({"top": 120, "act": null}),
+        "when the focused chip turns to plain text, focus must not move to a write button: {r}"
+    );
+    assert_eq!(
+        r["afterConfirm"],
+        json!({"top": 120, "act": "apply", "row": "c3"}),
+        "after Confirm, focus moves to the next pending row: {r}"
+    );
+    assert_eq!(
+        r["afterSkip"],
+        json!({"top": 120, "act": "dismiss", "row": "c5"}),
+        "after Skip, focus moves to the next pending row's Skip, past an error row: {r}"
+    );
+    assert_eq!(
+        r["afterLastSkip"],
+        json!({"top": 120, "act": "dismiss", "row": "c1"}),
+        "skipping the last pending row moves focus back to the nearest pending row: {r}"
+    );
+}
+
+#[tokio::test]
 async fn board_triage_dag_safety_guards_cycles_vars_and_scope() {
     let cfg = Config::from_value(json!({
         "flow": {"repos": [REPO], "optIn": {"label": FLOW}, "maxTickets": 4, "launch": "ask"}

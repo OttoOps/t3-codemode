@@ -6283,7 +6283,55 @@ function paintGraphTriage() {
     });
     kids.push(h("ul", { class: "gtriage-list" }, ...items));
   }
+  const kept = triageListKeep(box);
   box.replaceChildren(...kids);
+  triageListRestore(box, kept);
+}
+
+function triageListKeep(box) {
+  const list = box.querySelector(".gtriage-list");
+  const a = document.activeElement;
+  const kept = { top: list ? list.scrollTop || 0 : 0, headId: null, row: null, act: null, ctl: -1, order: [] };
+  if (!a || !box.contains(a)) return kept;
+  const row = list && list.contains(a) ? a.closest(".gtriage-row") : null;
+  if (row) {
+    kept.row = row.dataset.changeId;
+    kept.act = a.dataset.triageAct || null;
+    if (!kept.act) kept.ctl = triageRowCtls(row).indexOf(a);
+    kept.order = [...list.querySelectorAll(".gtriage-row")].map((r) => r.dataset.changeId);
+  } else if (a.id) {
+    kept.headId = a.id;
+  }
+  return kept;
+}
+
+function triageRowCtls(row) {
+  return [...row.querySelectorAll("button, a")].filter((el) => !el.dataset.triageAct);
+}
+
+function triageListRestore(box, kept) {
+  const list = box.querySelector(".gtriage-list");
+  let target = null;
+  if (kept.headId) {
+    target = box.querySelector("#" + kept.headId);
+  } else if (kept.row && list) {
+    const rows = [...list.querySelectorAll(".gtriage-row")];
+    const act = (r) => (kept.act && r.querySelector('[data-triage-act="' + kept.act + '"]')) || r.querySelector("[data-triage-act]");
+    const at = rows.findIndex((r) => r.dataset.changeId === kept.row);
+    if (!kept.act) {
+      target = at >= 0 ? triageRowCtls(rows[at])[kept.ctl] || null : null;
+    } else {
+      const later = new Set(kept.order.slice(kept.order.indexOf(kept.row) + 1));
+      const isLater = (r, i) => (at >= 0 ? i > at : later.has(r.dataset.changeId));
+      const pending = rows.filter((r) => r.dataset.status === "pending" && act(r));
+      const next = (at >= 0 && act(rows[at]) ? rows[at] : null)
+        || pending.find((r) => isLater(r, rows.indexOf(r)))
+        || pending[pending.length - 1];
+      target = next ? act(next) : null;
+    }
+  }
+  if (target) target.focus({ preventScroll: true });
+  if (list) list.scrollTop = kept.top;
 }
 
 async function startGraphTriage() {
