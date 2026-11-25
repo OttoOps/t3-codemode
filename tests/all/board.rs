@@ -1757,6 +1757,10 @@ async fn the_page_is_a_fixed_shell_with_view_tabs_and_skip_links() {
         "Skip to Activity",
         r#"<aside id="composer" class="drawer cdr" role="dialog" aria-modal="true" aria-labelledby="composer-h""#,
         r#"<div class="scrim" id="scrim" hidden></div>"#,
+        ".top .tools > * { flex-shrink: 0; }",
+        ".top:has(.upd:not([hidden])) .vtab .long { display: none; }",
+        ".top:has(.upd:not([hidden])) :is(.tools, .upd) > .btn .w { display: none; }",
+        "@media (max-width: 940px) {",
     ] {
         assert!(html.contains(needle), "missing {needle}");
     }
