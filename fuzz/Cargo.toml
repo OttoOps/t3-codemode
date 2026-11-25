@@ -1,0 +1,33 @@
+[package]
+name = "t3-codemode-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[features]
+test-sentinels = ["t3-codemode/test-sentinels"]
+
+[dependencies]
+arbitrary = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+jiff = "1.0"
+libfuzzer-sys = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.11"
+t3-codemode = { path = ".." }
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "decode_ops"
+path = "fuzz_targets/decode_ops.rs"
+test = false
+doc = false
+bench = false
