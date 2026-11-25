@@ -235,11 +235,16 @@ nothing when none wait. Issues in progress and PRs in progress follow, side by
 side above 1180 px, each row with its full title, one muted line and one
 pill, `Step n/m` for a ticket with more than one pull request. Both layouts
 render the same state and send the same answers, with the same undo, so
-switching loses nothing. Needs you and PRs move focus to their list on the
-Overview, and New issues, Graph and Activity open the Dispatch views in the
-Workspace palette. At 1180 px and below, Workspace drops the left nav and uses
-the Dispatch command bar and view tabs in the Workspace palette, so Launch,
-the layout button and the view tabs stay on screen down to 390 px.
+switching loses nothing. Needs you shows only the cards waiting on you, each
+with its full question and detail, and says so when none wait. PRs shows only
+the pull request list, with its Active, Merged and All filter. New issues,
+Graph and Activity show those views in the Workspace palette. Each nav view
+keeps its address (`#needs`, `#prs`), so a reload returns to it. A shortcut or
+link to a list the current view hides, such as Issues in progress from Needs
+you, goes back to the Overview. At 1180 px and below, Workspace drops the left
+nav for a row of the same six sections under the top bar, which scrolls
+sideways on a phone, so Launch, the layout button and every section stay
+reachable down to 390 px.
 
 The top bar keeps every button on screen in both layouts. The view tabs use
 their short names at 1100 px and below, or at 1240 px and below while the

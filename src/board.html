@@ -1408,7 +1408,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   --ochre-hover: #9a6700;
   --ochre-ink: #ffffff;
   --ochre-text: #9a6700;
-  --ochre-bg: #fff8c5;
+  --ochre-bg: rgb(212 167 44 / 0.14);
   --ochre-bd: rgb(212 167 44 / 0.6);
   --emerald: #1f883d;
   --emerald-text: #1a7f37;
@@ -1487,8 +1487,8 @@ kbd { font-family: var(--mono); font-size: 12px; }
 :root[data-layout="workspace"] .ph h2 .n { font: 400 13px/18px var(--sans); }
 :root[data-layout="workspace"] #p-merged, :root[data-layout="workspace"] .tgroup { display: none; }
 :root[data-layout="workspace"] #p-dec > .ph { min-height: 0; padding: 0 0 8px; border: 0; }
-:root[data-layout="workspace"] #p-dec > .ph h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-:root[data-layout="workspace"] #p-dec > .ph:not(:has(.newbtn:not(.off))) { display: none; }
+:root[data-layout="workspace"] .app:not([data-wsnav="needs"]) #p-dec > .ph h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+:root[data-layout="workspace"] .app:not([data-wsnav="needs"]) #p-dec > .ph:not(:has(.newbtn:not(.off))) { display: none; }
 :root[data-layout="workspace"] .app:not([data-wsnav="needs"]) #p-dec[data-clear] { display: none; }
 :root[data-layout="workspace"] .card {
   grid-template-columns: minmax(0, 1fr) auto; column-gap: 20px; row-gap: 2px; align-items: center; padding: 12px 18px; border-radius: 8px;
@@ -1511,7 +1511,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
 }
 :root[data-layout="workspace"] .card .btn.answer + .btn.answer:hover { background: var(--surface-hover); }
 :root[data-layout="workspace"] .undo-fill { background: var(--go); }
-:root[data-layout="workspace"] .tr { grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; row-gap: 2px; align-items: center; padding: 12px 18px; }
+:root[data-layout="workspace"] .tr { grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; row-gap: 2px; align-items: center; padding: var(--row-pad) 18px; }
 :root[data-layout="workspace"] .tr .mk, :root[data-layout="workspace"] .tr .ids, :root[data-layout="workspace"] .tr .pr,
 :root[data-layout="workspace"] .tr .ws, :root[data-layout="workspace"] .route-wrap { display: none; }
 :root[data-layout="workspace"] .tr .t1 { display: block; grid-column: 1; grid-row: 1; }
@@ -1531,7 +1531,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
 :root[data-layout="workspace"] .tk[data-step] .stp { display: none; }
 :root[data-layout="workspace"] .tr .side .wstep { display: inline-flex; order: -2; color: var(--blue-text); white-space: nowrap; }
 :root[data-layout="workspace"] .tr .side .wstep[hidden] { display: none; }
-:root[data-layout="workspace"] .prow { gap: 2px; padding: 12px 18px; }
+:root[data-layout="workspace"] .prow { gap: 2px; padding: var(--row-pad) 18px; }
 :root[data-layout="workspace"] .prow .pb { color: var(--fg); }
 :root[data-layout="workspace"] .prow .pt { font-size: 15px; line-height: 20px; font-weight: 600; }
 :root[data-layout="workspace"] .prow .pv { margin-left: auto; }
@@ -1542,26 +1542,54 @@ kbd { font-family: var(--mono); font-size: 12px; }
 :root[data-layout="workspace"] .stp .w, :root[data-layout="workspace"] .pv .w, :root[data-layout="workspace"] .wstep .w { font-family: var(--sans); font-size: 12px; font-weight: 600; text-transform: none; letter-spacing: 0; }
 :root[data-layout="workspace"] .spill.s-run { color: var(--emerald-text); }
 :root[data-layout="workspace"] .spill.s-wait, :root[data-layout="workspace"] .spill.s-idle, :root[data-layout="workspace"] .spill.s-pr-open { color: var(--fg-2); }
+:root[data-layout="workspace"] .app[data-wsnav="needs"] .dgrid,
+:root[data-layout="workspace"] .app[data-wsnav="prs"] #p-dec,
+:root[data-layout="workspace"] .app[data-wsnav="prs"] #p-tix { display: none; }
+:root[data-layout="workspace"] .app[data-wsnav="needs"] #p-dec { flex: 1 1 auto; max-height: none; }
+:root[data-layout="workspace"] .app[data-wsnav="needs"] #p-dec > .ph { min-height: 0; padding: 0 0 4px; }
+:root[data-layout="workspace"] .app[data-wsnav="needs"] .card > .detail { display: block; grid-column: 1; }
+:root[data-layout="workspace"] .app[data-wsnav="needs"] .q { -webkit-line-clamp: 3; }
+:root[data-layout="workspace"] .app[data-wsnav="prs"] .dgrid { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+:root[data-layout="workspace"] .fbar .ctx .fbtn { height: 32px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--fg); }
+:root[data-layout="workspace"] .fbar .ctx .fbtn:hover, :root[data-layout="workspace"] .fbar .ctx .fbtn[aria-expanded="true"] { background: var(--surface-hover); }
+:root[data-layout="workspace"] .fbar .ctx .fbtn[data-on] { border-color: var(--accent); color: var(--accent); }
+:root[data-layout="workspace"] .tab[aria-selected="true"] { border-bottom-color: var(--go); }
+:root[data-layout="workspace"] .top .brand-mark { border-color: var(--border-strong); }
+:root[data-layout="workspace"] .top .brand-sig { stroke: var(--go); }
+:root[data-layout="workspace"] .archive-find input[type=search] { border-color: var(--border); border-radius: 6px; }
 @media (max-width: 1180px) {
-  :root[data-layout="workspace"] .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: 56px auto minmax(0, 1fr); }
-  :root[data-layout="workspace"] .wnav { display: none; }
-  :root[data-layout="workspace"] .top, :root[data-layout="workspace"] .tele, :root[data-layout="workspace"] .views-main { grid-column: 1; grid-row: auto; }
-  :root[data-layout="workspace"] .top { padding: 0 16px; }
+  :root[data-layout="workspace"] .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: 56px auto auto minmax(0, 1fr); }
+  :root[data-layout="workspace"] .top { grid-column: 1; grid-row: 1; padding: 0 16px; }
+  :root[data-layout="workspace"] .wnav {
+    grid-column: 1; grid-row: 2; flex-direction: row; gap: 4px; padding: 6px 12px; overflow-x: auto; overflow-y: hidden;
+    background: var(--bg); border-right: 0; border-bottom: 1px solid var(--border); scrollbar-width: none;
+  }
+  :root[data-layout="workspace"] .wnav::-webkit-scrollbar { display: none; }
+  :root[data-layout="workspace"] .wlogo { display: none; }
+  :root[data-layout="workspace"] .wni { flex: none; width: auto; min-height: 32px; white-space: nowrap; }
+  :root[data-layout="workspace"] .tele { grid-column: 1; grid-row: 3; }
+  :root[data-layout="workspace"] .views-main { grid-column: 1; grid-row: 4; }
   :root[data-layout="workspace"] .top .btn.go { order: 0; }
-  :root[data-layout="workspace"] .top .brand, :root[data-layout="workspace"] .views { display: flex; }
+  :root[data-layout="workspace"] .top .brand { display: flex; }
   :root[data-layout="workspace"] .tele { height: auto; min-height: 42px; padding: 6px 12px; flex-wrap: wrap; }
   :root[data-layout="workspace"] .tele .fbar { flex: 1 1 100%; flex-wrap: wrap; }
   :root[data-layout="workspace"] .tele .search { flex: 1 1 200px; }
   :root[data-layout="workspace"] .dgrid { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 820px) {
-  :root[data-layout="workspace"] .app { grid-template-rows: auto auto minmax(0, 1fr); }
+  :root[data-layout="workspace"] .app { grid-template-rows: auto auto auto minmax(0, 1fr); }
   :root[data-layout="workspace"] .top { padding: 0 12px; }
   :root[data-layout="workspace"] .view { padding: 12px 12px 24px; }
   :root[data-layout="workspace"] .card { grid-template-columns: minmax(0, 1fr); }
   :root[data-layout="workspace"] .card > .act, :root[data-layout="workspace"] .card > .sending { grid-column: 1; grid-row: auto; margin-top: 6px; min-width: 0; }
   :root[data-layout="workspace"] .act { flex-wrap: wrap; justify-content: flex-start; }
   :root[data-layout="workspace"] .q { -webkit-line-clamp: 3; }
+}
+@media (max-width: 640px) {
+  :root[data-layout="workspace"] .wnav { padding: 6px 8px; gap: 2px; }
+  :root[data-layout="workspace"] .wni { padding: 0 8px; font-size: 13px; gap: 6px; }
+  :root[data-layout="workspace"] .tr, :root[data-layout="workspace"] .prow { padding: var(--row-pad) 12px; }
+  :root[data-layout="workspace"] .ph { padding: 10px 12px; }
 }
 </style>
 </head>
@@ -2103,6 +2131,7 @@ try {
 const WS_NAV = ["overview", "needs", "prs", "issues", "graph", "activity"];
 const WS_VIEW = { overview: "dispatch", needs: "dispatch", prs: "dispatch", issues: "issues", graph: "queue", activity: "activity" };
 const WS_WORD = { overview: "Overview", needs: "Needs you", prs: "PRs", issues: "New issues", graph: "Graph", activity: "Activity" };
+const WS_LISTS = { overview: ["cards", "open", "prs"], needs: ["cards"], prs: ["prs"] };
 
 function h(tag, attrs, ...kids) {
   const el = document.createElement(tag);
@@ -2473,14 +2502,30 @@ function setLayout(pref) {
   layout.pref = pref;
   try { localStorage.setItem(LAYOUT_KEY, pref); } catch (_) {}
   applyLayout();
+  saveHash();
   announce("Layout: " + LAYOUT_WORD[pref] + ".");
 }
 
 function paintWsNav() {
   const view = $("app").dataset.view;
   if (WS_VIEW[layout.nav] !== view) layout.nav = WS_NAV.find((k) => WS_VIEW[k] === view) || "overview";
+  const moved = $("app").dataset.wsnav !== layout.nav;
   setAttr($("app"), "data-wsnav", layout.nav);
   for (const k of WS_NAV) setAttr($("wn-" + k), "aria-current", k === layout.nav ? "page" : null);
+  const nav = $("wnav");
+  if (moved && nav.scrollWidth > nav.clientWidth) {
+    const b = $("wn-" + layout.nav);
+    nav.scrollLeft = Math.max(0, b.offsetLeft - (nav.clientWidth - b.offsetWidth) / 2);
+  }
+}
+
+function wsReveal(list) {
+  if (layout.pref !== "workspace" || !viewIs("dispatch")) return;
+  const shows = WS_LISTS[layout.nav];
+  if (!shows || shows.includes(list.id) || !WS_LISTS.overview.includes(list.id)) return;
+  layout.nav = "overview";
+  paintWsNav();
+  saveHash();
 }
 
 function wsGo(key) {
@@ -2900,6 +2945,7 @@ function rove(list) {
 
 function focusItem(list, el) {
   if (!el) return;
+  wsReveal(list);
   list._active = el;
   rove(list);
   el.focus();
@@ -7727,7 +7773,8 @@ function selectTab(tab, focus) {
 
 function saveHash() {
   const app = $("app");
-  const tag = "#" + app.dataset.view + (app.dataset.view === "activity" && app.dataset.tab === "settled" ? "-settled" : "");
+  const ws = layout.pref === "workspace" && app.dataset.view === "dispatch" && WS_LISTS[layout.nav] && layout.nav !== "overview";
+  const tag = "#" + (ws ? layout.nav : app.dataset.view) + (app.dataset.view === "activity" && app.dataset.tab === "settled" ? "-settled" : "");
   try { if (location.hash !== tag) history.replaceState(null, "", tag); } catch (_) {}
 }
 
@@ -7735,7 +7782,8 @@ function loadHash() {
   let hsh = "";
   try { hsh = (location.hash || "").slice(1); } catch (_) {}
   const [view, tab] = hsh.split("-");
-  const legacy = { decisions: "dispatch", tickets: tab === "graph" ? "queue" : tab === "done" || tab === "settled" || tab === "activity" ? "activity" : "dispatch" }[view];
+  const legacy = { decisions: "dispatch", needs: "dispatch", prs: "dispatch", tickets: tab === "graph" ? "queue" : tab === "done" || tab === "settled" || tab === "activity" ? "activity" : "dispatch" }[view];
+  if (view === "needs" || view === "prs") layout.nav = view;
   let want = VIEWS.includes(view) ? view : legacy || "";
   if (!want) { try { want = localStorage.getItem(VIEW_KEY) || ""; } catch (_) { want = ""; } }
   if (tab === "settled" || tab === "done") selectTab(tab);
@@ -7861,7 +7909,7 @@ function jump(where) {
   }
   if (["decisions", "tickets", "issues", "queue", "activity"].includes(where)) closeModals();
   if (where === "decisions") { layout.nav = "needs"; selectView("dispatch"); focusList($("cards")); }
-  else if (where === "tickets") { selectView("dispatch"); focusList($("open")); }
+  else if (where === "tickets") { layout.nav = "overview"; selectView("dispatch"); focusList($("open")); }
   else if (where === "issues") { selectView("issues"); focusList($("nis")); }
   else if (where === "queue") {
     selectView("queue");
@@ -7872,6 +7920,7 @@ function jump(where) {
 }
 
 function focusList(list) {
+  wsReveal(list);
   const all = items(list).filter((el) => !el.hidden);
   if (all.length) focusItem(list, list._active && list._active.parentNode === list && !list._active.hidden ? list._active : all[0]);
   else { setAttr(list, "tabindex", "-1"); list.focus(); }
