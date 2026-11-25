@@ -128,7 +128,7 @@ summary, with each missed and timed-out mutant listed below the table. The
 `mutants-diff` artifact holds the same files.
 
 The check is advisory. It runs in its own workflow, outside the required
-`check` job in `ci.yml`, and passes when mutants survive: it fails only when
+`check` job in `ci.yml`, and it passes when mutants survive. It fails only when
 cargo-mutants itself fails, such as when the unmutated tree does not build.
 Expect survivors in `src/board.rs` rendering code, which the chaos tests do not
 reach. A survivor in code your PR adds is worth a look: either a `pr_chaos`
