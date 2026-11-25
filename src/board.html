@@ -5186,6 +5186,7 @@ function paintFlow(v) {
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const GEO = { W: 168, H: 62, GAP: 32, ROW: 10, PAD: 10, HEAD: 28, LANE_GAP: 8 };
+const ROUTE = { HEAD_TEXT: 22, H_PAD: 7, H_STEP: 8, V_PAD: 12, V_STEP: 8, R: 6, K: 0.5523 };
 const TRACK_RANK = { label: 0, epic: 1, milestone: 2, repo: 2, component: 3, independent: 4, none: 5 };
 const graph = { mode: "tickets", pin: null, nodes: new Map(), byThread: new Map(), edges: [], dismissed: [], order: [], sig: null, held: false,
   pointer: false, hot: null, hover: null, focus: null, lead: null, active: null, btns: new Map(), paths: [], marks: null, lay: null,
@@ -5424,20 +5425,333 @@ function graphLayout(nodes, edges) {
     out.push({ name: l.name, by: l.by === "component" && !l.linked ? "none" : l.by, rows: height, count: l.idx.length, top: 0 });
     y += height;
   });
-  let top = 0;
-  for (const l of out) {
-    l.top = top;
-    l.h = GEO.HEAD + l.rows * (GEO.H + GEO.ROW) + GEO.PAD - GEO.ROW;
-    top += l.h + GEO.LANE_GAP;
-  }
-  for (const [id, p] of pos) {
-    p.x = GEO.PAD + p.col * (GEO.W + GEO.GAP);
-    p.y = out[p.lane].top + GEO.HEAD + p.row * (GEO.H + GEO.ROW);
-  }
   const maxCol = Math.max(0, ...[...pos.values()].map((p) => p.col));
-  const width = GEO.PAD + GEO.GAP / 2 + (maxCol + 1) * GEO.W + maxCol * GEO.GAP;
+  const routed = graphRoute(pos, out, maxCol, edges);
   const seq = [...pos.entries()].sort((a, b) => a[1].lane - b[1].lane || a[1].col - b[1].col || a[1].row - b[1].row).map((x) => x[0]);
-  return { pos, lanes: out, width, height: Math.max(0, top - GEO.LANE_GAP), seq };
+  return { pos, lanes: out, width: routed.width, height: routed.height, routes: routed.routes, seq };
+}
+
+function fmtNum(n) {
+  return String(Math.round(n * 100) / 100 || 0);
+}
+
+function cmpTuple(a, b) {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  return 0;
+}
+
+function routedOrthoPath(pts) {
+  let d = "M" + fmtNum(pts[0][0]) + " " + fmtNum(pts[0][1]);
+  const n = pts.length;
+  for (let i = 1; i < n - 1; i++) {
+    const [ax, ay] = pts[i - 1], [cx, cy] = pts[i], [bx, by] = pts[i + 1];
+    const d1x = cx - ax, d1y = cy - ay, len1 = Math.hypot(d1x, d1y);
+    const d2x = bx - cx, d2y = by - cy, len2 = Math.hypot(d2x, d2y);
+    if (len1 < 1e-6 || len2 < 1e-6) continue;
+    const r = Math.min(ROUTE.R, len1 / 2, len2 / 2);
+    const u1x = d1x / len1, u1y = d1y / len1;
+    const u2x = d2x / len2, u2y = d2y / len2;
+    const p0x = cx - u1x * r, p0y = cy - u1y * r;
+    const p3x = cx + u2x * r, p3y = cy + u2y * r;
+    const h = r * (1 - ROUTE.K);
+    const p1x = cx - u1x * h, p1y = cy - u1y * h;
+    const p2x = cx + u2x * h, p2y = cy + u2y * h;
+    d += "L" + fmtNum(p0x) + " " + fmtNum(p0y)
+      + "C" + fmtNum(p1x) + " " + fmtNum(p1y) + " " + fmtNum(p2x) + " " + fmtNum(p2y) + " " + fmtNum(p3x) + " " + fmtNum(p3y);
+  }
+  d += "L" + fmtNum(pts[n - 1][0]) + " " + fmtNum(pts[n - 1][1]);
+  return d;
+}
+
+function graphRoute(pos, out, maxCol, edges) {
+  const pairKey = (a, b) => (a < b ? a + "\0" + b : b + "\0" + a);
+  const pairTotals = new Map();
+  const pairSeen = new Map();
+  const items = [];
+  for (let ei = 0; ei < edges.length; ei++) {
+    const e = edges[ei];
+    const rawSrc = pos.get(e.to), rawDst = pos.get(e.from);
+    if (!rawSrc || !rawDst) { items.push(null); continue; }
+    const pk = pairKey(e.from, e.to);
+    pairTotals.set(pk, (pairTotals.get(pk) || 0) + 1);
+    const directed = edgeDirected(e);
+    const flip = e.kind === "fileConflict" && rawSrc.col > rawDst.col;
+    const src = flip ? rawDst : rawSrc;
+    const dst = flip ? rawSrc : rawDst;
+    const srcId = flip ? e.from : e.to;
+    const dstId = flip ? e.to : e.from;
+    let mode;
+    if (e.from === e.to) mode = "self";
+    else if (dst.col === src.col) mode = "sameCol";
+    else if (dst.col === src.col + 1) mode = "adjFwd";
+    else if (dst.col === src.col - 1) mode = "adjBack";
+    else if (dst.col > src.col + 1) mode = "routedFwd";
+    else mode = "routedBack";
+    items.push({ ei, e, directed, src, dst, srcId, dstId, pk, mode });
+  }
+  for (const it of items) {
+    if (!it) continue;
+    it.pairTotal = pairTotals.get(it.pk) || 1;
+    it.pairIdx = pairSeen.get(it.pk) || 0;
+    pairSeen.set(it.pk, it.pairIdx + 1);
+  }
+
+  // 1. Choose horizontal gutter for each multi-column edge (forward or backward) and pack horizontal tracks.
+  const routed = items.filter((it) => it && (it.mode === "routedFwd" || it.mode === "routedBack"));
+  for (const it of routed) {
+    // Use facing vertical gutters so every routed edge stays inside interior column gaps.
+    it.vExit = it.mode === "routedFwd" ? it.src.col : it.src.col - 1;
+    it.vEnter = it.mode === "routedFwd" ? it.dst.col - 1 : it.dst.col;
+    it.hLo = Math.min(it.vExit, it.vEnter);
+    it.hHi = Math.max(it.vExit, it.vEnter);
+  }
+  const hPlaced = new Map();
+  const hBuckets = new Map();
+  const hOverlaps = (key, lo, hi) => (hPlaced.get(key) || []).filter((iv) => lo <= iv.hi && iv.lo <= hi).length;
+  const pickBestH = (cands, lo, hi, pref) => {
+    let best = cands[0][0], bestLoad = Infinity, bestDist = Infinity;
+    for (const [key, idx] of cands) {
+      const load = hOverlaps(key, lo, hi);
+      const dist = Math.abs(idx - pref);
+      if (load < bestLoad || (load === bestLoad && dist < bestDist)) { best = key; bestLoad = load; bestDist = dist; }
+    }
+    return best;
+  };
+  const routedChoiceOrder = [...routed].sort((a, b) =>
+    (a.hHi - a.hLo) - (b.hHi - b.hLo) || a.hLo - b.hLo || a.src.lane - b.src.lane || a.src.row - b.src.row
+    || a.dst.lane - b.dst.lane || a.dst.row - b.dst.row || a.ei - b.ei);
+  for (const it of routedChoiceOrder) {
+    let key;
+    if (it.src.lane !== it.dst.lane) {
+      const loL = Math.min(it.src.lane, it.dst.lane), hiL = Math.max(it.src.lane, it.dst.lane);
+      const cands = [];
+      for (let li = loL; li < hiL; li++) cands.push(["b:" + li, li]);
+      key = pickBestH(cands, it.hLo, it.hHi, (loL + hiL - 1) / 2);
+    } else if (it.src.row !== it.dst.row) {
+      const li = it.src.lane, loR = Math.min(it.src.row, it.dst.row), hiR = Math.max(it.src.row, it.dst.row);
+      const cands = [];
+      for (let g = loR + 1; g <= hiR; g++) cands.push(["i:" + li + ":" + g, g]);
+      key = pickBestH(cands, it.hLo, it.hHi, (loR + hiR + 1) / 2);
+    } else {
+      const li = it.src.lane, r = it.src.row, rows = out[li].rows;
+      if (it.mode === "routedBack") key = "i:" + li + ":" + (r + 1);
+      else if (r === 0) key = "i:" + li + ":0";
+      else if (r === rows - 1) key = "i:" + li + ":" + rows;
+      else key = pickBestH([["i:" + li + ":" + r, r], ["i:" + li + ":" + (r + 1), r + 1]], it.hLo, it.hHi, r);
+    }
+    it.hKey = key;
+    (hPlaced.get(key) || hPlaced.set(key, []).get(key)).push({ lo: it.hLo, hi: it.hHi });
+    (hBuckets.get(key) || hBuckets.set(key, []).get(key)).push(it);
+  }
+  const hCounts = new Map();
+  for (const [key, list] of hBuckets) {
+    list.sort((a, b) => a.hLo - b.hLo || a.hHi - b.hHi || a.src.lane - b.src.lane || a.src.row - b.src.row
+      || a.dst.lane - b.dst.lane || a.dst.row - b.dst.row || a.ei - b.ei);
+    const ends = [];
+    for (const it of list) {
+      let t = ends.findIndex((end) => it.hLo > end);
+      if (t < 0) { t = ends.length; ends.push(it.hHi); }
+      else ends[t] = it.hHi;
+      it.hTrack = t;
+    }
+    hCounts.set(key, ends.length);
+  }
+
+  // 2. Compute Y coordinates for lanes, rows, nodes, and horizontal bus tracks.
+  const hNeed = (k) => (k > 0 ? 2 * ROUTE.H_PAD + (k - 1) * ROUTE.H_STEP : 0);
+  const hTrackY = new Map();
+  const placeHTracks = (key, k, bandTop, bandH) => {
+    const span = (k - 1) * ROUTE.H_STEP;
+    const y0 = bandTop + (bandH - span) / 2;
+    hTrackY.set(key, Array.from({ length: k }, (_, t) => y0 + t * ROUTE.H_STEP));
+  };
+  let top = 0;
+  const rowY = [];
+  for (let li = 0; li < out.length; li++) {
+    const l = out[li];
+    l.top = top;
+    const topKey = "i:" + li + ":0";
+    const topK = hCounts.get(topKey) || 0;
+    const headH = topK ? Math.max(GEO.HEAD, ROUTE.HEAD_TEXT + hNeed(topK)) : GEO.HEAD;
+    if (topK) placeHTracks(topKey, topK, l.top + ROUTE.HEAD_TEXT, headH - ROUTE.HEAD_TEXT);
+    let curY = l.top + headH;
+    const ys = [];
+    for (let r = 0; r < l.rows; r++) {
+      ys.push(curY);
+      curY += GEO.H;
+      if (r < l.rows - 1) {
+        const rk = "i:" + li + ":" + (r + 1);
+        const rkK = hCounts.get(rk) || 0;
+        const gap = rkK ? Math.max(GEO.ROW, hNeed(rkK)) : GEO.ROW;
+        if (rkK) placeHTracks(rk, rkK, curY, gap);
+        curY += gap;
+      }
+    }
+    rowY.push(ys);
+    const botKey = "i:" + li + ":" + l.rows;
+    const botK = hCounts.get(botKey) || 0;
+    const botPad = botK ? Math.max(GEO.PAD, hNeed(botK)) : GEO.PAD;
+    if (botK) placeHTracks(botKey, botK, curY, botPad);
+    l.h = (curY + botPad) - l.top;
+    top += l.h;
+    if (li < out.length - 1) {
+      const bk = "b:" + li;
+      const bkK = hCounts.get(bk) || 0;
+      const lgap = bkK ? Math.max(GEO.LANE_GAP, hNeed(bkK)) : GEO.LANE_GAP;
+      if (bkK) placeHTracks(bk, bkK, top, lgap);
+      top += lgap;
+    }
+  }
+  for (const p of pos.values()) p.y = rowY[p.lane][p.row];
+  const height = top;
+
+  // 3. Spread node attachment ports per card border (right border: fwd exits + back enters; left border: fwd enters + back exits).
+  const rightPorts = new Map();
+  const leftPorts = new Map();
+  const addPort = (map, id, entry) => { (map.get(id) || map.set(id, []).get(id)).push(entry); };
+  for (const it of routed) {
+    it.yBus = hTrackY.get(it.hKey)[it.hTrack];
+    if (it.mode === "routedFwd") {
+      addPort(rightPorts, it.srcId, { it, field: "sy" });
+      addPort(leftPorts, it.dstId, { it, field: "dy" });
+    } else {
+      addPort(leftPorts, it.srcId, { it, field: "sy" });
+      addPort(rightPorts, it.dstId, { it, field: "dy" });
+    }
+  }
+  const spreadPorts = (map) => {
+    for (const [id, list] of map) {
+      const p = pos.get(id);
+      const mid = p.y + GEO.H / 2;
+      if (list.length === 1) { list[0].it[list[0].field] = mid; continue; }
+      list.sort((a, b) => a.it.yBus - b.it.yBus || a.it.ei - b.it.ei);
+      const step = Math.min(8, 36 / (list.length - 1));
+      const start = mid - ((list.length - 1) * step) / 2;
+      list.forEach((entry, k) => { entry.it[entry.field] = start + k * step; });
+    }
+  };
+  spreadPorts(rightPorts);
+  spreadPorts(leftPorts);
+
+  // 4. Pack vertical gutter tracks for routed legs and bend slots for same-column curves.
+  const vLegs = new Map();
+  const addLeg = (v, leg) => { (vLegs.get(v) || vLegs.set(v, []).get(v)).push(leg); };
+  for (const it of routed) {
+    const exitSide = it.mode === "routedFwd" ? 0 : 1;
+    const enterSide = it.mode === "routedFwd" ? 1 : 0;
+    addLeg(it.vExit, { it, role: "exit", side: exitSide, portY: it.sy, loY: Math.min(it.sy, it.yBus), hiY: Math.max(it.sy, it.yBus) });
+    addLeg(it.vEnter, { it, role: "enter", side: enterSide, portY: it.dy, loY: Math.min(it.dy, it.yBus), hiY: Math.max(it.dy, it.yBus) });
+  }
+  const legKey = (leg) => {
+    const it = leg.it;
+    const above = it.yBus < leg.portY;
+    // Legs attached to the left card sit on the left of the gutter (side 0), right-card legs on the right (side 1).
+    const sub = leg.side === 0 ? (above ? it.yBus : -it.yBus) : (above ? -it.yBus : it.yBus);
+    return [leg.side, above ? 0 : 1, sub, it.ei];
+  };
+  const vCounts = new Map();
+  for (const [v, list] of vLegs) {
+    list.sort((a, b) => cmpTuple(legKey(a), legKey(b)));
+    const tracks = [];
+    for (const leg of list) {
+      let t = tracks.findIndex((ivs) => !ivs.some((iv) => leg.loY <= iv.hiY + 4 && iv.loY <= leg.hiY + 4));
+      if (t < 0) { t = tracks.length; tracks.push([]); }
+      tracks[t].push({ loY: leg.loY, hiY: leg.hiY });
+      if (leg.role === "exit") leg.it.vExitTrack = t;
+      else leg.it.vEnterTrack = t;
+    }
+    vCounts.set(v, tracks.length);
+  }
+
+  const sameBuckets = new Map();
+  for (const it of items) {
+    if (!it || (it.mode !== "sameCol" && it.mode !== "self")) continue;
+    const sy = it.src.y + GEO.H / 2, dy = it.dst.y + GEO.H / 2;
+    it.sameLoY = it.mode === "self" ? sy - 14 : Math.min(sy, dy);
+    it.sameHiY = it.mode === "self" ? sy + 14 : Math.max(sy, dy);
+    const c = it.src.col;
+    (sameBuckets.get(c) || sameBuckets.set(c, []).get(c)).push(it);
+  }
+  const sameMaxSlot = new Map();
+  for (const [c, list] of sameBuckets) {
+    list.sort((a, b) => a.sameLoY - b.sameLoY || a.sameHiY - b.sameHiY || a.ei - b.ei);
+    const tracks = [];
+    for (const it of list) {
+      let t = tracks.findIndex((ivs) => !ivs.some((iv) => it.sameLoY <= iv.hiY + 4 && iv.loY <= it.sameHiY + 4));
+      if (t < 0) { t = tracks.length; tracks.push([]); }
+      tracks[t].push({ loY: it.sameLoY, hiY: it.sameHiY });
+      it.sameSlot = t;
+    }
+    sameMaxSlot.set(c, tracks.length - 1);
+  }
+
+  // 5. Compute X coordinates for columns and vertical bus tracks, growing gutters only as needed.
+  const vTrackX = new Map();
+  const colX = new Array(maxCol + 1);
+  colX[0] = GEO.PAD;
+  for (let c = 0; c < maxCol; c++) {
+    const k = vCounts.get(c) || 0;
+    const needRouted = k ? 2 * ROUTE.V_PAD + (k - 1) * ROUTE.V_STEP : 0;
+    const needSame = sameMaxSlot.has(c) ? Math.ceil(0.75 * (GEO.GAP / 2 + sameMaxSlot.get(c) * 14) + 6) : 0;
+    const gap = Math.max(GEO.GAP, needRouted, needSame);
+    const gLeft = colX[c] + GEO.W;
+    if (k) {
+      const span = (k - 1) * ROUTE.V_STEP;
+      const bandL = gLeft + ROUTE.V_PAD;
+      const bandR = gLeft + gap - ROUTE.V_PAD;
+      const x0 = bandL + ((bandR - bandL) - span) / 2;
+      vTrackX.set(c, Array.from({ length: k }, (_, t) => x0 + t * ROUTE.V_STEP));
+    }
+    colX[c + 1] = gLeft + gap;
+  }
+  const needRightSame = sameMaxSlot.has(maxCol) ? Math.ceil(0.75 * (GEO.GAP / 2 + sameMaxSlot.get(maxCol) * 14) + 6) : 0;
+  const width = colX[maxCol] + GEO.W + Math.max(GEO.GAP / 2, needRightSame);
+  for (const p of pos.values()) p.x = colX[p.col];
+
+  // 6. Generate final SVG path d strings in original edges order.
+  const routes = items.map((it) => {
+    if (!it) return null;
+    if (it.mode === "adjFwd" || it.mode === "adjBack") {
+      const fwd = it.mode === "adjFwd";
+      const spread = it.pairTotal > 1 ? (it.pairIdx - (it.pairTotal - 1) / 2) : 0;
+      const portStep = it.pairTotal > 1 ? Math.min(8, 36 / (it.pairTotal - 1)) : 0;
+      const yOff = spread * portStep;
+      const sy = it.src.y + GEO.H / 2 + yOff, dy = it.dst.y + GEO.H / 2 + yOff;
+      const bow = spread * 14;
+      const x1 = fwd ? it.src.x + GEO.W : it.src.x;
+      const x2 = fwd ? it.dst.x - (it.directed ? 2 : 0) : it.dst.x + GEO.W + (it.directed ? 2 : 0);
+      const spanX = Math.abs(x2 - x1);
+      const dx = Math.min(spanX, Math.max(12, spanX / 2));
+      const dir = fwd ? 1 : -1;
+      return "M" + fmtNum(x1) + " " + fmtNum(sy) + "C" + fmtNum(x1 + dir * dx) + " " + fmtNum(sy + bow)
+        + " " + fmtNum(x2 - dir * dx) + " " + fmtNum(dy + bow) + " " + fmtNum(x2) + " " + fmtNum(dy);
+    }
+    if (it.mode === "sameCol") {
+      const sy = it.src.y + GEO.H / 2, dy = it.dst.y + GEO.H / 2;
+      const x = it.src.x + GEO.W, bend = x + GEO.GAP / 2 + it.sameSlot * 14;
+      return "M" + fmtNum(x) + " " + fmtNum(sy) + "C" + fmtNum(bend) + " " + fmtNum(sy)
+        + " " + fmtNum(bend) + " " + fmtNum(dy) + " " + fmtNum(it.dst.x + GEO.W + (it.directed ? 2 : 0)) + " " + fmtNum(dy);
+    }
+    if (it.mode === "self") {
+      const sy = it.src.y + GEO.H / 2, x = it.src.x + GEO.W, bend = x + GEO.GAP / 2 + it.sameSlot * 14;
+      return "M" + fmtNum(x) + " " + fmtNum(sy - 8) + "C" + fmtNum(bend) + " " + fmtNum(sy - 14)
+        + " " + fmtNum(bend) + " " + fmtNum(sy + 14) + " " + fmtNum(x + (it.directed ? 2 : 0)) + " " + fmtNum(sy + 8);
+    }
+    const fwd = it.mode === "routedFwd";
+    const x1 = fwd ? it.src.x + GEO.W : it.src.x;
+    const x2 = fwd ? it.dst.x - (it.directed ? 2 : 0) : it.dst.x + GEO.W + (it.directed ? 2 : 0);
+    const xExit = vTrackX.get(it.vExit)[it.vExitTrack];
+    const xEnter = vTrackX.get(it.vEnter)[it.vEnterTrack];
+    return routedOrthoPath([
+      [x1, it.sy],
+      [xExit, it.sy],
+      [xExit, it.yBus],
+      [xEnter, it.yBus],
+      [xEnter, it.dy],
+      [x2, it.dy],
+    ]);
+  });
+  return { width, height, routes };
 }
 
 function graphState(n, ctx) {
@@ -6131,39 +6445,15 @@ function graphBuild(box, lay, edges) {
   });
   if (wide > lay.width) { root.setAttribute("width", wide); root.setAttribute("viewBox", "0 0 " + wide + " " + lay.height); }
   const eg = svgEl("g", { class: "gedges" });
-  const pairTotals = new Map();
-  const pairSeen = new Map();
-  const pairKey = (a, b) => (a < b ? a + "\0" + b : b + "\0" + a);
-  for (const e of edges) {
-    if (!lay.pos.has(e.to) || !lay.pos.has(e.from)) continue;
-    const pk = pairKey(e.from, e.to);
-    pairTotals.set(pk, (pairTotals.get(pk) || 0) + 1);
-  }
-  for (const e of edges) {
+  for (let ei = 0; ei < edges.length; ei++) {
+    const e = edges[ei];
+    const d = lay.routes ? lay.routes[ei] : null;
+    if (!d) continue;
     const directed = edgeDirected(e);
-    const src = lay.pos.get(e.to), dst = lay.pos.get(e.from);
-    if (!src || !dst) continue;
-    const pk = pairKey(e.from, e.to);
-    const total = pairTotals.get(pk) || 1;
-    const idx = pairSeen.get(pk) || 0;
-    pairSeen.set(pk, idx + 1);
-    const bow = total > 1 ? (idx - (total - 1) / 2) * 14 : 0;
-    let d;
-    const sy = src.y + GEO.H / 2, dy = dst.y + GEO.H / 2;
-    if (dst.x > src.x) {
-      const x1 = src.x + GEO.W, x2 = dst.x - (directed ? 2 : 0), dx = Math.max(16, (x2 - x1) / 2);
-      d = "M" + x1 + " " + sy + "C" + (x1 + dx) + " " + (sy + bow) + " " + (x2 - dx) + " " + (dy + bow) + " " + x2 + " " + dy;
-    } else if (e.kind === "fileConflict" && src.x > dst.x) {
-      const x1 = dst.x + GEO.W, x2 = src.x, dx = Math.max(16, (x2 - x1) / 2);
-      d = "M" + x1 + " " + dy + "C" + (x1 + dx) + " " + (dy + bow) + " " + (x2 - dx) + " " + (sy + bow) + " " + x2 + " " + sy;
-    } else {
-      const x = src.x + GEO.W, bend = x + GEO.GAP / 2 + idx * 14;
-      d = "M" + x + " " + sy + "C" + bend + " " + sy + " " + bend + " " + dy + " " + (dst.x + GEO.W + (directed ? 2 : 0)) + " " + dy;
-    }
     const cls = edgeBaseClass(e);
     const source = e.source || "github";
     const tip = edgeTooltip(e);
-    const p = svgEl("path", { class: cls, "data-kind": e.kind, "data-source": source, d, "marker-end": directed ? edgeMarker(e, cls) : null }, svgEl("title", {}, tip));
+    const p = svgEl("path", { class: cls, "data-kind": e.kind, "data-source": source, "data-from": e.from, "data-to": e.to, d, "marker-end": directed ? edgeMarker(e, cls) : null }, svgEl("title", {}, tip));
     graph.paths.push({ el: p, e });
     eg.append(p);
   }

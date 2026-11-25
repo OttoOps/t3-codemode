@@ -1055,9 +1055,13 @@ Queue & Graph, and an older `#tickets-graph` link still lands there.
   dotted amber line marks a `fileConflict` (`source: "code"`), and a dashed
   blue arrow marks an advisory `codeDep` hint (`source: "code"`). A dashed line
   runs from a parent to its sub-issue, or a dotted purple line when parsed from
-  a body. Hovering an edge shows a tooltip naming its source, branch/PR or
-  part chain for `prStack`, overlapping file paths for `fileConflict`, or the
-  module edges and symbols for `codeDep`.
+  a body. Adjacent-column links curve within the column gap in either
+  direction. Links that span multiple columns in either direction route through
+  the row and lane gutters so they do not pass behind intermediate cards, and
+  parallel links in a shared gutter take separate tracks. Hovering an edge
+  shows a tooltip naming its source, branch/PR or part chain for `prStack`,
+  overlapping file paths for `fileConflict`, or the module edges and symbols
+  for `codeDep`.
 - **Sync parsed links.** When the graph holds `blockedBy` or `parent` links
   with `source: "body"` that are not yet on GitHub, the panel heading shows
   **Sync N parsed links to GitHub**. Clicking it calls
