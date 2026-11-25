@@ -1121,6 +1121,16 @@ fn decode_seed_ops(seed: u64) -> Vec<Op> {
     decode_ops(&mut u, &weights)
 }
 
+/// Entry point for the `fuzz/` crate: raw fuzzer bytes decoded with UNIFORM weights.
+pub(crate) async fn run_fuzz_bytes(bytes: &[u8], in_memory: bool, dump: bool) -> usize {
+    let ops = decode_ops(&mut Unstructured::new(bytes), &OpWeights::UNIFORM);
+    if dump {
+        eprint!("{}", format_ops_file(&ops, "fuzz input", "replay"));
+    }
+    run_sequential_ops(&ops, None, in_memory, "fuzz").await;
+    ops.len()
+}
+
 async fn run_sequential_seed(seed: u64) -> (Vec<String>, ReachSnapshot, OpStats) {
     run_sequential_seed_with(seed, None).await
 }
@@ -3114,6 +3124,15 @@ async fn memory_store_matches_wal_store_on_sequential_replay() {
         let wal = run_sequential_seed_inner(seed, None, false).await;
         assert_eq!(mem, wal, "in-memory and WAL sequential chaos diverged on seed={seed}");
     }
+}
+
+#[tokio::test]
+async fn fuzz_entry_replays_raw_bytes_on_both_stores() {
+    assert_eq!(run_fuzz_bytes(&[], true, false).await, 0);
+    let bytes = seed_bytes(3);
+    let mem = run_fuzz_bytes(&bytes, true, false).await;
+    assert!(mem > 0, "seed bytes must decode at least one op");
+    assert_eq!(run_fuzz_bytes(&bytes, false, false).await, mem);
 }
 
 #[test]
