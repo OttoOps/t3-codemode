@@ -3,7 +3,7 @@ use std::sync::Arc;
 use t3_codemode::clock::local_clock;
 use t3_codemode::config::Config;
 
-use t3_codemode::fake::{FakeTokens, disabled_provider, project, provider, thread};
+use t3_codemode::fake::{Failure, FakeTokens, Rule, disabled_provider, project, provider, thread};
 use t3_codemode::server;
 use t3_codemode::store::{Limit, PickRecord};
 
@@ -281,9 +281,9 @@ async fn a_failed_read_of_one_run_is_retried_and_does_not_hold_back_later_runs()
     assert_eq!(h.app.wf.record_tokens().await.unwrap().len(), 1);
     assert_eq!(h.app.wf.record_tokens().await.unwrap().len(), 0);
     assert_eq!(member(&stats(&h, "").await, "claude-a")["tokens"]["runs"], json!(1));
-    h.fake.set_list_fails(true);
+    h.fake.fail_tool("t3_thread_list");
     assert!(h.app.wf.record_tokens().await.is_err());
-    h.fake.set_list_fails(false);
+    h.fake.clear_faults_on("t3_thread_list");
     t.set_run_fails("run:r:1:1", false);
     assert_eq!(h.app.wf.record_tokens().await.unwrap().len(), 1);
     assert_eq!(member(&stats(&h, "").await, "claude-a")["tokens"], json!({"input": 300, "output": 30, "runs": 2}));
@@ -483,11 +483,13 @@ async fn a_failed_follow_up_capabilities_search_reports_the_instance_as_unknown(
     h.fake.set_short_list(1);
     let found = &stats(&h, "").await["members"][0];
     assert_eq!((found["status"].clone(), found["instanceId"].clone()), (json!("ready"), json!("claude-a")));
-    h.fake.set_search_fail(true);
+    h.fake.fault(
+        Rule::on("orchestrator_capabilities").target("claude-catalog").fail(Failure::down("T3 unreachable (fake)")),
+    );
     let failed = &stats(&h, "").await["members"][0];
     assert_eq!(failed["status"], "unknown");
     assert!(failed["reason"].as_str().unwrap().starts_with("T3 capabilities unreachable"), "{failed}");
-    h.fake.set_search_fail(false);
+    h.fake.clear_faults_on("orchestrator_capabilities");
     h.fake.set_providers(vec![provider("claude-a", "claudeAgent", &[OPUS])]);
     assert_eq!(stats(&h, "").await["members"][0]["status"], "disabled");
 }

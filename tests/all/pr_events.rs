@@ -2,7 +2,7 @@ use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::BOARD;
 use t3_codemode::config::Config;
-use t3_codemode::fake::{check_run, github_pr, project, pull_request, thread};
+use t3_codemode::fake::{Failure, Rule, check_run, github_pr, project, pull_request, thread};
 
 const REPO: &str = "acme/widgets";
 const HEAD: &str = "1111111111111111111111111111111111111111";
@@ -838,14 +838,35 @@ async fn a_failed_batch_read_leaves_a_wait_alone_even_with_an_older_head_cached(
     h.github.set_checks(REPO, 7, json!([pending_check("test")]));
     pr_event(&h, json!({"event": "updated", "repo": REPO, "pr": 7, "head": MOVED})).await;
     assert_eq!(pr_event(&h, ready(MOVED)).await["status"], "waiting");
-    h.github.fail_read(REPO, 7, "something went wrong");
-    h.github.fail_operation("read", "something went wrong");
+    h.github.fault(Rule::on("reconcile.pr").pr(REPO, 7).fail(Failure::refused("something went wrong")));
+    h.github.fault(Rule::on("read").fail(Failure::refused("something went wrong")));
 
     let _ = h.app.wf.reconcile().await;
 
     assert!(to(&h, TICKET).is_empty(), "{:?}", to(&h, TICKET));
     let pr = h.app.store.link_get(WORKER).unwrap().unwrap().pr.unwrap();
     assert!(pr.waiting && pr.head == MOVED, "{pr:?}");
+}
+
+#[tokio::test]
+async fn one_failed_github_read_sends_that_ready_to_the_ticket_and_the_next_ready_gates() {
+    let h = setup(merge_and_deploy());
+    ticket_and_worker(&h, "1/2", Some(pr_format())).await;
+    open_pr(&h, HEAD, GOOD, &["src/lib.rs"]);
+    h.github.fault(Rule::on("read").pr(REPO, 7).call(1).fail(Failure::refused("something went wrong")));
+
+    let first = pr_event(&h, ready(HEAD)).await;
+
+    assert_eq!(first["status"], "ticket", "{first}");
+    assert!(first["why"].as_str().unwrap().contains("could not read acme/widgets#7 on GitHub"), "{first}");
+    let woke = to(&h, TICKET);
+    assert_eq!(woke.len(), 1, "{woke:?}");
+    assert!(woke[0].contains("could not read acme/widgets#7 on GitHub"), "{}", woke[0]);
+    assert!(cards(&h).is_empty(), "{:?}", cards(&h));
+    let second = pr_event(&h, ready(HEAD)).await;
+    assert_eq!(second["status"], "gated", "{second}");
+    assert_eq!(cards(&h).len(), 1);
+    assert_eq!(h.github.operations().iter().filter(|op| *op == "read").count(), 2);
 }
 
 #[tokio::test]

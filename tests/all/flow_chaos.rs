@@ -126,7 +126,7 @@ fn put_issue(h: &H, repo: &str, number: u64, labels: &[&str], day: u32) {
 }
 
 fn sync_gh(h: &H, prs: &BTreeMap<u64, GhPrModel>) {
-    h.github.clear_read_errors();
+    h.github.clear_faults_on("reconcile.pr");
     for (&number, m) in prs {
         let mut pr = github_pr(HEADS[m.head_idx], m.merge_state, false);
         pr["state"] = json!(m.state);
@@ -1204,6 +1204,8 @@ async fn flow_auto_launch_isolation_holds_pr_and_gate_invariants() {
     for seed in 0..race_seeds as u64 {
         let mut rng = Rng::new(seed ^ 0x55aa_f100_u64);
         let (h, mut gh) = setup_flow_chaos(3, seed % 2 == 1);
+        h.fake.set_jitter(Some(seed));
+        h.github.set_jitter(Some(seed));
         join_initial(&h, ["mcp:t1", "mcp:t1", "mcp:t2"]).await;
         let workers: Vec<(String, u64)> = INIT_WORKERS.iter().map(|&(w, p)| (w.to_string(), p)).collect();
         let closed_workers = BTreeMap::new();

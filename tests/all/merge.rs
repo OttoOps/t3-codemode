@@ -1,7 +1,7 @@
 use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::BOARD;
-use t3_codemode::fake::{check_run, github_pr};
+use t3_codemode::fake::{Failure, Rule, check_run, github_pr};
 use t3_codemode::github::{errors, gh_response};
 
 const REPO: &str = "acme/widgets";
@@ -197,7 +197,7 @@ async fn an_already_merged_pr_reports_its_merge_commit() {
 async fn a_github_refusal_of_the_mutation_comes_back_as_refused() {
     let h = H::new();
     h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
-    h.github.fail_operation("enqueuePullRequest", "Pull request is not mergeable");
+    h.github.fault(Rule::on("enqueuePullRequest").fail(Failure::refused("Pull request is not mergeable")));
 
     let r = merge(&h, args(7)).await;
 
@@ -235,7 +235,7 @@ async fn an_unknown_merge_state_is_read_again_before_deciding() {
 async fn a_gh_failure_throws_instead_of_returning_an_outcome() {
     let h = H::new();
     h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
-    h.github.set_down(true);
+    h.github.unreachable();
 
     let out = h.exec_as(TICKET, &format!("async () => wf.merge({})", args(7))).await;
 

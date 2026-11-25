@@ -1551,7 +1551,7 @@ async fn move_on_limit_auto_reports_a_fork_it_could_not_resume() {
     let h = moving("auto");
     let old = launch(&h, 55).await["thread"].as_str().unwrap().to_string();
     limit_stop_on(&h, &old);
-    h.fake.set_send_fails(true);
+    h.fake.fail_tool("t3_thread_send");
     let actions = mark(&h).await;
     assert!(move_cards(&h).is_empty(), "{actions:?}");
     let cards: Vec<_> =

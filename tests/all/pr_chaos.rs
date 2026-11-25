@@ -11,7 +11,8 @@ use t3_codemode::board::{BOARD, Card, CardRef};
 use t3_codemode::clock::{Clock, iso, plus_minutes};
 use t3_codemode::config::Config;
 use t3_codemode::fake::{
-    check_run, github_pr, gitlab_gid, gitlab_mr, gitlab_pipeline, merge_request, project, pull_request, thread,
+    Failure, Rule, check_run, github_pr, gitlab_gid, gitlab_mr, gitlab_pipeline, merge_request, project, pull_request,
+    thread,
 };
 use t3_codemode::reach::{ReachPoint, ReachSnapshot};
 use t3_codemode::sentinels::Sentinel;
@@ -370,7 +371,7 @@ fn sync_gh(h: &H, prs: &BTreeMap<u64, GhPrModel>) {
     if forge() == Forge::Gitlab {
         return sync_lab(h, prs);
     }
-    h.github.clear_read_errors();
+    h.github.clear_faults_on("reconcile.pr");
     for (&number, m) in prs {
         if !m.exists {
             h.github.remove_pr(REPO, number);
@@ -409,7 +410,8 @@ fn sync_gh(h: &H, prs: &BTreeMap<u64, GhPrModel>) {
         };
         h.github.set_checks(REPO, number, checks);
         if m.read_err {
-            h.github.fail_read(REPO, number, "transient chaos read error");
+            h.github
+                .fault(Rule::on("reconcile.pr").pr(REPO, number).fail(Failure::refused("transient chaos read error")));
         }
     }
 }
@@ -2481,6 +2483,8 @@ async fn run_concurrent_seed(seed: u64) -> (Vec<String>, H) {
 async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec<String>, H) {
     let mut rng = Rng::new(seed ^ 0x55aa_1234_9876_fedc);
     let (h, mut gh) = setup_chaos(false);
+    h.fake.set_jitter(Some(seed));
+    h.github.set_jitter(Some(seed));
     enable_sentinel(&h, sentinel);
     for m in gh.values_mut() {
         m.queue_enabled = rng.coin();

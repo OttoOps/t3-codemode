@@ -398,11 +398,11 @@ async fn a_busy_parent_gets_held_wakes_after_the_max_hold() {
 async fn a_failed_delivery_stays_queued_and_the_watcher_retries() {
     let h = H::new();
     link_ticket_worker(&h).await;
-    h.fake.set_send_fails(true);
+    h.fake.fail_tool("t3_thread_send");
     let r = h.wf(WORKER, "send", json!({"kind": "blocker", "body": "need a token"})).await;
     assert_eq!(r["delivery"], "queued");
     assert!(r["detail"].as_str().unwrap().contains("delivery failed"));
-    h.fake.set_send_fails(false);
+    h.fake.clear_faults_on("t3_thread_send");
     h.fake.update(WORKER, json!({"status": "running"}));
     assert_eq!(h.tick(3).await, vec!["delivered m1 to mcp:ticket"]);
 }
@@ -412,9 +412,9 @@ async fn a_failed_delivery_keeps_the_digest_for_the_retry() {
     let h = H::new();
     link_ticket_worker(&h).await;
     h.wf(WORKER, "send", json!({"kind": "note", "body": "review clean"})).await;
-    h.fake.set_send_fails(true);
+    h.fake.fail_tool("t3_thread_send");
     h.wf(WORKER, "send", json!({"kind": "event", "body": "PR opened"})).await;
-    h.fake.set_send_fails(false);
+    h.fake.clear_faults_on("t3_thread_send");
     h.fake.update(WORKER, json!({"status": "running"}));
     h.tick(3).await;
     assert!(h.last_message().contains("review clean [m1]"), "{}", h.last_message());

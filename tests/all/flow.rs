@@ -2,7 +2,7 @@ use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::BOARD;
 use t3_codemode::config::Config;
-use t3_codemode::fake::{github_issue, project};
+use t3_codemode::fake::{Failure, Rule, github_issue, project};
 use t3_codemode::field;
 use t3_codemode::store::Pending;
 
@@ -418,7 +418,7 @@ async fn a_repo_github_cannot_read_fails_the_call() {
 
     assert!(err_text(&out).contains("reading acme/tools's issues failed"), "{}", out.text);
     h.github.add_repo(TOOLS);
-    h.github.set_down(true);
+    h.github.unreachable();
     let out = h.exec("async () => wf.flow()").await;
     assert!(err_text(&out).contains("not logged in"), "{}", out.text);
 }
@@ -2961,7 +2961,9 @@ async fn failed_sibling_read_and_out_of_range_issue_numbers_keep_dependents_safe
     h.github.set_issue(REPO, github_issue(12, "Required symbolic failed open read", &[FLOW], "2026-03-05T00:00:00Z"));
     h.github.set_body(REPO, 12, "After #1, \"Dup auth\"\n");
 
-    h.github.fail_unlabelled_open_issues(Some("transient GraphQL error on open siblings"));
+    h.github.fault(
+        Rule::on("flowIssues.unlabelledOpen").fail(Failure::refused("transient GraphQL error on open siblings")),
+    );
 
     let q = flow(&h).await;
     assert_eq!(labels(&q["queue"]), Vec::<String>::new(), "none of #10, #11, #12 may enter queue: {q}");
@@ -2978,7 +2980,7 @@ async fn failed_sibling_read_and_out_of_range_issue_numbers_keep_dependents_safe
 
     // Once the supplemental open read recovers, #10 resolves tools#7, #11 resolves open #2, and
     // #12 stays blocked as ambiguous between closed #3 and open #4.
-    h.github.fail_unlabelled_open_issues(None);
+    h.github.clear_faults_on("flowIssues.unlabelledOpen");
     let q2 = flow(&h).await;
     assert_eq!(labels(&q2["blocked"]), ["widgets#10", "widgets#11", "widgets#12"], "{q2}");
     assert_eq!(labels(&q2["blocked"][1]["blockers"]), ["widgets#2"]);
@@ -3194,7 +3196,8 @@ async fn board_sync_links_reports_permission_errors_parent_conflicts_and_self_lo
     // Now test FORBIDDEN permission error on addBlockedBy while addSubIssue still works.
     issue(&s.h, REPO, 5, &[FLOW], 7);
     s.h.github.set_body(REPO, 5, "## Flow\n- Parent: #10\n- Blocked by: #1\n");
-    s.h.github.fail_operation_with_type("addBlockedBy", "FORBIDDEN", "Resource not accessible by integration");
+    s.h.github
+        .fault(Rule::on("addBlockedBy").fail(Failure::typed("FORBIDDEN", "Resource not accessible by integration")));
     let perm_res: Value = s
         .http
         .post(format!("{}/api/flow/sync-links", s.base))
@@ -3224,7 +3227,7 @@ async fn board_sync_links_reports_permission_errors_parent_conflicts_and_self_lo
     );
 
     // When GitHub is completely unreachable on initial read, endpoint returns 502.
-    s.h.github.set_down(true);
+    s.h.github.unreachable();
     let down = s
         .http
         .post(format!("{}/api/flow/sync-links", s.base))
@@ -3294,7 +3297,8 @@ async fn board_sync_links_writes_graph_primary_parent_and_conflicts_lower_preced
     issue(&s.h, REPO, 4, &[FLOW], 5);
     s.h.github.set_body(REPO, 10, "- [ ] #3\n- [ ] #4\n");
     s.h.github.set_body(REPO, 4, "## Flow\n- Parent: #30\n");
-    s.h.github.fail_operation_with_type("addSubIssue", "FORBIDDEN", "Resource not accessible by integration");
+    s.h.github
+        .fault(Rule::on("addSubIssue").fail(Failure::typed("FORBIDDEN", "Resource not accessible by integration")));
 
     let denied: Value = s
         .http
@@ -4701,7 +4705,7 @@ async fn exact_spaced_paths_pending_worktrees_priority_displacement_optional_pr_
         open_pr(202, "feat/1-base", "feat/2-stack", "Closes #2", &[(REPO, 2)], &["src/b.rs", "src/c.rs"]),
     );
     h_off.github.set_pr_file_page(1);
-    h_off.github.fail_operation("flowPrFiles", "file page 2 unavailable");
+    h_off.github.fault(Rule::on("flowPrFiles").fail(Failure::refused("file page 2 unavailable")));
 
     let f_off = flow(&h_off).await;
     assert_eq!(labels(&f_off["queue"]), ["widgets#1"], "prStack still holds #2 without PR files: {f_off}");
@@ -5605,7 +5609,8 @@ async fn board_flow_edge_edits_confirm_dismiss_restore_add_remove_and_persist() 
     assert_eq!(synced["results"][0]["kind"], "parent", "{synced}");
 
     // 5. Confirming codeDep with permission error does NOT dismiss the advisory edge; clearing error promotes it.
-    s.h.github.fail_operation_with_type("addBlockedBy", "FORBIDDEN", "Resource not accessible by integration");
+    s.h.github
+        .fault(Rule::on("addBlockedBy").fail(Failure::typed("FORBIDDEN", "Resource not accessible by integration")));
     let (st, perm_err) =
         post_edge(json!({"action": "confirm", "from": "acme/widgets#2", "to": "#1", "kind": "codeDep"})).await;
     assert_eq!(st, 200, "{perm_err}");
@@ -5615,7 +5620,7 @@ async fn board_flow_edge_edits_confirm_dismiss_restore_add_remove_and_persist() 
         perm_err["flow"]["graph"]["edges"].as_array().unwrap().iter().any(|e| e["kind"] == "codeDep"),
         "failed confirm must keep codeDep visible: {perm_err}"
     );
-    s.h.github.clear_operation_errors();
+    s.h.github.clear_faults();
 
     let (st, conf_cd) =
         post_edge(json!({"action": "confirm", "from": "acme/widgets#2", "to": "#1", "kind": "codeDep"})).await;
@@ -5722,7 +5727,7 @@ async fn board_flow_issue_updates_track_and_priority_labels_preserving_unrelated
     assert!(labels2.contains(&"area: core"), "{labels2:?}");
 
     // Failed replacement attach must preserve existing track and priority labels (attach before remove).
-    s.h.github.fail_operation("addLabelsToLabelable", "label attach refused");
+    s.h.github.fault(Rule::on("addLabelsToLabelable").fail(Failure::refused("label attach refused")));
     let (st, failed_rep) =
         post_issue(json!({"issue": "acme/widgets#6", "track": "new-track", "priority": "high"})).await;
     assert_eq!(st, 200, "{failed_rep}");
@@ -5992,7 +5997,7 @@ async fn board_triage_dag_proposes_read_only_and_writes_only_after_confirmation(
         })],
     );
     assert!(!s.h.app.wf.check_asks(None).await.unwrap());
-    s.h.github.fail_operation("removeLabelsFromLabelable", "remove refused");
+    s.h.github.fault(Rule::on("removeLabelsFromLabelable").fail(Failure::refused("remove refused")));
     let partial: Value = s
         .http
         .post(format!("{}/api/flow/triage/t2/apply", s.base))
@@ -6078,7 +6083,7 @@ async fn board_triage_dag_proposes_read_only_and_writes_only_after_confirmation(
         .await
         .unwrap();
     assert_eq!(start4["id"], "t4");
-    s.h.fake.fail_interrupt(true);
+    s.h.fake.fail_tool("t3_thread_interrupt");
     s.h.clock.set(&at(120));
     assert!(s.h.app.wf.check_asks(None).await.unwrap(), "unstopped timed-out triage must keep polling");
     let (open4, data4) = s.h.app.store.triage_get(4).unwrap().unwrap();
@@ -6092,7 +6097,7 @@ async fn board_triage_dag_proposes_read_only_and_writes_only_after_confirmation(
         still_blocked.text
     );
     assert!(still_blocked.text.contains("caller thread id is required"), "{}", still_blocked.text);
-    s.h.fake.fail_interrupt(false);
+    s.h.fake.clear_faults_on("t3_thread_interrupt");
     assert!(!s.h.app.wf.check_asks(None).await.unwrap(), "retry should stop thread and finish polling");
     assert!(
         s.h.fake.interrupted().iter().any(|v| v["threadId"] == "launch:4" && v["stop"] == true),
@@ -6544,7 +6549,7 @@ async fn board_triage_dag_safety_guards_cycles_vars_and_scope() {
     assert!(results[3]["error"].as_str().unwrap().contains("cycle"), "{results:?}");
 
     // 5. Failed replacement triage send preserves existing ready review t1 (CR#4).
-    s.h.fake.set_send_fails(true);
+    s.h.fake.fail_tool("t3_thread_send");
     let fail_start = s
         .http
         .post(format!("{}/api/flow/triage", s.base))
@@ -6555,7 +6560,7 @@ async fn board_triage_dag_safety_guards_cycles_vars_and_scope() {
         .await
         .unwrap();
     assert!(!fail_start.status().is_success(), "send failure must fail triage start");
-    s.h.fake.set_send_fails(false);
+    s.h.fake.clear_faults_on("t3_thread_send");
     assert_eq!(s.get("/api/state").await["flowTriage"]["id"], "t1", "previous ready triage must stay active");
 
     // 6. Dismissing t1 settles it; retrying failed change on settled t1 is rejected with 400 (CR#5).
@@ -6594,7 +6599,7 @@ async fn board_triage_dag_safety_guards_cycles_vars_and_scope() {
         .await
         .unwrap();
     let tid3 = start3["seq"].as_i64().unwrap();
-    s.h.fake.set_read_fails(true);
+    s.h.fake.fail_tool("t3_thread_read");
     s.h.clock.set(&at(120));
     // Read fails so stop_triage_thread cannot confirm via t3_thread_read -> closes as timed out with threadStopped=false and keeps polling.
     assert!(s.h.app.wf.check_asks(None).await.unwrap());
@@ -6602,7 +6607,7 @@ async fn board_triage_dag_safety_guards_cycles_vars_and_scope() {
     assert!(!open3, "{data3}");
     assert_eq!(data3["status"], "timed out", "{data3}");
     assert_eq!(data3["threadStopped"], false, "{data3}");
-    s.h.fake.set_read_fails(false);
+    s.h.fake.clear_faults_on("t3_thread_read");
     assert!(!s.h.app.wf.check_asks(None).await.unwrap());
     let (_, data3_after) = s.h.app.store.triage_get(tid3).unwrap().unwrap();
     assert_eq!(data3_after["threadStopped"], true, "{data3_after}");

@@ -4,7 +4,7 @@ use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::{BOARD, Tracker, card_text, parse_issue, parse_remote, reply_options};
 use t3_codemode::config::Config;
-use t3_codemode::fake::{project, pull_request, thread};
+use t3_codemode::fake::{Failure, Rule, project, pull_request, thread};
 use t3_codemode::server;
 
 const GATE: &str = "PR #81 is green and reviewed.\n\
@@ -452,7 +452,7 @@ async fn dispatch_prefers_an_exact_project_id_over_a_title() {
 async fn a_failed_dispatch_launch_frees_its_label_and_leaves_an_error_card() {
     let h = H::new();
     dispatch_projects(&h);
-    h.fake.set_launch_fails(true);
+    h.fake.fault(Rule::on("t3_thread_launch").fail(Failure::refused("t3_thread_launch: launch refused")));
     let out =
         h.exec("async () => wf.dispatch({ project: 'p-codemode', request: 'Cut a release.', title: 'release' })").await;
     assert!(err_text(&out).contains("Launching t3-codemode: release failed"), "{}", out.text);
@@ -515,7 +515,7 @@ async fn an_ask_brief_lists_the_projects_and_sends_work_to_wf_dispatch() {
 async fn an_ask_still_asks_when_t3_lists_no_projects() {
     let h = H::new();
     h.app.wf.ask("Which tickets wait on me?").await.unwrap();
-    h.fake.set_projects_fail(true);
+    h.fake.fail_tool("t3_project_list");
     h.app.wf.ask("Which tickets wait on me?").await.unwrap();
     let msgs: Vec<String> = h.fake.launched().iter().map(|l| l["message"].as_str().unwrap().to_string()).collect();
     assert_eq!(msgs.len(), 2);
@@ -546,7 +546,7 @@ async fn an_unmapped_repo_leaves_an_error_card() {
 #[tokio::test]
 async fn a_failed_project_lookup_leaves_an_error_card() {
     let h = H::new();
-    h.fake.set_projects_fail(true);
+    h.fake.fail_tool("t3_project_list");
     let out = h.exec("async () => wf.launchTicket({ issue: 'Acme/widgets#41' })").await;
     assert!(err_text(&out).contains("Cannot launch widgets#41: "), "{}", out.text);
     let c = cards(&h);
@@ -1083,7 +1083,7 @@ async fn a_restored_ticket_ignores_a_t3_settle_older_than_the_restore() {
     done_ticket(&h, TICKET, "widgets#41").await;
     h.app.wf.settle_ticket(TICKET).await.unwrap();
     h.clock.advance_minutes(10);
-    h.fake.set_organize_fails(true);
+    h.fake.fail_tool("t3_thread_organize");
     h.app.wf.restore_ticket(TICKET).await.unwrap();
     h.fake.update(TICKET, json!({"settled": true, "settledAt": "2026-11-17T12:00:00.000Z"}));
     h.app.wf.board_tick().await.unwrap();
@@ -1198,7 +1198,7 @@ async fn open_tickets_and_open_asks_cannot_be_settled() {
 async fn a_t3_error_does_not_fail_settle_or_restore() {
     let s = start(H::new()).await;
     done_ticket(&s.h, TICKET, "widgets#41").await;
-    s.h.fake.set_organize_fails(true);
+    s.h.fake.fail_tool("t3_thread_organize");
     let r = s.post(&format!("/api/tickets/{TICKET}/settle"), json!({}), Some(&s.csrf()), None).await;
     assert_eq!(r.status(), 200);
     let body: Value = r.json().await.unwrap();
@@ -1392,10 +1392,10 @@ async fn close_idle_open_ticket_through_route_then_settle() {
 
     // Transient T3 read error returns 503 and leaves link and cards untouched.
     s.h.fake.update("mcp:t3", json!({"status": "idle"}));
-    s.h.fake.set_read_fails(true);
+    s.h.fake.fail_tool("t3_thread_read");
     let unavailable = s.post("/api/tickets/mcp:t3/close", json!({}), Some(&s.csrf()), None).await;
     assert_eq!(unavailable.status(), 503);
-    s.h.fake.set_read_fails(false);
+    s.h.fake.clear_faults_on("t3_thread_read");
     let st = snapshot(&s.h);
     assert_eq!(st["cards"].as_array().unwrap().len(), 1);
     assert_eq!(st["tree"].as_array().unwrap().iter().find(|t| t["thread"] == "mcp:t3").unwrap()["done"], false);
@@ -1431,7 +1431,7 @@ async fn close_ticket_optionally_notifies_the_thread() {
     // A T3 send failure still closes the ticket and reports the error in t3.
     s.h.fake.put(thread("mcp:t2", "failed", T0));
     join_board(&s.h, "mcp:t2", "widgets#42").await;
-    s.h.fake.set_send_fails(true);
+    s.h.fake.fail_tool("t3_thread_send");
     let r = s.post("/api/tickets/mcp:t2/close", json!({"notify": true}), Some(&s.csrf()), None).await;
     assert_eq!(r.status(), 200);
     let body: Value = r.json().await.unwrap();
@@ -3517,12 +3517,12 @@ async fn a_failed_pr_lookup_is_retried_on_the_next_board_tick() {
     let h = H::new();
     ticket_with_worker(&h).await;
     h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 84, "merged")]);
-    h.fake.set_prs_fail(true);
+    h.fake.fail_tool("list_thread_pull_requests");
     h.wf(WORKER, "send", json!({"kind": "handoff", "body": "merged at abc123"})).await;
     assert_eq!(worker_pr(&h), Value::Null);
     h.app.wf.board_tick().await.unwrap();
     assert_eq!(worker_pr(&h), Value::Null);
-    h.fake.set_prs_fail(false);
+    h.fake.clear_faults_on("list_thread_pull_requests");
     h.app.wf.board_tick().await.unwrap();
     assert_eq!(worker_pr(&h)["state"], "merged");
     h.app.wf.board_tick().await.unwrap();
@@ -3537,9 +3537,9 @@ async fn a_failed_read_at_handoff_is_retried_on_the_next_board_tick() {
     h.tick(1).await;
     assert_eq!(worker_pr(&h)["state"], "open");
     h.fake.set_prs(WORKER, vec![pull_request("acme/widgets", 85, "merged")]);
-    h.fake.set_read_fails(true);
+    h.fake.fail_tool("t3_thread_read");
     h.wf(WORKER, "send", json!({"kind": "handoff", "body": "merged at abc123"})).await;
-    h.fake.set_read_fails(false);
+    h.fake.clear_faults_on("t3_thread_read");
     h.app.wf.board_tick().await.unwrap();
     assert_eq!(worker_pr(&h)["state"], "merged");
 }
@@ -6609,7 +6609,7 @@ async fn board_launch_fails_with_error_card_on_invalid_slot_choices_never_fallin
     assert!(err_text(&out).contains("no enabled Claude provider"), "{}", out.text);
 
     // 8. T3 capabilities unreachable -> fails with error card.
-    s.h.fake.set_caps_fail(true);
+    s.h.fake.fail_tool("orchestrator_capabilities");
     let out = s.h.exec("async () => wf.launchTicket({ issue: 'acme/widgets#8' })").await;
     assert!(err_text(&out).contains("T3 capabilities unreachable"), "{}", out.text);
 
