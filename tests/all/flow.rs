@@ -6590,3 +6590,281 @@ async fn board_triage_dag_safety_guards_cycles_vars_and_scope() {
         .collect();
     assert_eq!(prios.len(), 1, "serialized edits must leave exactly one priority label: {n1}");
 }
+
+#[tokio::test]
+async fn launching_pending_tickets_render_and_click_identically_in_flow_mode_and_on_join() {
+    let h = flowing(4);
+    h.fake.set_projects(vec![project("p-widgets", "/src/widgets")]);
+    h.remotes.set("/src/widgets", "git@github.com:acme/widgets.git");
+    issue(&h, REPO, 1, &[FLOW, "track: board"], 1);
+    issue(&h, REPO, 2, &[FLOW, "track: board"], 2);
+    h.github.set_blockers(REPO, 2, &[(REPO, 1)]);
+    // Create the pending launch and hydrate known project metadata via board_tick.
+    let params = h.app.wf.config().link_params("overseer", "ticket").unwrap();
+    h.app
+        .store
+        .pending_put(&Pending {
+            parent: BOARD.into(),
+            label: "widgets#2".into(),
+            role: "ticket".into(),
+            params,
+            at: T0.into(),
+            reported: false,
+            thread: None,
+            link: None,
+            project: Some("p-widgets".into()),
+            identity: t3_codemode::store::Identity { issue: Some("acme/widgets#2".into()), ..Default::default() },
+            brief: None,
+        })
+        .unwrap();
+    h.app.wf.board_tick().await.unwrap();
+
+    let (html, st, view) = panel_page(h).await;
+    // Backend /api/state populates repo/project on pending tickets via p.project.
+    assert_eq!(st["tree"][0]["label"], "widgets#2", "{st}");
+    assert_eq!(st["tree"][0]["thread"], Value::Null, "{st}");
+    assert_eq!(st["tree"][0]["status"], "launching", "{st}");
+    assert_eq!(st["tree"][0]["repo"], "acme/widgets", "{st}");
+    assert_eq!(st["tree"][0]["project"]["id"], "p-widgets", "{st}");
+    // Backend /api/flow includes the pending launching ticket in graph.nodes via open_tickets().
+    let n2 = view["graph"]["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "acme/widgets#2").unwrap();
+    assert_eq!(n2["ticket"], json!({"thread": null, "link": null, "status": "launching"}), "{n2}");
+
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        &format!(
+            r##"{GRAPH}
+let flowCalls = 0;
+let currentView = view;
+fetchReply = (url) => {{
+  if (url === "/api/flow") {{
+    flowCalls++;
+    return reply(200, currentView);
+  }}
+  return new Promise(() => {{}});
+}};
+emitState(base);
+await tick();
+selectTab("graph");
+
+const initial = {{
+  nOpen: q("#n-open").textContent,
+  nGraph: q("#n-graph").textContent,
+  nodes: document.querySelectorAll(".gnode").map((b) => [b.dataset.id, b.querySelector('[data-part="st"]').textContent]),
+}};
+
+// Clicking the flow-mode launching node announces "has not joined yet", opens launching view, and keeps DAG deps visible.
+btn("acme/widgets#2").dispatch("click");
+advance(100);
+const clicked = {{
+  live: q("#live").textContent,
+  open: q("#drawer").classList.contains("open"),
+  kind: q("#drawer").getAttribute("data-kind"),
+  goneHidden: dp("gone").hidden,
+  st: dp("st").textContent,
+  note: dp("note-m").textContent,
+  t3Empty: !dp("t3").firstChild,
+  depsHidden: dp("deps").hidden,
+  deps: deps(),
+}};
+
+// Launching an issue already in graph.nodes (before /api/flow refreshes) AND an unmapped pending ticket both appear with no duplicates.
+const p1 = {{ ...base.tree[0], label: "widgets#1", issue: "acme/widgets#1", thread: null, ticket: null, link: null, joined: false, status: "launching" }};
+const pFree = {{ ...base.tree[0], label: "Refactor logging", issue: null, repo: "acme/widgets", thread: null, ticket: null, link: null, joined: false, status: "launching" }};
+const staleCalls = flowCalls;
+// Hold /api/flow in flight by returning unresolved promise to verify immediate overlay before flow refreshes.
+fetchReply = (url) => url === "/api/flow" ? (flowCalls++, new Promise(() => {{}})) : new Promise(() => {{}});
+emitState({{ ...base, tree: [...base.tree, p1, pFree] }});
+const inFlight = {{
+  nOpen: q("#n-open").textContent,
+  nGraph: q("#n-graph").textContent,
+  nodes: document.querySelectorAll(".gnode").map((b) => [b.dataset.id, b.querySelector('[data-part="st"]').textContent]),
+  triggeredFlow: flowCalls > staleCalls,
+}};
+
+// Joining widgets#2 upgrades the open drawer to the live ticket and triggers a /api/flow refresh (flowSig includes thread).
+const joined2 = {{ ...base.tree[0], thread: "mcp:t2", ticket: "mcp:t2", link: "https://t3/mcp:t2", joined: true, status: "running" }};
+const callsBeforeJoin = flowCalls;
+// Clear flow.busy so we observe flowSig triggering loadFlow on thread join.
+flow.busy = false;
+emitState({{ ...base, tree: [joined2] }});
+const afterJoin = {{
+  triggeredFlowOnJoin: flowCalls > callsBeforeJoin,
+  drawerKind: q("#drawer").getAttribute("data-kind"),
+  drawerSt: dp("st").textContent,
+  drawerDepsHidden: dp("deps").hidden,
+  nodes: document.querySelectorAll(".gnode").map((b) => [b.dataset.id, b.querySelector('[data-part="st"]').textContent]),
+}};
+closeDrawer(false);
+document.activeElement.blur();
+q("#gscroll").dispatch("focusout");
+advance(1);
+
+// Unmatched flow-mode ticket ("Refactor logging") stays on Graph and upgrades its open drawer when it joins (S1).
+emitState({{ ...base, tree: [joined2, pFree] }});
+document.querySelectorAll(".gnode").find((b) => b.dataset.id === "pending:Refactor logging").dispatch("click");
+const freePendingKind = q("#drawer").getAttribute("data-kind");
+const joinedFree = {{ ...pFree, thread: "mcp:t-free", ticket: "mcp:t-free", link: "https://t3/mcp:t-free", joined: true, status: "running" }};
+emitState({{ ...base, tree: [joined2, joinedFree] }});
+const afterFreeJoin = {{
+  nOpen: q("#n-open").textContent,
+  nGraph: q("#n-graph").textContent,
+  drawerKind: q("#drawer").getAttribute("data-kind"),
+  drawerId: dp("id").textContent,
+  drawerGoneHidden: dp("gone").hidden,
+  nodes: document.querySelectorAll(".gnode").map((b) => [b.dataset.id, b.querySelector('[data-part="st"]').textContent]),
+}};
+closeDrawer(false);
+document.activeElement.blur();
+q("#gscroll").dispatch("focusout");
+advance(1);
+
+// A ticket whose canonical issue belongs to a different repo (other/widgets#1) must not collide by short label with acme/widgets#1 (S2).
+const otherRepo = {{ ...base.tree[0], label: "widgets#1", issue: "other/widgets#1", repo: "other/widgets", thread: null, ticket: null, link: null, joined: false, status: "launching" }};
+emitState({{ ...base, tree: [joined2, otherRepo] }});
+const crossRepo = {{
+  nodes: document.querySelectorAll(".gnode").map((b) => [b.dataset.id, b.querySelector('[data-part="st"]').textContent]),
+}};
+
+// A relaunch replaces a stale cached flow ticket whose previous thread is no longer open, dropping the old thread link (S4).
+const cachedWithOldThread = {{
+  ...view,
+  graph: {{
+    ...view.graph,
+    nodes: view.graph.nodes.map((n) => n.id === "acme/widgets#1"
+      ? {{ ...n, ready: false, flowList: null, ticket: {{ thread: "mcp:t1-old", link: "https://t3/mcp:t1-old", status: "running" }} }}
+      : n),
+  }},
+}};
+paintFlow(cachedWithOldThread);
+const doneOld1 = {{ ...base.tree[0], label: "widgets#1", issue: "acme/widgets#1", thread: "mcp:t1-old", ticket: "mcp:t1-old", link: "https://t3/mcp:t1-old", joined: true, done: true, status: "done" }};
+const relaunch1 = {{ ...base.tree[0], label: "widgets#1", issue: "acme/widgets#1", thread: null, ticket: null, link: null, joined: false, done: false, status: "launching" }};
+emitState({{ ...base, tree: [doneOld1, relaunch1, joined2] }});
+btn("acme/widgets#1").dispatch("click");
+const relaunched = {{
+  nodes: document.querySelectorAll(".gnode").map((b) => [b.dataset.id, b.querySelector('[data-part="st"]').textContent]),
+  drawerKind: q("#drawer").getAttribute("data-kind"),
+  drawerSt: dp("st").textContent,
+  drawerNote: dp("note-m").textContent,
+  t3Empty: !dp("t3").firstChild,
+}};
+closeDrawer(false);
+document.activeElement.blur();
+q("#gscroll").dispatch("focusout");
+advance(1);
+
+// Verify PR 8 refresh guards (editing, syncing, triageBusy) remain intact.
+flow.busy = false;
+flow.again = false;
+const callsBeforeGuard = flowCalls;
+graph.editing = true;
+loadFlow();
+const guardedEditing = flowCalls === callsBeforeGuard && flow.again === true;
+graph.editing = false;
+flow.again = false;
+graph.syncing = true;
+loadFlow();
+const guardedSyncing = flowCalls === callsBeforeGuard && flow.again === true;
+graph.syncing = false;
+
+return {{ initial, clicked, inFlight, afterJoin, freePendingKind, afterFreeJoin, crossRepo, relaunched, guardedEditing, guardedSyncing }};
+"##
+        ),
+    );
+
+    assert_eq!(
+        r["initial"],
+        json!({
+            "nOpen": "1",
+            "nGraph": "2",
+            "nodes": [["acme/widgets#1", "ready"], ["acme/widgets#2", "launching"]],
+        }),
+        "flow mode renders pending launching ticket without duplicating pending:widgets#2: {r}"
+    );
+    assert!(
+        r["clicked"]["live"].as_str().unwrap().contains("has not joined yet"),
+        "clicking flow-mode pending node announces not joined yet: {r}"
+    );
+    assert_eq!(
+        (
+            &r["clicked"]["open"],
+            &r["clicked"]["kind"],
+            &r["clicked"]["goneHidden"],
+            &r["clicked"]["st"],
+            &r["clicked"]["t3Empty"],
+            &r["clicked"]["depsHidden"]
+        ),
+        (&json!(true), &json!("issue"), &json!(true), &json!("launching"), &json!(true), &json!(false)),
+        "{r}"
+    );
+    assert!(
+        r["clicked"]["note"].as_str().unwrap().contains("has not joined yet"),
+        "drawer says the thread has not joined yet in flow mode too: {r}"
+    );
+    assert_eq!(r["clicked"]["deps"], json!(["Blocked bywidgets#1ready"]), "{r}");
+    assert_eq!(
+        r["inFlight"],
+        json!({
+            "nOpen": "3",
+            "nGraph": "3",
+            "nodes": [
+                ["acme/widgets#1", "launching"],
+                ["acme/widgets#2", "launching"],
+                ["pending:Refactor logging", "launching"],
+            ],
+            "triggeredFlow": true,
+        }),
+        "in-flight launches overlay matched flow nodes and show unmatched pending tickets with no duplicates: {r}"
+    );
+    assert_eq!(
+        r["afterJoin"],
+        json!({
+            "triggeredFlowOnJoin": true,
+            "drawerKind": "ticket",
+            "drawerSt": "running",
+            "drawerDepsHidden": false,
+            "nodes": [["acme/widgets#1", "ready"], ["acme/widgets#2", "running"]],
+        }),
+        "joining transitions flow-mode node and open drawer cleanly to the live ticket: {r}"
+    );
+    assert_eq!(r["freePendingKind"], "issue", "{r}");
+    assert_eq!(
+        r["afterFreeJoin"],
+        json!({
+            "nOpen": "2",
+            "nGraph": "3",
+            "drawerKind": "ticket",
+            "drawerId": "Refactor logging",
+            "drawerGoneHidden": true,
+            "nodes": [
+                ["acme/widgets#1", "ready"],
+                ["acme/widgets#2", "running"],
+                ["t:mcp:t-free", "running"],
+            ],
+        }),
+        "unmatched flow-mode ticket remains on Graph as t:<thread> after join and upgrades its open drawer: {r}"
+    );
+    assert_eq!(
+        r["crossRepo"]["nodes"],
+        json!([["acme/widgets#1", "ready"], ["acme/widgets#2", "running"], ["pending:widgets#1", "launching"],]),
+        "different-repo canonical issue must not collide with acme/widgets#1 by short label: {r}"
+    );
+    assert_eq!(
+        r["relaunched"]["nodes"],
+        json!([["acme/widgets#1", "launching"], ["acme/widgets#2", "running"]]),
+        "relaunch replaces stale cached thread on acme/widgets#1: {r}"
+    );
+    assert_eq!(
+        (&r["relaunched"]["drawerKind"], &r["relaunched"]["drawerSt"], &r["relaunched"]["t3Empty"]),
+        (&json!("issue"), &json!("launching"), &json!(true)),
+        "relaunched node opens launching view without stale thread link: {r}"
+    );
+    assert!(
+        r["relaunched"]["drawerNote"].as_str().unwrap().contains("has not joined yet"),
+        "relaunched drawer says the thread has not joined yet: {r}"
+    );
+    assert_eq!(r["guardedEditing"], true, "{r}");
+    assert_eq!(r["guardedSyncing"], true, "{r}");
+}

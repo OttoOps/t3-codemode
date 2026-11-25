@@ -4661,7 +4661,7 @@ function flowNeeded(s) {
 }
 
 function flowSig(s) {
-  const open = (s.tree || []).filter((t) => !t.done).map((t) => t.label).sort();
+  const open = (s.tree || []).filter((t) => !t.done).map((t) => t.label + "\0" + (t.thread || "")).sort();
   const cards = (s.cards || []).filter((c) => c.flow).map((c) => c.id).sort();
   return JSON.stringify([!!s.flow, open, cards]);
 }
@@ -4848,7 +4848,7 @@ function paintFlow(v) {
   const moved = flowGraph(v);
   flowShow(!!v.enabled);
   if (moved && state) render(state);
-  if (!v.enabled) { if (state) paintGraph(); return; }
+  if (!v.enabled) { if (state) { paintGraph(); if (dr.open) paintDrawer(); } return; }
   const queue = v.queue || [], blocked = v.blocked || [], skipped = v.skipped || [];
   const a = document.activeElement;
   const list = a && a.tagName === "A" && a.closest ? a.closest("#flow-q, #flow-b, #flow-s") : null;
@@ -4895,27 +4895,128 @@ function svgEl(tag, attrs, ...kids) {
 
 
 
+function isPendingGraphNode(n) {
+  return !!(n && n.ticket && !n.ticket.thread);
+}
+
+function ticketIssueKey(t) {
+  const own = ghIssue(t && t.issue);
+  if (own) return own.ref.toLowerCase();
+  const m = /^(?:([\w.-]+\/[\w.-]+)|([\w.-]+))?#(\d+)$/.exec(String((t && t.label) || ""));
+  if (!m) return null;
+  let r = m[1] || "";
+  const known = /^[\w.-]+\/[\w.-]+$/.test(String((t && t.repo) || "")) ? t.repo : "";
+  if (!r && known && (!m[2] || m[2].toLowerCase() === known.split("/")[1].toLowerCase())) r = known;
+  return r ? (r + "#" + m[3]).toLowerCase() : null;
+}
+
 function graphTicket(n) {
   const th = n && n.ticket && n.ticket.thread;
   return th && state ? state.tree.find((t) => t.thread === th) || null : null;
 }
 
-function graphData(s) {
-  const g = flow.view && flow.view.graph;
-  if (g) {
-    const nodes = (g.nodes || []).filter((n) => n && n.id);
-    const open = s.tree.filter((t) => !t.done && t.thread);
-    if (nodes.length || !open.length) {
-      return { mode: "flow", nodes, edges: (g.edges || []).filter((e) => e && e.from && e.to), warnings: g.warnings || [], dismissedEdges: g.dismissedEdges || [] };
+function graphPendingTicket(n) {
+  if (!isPendingGraphNode(n) || !state) return null;
+  const open = (state.tree || []).filter((t) => !t.done && !t.thread);
+  if (!open.length) return null;
+  const id = String(n.id || "");
+  if (id.startsWith("pending:")) {
+    const label = id.slice("pending:".length);
+    return open.find((t) => t.label === label) || null;
+  }
+  const lowId = id.toLowerCase();
+  const byIssue = open.filter((t) => ticketIssueKey(t) === lowId);
+  if (byIssue.length === 1) return byIssue[0];
+  const lowLabel = String(n.label || "").toLowerCase();
+  const byLabel = lowLabel ? open.filter((t) => !ticketIssueKey(t) && String(t.label || "").toLowerCase() === lowLabel) : [];
+  return byLabel.length === 1 ? byLabel[0] : null;
+}
+
+function graphTicketNode(t) {
+  const ids = ticketIds(t);
+  const issue = ids && ids.issue;
+  const repo = t.repo || "";
+  return {
+    id: t.thread ? "t:" + t.thread : "pending:" + t.label,
+    repo,
+    number: null,
+    label: t.label,
+    url: (issue && issue.url) || issueUrl(t.label, repo),
+    title: titleOf(t),
+    state: "open",
+    tracked: true,
+    track: repo || "Tickets",
+    trackBy: repo ? "repo" : "none",
+    parent: null,
+    subIssues: [],
+    blockedBy: [],
+    unlocks: [],
+    warnings: [],
+    ticket: { thread: t.thread || null, link: t.link || null, status: t.thread ? t.status : (t.status || "launching") },
+  };
+}
+
+function mergeFlowOpenTickets(raw, open) {
+  if (!open.length) return raw;
+  const nodes = raw.slice();
+  const openThreads = new Set(open.map((t) => t.thread).filter(Boolean));
+  const byThread = new Map();
+  const byId = new Map();
+  const byLabel = new Map();
+  nodes.forEach((n, i) => {
+    if (n.ticket && n.ticket.thread) byThread.set(n.ticket.thread, i);
+    byId.set(String(n.id).toLowerCase(), i);
+    const lbl = String(n.label || "").toLowerCase();
+    if (lbl) byLabel.set(lbl, byLabel.has(lbl) ? -1 : i);
+  });
+  const extra = [];
+  for (const t of open) {
+    let idx = t.thread && byThread.has(t.thread) ? byThread.get(t.thread) : undefined;
+    const k = idx === undefined ? ticketIssueKey(t) : null;
+    if (idx === undefined && k) {
+      if (byId.has(k)) idx = byId.get(k);
+    } else if (idx === undefined) {
+      const lbl = String(t.label || "").toLowerCase();
+      const hit = lbl ? byLabel.get(lbl) : undefined;
+      if (hit !== undefined && hit >= 0) idx = hit;
+    }
+    if (idx !== undefined) {
+      const n = nodes[idx];
+      const liveCached = !!(n.ticket && n.ticket.thread && openThreads.has(n.ticket.thread));
+      if (!liveCached) {
+        const samePending = !!(n.ticket && !n.ticket.thread && !t.thread);
+        const status = t.thread ? (t.status || "") : (t.status || (samePending && n.ticket.status) || "launching");
+        const link = t.link || (samePending && n.ticket.link) || null;
+        nodes[idx] = {
+          ...n,
+          ready: false,
+          flowList: n.flowList === "queue" ? null : n.flowList,
+          ticket: { thread: t.thread || null, link, status },
+        };
+      }
+    } else {
+      extra.push(graphTicketNode(t));
     }
   }
-  const nodes = s.tree.filter((t) => !t.done && t.thread).map((t) => {
-    const ids = ticketIds(t);
-    const issue = ids && ids.issue;
-    return { id: "t:" + t.thread, repo: t.repo || "", number: null, label: t.label, url: (issue && issue.url) || issueUrl(t.label, t.repo),
-      title: titleOf(t), state: "open", tracked: true, track: t.repo || "Tickets", trackBy: t.repo ? "repo" : "none", parent: null, subIssues: [],
-      blockedBy: [], unlocks: [], warnings: [], ticket: { thread: t.thread, link: t.link, status: t.status } };
-  });
+  return extra.length ? nodes.concat(extra) : nodes;
+}
+
+function graphData(s) {
+  const open = (s.tree || []).filter((t) => !t.done);
+  const g = flow.view && flow.view.graph;
+  if (g) {
+    const raw = (g.nodes || []).filter((n) => n && n.id);
+    if (raw.length || !open.length) {
+      return {
+        mode: "flow",
+        nodes: mergeFlowOpenTickets(raw, open),
+        edges: (g.edges || []).filter((e) => e && e.from && e.to),
+        warnings: g.warnings || [],
+        dismissedEdges: g.dismissedEdges || [],
+      };
+    }
+  }
+  const nodes = open.map(graphTicketNode);
   const mode = flow.failed ? "error" : (g ? "tickets" : "loading");
   return { mode, nodes, edges: [], warnings: [], dismissedEdges: [] };
 }
@@ -5030,8 +5131,10 @@ function graphState(n, ctx) {
     return [markOf(st, cards), WORDS[st]];
   }
   if (n.ticket) {
-    const st = state && state.settled.tickets.some((x) => x.thread && x.thread === n.ticket.thread) ? "done" : ownState(n.ticket.status);
-    return [st, WORDS[st]];
+    if (state && state.settled.tickets.some((x) => x.thread && x.thread === n.ticket.thread)) return ["done", WORDS.done];
+    const status = n.ticket.status || (n.ticket.thread ? "" : "launching");
+    const st = ownState(status);
+    return [st, status === "launching" ? "launching" : WORDS[st]];
   }
   if (n.state === "closed") return ["done", "closed"];
   if (n.ready) return ["ready", "ready"];
@@ -5043,12 +5146,19 @@ function graphState(n, ctx) {
 
 function graphDesc(n, ctx) {
   const extra = [n.id, n.track, n.milestone && n.milestone.title];
-  const t = graphTicket(n);
+  const t = graphTicket(n) || graphPendingTicket(n);
   if (t) {
     const d = ticketDesc(t, ctx);
-    return { ...d, text: [...d.text, ...extra] };
+    return { ...d, text: [...d.text, n.label, n.title, n.repo, ...extra] };
   }
   const phase = [];
+  if (isPendingGraphNode(n)) {
+    const st = ownState(n.ticket.status || "launching");
+    if (st === "run") phase.push("running");
+    else if (st === "fail") phase.push("blocked");
+    else if (st === "pause") phase.push("paused");
+    else if (st === "done") phase.push("done");
+  }
   if (n.ready) phase.push("ready");
   if (n.external) phase.push("external");
   if (n.flowList === "blocked") phase.push("blocked");
@@ -5567,6 +5677,57 @@ async function syncGraphLinks() {
   }
 }
 
+function pendingGraphReplacement(oldId, nodes) {
+  if (!String(oldId || "").startsWith("pending:")) return null;
+  if (nodes.some((n) => n.id === oldId)) return null;
+  const label = oldId.slice("pending:".length);
+  const low = label.toLowerCase();
+  const candidates = nodes.filter((n) => n.ticket && !String(n.id || "").startsWith("pending:"));
+  const byLabel = candidates.filter((n) => String(n.label || "") === label);
+  if (byLabel.length === 1) return byLabel[0];
+  if (byLabel.length > 1) return null;
+  const byId = candidates.filter((n) => String(n.id || "").toLowerCase() === low);
+  return byId.length === 1 ? byId[0] : null;
+}
+
+function migratePendingGraphNodes(nodes) {
+  const seen = new Set([...graph.btns.keys(), graph.active, graph.pin, graph.focus, graph.hover, graph.hot,
+    dr.sub && dr.sub.kind === "issue" ? dr.sub.key : null, dr.from && dr.from.graph].filter((id) => String(id || "").startsWith("pending:")));
+  for (const oldId of seen) {
+    const next = pendingGraphReplacement(oldId, nodes);
+    if (!next) continue;
+    if (graph.btns.has(oldId) && !graph.btns.has(next.id)) {
+      const b = graph.btns.get(oldId);
+      graph.btns.delete(oldId);
+      setAttr(b, "data-id", next.id);
+      graph.btns.set(next.id, b);
+      graph.order = graph.order.map((x) => (x === oldId ? next.id : x));
+    }
+    for (const k of ["active", "pin", "focus", "hover", "hot"]) {
+      if (graph[k] === oldId) graph[k] = next.id;
+    }
+    if (dr.from && dr.from.graph === oldId) dr.from.graph = next.id;
+    if (dr.open && dr.sub && dr.sub.kind === "issue" && dr.sub.key === oldId) {
+      const th = next.ticket && next.ticket.thread;
+      if (th && state && state.tree.some((t) => t.thread === th)) {
+        dr.sub = { kind: "ticket", key: th, worker: null, card: null };
+        if (dr.from) dr.from.sub = { kind: "ticket", key: th };
+      } else {
+        dr.sub = { kind: "issue", key: next.id, worker: null, card: null, pending: isPendingGraphNode(next) };
+        if (dr.from) dr.from.sub = { kind: "issue", key: next.id };
+      }
+    }
+  }
+  if (dr.open && dr.sub && dr.sub.kind === "issue" && dr.sub.pending) {
+    const cur = graphNode(dr.sub.key);
+    const th = cur && cur.ticket && cur.ticket.thread;
+    if (th && state && state.tree.some((t) => t.thread === th)) {
+      dr.sub = { kind: "ticket", key: th, worker: null, card: null };
+      if (dr.from) dr.from.sub = { kind: "ticket", key: th };
+    }
+  }
+}
+
 function paintGraph() {
   if (!state) return;
   const d = graphData(state);
@@ -5575,6 +5736,7 @@ function paintGraph() {
   graph.edges = d.edges;
   graph.dismissed = d.dismissedEdges || [];
   graph.byThread = new Map(d.nodes.filter((n) => n.ticket && n.ticket.thread).map((n) => [n.ticket.thread, n]));
+  migratePendingGraphNodes(d.nodes);
   const ctx = filterCtx(state);
   const on = filtering();
   const hits = d.nodes.filter((n) => !on || matches(graphDesc(n, ctx)));
@@ -5704,9 +5866,10 @@ function graphPatch(b, n, ctx, out) {
     setAttr(gw, "title", null);
   }
   const t = graphTicket(n);
+  const pending = isPendingGraphNode(n);
   const title = n.title || (t ? titleOf(t) : "");
-  setText(part(b, "title"), title || (n.tracked ? "" : "Not opted into the flow"));
-  const said = [n.label || n.id, title, word, n.track ? "lane " + n.track : "",
+  setText(part(b, "title"), title || (pending ? "Not joined yet" : n.tracked ? "" : "Not opted into the flow"));
+  const said = [n.label || n.id, title, word, pending ? "not joined yet" : "", n.track ? "lane " + n.track : "",
     openBlockers(n).length ? "blocked by " + openBlockers(n).length : "", (n.unlocks || []).length ? "unlocks " + n.unlocks.length : "",
     warns.length ? warns.map((w) => w.message).join("; ") : "",
     out ? "outside the filter" : ""].filter(Boolean).join(", ");
@@ -7166,9 +7329,11 @@ function openDrawer(sub, from) {
     const c = state.cards.find((x) => x.id === sub.key);
     if (c && c.ticket && state.tree.some((t) => t.thread === c.ticket)) sub = { kind: "ticket", key: c.ticket, card: c.id };
   }
-  if (state && !drFind(sub, state)) return announce(drGoneSaid(sub));
+  const hit = state ? drFind(sub, state) : null;
+  if (state && !hit) return announce(drGoneSaid(sub));
+  const pending = !!(hit && hit.n && isPendingGraphNode(hit.n));
   const fresh = !dr.open || !drSame(dr.sub, sub);
-  dr.sub = { kind: sub.kind, key: sub.key, worker: sub.worker || null, card: sub.card || null };
+  dr.sub = { kind: sub.kind, key: sub.key, worker: sub.worker || null, card: sub.card || null, pending };
   if (from) dr.from = from;
   for (const [k, v] of dr.msgs) if (v.error) dr.msgs.delete(k);
   closeComposer(false);
@@ -7177,6 +7342,7 @@ function openDrawer(sub, from) {
   paintScrim();
   if (fresh) $("dr-err").hidden = true;
   paintDrawer();
+  if (pending) announce((hit.n.label || hit.n.id) + " is launching; the thread has not joined yet.");
   if (fresh) {
     drPart("body").scrollTop = 0;
     const w = drPart("workers-l").querySelector("[data-inspected]");
@@ -8032,7 +8198,8 @@ function flowSaid(n) {
   const out = [];
   const warns = n.warnings || [];
   if (n.state === "closed") out.push("Closed on GitHub.");
-  if (n.flowList === "queue") out.push("In the ready queue: opted in, no open blocker and no ticket yet.");
+  if (isPendingGraphNode(n)) out.push("Launched; the thread has not joined yet.");
+  else if (n.flowList === "queue") out.push("In the ready queue: opted in, no open blocker and no ticket yet.");
   else if (n.flowList === "blocked") {
     const blockedEntry = flow.view && (flow.view.blocked || []).find((b) => (b.repo + "#" + b.number).toLowerCase() === String(n.id || "").toLowerCase());
     if (n.external) out.push("Held by blockers outside the covered repos, or labelled blocked: external.");
@@ -8052,8 +8219,9 @@ function flowSaid(n) {
 function paintIssueDrawer(n) {
   const [mk, word] = graphState(n, filterCtx(state));
   const label = n.label || n.id;
+  const pt = graphPendingTicket(n);
   drHead(label, "", n.title || label, null);
-  drPills(mk, word, null, label, false, { repo: n.repo });
+  drPills(mk, word, null, label, false, { repo: n.repo || (pt && pt.repo) || "", project: pt && pt.project });
   drPart("ext").hidden = !n.external || mk === "external";
   drFlowPills(n);
   drLink("gh-issue", n.url, "Open issue on GitHub", "Open issue " + label + " on GitHub");
@@ -8062,7 +8230,7 @@ function paintIssueDrawer(n) {
   else drClear("t3");
   const said = flowSaid(n);
   drSec("note", !!said);
-  setText(drPart("note-h"), "Flow");
+  setText(drPart("note-h"), isPendingGraphNode(n) && graph.mode !== "flow" ? "Ticket" : "Flow");
   drPart("note-b").hidden = true;
   const m = drPart("note-m");
   m._key = null;
