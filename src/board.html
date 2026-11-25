@@ -1042,16 +1042,31 @@ kbd { font-family: var(--mono); font-size: 12px; }
 @media (max-width: 1120px) {
   .dgrid, .agrid { grid-template-columns: minmax(0, 1fr); }
 }
-@media (max-width: 1023px) {
-  .top .tools .btn .w { display: none; }
-  .top .tools .btn:not(.go) { width: 30px; padding: 0; }
+@media (max-width: 1240px) {
+  .top:has(.upd:not([hidden])) .vtab .long { display: none; }
 }
-@media (max-width: 820px) {
+@media (max-width: 1100px) {
+  .vtab .long { display: none; }
+}
+@media (max-width: 1080px) {
+  .top:has(.upd:not([hidden])) :is(.tools, .upd) > .btn .w { display: none; }
+  .top:has(.upd:not([hidden])) :is(.tools, .upd) > .btn:not(.go) { width: 30px; padding: 0; }
+}
+@media (max-width: 1023px) {
+  .top :is(.tools, .upd) > .btn .w { display: none; }
+  .top :is(.tools, .upd) > .btn:not(.go) { width: 30px; padding: 0; }
+}
+.top .tools > * { flex-shrink: 0; }
+@media (max-width: 940px) {
   .app { grid-template-rows: auto auto minmax(0, 1fr); }
   .top { flex-wrap: wrap; height: auto; padding: 0 12px; gap: 0 8px; }
   .brand { height: 48px; }
   .views { order: 3; flex: 1 1 100%; margin: 0 -12px; padding: 0 4px; border-top: 1px solid var(--header-border); }
   .vtab { flex: 1 1 0; justify-content: center; min-width: 0; height: 44px; padding: 0 6px; }
+  .upd { position: static; }
+  .drift-pop, .upd-pop { width: auto; left: 12px; right: 12px; top: 52px; }
+}
+@media (max-width: 820px) {
   .route { position: static; }
   .tele { position: relative; }
   .route-tip { left: 12px; right: 12px; width: auto; }
@@ -1060,9 +1075,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   .fbar { position: static; }
   .facet { position: static; }
   .tele .fbar { position: relative; }
-  .upd { position: static; }
   .top { position: sticky; }
-  .drift-pop, .upd-pop { width: auto; left: 12px; right: 12px; top: 52px; }
   .nrow { grid-template-columns: minmax(0, 1fr); padding: var(--row-pad) 16px; }
   .nrow .nacts { grid-column: 1; grid-row: auto; opacity: 1; flex-wrap: wrap; }
 }
@@ -1079,7 +1092,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
   #keys-btn { display: none; }
   .btn, .tab, .linkish, .mode .btn, .t-btn { min-height: 36px; }
   .top .btn { min-height: 34px; }
-  .top .btn.ib, .top .tools .btn:not(.go) { width: 34px; }
+  .top .btn.ib, .top :is(.tools, .upd) > .btn:not(.go) { width: 34px; }
   .btn.answer { padding: 0 12px; white-space: normal; text-align: center; }
   .act .opts { flex: 1 1 100%; min-width: 0; max-width: 100%; }
   .act .opts .btn.answer:first-child { flex: 1 1 100%; }

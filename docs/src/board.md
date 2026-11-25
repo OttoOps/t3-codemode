@@ -239,6 +239,12 @@ Workspace palette. At 1180 px and below, Workspace drops the left nav and uses
 the Dispatch command bar and view tabs in the Workspace palette, so Launch,
 the layout button and the view tabs stay on screen down to 390 px.
 
+The top bar keeps every button on screen in both layouts. The view tabs use
+their short names at 1100 px and below, or at 1240 px and below while the
+update or skills button shows. The buttons drop their labels at 1023 px and
+below, or at 1080 px and below while either of those buttons shows. At 940 px
+and below the view tabs move to their own row.
+
 Single-key shortcuts work while no field has focus: `/` focuses search, `a`
 opens Ask, `l` opens Launch, `t` switches the theme, `d` switches the density,
 `g` then `d`, `t`, `i`, `q` or `a` goes to Needs you, Issues in progress, New
