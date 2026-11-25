@@ -38,11 +38,54 @@ async () => {
   return vars.idle.length;
 }"#;
 
-fn with_namespaces(text: &str, namespaces: &[String]) -> String {
-    if namespaces.is_empty() {
+pub const DEFAULT_INSTRUCTIONS: &str = "T3 Code and the configured MCP servers in two tools: `search` the API catalog with code, then `execute` code against it.";
+
+pub const MAX_INSTRUCTIONS_CHARS: usize = 2000;
+
+pub type Described = (String, Option<String>);
+
+fn server_list(servers: &[Described], described: usize, ticks: bool) -> String {
+    servers
+        .iter()
+        .enumerate()
+        .map(|(i, (name, about))| {
+            let name = if ticks { format!("`{name}`") } else { name.clone() };
+            match about {
+                Some(about) if i < described => format!("{name} ({about})"),
+                _ => name,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_instructions(servers: &[Described], described: usize) -> String {
+    format!(
+        "T3 Code and these MCP servers, reached through `search` then `execute`: {}. Prefer these over the web or a browser for the same data.",
+        server_list(servers, described, true)
+    )
+}
+
+fn described_within_cap(servers: &[Described]) -> usize {
+    (0..=servers.len())
+        .rev()
+        .find(|&n| render_instructions(servers, n).chars().count() <= MAX_INSTRUCTIONS_CHARS)
+        .unwrap_or(0)
+}
+
+pub fn instructions(servers: &[Described]) -> String {
+    if servers.is_empty() {
+        return DEFAULT_INSTRUCTIONS.to_string();
+    }
+    render_instructions(servers, described_within_cap(servers))
+}
+
+fn with_namespaces(text: &str, servers: &[Described]) -> String {
+    if servers.is_empty() {
         format!("{text}\n\nNo MCP servers are configured.")
     } else {
-        format!("{text}\n\nMCP server namespaces: {}.", namespaces.join(", "))
+        let list = server_list(servers, described_within_cap(servers), false);
+        format!("{text}\n\nMCP server namespaces: {list}.")
     }
 }
 
@@ -50,12 +93,12 @@ pub fn tools() -> Value {
     tools_with(&[])
 }
 
-pub fn tools_with(namespaces: &[String]) -> Value {
+pub fn tools_with(servers: &[Described]) -> Value {
     json!([
         {
             "name": "search",
             "title": "Search the Code Mode API",
-            "description": with_namespaces(SEARCH_DESCRIPTION, namespaces),
+            "description": with_namespaces(SEARCH_DESCRIPTION, servers),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -69,7 +112,7 @@ pub fn tools_with(namespaces: &[String]) -> Value {
         {
             "name": "execute",
             "title": "Run code against T3 Code and MCP servers",
-            "description": with_namespaces(EXECUTE_DESCRIPTION, namespaces),
+            "description": with_namespaces(EXECUTE_DESCRIPTION, servers),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -127,12 +170,12 @@ pub async fn handle_with(app: &Arc<App>, msg: Value, caller: Option<&str>, repor
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "t3-codemode", "version": env!("CARGO_PKG_VERSION")},
-                    "instructions": "T3 Code and the configured MCP servers in two tools: `search` the API catalog with code, then `execute` code against it."
+                    "instructions": instructions(&app.upstreams.descriptions())
                 }),
             )
         }
         "ping" => ok(id, json!({})),
-        "tools/list" => ok(id, json!({"tools": tools_with(&app.upstreams.namespaces())})),
+        "tools/list" => ok(id, json!({"tools": tools_with(&app.upstreams.descriptions())})),
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
             let args = &params["arguments"];

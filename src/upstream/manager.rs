@@ -12,8 +12,8 @@ use tokio::time::Instant;
 use super::config::resolve;
 use super::{
     BACKOFF_MAX, BACKOFF_MIN, BoxFut, CONNECT_TIMEOUT, Connector, McpConnector, Secret, T3_NAMESPACE, ToolDef,
-    ToolFilter, Upstream, UpstreamConfig, UpstreamError, UpstreamState, UpstreamStatus, qualified, redact_json,
-    redact_secrets, server_info,
+    ToolFilter, Upstream, UpstreamConfig, UpstreamError, UpstreamState, UpstreamStatus, describe, qualified,
+    redact_json, redact_secrets, server_info,
 };
 
 type Conn = Arc<dyn Upstream>;
@@ -72,6 +72,7 @@ struct SlotState {
     retry_at: Option<(Instant, String)>,
     secrets: Vec<Secret>,
     server: Option<Value>,
+    described: Option<String>,
 }
 
 fn same(a: &Conn, b: &Conn) -> bool {
@@ -184,7 +185,9 @@ impl Inner {
     fn install(&self, idx: usize, conn: Conn, tools: Vec<ToolDef>) -> bool {
         let count = self.set_tools(idx, tools);
         let r = self.redactor();
-        let server = server_info(conn.status().server, &|s| r.apply(s));
+        let raw = conn.status().server;
+        let described = describe(raw.as_ref(), &|s| r.apply(s));
+        let server = server_info(raw, &|s| r.apply(s));
         let mut st = self.slots[idx].lock();
         if self.closed.load(Ordering::SeqCst) {
             st.connecting = None;
@@ -200,6 +203,7 @@ impl Inner {
         st.retry_at = None;
         st.last_error = None;
         st.server = server;
+        st.described = described;
         true
     }
 
@@ -534,6 +538,17 @@ impl UpstreamManager {
 
     pub fn namespaces(&self) -> Vec<String> {
         self.inner.enabled().map(|(_, s)| s.name().to_string()).collect()
+    }
+
+    pub fn descriptions(&self) -> Vec<(String, Option<String>)> {
+        let r = self.inner.redactor();
+        self.inner
+            .enabled()
+            .map(|(_, s)| {
+                let about = s.config.about.clone().or_else(|| s.lock().described.clone().map(|d| r.apply(d)));
+                (s.name().to_string(), about)
+            })
+            .collect()
     }
 
     pub fn is_namespace(&self, ns: &str) -> bool {

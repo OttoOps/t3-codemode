@@ -36,6 +36,7 @@ pub const SECRET_NAME_HINTS: &[&str] =
     &["TOKEN", "SECRET", "KEY", "PASSWORD", "PASSWD", "AUTH", "COOKIE", "CREDENTIAL"];
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const SERVER_INFO_CHARS: usize = 100;
+pub const MAX_ABOUT_CHARS: usize = 120;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -95,6 +96,8 @@ pub struct UpstreamConfig {
     pub allow: Vec<String>,
     #[serde(default)]
     pub deny: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -433,6 +436,17 @@ pub fn server_info(info: Option<Value>, redact: &dyn Fn(String) -> String) -> Op
         }
     }
     if out.is_empty() { None } else { Some(Value::Object(out)) }
+}
+
+pub fn describe(server: Option<&Value>, redact: &dyn Fn(String) -> String) -> Option<String> {
+    let server = server?;
+    let one_line = |v: &Value| {
+        let redacted = redact(v.as_str()?.to_string());
+        let text = redacted.lines().map(str::trim).find(|l| !l.is_empty())?;
+        Some(redact(text.split_whitespace().collect::<Vec<_>>().join(" ")))
+    };
+    let text = one_line(&server["title"]).or_else(|| one_line(&server["instructions"]))?;
+    Some(truncate_chars(&text, MAX_ABOUT_CHARS))
 }
 
 pub fn unwrap_call_result(qualified_name: &str, result: &Value) -> Result<Value, UpstreamError> {

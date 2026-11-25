@@ -106,7 +106,12 @@ pub(super) fn accept_initialize(ns: &str, result: &Value) -> Result<(String, Opt
             SUPPORTED_VERSIONS.join(", ")
         )));
     }
-    Ok((version.to_string(), result.get("serverInfo").filter(|v| v.is_object()).cloned()))
+    let mut server = result.get("serverInfo").filter(|v| v.is_object()).cloned();
+    if let Some(text) = result["instructions"].as_str().filter(|t| !t.trim().is_empty()) {
+        let info = server.get_or_insert_with(|| json!({}));
+        info["instructions"] = Value::String(text.to_string());
+    }
+    Ok((version.to_string(), server))
 }
 
 pub(super) fn remote_message(err: &Value) -> String {

@@ -8,8 +8,9 @@ use t3_codemode::config::Config;
 use t3_codemode::upstream::config::{glob_match, has_reference, parse_references, resolve, resolve_value};
 use t3_codemode::upstream::fake::{FakeConnector, FakeUpstream, tool};
 use t3_codemode::upstream::{
-    BoxFut, Connector, REDACTED, RESERVED_JS, RESERVED_NAMES, Reference, ResolvedTransport, ResolvedUpstream, ToolDef,
-    ToolFilter, Transport, Upstream, UpstreamConfig, UpstreamError, UpstreamManager, UpstreamState,
+    BoxFut, Connector, MAX_ABOUT_CHARS, REDACTED, RESERVED_JS, RESERVED_NAMES, Reference, ResolvedTransport,
+    ResolvedUpstream, ToolDef, ToolFilter, Transport, Upstream, UpstreamConfig, UpstreamError, UpstreamManager,
+    UpstreamState,
 };
 
 fn example() -> Value {
@@ -883,4 +884,109 @@ async fn tool_definitions_and_server_info_are_redacted_and_trimmed() {
     assert!(!dump.contains("def-secret-5521") && dump.contains(REDACTED), "{dump}");
     let server = state(&m, "a").server.unwrap();
     assert_eq!(server, json!({"name": format!("srv {REDACTED}"), "version": "1"}));
+}
+
+#[test]
+fn about_is_optional_one_line_and_capped() {
+    let c = Config::from_value(json!({"upstreams": [with(http_up("a"), json!({"about": "Example quotes API"}))]}));
+    assert_eq!(c.unwrap().upstreams[0].about.as_deref(), Some("Example quotes API"));
+    assert_eq!(cfg(http_up("a")).about, None);
+    let longest = "é".repeat(MAX_ABOUT_CHARS);
+    assert!(Config::from_value(json!({"upstreams": [with(http_up("a"), json!({"about": longest}))]})).is_ok());
+    for bad in [
+        json!(""),
+        json!("   "),
+        json!("two\nlines"),
+        json!("tab\there"),
+        json!("line\u{2028}separator"),
+        json!("x".repeat(MAX_ABOUT_CHARS + 1)),
+    ] {
+        reject_one(with(http_up("a"), json!({"about": bad})), "about");
+    }
+}
+
+#[tokio::test]
+async fn descriptions_fall_back_from_about_to_title_to_instructions_to_none() {
+    let titled = FakeUpstream::new("titled", echo_tools());
+    titled.set_server(json!({"name": "t", "title": "Titled Server", "instructions": "Not this."}));
+    let taught = FakeUpstream::new("taught", echo_tools());
+    taught.set_server(json!({"name": "i", "instructions": "\n  Reads   the\tdocs.  \nSecond line."}));
+    let named = FakeUpstream::new("named", echo_tools());
+    let told = FakeUpstream::new("told", echo_tools());
+    told.set_server(json!({"title": "Ignored", "instructions": "Ignored too."}));
+    let (m, _) = manager(
+        vec![
+            http_up("titled"),
+            http_up("taught"),
+            http_up("named"),
+            with(http_up("told"), json!({"about": "Configured text"})),
+            with(http_up("off"), json!({"enabled": false, "about": "Never shown"})),
+        ],
+        &[&titled, &taught, &named, &told],
+    );
+    let none = |n: &str| (n.to_string(), None::<String>);
+    assert_eq!(
+        m.descriptions(),
+        vec![none("titled"), none("taught"), none("named"), ("told".into(), Some("Configured text".into()))]
+    );
+    m.tools().await;
+    let some = |n: &str, d: &str| (n.to_string(), Some(d.to_string()));
+    let expected = vec![
+        some("titled", "Titled Server"),
+        some("taught", "Reads the docs."),
+        none("named"),
+        some("told", "Configured text"),
+    ];
+    assert_eq!(m.descriptions(), expected);
+    titled.set_down(true);
+    let _ = m.call("titled", "echo", json!({})).await;
+    assert_eq!(state(&m, "titled").state, UpstreamState::Backoff);
+    assert_eq!(m.descriptions(), expected, "the last successful connect still describes it");
+}
+
+#[tokio::test]
+async fn descriptions_are_trimmed_and_redacted() {
+    set_env("UPMGR_ABOUT_TOKEN", "about-secret-8812");
+    let up = json!({
+        "name": "a",
+        "transport": "http",
+        "http": {"url": "http://127.0.0.1:9/mcp", "headers": {"Authorization": "Bearer ${env:UPMGR_ABOUT_TOKEN}"}}
+    });
+    let fake = FakeUpstream::new("a", echo_tools());
+    let straddling = format!("{} about-secret-8812 tail", "y".repeat(MAX_ABOUT_CHARS - 8));
+    fake.set_server(json!({"instructions": format!("about-secret-8812 {straddling}")}));
+    let (m, _) = manager(vec![up], &[&fake]);
+    m.tools().await;
+    let about = m.descriptions()[0].1.clone().unwrap();
+    assert!(about.starts_with(&format!("{REDACTED} y")), "{about}");
+    assert!(!about.contains("about-se"), "a secret across the cut must not leave its prefix: {about}");
+    assert!(about.ends_with("...") && about.chars().count() == MAX_ABOUT_CHARS + 3, "{about}");
+}
+
+#[tokio::test]
+async fn descriptions_redact_secrets_learned_later_and_after_normalizing_whitespace() {
+    set_env("UPMGR_LATE_TOKEN", "late-secret-4410");
+    set_env("UPMGR_SPACED_TOKEN", "correct horse 9931");
+    let early = FakeUpstream::new("early", echo_tools());
+    early.set_server(json!({"title": "Uses late-secret-4410 for auth"}));
+    let spaced = FakeUpstream::new("spaced", echo_tools());
+    spaced.set_server(json!({"title": "Key correct\thorse  9931 here"}));
+    let late = FakeUpstream::new("late", echo_tools());
+    let header = |var: &str| json!({"Authorization": format!("Bearer ${{env:{var}}}")});
+    let (m, _) = manager(
+        vec![
+            http_up("early"),
+            json!({"name": "spaced", "transport": "http",
+                   "http": {"url": "http://127.0.0.1:9/mcp", "headers": header("UPMGR_SPACED_TOKEN")}}),
+            json!({"name": "late", "transport": "http",
+                   "http": {"url": "http://127.0.0.1:9/mcp", "headers": header("UPMGR_LATE_TOKEN")}}),
+        ],
+        &[&early, &spaced, &late],
+    );
+    m.call("early", "echo", json!({})).await.unwrap();
+    m.call("spaced", "echo", json!({})).await.unwrap();
+    m.call("late", "echo", json!({})).await.unwrap();
+    let got = m.descriptions();
+    assert_eq!(got[0].1.as_deref(), Some(format!("Uses {REDACTED} for auth").as_str()));
+    assert_eq!(got[1].1.as_deref(), Some(format!("Key {REDACTED} here").as_str()));
 }

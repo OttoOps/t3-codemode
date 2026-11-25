@@ -81,6 +81,10 @@ async fn initialize_list_and_call_over_http() {
     let init: Value = r.json().await.unwrap();
     assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(init["result"]["serverInfo"]["name"], "t3-codemode");
+    assert_eq!(
+        init["result"]["instructions"],
+        "T3 Code and the configured MCP servers in two tools: `search` the API catalog with code, then `execute` code against it."
+    );
 
     let r = s.rpc(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}), None).await;
     assert_eq!(r.status(), 202);

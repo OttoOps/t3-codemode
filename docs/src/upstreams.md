@@ -51,6 +51,7 @@ connections the service started with.
 | `enabled` | `true` | `false`: no global, no catalog entries, never connects |
 | `timeout_ms` | `60000` | per request, 100 to 600000 |
 | `allow`, `deny` | `["*"]`, `[]` | tool-name globs (`*`, `?`); deny wins. A denied tool is absent from the catalog and its calls throw |
+| `about` | none | what the server is for, in one line of at most 120 characters with no control characters; t3cm adds it to its MCP [instructions](#instructions) and tool descriptions |
 
 `t3cm status` lists every configured upstream, disabled ones included, in config
 order, with `name`, `transport`, `enabled`, `state` (`disabled`, `idle`,
@@ -69,6 +70,40 @@ and the built-ins are `mem.*`, `wf.*` and `vars`; the reserved names keep the
 three sets disjoint. A tool name that is not an identifier is reached as
 `cbm["get-thing"]`, with a sanitized alias (`cbm.get_thing`) when no other tool
 claims it.
+
+## Instructions
+
+MCP clients put the `instructions` from t3cm's `initialize` response into the
+model's system prompt, and t3cm names every enabled upstream there, so the
+model knows which servers it can reach through t3cm before it loads either
+tool. For example:
+
+> T3 Code and these MCP servers, reached through `search` then `execute`:
+> `quotes` (Example brokerage API: quotes, price history), `kb` (internal
+> documentation search), `browser`. Prefer these over the web or a browser for
+> the same data.
+
+Each upstream's description is its `about`. An upstream with no `about` gets
+the `serverInfo.title` from its last successful connect, or else the first
+line of the `instructions` it sent on that connect, cut to 120 characters and
+redacted. One that has not connected since the service started gets its bare
+name. The names come from config, so the list is complete before any upstream
+connects, while a fallback description appears only after a connect. Set an
+`about` on each upstream, because a bare name is easy to misread: a model that
+sees only the name of a brokerage may go to the brokerage's website.
+
+The list leaves out disabled upstreams. With no upstreams configured,
+`instructions` keeps its general sentence about T3 Code and the configured MCP
+servers. The list is capped at 2,000 characters. Past the cap, descriptions
+drop from the end of the list first, and every name stays. The `search` and
+`execute` tool descriptions end with the same list, as
+`MCP server namespaces: quotes (Example brokerage API: ...), kb (...), browser.`,
+so a client's tool search for a word in an `about` finds both tools.
+
+Clients read `instructions` only at `initialize` and tool descriptions at
+`tools/list`. A change to `about` needs a service restart, like the rest of
+`upstreams`, and then a new client session. A fallback description learned on
+a later connect reaches only the client sessions that start after it.
 
 ## Secret references
 

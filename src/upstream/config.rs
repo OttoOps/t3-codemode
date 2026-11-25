@@ -5,9 +5,9 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 
 use super::{
-    HttpConfig, MAX_NAME_LEN, MAX_TIMEOUT_MS, MIN_SECRET_LEN, MIN_TIMEOUT_MS, RESERVED_JS, RESERVED_NAMES, Reference,
-    ResolvedTransport, ResolvedUpstream, SECRET_NAME_HINTS, Secret, StdioConfig, ToolFilter, Transport, UpstreamConfig,
-    UpstreamError, is_loopback_host,
+    HttpConfig, MAX_ABOUT_CHARS, MAX_NAME_LEN, MAX_TIMEOUT_MS, MIN_SECRET_LEN, MIN_TIMEOUT_MS, RESERVED_JS,
+    RESERVED_NAMES, Reference, ResolvedTransport, ResolvedUpstream, SECRET_NAME_HINTS, Secret, StdioConfig, ToolFilter,
+    Transport, UpstreamConfig, UpstreamError, is_loopback_host,
 };
 use crate::field::{invalid, segment};
 use crate::platform::{executable_variants, has_separator, home_dir, is_executable};
@@ -63,10 +63,28 @@ fn check_upstream(up: &UpstreamConfig) -> Result<(), FieldError> {
             format!("must be between {MIN_TIMEOUT_MS} and {MAX_TIMEOUT_MS}, got {}", up.timeout_ms),
         ));
     }
+    if let Some(about) = &up.about {
+        check_about(about)?;
+    }
     for (key, globs) in [("allow", &up.allow), ("deny", &up.deny)] {
         if let Some(i) = globs.iter().position(|g| g.is_empty()) {
             return err(&format!("{key}[{i}]"), "a glob must not be empty");
         }
+    }
+    Ok(())
+}
+
+fn check_about(about: &str) -> Result<(), FieldError> {
+    let fail = |msg: String| Err(("about".to_string(), msg));
+    if about.trim().is_empty() {
+        return fail("must not be empty".into());
+    }
+    if about.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')) {
+        return fail("must be one line, with no control characters".into());
+    }
+    let len = about.chars().count();
+    if len > MAX_ABOUT_CHARS {
+        return fail(format!("must be at most {MAX_ABOUT_CHARS} characters, got {len}"));
     }
     Ok(())
 }
