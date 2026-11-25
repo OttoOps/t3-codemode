@@ -1,0 +1,12 @@
+examine_globs = [
+  "src/reconcile.rs",
+  "src/wf_pr.rs",
+  "src/merge.rs",
+  "src/board.rs",
+  "src/wf.rs",
+]
+profile = "mutants"
+test_tool = "nextest"
+additional_cargo_args = ["--test", "all"]
+additional_cargo_test_args = ["-E", "test(/^pr_chaos::/)"]
+minimum_test_timeout = 60
