@@ -30,7 +30,7 @@ clap = { version = "4", features = ["derive", "env"] }
 fancy-regex = "0.14"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 getrandom = "0.4"
-jiff = "0.2"
+jiff = "1.0"
 oxc_allocator = "=0.146.0"
 oxc_ast = "=0.146.0"
 oxc_codegen = "=0.146.0"
