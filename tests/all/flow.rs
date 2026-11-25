@@ -6904,3 +6904,351 @@ return {{ initial, clicked, inFlight, afterJoin, freePendingKind, afterFreeJoin,
     assert_eq!(r["guardedEditing"], true, "{r}");
     assert_eq!(r["guardedSyncing"], true, "{r}");
 }
+
+const GRAPH_GEOM: &str = r##"
+function sampleSvgPath(d) {
+  const toks = d.match(/[MLC]|-?\d+(?:\.\d+)?/g) || [];
+  let i = 0, cx = 0, cy = 0;
+  const pts = [];
+  const horizYs = [];
+  while (i < toks.length) {
+    const cmd = toks[i++];
+    if (cmd === "M") {
+      cx = +toks[i++]; cy = +toks[i++];
+      pts.push([cx, cy]);
+    } else if (cmd === "L") {
+      const nx = +toks[i++], ny = +toks[i++];
+      if (Math.abs(ny - cy) < 0.01 && Math.abs(nx - cx) > 40) horizYs.push(cy);
+      const steps = Math.max(2, Math.ceil(Math.hypot(nx - cx, ny - cy) / 2));
+      for (let s = 1; s <= steps; s++) {
+        const t = s / steps;
+        pts.push([cx + (nx - cx) * t, cy + (ny - cy) * t]);
+      }
+      cx = nx; cy = ny;
+    } else if (cmd === "C") {
+      const x1 = +toks[i++], y1 = +toks[i++], x2 = +toks[i++], y2 = +toks[i++], nx = +toks[i++], ny = +toks[i++];
+      for (let s = 1; s <= 32; s++) {
+        const t = s / 32, u = 1 - t;
+        pts.push([
+          u*u*u*cx + 3*u*u*t*x1 + 3*u*t*t*x2 + t*t*t*nx,
+          u*u*u*cy + 3*u*u*t*y1 + 3*u*t*t*y2 + t*t*t*ny,
+        ]);
+      }
+      cx = nx; cy = ny;
+    } else {
+      throw new Error("unexpected SVG path command: " + cmd);
+    }
+  }
+  return { pts, horizYs, start: pts[0], end: pts[pts.length - 1], mid: pts[Math.floor(pts.length / 2)] };
+}
+
+function verifyGraphEdges() {
+  const svg = q("#gscroll svg");
+  const w = +svg.getAttribute("width"), h = +svg.getAttribute("height");
+  const rects = Object.fromEntries(document.querySelectorAll("foreignObject").map((f) => {
+    const id = f.querySelector(".gnode").dataset.id;
+    return [id, { x: +f.getAttribute("x"), y: +f.getAttribute("y"), w: +f.getAttribute("width"), h: +f.getAttribute("height") }];
+  }));
+  const laneRects = document.querySelectorAll(".glane").map((r) => ({ y: +r.getAttribute("y"), h: +r.getAttribute("height") }));
+  const violations = [];
+  const edgeMeta = [];
+  for (const p of document.querySelectorAll(".ge")) {
+    const from = p.getAttribute("data-from"), to = p.getAttribute("data-to"), d = p.getAttribute("d");
+    const sampled = sampleSvgPath(d);
+    for (let k = 0; k < sampled.pts.length; k++) {
+      const [px, py] = sampled.pts[k];
+      if (px < 0 || px > w || py < 0 || py > h) violations.push({ from, to, reason: "oob", px, py, w, h });
+      for (const [id, r] of Object.entries(rects)) {
+        if (id === from || id === to) {
+          if (k > 0 && k < sampled.pts.length - 1 && px > r.x + 0.5 && px < r.x + r.w - 0.5 && py > r.y + 0.5 && py < r.y + r.h - 0.5) {
+            violations.push({ from, to, hit: id, reason: "endpoint-interior", px, py, r });
+          }
+        } else if (px >= r.x - 1 && px <= r.x + r.w + 1 && py >= r.y - 1 && py <= r.y + r.h + 1) {
+          violations.push({ from, to, hit: id, reason: "intermediate-node", px, py, r });
+        }
+      }
+    }
+    edgeMeta.push({
+      from, to,
+      kind: p.getAttribute("data-kind"),
+      source: p.getAttribute("data-source"),
+      cls: p.getAttribute("class"),
+      marker: p.getAttribute("marker-end"),
+      d,
+      routed: d.includes("L"),
+      horizYs: sampled.horizYs,
+      start: sampled.start,
+      end: sampled.end,
+      mid: sampled.mid,
+      title: p.querySelector("title") ? p.querySelector("title").textContent : null,
+    });
+  }
+  return { w, h, rects, laneRects, violations, edgeMeta };
+}
+"##;
+
+#[tokio::test]
+async fn graph_edges_route_through_gutters_for_diamond_skip_and_backward_cycle() {
+    let h = flowing(4);
+    for n in 1u64..=4 {
+        issue(&h, REPO, n, &[FLOW, "track: board"], n as u32);
+    }
+    // Diamond: A(#1) -> B(#2) -> D(#4), A(#1) -> C(#3) -> D(#4),
+    // plus skip edge A(#1) -> D(#4) (parsed from body) and backward cycle edge D(#4) -> A(#1).
+    h.github.set_blockers(REPO, 2, &[(REPO, 1)]);
+    h.github.set_blockers(REPO, 3, &[(REPO, 1)]);
+    h.github.set_blockers(REPO, 4, &[(REPO, 2), (REPO, 3)]);
+    h.github.set_body(REPO, 4, "## Flow\n- Blocked by: #1\n");
+    h.github.set_blockers(REPO, 1, &[(REPO, 4)]);
+
+    let (html, st, view) = panel_page(h).await;
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        &format!(
+            r##"{GRAPH}
+{GRAPH_GEOM}
+fetchReply = (url) => url === "/api/flow" ? reply(200, view) : new Promise(() => {{}});
+emitState(base);
+await tick();
+selectTab("graph");
+const full = verifyGraphEdges();
+
+// Hover tracing on #4 highlights upstream skip edge (#1->#4) and downstream cycle edge (#4->#1) cleanly.
+btn("acme/widgets#4").dispatch("pointerover");
+const hover4 = document.querySelectorAll(".ge").map((p) => [
+  p.getAttribute("data-to") + "->" + p.getAttribute("data-from"),
+  p.getAttribute("class"),
+  p.getAttribute("marker-end"),
+]);
+q("#gscroll").dispatch("pointerleave");
+
+// Measure minimal gutter growth: adjacent-only diamond vs diamond+skip vs diamond+skip+cycle.
+const baseEdges = view.graph.edges.filter((e) => !(e.from === "acme/widgets#4" && e.to === "acme/widgets#1") && !(e.from === "acme/widgets#1" && e.to === "acme/widgets#4"));
+const skipOnlyEdges = view.graph.edges.filter((e) => !(e.from === "acme/widgets#1" && e.to === "acme/widgets#4"));
+paintFlow({{ ...view, graph: {{ ...view.graph, edges: baseEdges }} }});
+const adjOnly = verifyGraphEdges();
+paintFlow({{ ...view, graph: {{ ...view.graph, edges: skipOnlyEdges }} }});
+const withSkip = verifyGraphEdges();
+
+// Adjacent two-card reciprocal cycle stays inside the existing column gap with zero SVG growth.
+const twoNodes = view.graph.nodes.filter((n) => n.id === "acme/widgets#1" || n.id === "acme/widgets#2");
+const fwdEdge = [{{ from: "acme/widgets#2", to: "acme/widgets#1", kind: "blockedBy", source: "github" }}];
+const recipEdges = [...fwdEdge, {{ from: "acme/widgets#1", to: "acme/widgets#2", kind: "blockedBy", source: "github" }}];
+paintFlow({{ ...view, graph: {{ ...view.graph, nodes: twoNodes, edges: fwdEdge }} }});
+const twoFwd = verifyGraphEdges();
+paintFlow({{ ...view, graph: {{ ...view.graph, nodes: twoNodes, edges: recipEdges }} }});
+const twoRecip = verifyGraphEdges();
+
+return {{ full, hover4, adjOnly, withSkip, twoFwd, twoRecip }};
+"##
+        ),
+    );
+
+    assert_eq!(r["full"]["violations"], json!([]), "diamond + skip + backward cycle had node/viewBox collisions: {r}");
+    assert_eq!(r["adjOnly"]["violations"], json!([]), "adjacent-only diamond had collisions: {r}");
+    assert_eq!(r["withSkip"]["violations"], json!([]), "diamond + skip had collisions: {r}");
+    assert_eq!(r["twoFwd"]["violations"], json!([]), "two-card forward had collisions: {r}");
+    assert_eq!(r["twoRecip"]["violations"], json!([]), "two-card reciprocal had collisions: {r}");
+
+    let rects = &r["full"]["rects"];
+    let edges = r["full"]["edgeMeta"].as_array().unwrap();
+    let find_e = |to: &str, from: &str| {
+        edges
+            .iter()
+            .find(|e| e["to"] == to && e["from"] == from)
+            .unwrap_or_else(|| panic!("missing {to}->{from}: {edges:?}"))
+    };
+
+    // Adjacent edges keep single cubic curves (no routed L segments).
+    for (to, from) in [
+        ("acme/widgets#1", "acme/widgets#2"),
+        ("acme/widgets#1", "acme/widgets#3"),
+        ("acme/widgets#2", "acme/widgets#4"),
+        ("acme/widgets#3", "acme/widgets#4"),
+    ] {
+        let e = find_e(to, from);
+        assert_eq!(e["routed"], false, "adjacent edge {to}->{from} should keep cubic curve: {e}");
+        assert_eq!(e["marker"], "url(#gm-base)", "{e}");
+    }
+
+    // Multi-column skip edge A(#1) -> D(#4) routes through top gutter above intermediate B(#2), ending at D's left border.
+    let skip = find_e("acme/widgets#1", "acme/widgets#4");
+    assert_eq!(skip["routed"], true, "multi-column skip edge must route through gutter: {skip}");
+    assert_eq!(skip["cls"], "ge src-body", "{skip}");
+    assert_eq!(skip["marker"], "url(#gm-body)", "{skip}");
+    let skip_bus_y = skip["horizYs"][0].as_f64().unwrap();
+    let b_y = rects["acme/widgets#2"]["y"].as_f64().unwrap();
+    assert!(skip_bus_y < b_y - 2.0, "skip edge bus y={skip_bus_y} should clear intermediate node B top y={b_y}");
+    let d_x = rects["acme/widgets#4"]["x"].as_f64().unwrap();
+    assert!(
+        (skip["end"][0].as_f64().unwrap() - (d_x - 2.0)).abs() < 0.05,
+        "skip edge must land at D left edge: {skip}"
+    );
+
+    // Backward cycle edge D(#4) -> A(#1) leaves D's facing left border, routes through the row gutter between B and C,
+    // and lands on A's facing right border without needing left-gutter growth.
+    let back = find_e("acme/widgets#4", "acme/widgets#1");
+    assert_eq!(back["routed"], true, "backward cycle edge must route through gutters: {back}");
+    assert_eq!(back["cls"], "ge", "{back}");
+    assert_eq!(back["marker"], "url(#gm-base)", "{back}");
+    let back_bus_y = back["horizYs"][0].as_f64().unwrap();
+    let b_bottom = b_y + rects["acme/widgets#2"]["h"].as_f64().unwrap();
+    let c_y = rects["acme/widgets#3"]["y"].as_f64().unwrap();
+    assert!(
+        back_bus_y > b_bottom + 2.0 && back_bus_y < c_y - 2.0,
+        "backward edge bus y={back_bus_y} should route inside row gutter ({b_bottom}..{c_y})"
+    );
+    let a_right = rects["acme/widgets#1"]["x"].as_f64().unwrap() + rects["acme/widgets#1"]["w"].as_f64().unwrap();
+    assert!(
+        (back["start"][0].as_f64().unwrap() - d_x).abs() < 0.05,
+        "backward edge must leave D facing left border: {back}"
+    );
+    assert!(
+        (back["end"][0].as_f64().unwrap() - (a_right + 2.0)).abs() < 0.05,
+        "backward edge must land at A facing right border: {back}"
+    );
+
+    // Hover tracing on #4 keeps upstream/downstream classes and markers on routed edges.
+    let h4 = r["hover4"].as_array().unwrap();
+    assert!(h4.contains(&json!(["acme/widgets#1->acme/widgets#4", "ge src-body up", "url(#gm-up)"])), "{h4:?}");
+    assert!(h4.contains(&json!(["acme/widgets#4->acme/widgets#1", "ge down", "url(#gm-down)"])), "{h4:?}");
+
+    // Minimal gutter growth: left margin and SVG width stay unchanged across all three diamond variants;
+    // only horizontal gutters used by routed edges expand.
+    assert_eq!(r["adjOnly"]["rects"]["acme/widgets#1"]["x"], json!(10), "{r}");
+    assert_eq!(r["withSkip"]["rects"]["acme/widgets#1"]["x"], json!(10), "{r}");
+    assert_eq!(r["full"]["rects"]["acme/widgets#1"]["x"], json!(10), "{r}");
+    assert_eq!(r["adjOnly"]["w"], r["full"]["w"], "facing-port routing needs no extra SVG width: {r}");
+    assert!(
+        r["adjOnly"]["h"].as_f64().unwrap() < r["withSkip"]["h"].as_f64().unwrap()
+            && r["withSkip"]["h"].as_f64().unwrap() < r["full"]["h"].as_f64().unwrap(),
+        "gutters should grow only as routed edges require: adj={} skip={} full={}",
+        r["adjOnly"]["h"],
+        r["withSkip"]["h"],
+        r["full"]["h"]
+    );
+
+    // Adjacent two-card reciprocal cycle stays within the existing column gap (zero width/height growth) and separates paths.
+    assert_eq!(
+        (&r["twoFwd"]["w"], &r["twoFwd"]["h"]),
+        (&r["twoRecip"]["w"], &r["twoRecip"]["h"]),
+        "adding reverse edge between adjacent cards must not grow SVG: fwd={} recip={}",
+        r["twoFwd"],
+        r["twoRecip"]
+    );
+    let rec_edges = r["twoRecip"]["edgeMeta"].as_array().unwrap();
+    assert_eq!(rec_edges.len(), 2, "{rec_edges:?}");
+    assert_eq!((&rec_edges[0]["routed"], &rec_edges[1]["routed"]), (&json!(false), &json!(false)), "{rec_edges:?}");
+    let mid_dy = (rec_edges[0]["mid"][1].as_f64().unwrap() - rec_edges[1]["mid"][1].as_f64().unwrap()).abs();
+    assert!(mid_dy >= 10.0, "adjacent reciprocal curves must separate cleanly inside the gap: {rec_edges:?}");
+}
+
+#[tokio::test]
+async fn graph_routed_parallel_and_cross_lane_edges_spread_tracks_and_keep_kinds() {
+    let h = flowing(4);
+    for n in 1u64..=3 {
+        issue(&h, REPO, n, &[FLOW, "track: alpha"], n as u32);
+    }
+    for n in 4u64..=6 {
+        issue(&h, REPO, n, &[FLOW, "track: beta"], n as u32);
+    }
+    h.github.set_blockers(REPO, 2, &[(REPO, 1)]);
+    h.github.set_blockers(REPO, 3, &[(REPO, 2)]);
+    h.github.set_blockers(REPO, 5, &[(REPO, 4)]);
+    h.github.set_blockers(REPO, 6, &[(REPO, 5)]);
+
+    let (html, st, view) = panel_page(h).await;
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        &format!(
+            r##"{GRAPH}
+{GRAPH_GEOM}
+// Inject all 5 edge kinds sharing the top gutter (A#1 -> C#3), cross-lane forward (#1 -> #6) and backward (#6 -> #1)
+// sharing the inter-lane gutter, and same-column reciprocal codeDep (#2 <-> #5).
+const extraEdges = [
+  {{ from: "acme/widgets#3", to: "acme/widgets#1", kind: "blockedBy", source: "github" }},
+  {{ from: "acme/widgets#3", to: "acme/widgets#1", kind: "parent", source: "body" }},
+  {{ from: "acme/widgets#3", to: "acme/widgets#1", kind: "prStack", source: "git", branch: "feat/3", baseBranch: "feat/1", pr: 30, basePr: 10 }},
+  {{ from: "acme/widgets#3", to: "acme/widgets#1", kind: "fileConflict", source: "code", files: ["src/board.html"] }},
+  {{ from: "acme/widgets#3", to: "acme/widgets#1", kind: "codeDep", source: "code", modules: ["src/c.rs -> src/a.rs"] }},
+  {{ from: "acme/widgets#6", to: "acme/widgets#1", kind: "blockedBy", source: "github" }},
+  {{ from: "acme/widgets#1", to: "acme/widgets#6", kind: "codeDep", source: "code", modules: ["src/a.rs -> src/f.rs"] }},
+  {{ from: "acme/widgets#5", to: "acme/widgets#2", kind: "codeDep", source: "code", modules: ["src/e.rs -> src/b.rs"] }},
+  {{ from: "acme/widgets#2", to: "acme/widgets#5", kind: "codeDep", source: "code", modules: ["src/b.rs -> src/e.rs"] }},
+];
+const customView = {{ ...view, graph: {{ ...view.graph, edges: [...view.graph.edges, ...extraEdges] }} }};
+fetchReply = (url) => url === "/api/flow" ? reply(200, customView) : new Promise(() => {{}});
+emitState(base);
+await tick();
+selectTab("graph");
+return verifyGraphEdges();
+"##
+        ),
+    );
+
+    assert_eq!(r["violations"], json!([]), "parallel + cross-lane + same-col edges had collisions: {r}");
+    let all = r["edgeMeta"].as_array().unwrap();
+
+    // All 5 parallel #1 -> #3 routed edges share the top gutter on 5 distinct Y tracks and keep their styles/markers/tooltips.
+    let par13: Vec<&Value> =
+        all.iter().filter(|e| e["to"] == "acme/widgets#1" && e["from"] == "acme/widgets#3").collect();
+    assert_eq!(par13.len(), 5, "{par13:?}");
+    let mut par_ys: Vec<f64> = par13.iter().map(|e| e["horizYs"][0].as_f64().unwrap()).collect();
+    par_ys.sort_by(|a, b| a.total_cmp(b));
+    for pair in par_ys.windows(2) {
+        assert!(pair[1] - pair[0] >= 7.5, "parallel routed tracks must be separated: {par_ys:?}");
+    }
+    let by_kind = |k: &str| par13.iter().find(|e| e["kind"] == k).unwrap();
+    assert_eq!(
+        (&by_kind("blockedBy")["cls"], &by_kind("blockedBy")["marker"]),
+        (&json!("ge"), &json!("url(#gm-base)"))
+    );
+    assert_eq!((&by_kind("parent")["cls"], &by_kind("parent")["marker"]), (&json!("ge par src-body"), &Value::Null));
+    assert_eq!(
+        (&by_kind("prStack")["cls"], &by_kind("prStack")["marker"]),
+        (&json!("ge stack src-git"), &json!("url(#gm-git)"))
+    );
+    assert!(by_kind("prStack")["title"].as_str().unwrap().contains("feat/3 (PR #30) on feat/1 (PR #10)"));
+    assert_eq!(
+        (&by_kind("fileConflict")["cls"], &by_kind("fileConflict")["marker"]),
+        (&json!("ge conflict src-code"), &Value::Null)
+    );
+    assert!(by_kind("fileConflict")["title"].as_str().unwrap().contains("src/board.html"));
+    assert_eq!(
+        (&by_kind("codeDep")["cls"], &by_kind("codeDep")["marker"]),
+        (&json!("ge codedep src-code"), &json!("url(#gm-code)"))
+    );
+    assert!(by_kind("codeDep")["title"].as_str().unwrap().contains("src/c.rs -> src/a.rs"));
+
+    // Cross-lane forward (#1 -> #6) and backward (#6 -> #1) route inside the inter-lane gutter on distinct Y tracks.
+    let lanes = r["laneRects"].as_array().unwrap();
+    let lane0_bot = lanes[0]["y"].as_f64().unwrap() + lanes[0]["h"].as_f64().unwrap();
+    let lane1_top = lanes[1]["y"].as_f64().unwrap();
+    let xl_fwd = all.iter().find(|e| e["to"] == "acme/widgets#1" && e["from"] == "acme/widgets#6").unwrap();
+    let xl_back = all.iter().find(|e| e["to"] == "acme/widgets#6" && e["from"] == "acme/widgets#1").unwrap();
+    let yf = xl_fwd["horizYs"][0].as_f64().unwrap();
+    let yb = xl_back["horizYs"][0].as_f64().unwrap();
+    assert!(
+        yf > lane0_bot && yf < lane1_top,
+        "cross-lane forward y={yf} must sit in inter-lane gutter ({lane0_bot}..{lane1_top})"
+    );
+    assert!(
+        yb > lane0_bot && yb < lane1_top,
+        "cross-lane backward y={yb} must sit in inter-lane gutter ({lane0_bot}..{lane1_top})"
+    );
+    assert!((yf - yb).abs() >= 7.5, "overlapping cross-lane edges must get distinct tracks: {yf} vs {yb}");
+
+    // Same-column reciprocal codeDep (#2 <-> #5) keep distinct cubic bend X coordinates.
+    let sc25 = all.iter().find(|e| e["to"] == "acme/widgets#2" && e["from"] == "acme/widgets#5").unwrap();
+    let sc52 = all.iter().find(|e| e["to"] == "acme/widgets#5" && e["from"] == "acme/widgets#2").unwrap();
+    let bend_x = |d: &str| d.split('C').nth(1).unwrap().split_whitespace().next().unwrap().to_string();
+    assert_ne!(
+        bend_x(sc25["d"].as_str().unwrap()),
+        bend_x(sc52["d"].as_str().unwrap()),
+        "same-column reciprocal curves must keep distinct bend X: {sc25} vs {sc52}"
+    );
+}
