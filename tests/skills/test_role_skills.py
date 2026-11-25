@@ -586,7 +586,9 @@ class GitlabForgeTests(unittest.TestCase):
         ready = self.flat(self.ticket, "### Ready to merge")
         for token in ("**Tracked GitLab:**", "`detailed_merge_status` `mergeable`", "`refs/merge-requests/<iid>/train`",
                       "projects/<enc path>/merge_requests/<iid>/pipelines",
-                      "projects/<enc path>/repository/commits/<sha>/statuses?per_page=100",
+                      "projects/<enc path>/repository/commits/<pipeline sha>/statuses?pipeline_id=<pipeline id>&per_page=100",
+                      "projects/<enc path>/repository/commits/<sha>/statuses?stage=external&per_page=100",
+                      "the external read keeps it from any pipeline", "Any other status from another pipeline at the head does not count", "only the external read applies",
                       "`ref` is `refs/merge-requests/<iid>/merge`, the ref a merged-results pipeline runs on",
                       "when the head is one of the `parent_ids` of its commit", "a `failed` or `canceled` one goes back to the worker", "`success`, `skipped` and `manual` pass",
                       "merge_requests/<iid>/diffs?per_page=100", "until a page holds fewer than 100", "`changes_count`", "`old_path` and `new_path`", "--no-renames", "or the GitLab path set above",
