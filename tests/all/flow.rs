@@ -6728,6 +6728,28 @@ const crossRepo = {{
   nodes: document.querySelectorAll(".gnode").map((b) => [b.dataset.id, b.querySelector('[data-part="st"]').textContent]),
 }};
 
+// An explicit GitLab ticket with short label widgets#1 and repo acme/widgets must not map onto GitHub flow node acme/widgets#1.
+const gitlabTicket = {{ ...base.tree[0], label: "widgets#1", issue: "gitlab.example/acme/widgets#1", repo: "acme/widgets", thread: null, ticket: null, link: null, joined: false, status: "launching" }};
+emitState({{ ...base, tree: [joined2, gitlabTicket] }});
+const gitlabCrossForge = {{
+  nodes: document.querySelectorAll(".gnode").map((b) => [b.dataset.id, b.querySelector('[data-part="st"]').textContent]),
+}};
+
+// A failed other/widgets#1 launch (reserved label widgets#1) must not transfer its open drawer to a joined acme/widgets#1 ticket whose flow node displays widgets#1.
+const joinedAcme1 = {{ ...base.tree[0], label: "acme/widgets#1", issue: "acme/widgets#1", repo: "acme/widgets", thread: "mcp:t1-acme", ticket: "mcp:t1-acme", link: "https://t3/mcp:t1-acme", joined: true, status: "running" }};
+emitState({{ ...base, tree: [joined2, otherRepo, joinedAcme1] }});
+btn("pending:widgets#1").dispatch("click");
+emitState({{ ...base, tree: [joined2, joinedAcme1] }});
+const failedLaunchDrawer = {{
+  kind: q("#drawer").getAttribute("data-kind"),
+  goneHidden: dp("gone").hidden,
+  goneText: dp("gone").textContent,
+}};
+closeDrawer(false);
+document.activeElement.blur();
+q("#gscroll").dispatch("focusout");
+advance(1);
+
 // A relaunch replaces a stale cached flow ticket whose previous thread is no longer open, dropping the old thread link (S4).
 const cachedWithOldThread = {{
   ...view,
@@ -6769,7 +6791,7 @@ loadFlow();
 const guardedSyncing = flowCalls === callsBeforeGuard && flow.again === true;
 graph.syncing = false;
 
-return {{ initial, clicked, inFlight, afterJoin, freePendingKind, afterFreeJoin, crossRepo, relaunched, guardedEditing, guardedSyncing }};
+return {{ initial, clicked, inFlight, afterJoin, freePendingKind, afterFreeJoin, crossRepo, gitlabCrossForge, failedLaunchDrawer, relaunched, guardedEditing, guardedSyncing }};
 "##
         ),
     );
@@ -6850,6 +6872,20 @@ return {{ initial, clicked, inFlight, afterJoin, freePendingKind, afterFreeJoin,
         r["crossRepo"]["nodes"],
         json!([["acme/widgets#1", "ready"], ["acme/widgets#2", "running"], ["pending:widgets#1", "launching"],]),
         "different-repo canonical issue must not collide with acme/widgets#1 by short label: {r}"
+    );
+    assert_eq!(
+        r["gitlabCrossForge"]["nodes"],
+        json!([["acme/widgets#1", "ready"], ["acme/widgets#2", "running"], ["pending:widgets#1", "launching"],]),
+        "explicit GitLab issue must not map onto GitHub flow node acme/widgets#1: {r}"
+    );
+    assert_eq!(
+        (&r["failedLaunchDrawer"]["kind"], &r["failedLaunchDrawer"]["goneHidden"]),
+        (&json!("issue"), &json!(false)),
+        "failed launch drawer must stay gone instead of transferring to acme/widgets#1: {r}"
+    );
+    assert!(
+        r["failedLaunchDrawer"]["goneText"].as_str().unwrap().contains("no longer in the graph"),
+        "failed launch drawer shows the gone message: {r}"
     );
     assert_eq!(
         r["relaunched"]["nodes"],

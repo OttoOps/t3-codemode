@@ -4895,13 +4895,19 @@ function svgEl(tag, attrs, ...kids) {
 
 
 
+function hasExplicitIssue(t) {
+  return !!(t && typeof t.issue === "string" && t.issue.trim());
+}
+
 function isPendingGraphNode(n) {
   return !!(n && n.ticket && !n.ticket.thread);
 }
 
 function ticketIssueKey(t) {
-  const own = ghIssue(t && t.issue);
-  if (own) return own.ref.toLowerCase();
+  if (hasExplicitIssue(t)) {
+    const own = ghIssue(t.issue.trim());
+    return own ? own.ref.toLowerCase() : null;
+  }
   const m = /^(?:([\w.-]+\/[\w.-]+)|([\w.-]+))?#(\d+)$/.exec(String((t && t.label) || ""));
   if (!m) return null;
   let r = m[1] || "";
@@ -4928,7 +4934,7 @@ function graphPendingTicket(n) {
   const byIssue = open.filter((t) => ticketIssueKey(t) === lowId);
   if (byIssue.length === 1) return byIssue[0];
   const lowLabel = String(n.label || "").toLowerCase();
-  const byLabel = lowLabel ? open.filter((t) => !ticketIssueKey(t) && String(t.label || "").toLowerCase() === lowLabel) : [];
+  const byLabel = lowLabel ? open.filter((t) => !hasExplicitIssue(t) && !ticketIssueKey(t) && String(t.label || "").toLowerCase() === lowLabel) : [];
   return byLabel.length === 1 ? byLabel[0] : null;
 }
 
@@ -4952,7 +4958,12 @@ function graphTicketNode(t) {
     blockedBy: [],
     unlocks: [],
     warnings: [],
-    ticket: { thread: t.thread || null, link: t.link || null, status: t.thread ? t.status : (t.status || "launching") },
+    ticket: {
+      thread: t.thread || null,
+      link: t.link || null,
+      status: t.thread ? t.status : (t.status || "launching"),
+      issue: hasExplicitIssue(t) ? t.issue.trim() : null,
+    },
   };
 }
 
@@ -4972,10 +4983,11 @@ function mergeFlowOpenTickets(raw, open) {
   const extra = [];
   for (const t of open) {
     let idx = t.thread && byThread.has(t.thread) ? byThread.get(t.thread) : undefined;
+    const explicit = hasExplicitIssue(t);
     const k = idx === undefined ? ticketIssueKey(t) : null;
     if (idx === undefined && k) {
       if (byId.has(k)) idx = byId.get(k);
-    } else if (idx === undefined) {
+    } else if (idx === undefined && !explicit) {
       const lbl = String(t.label || "").toLowerCase();
       const hit = lbl ? byLabel.get(lbl) : undefined;
       if (hit !== undefined && hit >= 0) idx = hit;
@@ -5677,24 +5689,44 @@ async function syncGraphLinks() {
   }
 }
 
-function pendingGraphReplacement(oldId, nodes) {
-  if (!String(oldId || "").startsWith("pending:")) return null;
-  if (nodes.some((n) => n.id === oldId)) return null;
-  const label = oldId.slice("pending:".length);
-  const low = label.toLowerCase();
-  const candidates = nodes.filter((n) => n.ticket && !String(n.id || "").startsWith("pending:"));
-  const byLabel = candidates.filter((n) => String(n.label || "") === label);
-  if (byLabel.length === 1) return byLabel[0];
-  if (byLabel.length > 1) return null;
-  const byId = candidates.filter((n) => String(n.id || "").toLowerCase() === low);
-  return byId.length === 1 ? byId[0] : null;
+function nodeIssueIdentity(n) {
+  if (!n) return null;
+  if (n.ticket && typeof n.ticket.issue === "string" && n.ticket.issue.trim()) return n.ticket.issue.trim().toLowerCase();
+  const t = graphTicket(n) || graphPendingTicket(n);
+  if (t && hasExplicitIssue(t)) return t.issue.trim().toLowerCase();
+  if (n.repo && typeof n.number === "number") return String(n.id || "").toLowerCase();
+  return null;
 }
 
-function migratePendingGraphNodes(nodes) {
+function pendingGraphReplacement(oldId, prevNodes, nodes) {
+  if (!String(oldId || "").startsWith("pending:")) return null;
+  if (nodes.some((n) => n.id === oldId)) return null;
+  const prev = prevNodes.get(oldId);
+  if (!prev) return null;
+  const label = oldId.slice("pending:".length);
+  const low = label.toLowerCase();
+  const prevIssue = prev.ticket && typeof prev.ticket.issue === "string" && prev.ticket.issue.trim()
+    ? prev.ticket.issue.trim().toLowerCase()
+    : null;
+  const prevRepo = String(prev.repo || "").toLowerCase();
+  const candidates = nodes.filter((n) => {
+    if (!n.ticket || String(n.id || "").startsWith("pending:")) return false;
+    const candIssue = nodeIssueIdentity(n);
+    if (prevIssue) return candIssue === prevIssue;
+    const t = graphTicket(n) || graphPendingTicket(n);
+    const candRepo = String((t && t.repo) || n.repo || "").toLowerCase();
+    if (prevRepo && candRepo && prevRepo !== candRepo) return false;
+    const boardLabel = t ? String(t.label || "") : String(n.label || "");
+    return boardLabel === label || (!t && String(n.id || "").toLowerCase() === low);
+  });
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+function migratePendingGraphNodes(prevNodes, nodes) {
   const seen = new Set([...graph.btns.keys(), graph.active, graph.pin, graph.focus, graph.hover, graph.hot,
     dr.sub && dr.sub.kind === "issue" ? dr.sub.key : null, dr.from && dr.from.graph].filter((id) => String(id || "").startsWith("pending:")));
   for (const oldId of seen) {
-    const next = pendingGraphReplacement(oldId, nodes);
+    const next = pendingGraphReplacement(oldId, prevNodes, nodes);
     if (!next) continue;
     if (graph.btns.has(oldId) && !graph.btns.has(next.id)) {
       const b = graph.btns.get(oldId);
@@ -5724,19 +5756,22 @@ function migratePendingGraphNodes(nodes) {
     if (th && state && state.tree.some((t) => t.thread === th)) {
       dr.sub = { kind: "ticket", key: th, worker: null, card: null };
       if (dr.from) dr.from.sub = { kind: "ticket", key: th };
+    } else if (!cur || !isPendingGraphNode(cur)) {
+      dr.sub.pending = false;
     }
   }
 }
 
 function paintGraph() {
   if (!state) return;
+  const prevNodes = graph.nodes;
   const d = graphData(state);
   graph.mode = d.mode;
   graph.nodes = new Map(d.nodes.map((n) => [n.id, n]));
   graph.edges = d.edges;
   graph.dismissed = d.dismissedEdges || [];
   graph.byThread = new Map(d.nodes.filter((n) => n.ticket && n.ticket.thread).map((n) => [n.ticket.thread, n]));
-  migratePendingGraphNodes(d.nodes);
+  migratePendingGraphNodes(prevNodes, d.nodes);
   const ctx = filterCtx(state);
   const on = filtering();
   const hits = d.nodes.filter((n) => !on || matches(graphDesc(n, ctx)));
