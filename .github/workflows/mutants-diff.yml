@@ -37,7 +37,7 @@ jobs:
       - name: Diff against the PR base
         id: scope
         run: |
-          git diff --no-ext-diff HEAD^1 HEAD >pr.diff
+          git diff --no-ext-diff --no-color --src-prefix=a/ --dst-prefix=b/ HEAD^1 HEAD >pr.diff
           files=$(git diff --name-only --no-renames HEAD^1 HEAD | python3 .github/scripts/mutants-scope.py .cargo/mutants.toml)
           if [ -z "$files" ]; then
             echo "run=false" >>"$GITHUB_OUTPUT"
