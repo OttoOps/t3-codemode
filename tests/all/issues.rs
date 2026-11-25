@@ -2,7 +2,7 @@ use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::BOARD;
 use t3_codemode::config::{Config, FlowConfig, OptIn};
-use t3_codemode::fake::{FakeGitHub, github_issue, project};
+use t3_codemode::fake::{Failure, FakeGitHub, Nth, Rule, github_issue, project};
 use t3_codemode::github::{self, EnsureLabelOutcome, LabelSpec, LinkOutcome, UnlinkOutcome};
 use t3_codemode::server;
 
@@ -79,12 +79,12 @@ async fn reporting_the_same_issue_twice_adds_nothing() {
 #[tokio::test]
 async fn reporting_again_fills_in_a_thread_link_that_t3_could_not_give() {
     let h = H::new();
-    h.fake.set_read_fails(true);
+    h.fake.fail_tool("t3_thread_read");
     let r = result(&h.exec_as(WORKER, REPORT).await);
     assert_eq!(r["added"], true);
     assert_eq!(r["issue"]["thread"], WORKER);
     assert_eq!(r["issue"]["threadLink"], Value::Null);
-    h.fake.set_read_fails(false);
+    h.fake.clear_faults_on("t3_thread_read");
     let again = result(&h.exec_as(TICKET, REPORT).await);
     assert_eq!(again["reason"], "reported");
     assert_eq!(again["issue"]["thread"], WORKER);
@@ -404,8 +404,11 @@ async fn wf_issue_reports_permission_and_parent_conflict_errors_without_dropping
     h.github.set_issue("Acme/widgets", github_issue(3, "Blocker", &[], T0));
     h.github.set_issue("Acme/widgets", github_issue(4, "Target", &[], T0));
     h.github.set_parent("Acme/widgets", 4, ("Acme/widgets", 1));
-    h.github.fail_operation_with_type("addBlockedBy", "FORBIDDEN", "Resource not accessible by integration");
-    h.github.fail_operation_with_type("createLabel", "FORBIDDEN", "Viewer does not have permission to create labels");
+    h.github
+        .fault(Rule::on("addBlockedBy").fail(Failure::typed("FORBIDDEN", "Resource not accessible by integration")));
+    h.github.fault(
+        Rule::on("createLabel").fail(Failure::typed("FORBIDDEN", "Viewer does not have permission to create labels")),
+    );
 
     let r = result(
         &h.exec_as(
@@ -725,7 +728,7 @@ async fn wf_file_issues_rejects_cycles_and_bad_plans_with_zero_partial_writes() 
 async fn wf_file_issues_inherits_top_level_parent_without_self_linking_parent_item_and_reports_wiring_errors() {
     let h = H::new();
     h.github.add_repo("Acme/widgets");
-    h.github.fail_operation_with_type("addBlockedBy", "FORBIDDEN", "No permission to add blocked-by links");
+    h.github.fault(Rule::on("addBlockedBy").fail(Failure::typed("FORBIDDEN", "No permission to add blocked-by links")));
 
     let r = result(
         &h.exec_as(
@@ -828,8 +831,8 @@ async fn wf_file_issues_returns_completed_results_when_a_later_create_issue_fail
     let h = H::new();
     h.github.add_repo("Acme/widgets");
     h.github.set_issue("Acme/widgets", github_issue(10, "Existing prereq", &[], T0));
-    h.github.fail_operation_with_type("addBlockedBy", "FORBIDDEN", "No permission for blockedBy");
-    h.github.fail_operation_after("createIssue", 1, "FORBIDDEN", "Secondary rate limit");
+    h.github.fault(Rule::on("addBlockedBy").fail(Failure::typed("FORBIDDEN", "No permission for blockedBy")));
+    h.github.fault(Rule::on("createIssue").nth(Nth::From(2)).fail(Failure::typed("FORBIDDEN", "Secondary rate limit")));
 
     let r = result(
         &h.exec_as(

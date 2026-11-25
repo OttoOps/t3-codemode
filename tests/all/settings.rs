@@ -589,11 +589,11 @@ async fn a_changed_pool_has_its_members_checked() {
         assert_eq!(b.text(), None);
     }
 
-    b.h.fake.set_caps_fail(true);
+    b.h.fake.fail_tool("orchestrator_capabilities");
     let unchecked = b.saved(pools("ghost")).await;
     assert!(unchecked["warnings"][0].as_str().unwrap().contains("not checked against T3"), "{unchecked}");
 
-    b.h.fake.set_caps_fail(false);
+    b.h.fake.clear_faults_on("orchestrator_capabilities");
     let mut unrelated = pools("ghost");
     unrelated["bodyCap"] = json!(900);
     assert_eq!(b.saved(unrelated).await["warnings"], json!([]), "a pool left alone is not checked again");
@@ -631,7 +631,7 @@ async fn pool_member_state_is_live_and_separate_from_the_file() {
     assert_eq!(shown["pools"], b.h.wf(BOSS, "pools", json!({})).await);
     assert_eq!(b.settings().await["revision"], saved["revision"], "live state never makes a form stale");
 
-    b.h.fake.set_caps_fail(true);
+    b.h.fake.fail_tool("orchestrator_capabilities");
     let down = b.get("/api/settings/pools").await;
     assert_eq!(down["pools"][0]["members"][0]["state"], "unknown");
     assert!(down["pools"][0]["error"].as_str().unwrap().contains("T3 did not answer"), "{down}");

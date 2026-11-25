@@ -8,6 +8,11 @@ use crate::t3::{BoxFut, T3Client, T3Error};
 use crate::tokens::{RunTokens, TokenSource};
 use crate::usage::{Usage, UsageSource};
 
+mod fault;
+
+pub use fault::{Failure, Fault, Gate, Match, Nth, Rule, Target};
+use fault::{Faults, Hit};
+
 #[derive(Default)]
 struct State {
     threads: BTreeMap<String, Value>,
@@ -24,18 +29,9 @@ struct State {
     forks: u64,
     sent: Vec<Value>,
     calls: Vec<String>,
-    send_fails: bool,
-    prs_fail: bool,
-    list_fails: bool,
-    projects_fail: bool,
-    read_fails: bool,
-    caps_fail: bool,
-    search_fail: bool,
+    faults: Faults,
     pr_page: usize,
     short_list: usize,
-    organize_fails: bool,
-    interrupt_fails: bool,
-    launch_fails: bool,
     delay: Duration,
 }
 
@@ -248,40 +244,32 @@ impl FakeT3 {
         self.st().threads.remove(id);
     }
 
-    pub fn set_send_fails(&self, fails: bool) {
-        self.st().send_fails = fails;
-    }
-
-    pub fn set_list_fails(&self, fails: bool) {
-        self.st().list_fails = fails;
-    }
-
-    pub fn set_prs_fail(&self, fails: bool) {
-        self.st().prs_fail = fails;
-    }
-
-    pub fn set_projects_fail(&self, fails: bool) {
-        self.st().projects_fail = fails;
-    }
-
     pub fn set_pr_page(&self, size: usize) {
         self.st().pr_page = size;
     }
 
-    pub fn set_read_fails(&self, fails: bool) {
-        self.st().read_fails = fails;
-    }
-
-    pub fn set_launch_fails(&self, fails: bool) {
-        self.st().launch_fails = fails;
-    }
-
-    pub fn set_organize_fails(&self, fails: bool) {
-        self.st().organize_fails = fails;
-    }
-
     pub fn set_delay(&self, delay: Duration) {
         self.st().delay = delay;
+    }
+
+    pub fn fault(&self, rule: Rule) {
+        self.st().faults.add(rule);
+    }
+
+    pub fn fail_tool(&self, tool: &str) {
+        self.fault(Rule::on(tool).fail(Failure::down(T3_DOWN)));
+    }
+
+    pub fn clear_faults_on(&self, tool: &str) {
+        self.st().faults.clear(Some(tool));
+    }
+
+    pub fn clear_faults(&self) {
+        self.st().faults.clear(None);
+    }
+
+    pub fn set_jitter(&self, seed: Option<u64>) {
+        self.st().faults.set_jitter(seed);
     }
 
     pub fn set_items(&self, id: &str, items: Vec<Value>) {
@@ -304,14 +292,6 @@ impl FakeT3 {
         self.st().projects = projects;
     }
 
-    pub fn set_caps_fail(&self, fails: bool) {
-        self.st().caps_fail = fails;
-    }
-
-    pub fn set_search_fail(&self, fails: bool) {
-        self.st().search_fail = fails;
-    }
-
     pub fn set_providers(&self, providers: Vec<Value>) {
         self.st().providers = providers;
     }
@@ -332,10 +312,6 @@ impl FakeT3 {
         self.st().interrupted.clone()
     }
 
-    pub fn fail_interrupt(&self, fail: bool) {
-        self.st().interrupt_fails = fail;
-    }
-
     pub fn sent(&self) -> Vec<Value> {
         self.st().sent.clone()
     }
@@ -354,12 +330,8 @@ impl FakeT3 {
 
     fn handle(&self, tool: &str, args: &Value) -> Result<Value, T3Error> {
         let mut st = self.st();
-        st.calls.push(tool.to_string());
         match tool {
             "t3_thread_read" => {
-                if st.read_fails {
-                    return Err(T3Error::Unavailable("T3 unreachable (fake)".into()));
-                }
                 let id = args["threadId"].as_str().unwrap_or_default();
                 let items = st.items.get(id).cloned().unwrap_or_default();
                 let runs = st.runs.get(id).cloned().unwrap_or_default();
@@ -378,9 +350,6 @@ impl FakeT3 {
                 }
             }
             "t3_thread_send" => {
-                if st.send_fails {
-                    return Err(T3Error::Unavailable("T3 unreachable (fake)".into()));
-                }
                 st.sent.push(args.clone());
                 if let Some(id) = args["threadId"].as_str()
                     && let Some(th) = st.threads.get_mut(id)
@@ -394,7 +363,6 @@ impl FakeT3 {
                 Ok(json!({"threadId": args["threadId"], "messageId": format!("msg:{n}"),
                           "runId": format!("run:{n}"), "status": "queued", "delivery": "queued"}))
             }
-            "t3_thread_list" if st.list_fails => Err(T3Error::Unavailable("T3 unreachable (fake)".into())),
             "t3_thread_list" => {
                 let wanted: Option<Vec<&str>> =
                     args["statuses"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect());
@@ -410,9 +378,6 @@ impl FakeT3 {
                 Ok(json!({"threads": threads, "nextCursor": next, "total": matching.len()}))
             }
             "list_thread_pull_requests" => {
-                if st.prs_fail {
-                    return Err(T3Error::Unavailable("T3 unreachable (fake)".into()));
-                }
                 let id = args["threadId"].as_str().unwrap_or_default();
                 if let Some(prs) = st.prs_before_list.remove(id) {
                     st.prs.insert(id.into(), prs);
@@ -433,11 +398,7 @@ impl FakeT3 {
                 let next = (end < prs.len()).then(|| end.to_string());
                 Ok(json!({"pullRequests": prs[start.min(end)..end], "chains": [], "nextCursor": next}))
             }
-            "t3_project_list" if st.projects_fail => Err(T3Error::Unavailable("T3 unreachable (fake)".into())),
             "t3_project_list" => Ok(json!({"projects": st.projects, "nextCursor": null})),
-            "orchestrator_capabilities" if st.caps_fail || (st.search_fail && args["search"].is_string()) => {
-                Err(T3Error::Unavailable("T3 unreachable (fake)".into()))
-            }
             "orchestrator_capabilities" => {
                 let search = args["search"].as_str();
                 let providers: Vec<Value> = st
@@ -465,7 +426,6 @@ impl FakeT3 {
                     .collect();
                 Ok(json!({"parentThreadId": null, "runtimeMode": "full-access", "providers": providers}))
             }
-            "t3_thread_launch" if st.launch_fails => Err(T3Error::Tool("t3_thread_launch: launch refused".into())),
             "t3_thread_launch" => {
                 st.launched.push(args.clone());
                 let id = format!("launch:{}", st.launched.len());
@@ -517,9 +477,6 @@ impl FakeT3 {
                 Ok(json!({"sequence": 1}))
             }
             "t3_thread_interrupt" => {
-                if st.interrupt_fails {
-                    return Err(T3Error::Unavailable("T3 unreachable (fake)".into()));
-                }
                 st.interrupted.push(args.clone());
                 let id = args["threadId"].as_str().unwrap_or_default().to_string();
                 let Some(th) = st.threads.get_mut(&id) else {
@@ -529,9 +486,6 @@ impl FakeT3 {
                 Ok(json!({"threadId": id, "interrupted": true}))
             }
             "t3_thread_organize" => {
-                if st.organize_fails {
-                    return Err(T3Error::Unavailable("T3 unreachable (fake)".into()));
-                }
                 st.organized.push(args.clone());
                 let id = args["threadId"].as_str().unwrap_or_default().to_string();
                 if args["action"] == "archive"
@@ -550,6 +504,15 @@ impl FakeT3 {
     }
 }
 
+const T3_DOWN: &str = "T3 unreachable (fake)";
+
+fn t3_error(f: &Failure) -> T3Error {
+    match f {
+        Failure::Down(m) => T3Error::Unavailable(m.clone()),
+        _ => T3Error::Tool(f.message().to_string()),
+    }
+}
+
 impl T3Client for FakeT3 {
     fn call<'a>(&'a self, tool: &'a str, args: Value) -> BoxFut<'a, Result<Value, T3Error>> {
         Box::pin(async move {
@@ -562,11 +525,22 @@ impl T3Client for FakeT3 {
                 tokio::time::sleep(delay).await;
             }
             tokio::task::yield_now().await;
-            if tool == "sleep" {
-                self.st().calls.push("sleep".into());
-                return Ok(args);
+            let (yields, hit) = {
+                let mut st = self.st();
+                st.calls.push(tool.to_string());
+                let target = args["threadId"].as_str().or(args["search"].as_str());
+                (st.faults.yields(), st.faults.hit(&[tool], target))
+            };
+            fault::jitter(yields).await;
+            hit.pass_gates().await;
+            if let Some(f) = hit.before() {
+                return Err(t3_error(f));
             }
-            self.handle(tool, &args)
+            let out = if tool == "sleep" { Ok(args) } else { self.handle(tool, &args) };
+            match hit.after() {
+                Some(f) => Err(t3_error(f)),
+                None => out,
+            }
         })
     }
 
@@ -589,12 +563,7 @@ struct GhState {
     pr_page: usize,
     pr_file_page: usize,
     calls: Vec<Value>,
-    errors: BTreeMap<String, (String, String)>,
-    fail_after: BTreeMap<String, (usize, String, String)>,
-    unlabelled_open_error: Option<String>,
-    read_errors: BTreeMap<(String, u64), String>,
-    field_errors: BTreeMap<(String, u64), (String, String)>,
-    down: bool,
+    faults: Faults,
     queue: u64,
     merges: u64,
     label_seq: u64,
@@ -750,48 +719,28 @@ impl FakeGitHub {
         self.st().queue = n;
     }
 
-    pub fn fail_operation(&self, operation: &str, message: &str) {
-        self.st().errors.insert(operation.into(), ("UNPROCESSABLE".into(), message.into()));
+    pub fn fault(&self, rule: Rule) {
+        self.st().faults.add(rule);
     }
 
-    pub fn fail_operation_with_type(&self, operation: &str, err_type: &str, message: &str) {
-        self.st().errors.insert(operation.into(), (err_type.into(), message.into()));
+    pub fn unreachable(&self) {
+        self.st().faults.add_first(Rule::on("*").fail(Failure::down(GH_DOWN)));
     }
 
-    pub fn fail_operation_after(&self, operation: &str, ok_calls: usize, err_type: &str, message: &str) {
-        self.st().fail_after.insert(operation.into(), (ok_calls, err_type.into(), message.into()));
+    pub fn clear_faults_on(&self, operation: &str) {
+        self.st().faults.clear(Some(operation));
     }
 
-    pub fn clear_operation_errors(&self) {
-        let mut st = self.st();
-        st.errors.clear();
-        st.fail_after.clear();
+    pub fn clear_faults(&self) {
+        self.st().faults.clear(None);
     }
 
-    pub fn fail_unlabelled_open_issues(&self, message: Option<&str>) {
-        self.st().unlabelled_open_error = message.map(String::from);
-    }
-
-    pub fn fail_read(&self, repo: &str, number: u64, message: &str) {
-        self.st().read_errors.insert((repo.into(), number), message.into());
-    }
-
-    pub fn fail_field(&self, repo: &str, number: u64, field: &str, message: &str) {
-        self.st().field_errors.insert((repo.into(), number), (field.into(), message.into()));
-    }
-
-    pub fn clear_read_errors(&self) {
-        let mut st = self.st();
-        st.read_errors.clear();
-        st.field_errors.clear();
+    pub fn set_jitter(&self, seed: Option<u64>) {
+        self.st().faults.set_jitter(seed);
     }
 
     pub fn set_unknown_reads(&self, n: usize) {
         self.st().unknown_reads = n;
-    }
-
-    pub fn set_down(&self, down: bool) {
-        self.st().down = down;
     }
 
     pub fn add_repo(&self, repo: &str) {
@@ -881,6 +830,60 @@ impl FakeGitHub {
     pub fn operations(&self) -> Vec<String> {
         self.calls().iter().map(|c| c["operation"].as_str().unwrap_or_default().to_string()).collect()
     }
+}
+
+const GH_DOWN: &str = "gh api graphql failed: gh: not logged in";
+
+fn gh_failure(f: &Failure) -> anyhow::Result<Value> {
+    match f {
+        Failure::Down(m) => anyhow::bail!("{m}"),
+        Failure::Refused(m) => Ok(gh_error(m)),
+        Failure::Typed { kind, message } => Ok(gh_typed_error(kind, message)),
+        Failure::Field { field, message } => {
+            Ok(json!({"data": null, "errors": [{"path": [field], "message": message}]}))
+        }
+    }
+}
+
+fn gh_ops(op: &'static str, query: &str, variables: &Value) -> Vec<&'static str> {
+    let mut ops = vec![op];
+    if op == "flowIssues" && variables["label"].as_str().is_none() && !query.contains("states: CLOSED") {
+        ops.push("flowIssues.unlabelledOpen");
+    }
+    ops
+}
+
+fn gh_target(st: &GhState, variables: &Value) -> Option<String> {
+    if let (Some(owner), Some(name)) = (variables["owner"].as_str(), variables["name"].as_str()) {
+        return Some(match variables["number"].as_u64() {
+            Some(n) => format!("{owner}/{name}#{n}"),
+            None => format!("{owner}/{name}"),
+        });
+    }
+    if let Some(id) = variables["id"].as_str() {
+        return st.prs.iter().find(|(_, p)| p["id"] == id).map(|((r, n), _)| format!("{r}#{n}"));
+    }
+    if let Some(id) = variables["ref"].as_str() {
+        return st.prs.iter().find(|(_, p)| p["headRef"]["id"] == id).map(|((r, n), _)| format!("{r}#{n}"));
+    }
+    if let Some((repo, n)) =
+        ["issueId", "labelableId"].iter().find_map(|k| variables[*k].as_str().and_then(parse_issue_node_id))
+    {
+        return Some(format!("{repo}#{n}"));
+    }
+    variables["repoId"].as_str().and_then(|id| id.strip_prefix("R_")).map(String::from)
+}
+
+fn batch_targets(variables: &Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for i in 0.. {
+        let Some(owner) = variables[format!("o{i}")].as_str() else { break };
+        let (Some(name), Some(n)) = (variables[format!("r{i}")].as_str(), variables[format!("n{i}")].as_u64()) else {
+            break;
+        };
+        out.push((format!("p{i}"), format!("{owner}/{name}#{n}")));
+    }
+    out
 }
 
 fn operation(query: &str) -> &'static str {
@@ -1118,12 +1121,6 @@ fn flow_issues(st: &GhState, query: &str, variables: &Value) -> Value {
     }
     let want_state = if query.contains("states: CLOSED") { "CLOSED" } else { "OPEN" };
     let label = variables["label"].as_str().map(str::to_ascii_lowercase);
-    if want_state == "OPEN"
-        && label.is_none()
-        && let Some(msg) = &st.unlabelled_open_error
-    {
-        return gh_error(msg);
-    }
     let mut matching: Vec<&Value> = st
         .issues
         .iter()
@@ -1600,169 +1597,197 @@ impl crate::github::GitHub for FakeGitHub {
                 tokio::time::sleep(delay).await;
             }
             tokio::task::yield_now().await;
-            let mut st = self.st();
             let op = operation(query);
-            let mut call = json!({"operation": op, "query": query, "variables": variables});
-            if !headers.is_empty() {
-                let hdrs: serde_json::Map<String, Value> =
-                    headers.iter().map(|(k, v)| ((*k).to_string(), json!(v))).collect();
-                call["headers"] = Value::Object(hdrs);
-            }
-            st.calls.push(call);
-            if st.down {
-                anyhow::bail!("gh api graphql failed: gh: not logged in");
-            }
-            if let Some((err_type, message)) = st.errors.get(op) {
-                return Ok(gh_typed_error(err_type, message));
-            }
-            if let Some((remaining, err_type, message)) = st.fail_after.get_mut(op) {
-                if *remaining == 0 {
-                    return Ok(gh_typed_error(err_type, message));
+            let (yields, hit, per_pr) = {
+                let mut st = self.st();
+                let mut call = json!({"operation": op, "query": query, "variables": variables});
+                if !headers.is_empty() {
+                    let hdrs: serde_json::Map<String, Value> =
+                        headers.iter().map(|(k, v)| ((*k).to_string(), json!(v))).collect();
+                    call["headers"] = Value::Object(hdrs);
                 }
-                *remaining -= 1;
-            }
-            if op == "repoCanonical" {
-                return Ok(repo_canonical(&st, &variables));
-            }
-            if op == "repoId" {
-                return Ok(repo_id_query(&st, &variables));
-            }
-            if op == "issueNode" {
-                return Ok(issue_node_query(&mut st, &variables));
-            }
-            if op == "repoLabel" {
-                return Ok(repo_label_query(&st, &variables));
-            }
-            if op == "createLabel" {
-                return Ok(create_label_mut(&mut st, &variables));
-            }
-            if op == "addLabelsToLabelable" {
-                return Ok(add_labels_mut(&mut st, &variables));
-            }
-            if op == "removeLabelsFromLabelable" {
-                return Ok(remove_labels_mut(&mut st, &variables));
-            }
-            if op == "addBlockedBy" {
-                return Ok(add_blocked_by_mut(&mut st, &variables));
-            }
-            if op == "removeBlockedBy" {
-                return Ok(remove_blocked_by_mut(&mut st, &variables));
-            }
-            if op == "addSubIssue" {
-                return Ok(add_sub_issue_mut(&mut st, &variables));
-            }
-            if op == "removeSubIssue" {
-                return Ok(remove_sub_issue_mut(&mut st, &variables));
-            }
-            if op == "createIssue" {
-                return Ok(create_issue_mut(&mut st, &variables));
-            }
-            if op == "flowIssues" {
-                return Ok(flow_issues(&st, query, &variables));
-            }
-            if op == "flowOpenPrs" {
-                return Ok(flow_open_prs(&st, &variables));
-            }
-            if op == "flowPrFiles" {
-                return Ok(flow_pr_files(&st, &variables));
-            }
-            if op == "flowBranchMerged" {
-                return Ok(flow_branch_merged(&st, &variables));
-            }
-            if op == "flowTickets" {
-                return Ok(flow_tickets(&st, &variables));
-            }
-            if op == "reconcile" {
-                let mut data = serde_json::Map::new();
-                let mut errs = Vec::new();
-                for i in 0.. {
-                    let Some(owner) = variables[format!("o{i}")].as_str() else { break };
-                    let repo = format!("{owner}/{}", variables[format!("r{i}")].as_str().unwrap()).to_ascii_lowercase();
-                    let number = variables[format!("n{i}")].as_u64().unwrap();
-                    let alias = format!("p{i}");
-                    if !st.repos.contains_key(&repo) {
-                        errs.push(
-                            json!({"type": "NOT_FOUND", "path": [alias], "message": format!("no repository {repo}")}),
-                        );
-                        data.insert(alias, Value::Null);
-                        continue;
-                    }
-                    let mut pr = st.prs.get(&(repo.clone(), number)).cloned().unwrap_or(Value::Null);
-                    if let Some(message) = st.read_errors.get(&(repo.clone(), number)) {
-                        errs.push(json!({"path": [alias, "pullRequest"], "message": message}));
-                        pr = Value::Null;
-                    } else if let Some((field, message)) = st.field_errors.get(&(repo.clone(), number)) {
-                        errs.push(json!({"path": [alias, "pullRequest", field], "message": message}));
-                        pr[field.as_str()] = Value::Null;
-                    } else if pr.is_null() {
-                        errs.push(
-                            json!({"type": "NOT_FOUND", "path": [alias, "pullRequest"], "message": "no pull request"}),
-                        );
-                    }
-                    let mut repository = st.repos[&repo].clone();
-                    repository["pullRequest"] = pr;
-                    data.insert(alias, repository);
-                }
-                let mut out = json!({"data": data});
-                if !errs.is_empty() {
-                    out["errors"] = json!(errs);
-                }
-                return Ok(out);
-            }
-            if op == "read" {
-                let repo = format!("{}/{}", variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap())
-                    .to_ascii_lowercase();
-                let Some(meta) = st.repos.get(&repo).cloned() else {
-                    return Ok(gh_error(&format!("Could not resolve to a Repository with the name '{repo}'.")));
+                st.calls.push(call);
+                let target = gh_target(&st, &variables);
+                let hit = st.faults.hit(&gh_ops(op, query, &variables), target.as_deref());
+                let per_pr: Vec<(String, Hit)> = if op == "reconcile" && hit.before().is_none() {
+                    batch_targets(&variables)
+                        .into_iter()
+                        .map(|(alias, t)| (alias, st.faults.hit(&["reconcile.pr"], Some(&t))))
+                        .collect()
+                } else {
+                    Vec::new()
                 };
-                let number = variables["number"].as_u64().unwrap();
-                let mut pr = st.prs.get(&(repo, number)).cloned().unwrap_or(Value::Null);
-                if st.unknown_reads > 0 && !pr.is_null() {
-                    st.unknown_reads -= 1;
-                    pr["mergeStateStatus"] = json!("UNKNOWN");
-                }
-                if pr["headRef"].is_object() && pr["headRef"]["target"].is_null() {
-                    pr["headRef"]["target"] = json!({"oid": pr["headRefOid"]});
-                }
-                let mut repository = meta;
-                repository["pullRequest"] = pr;
-                return Ok(json!({"data": {"repository": repository}}));
-            }
-            if op == "deleteRef" {
-                let wanted = variables["ref"].as_str().unwrap_or_default().to_string();
-                let Some(pr) = st.prs.values_mut().find(|p| p["headRef"]["id"] == wanted.as_str()) else {
-                    return Ok(gh_error("Could not resolve to a node"));
-                };
-                pr["headRef"] = Value::Null;
-                return Ok(json!({"data": {"deleteRef": {"clientMutationId": null}}}));
-            }
-            let id = variables["id"].as_str().unwrap().to_string();
-            let head = variables["head"].as_str().unwrap().to_string();
-            let queue = st.queue;
-            st.merges += 1;
-            let merges = st.merges;
-            let Some(pr) = st.prs.values_mut().find(|p| p["id"] == id.as_str()) else {
-                return Ok(gh_error("Could not resolve to a node"));
+                (st.faults.yields(), hit, per_pr)
             };
-            if pr["headRefOid"] != head.as_str() {
-                return Ok(gh_error("Head branch was modified. Review and try the merge again."));
+            fault::jitter(yields).await;
+            hit.pass_gates().await;
+            for (_, h) in &per_pr {
+                h.pass_gates().await;
             }
-            match op {
-                "enqueuePullRequest" => {
-                    let position = queue + 1;
-                    pr["isInMergeQueue"] = json!(true);
-                    pr["mergeQueueEntry"] = json!({"position": position});
-                    Ok(json!({"data": {"enqueuePullRequest": {"mergeQueueEntry": {"position": position}}}}))
-                }
-                "mergePullRequest" => {
-                    let oid = format!("{merges:040x}");
-                    pr["state"] = json!("MERGED");
-                    pr["mergeCommit"] = json!({"oid": oid});
-                    Ok(json!({"data": {"mergePullRequest": {"pullRequest": {"mergeCommit": {"oid": oid}}}}}))
-                }
-                _ => Ok(gh_error("the fake does not support this mutation")),
+            if let Some(f) = hit.before() {
+                return gh_failure(f);
+            }
+            let failed: BTreeMap<String, Failure> =
+                per_pr.into_iter().filter_map(|(alias, h)| h.fail.map(|f| (alias, f))).collect();
+            let out = self.respond(op, query, &variables, &failed);
+            match hit.after() {
+                Some(f) => gh_failure(f),
+                None => out,
             }
         })
+    }
+}
+
+impl FakeGitHub {
+    fn respond(
+        &self,
+        op: &'static str,
+        query: &str,
+        variables: &Value,
+        failed: &BTreeMap<String, Failure>,
+    ) -> anyhow::Result<Value> {
+        let mut st = self.st();
+        if op == "repoCanonical" {
+            return Ok(repo_canonical(&st, variables));
+        }
+        if op == "repoId" {
+            return Ok(repo_id_query(&st, variables));
+        }
+        if op == "issueNode" {
+            return Ok(issue_node_query(&mut st, variables));
+        }
+        if op == "repoLabel" {
+            return Ok(repo_label_query(&st, variables));
+        }
+        if op == "createLabel" {
+            return Ok(create_label_mut(&mut st, variables));
+        }
+        if op == "addLabelsToLabelable" {
+            return Ok(add_labels_mut(&mut st, variables));
+        }
+        if op == "removeLabelsFromLabelable" {
+            return Ok(remove_labels_mut(&mut st, variables));
+        }
+        if op == "addBlockedBy" {
+            return Ok(add_blocked_by_mut(&mut st, variables));
+        }
+        if op == "removeBlockedBy" {
+            return Ok(remove_blocked_by_mut(&mut st, variables));
+        }
+        if op == "addSubIssue" {
+            return Ok(add_sub_issue_mut(&mut st, variables));
+        }
+        if op == "removeSubIssue" {
+            return Ok(remove_sub_issue_mut(&mut st, variables));
+        }
+        if op == "createIssue" {
+            return Ok(create_issue_mut(&mut st, variables));
+        }
+        if op == "flowIssues" {
+            return Ok(flow_issues(&st, query, variables));
+        }
+        if op == "flowOpenPrs" {
+            return Ok(flow_open_prs(&st, variables));
+        }
+        if op == "flowPrFiles" {
+            return Ok(flow_pr_files(&st, variables));
+        }
+        if op == "flowBranchMerged" {
+            return Ok(flow_branch_merged(&st, variables));
+        }
+        if op == "flowTickets" {
+            return Ok(flow_tickets(&st, variables));
+        }
+        if op == "reconcile" {
+            let mut data = serde_json::Map::new();
+            let mut errs = Vec::new();
+            for i in 0.. {
+                let Some(owner) = variables[format!("o{i}")].as_str() else { break };
+                let repo = format!("{owner}/{}", variables[format!("r{i}")].as_str().unwrap()).to_ascii_lowercase();
+                let number = variables[format!("n{i}")].as_u64().unwrap();
+                let alias = format!("p{i}");
+                if !st.repos.contains_key(&repo) {
+                    errs.push(
+                        json!({"type": "NOT_FOUND", "path": [alias], "message": format!("no repository {repo}")}),
+                    );
+                    data.insert(alias, Value::Null);
+                    continue;
+                }
+                let mut pr = st.prs.get(&(repo.clone(), number)).cloned().unwrap_or(Value::Null);
+                if let Some(Failure::Field { field, message }) = failed.get(&alias) {
+                    errs.push(json!({"path": [alias, "pullRequest", field], "message": message}));
+                    pr[field.as_str()] = Value::Null;
+                } else if let Some(f) = failed.get(&alias) {
+                    errs.push(json!({"path": [alias, "pullRequest"], "message": f.message()}));
+                    pr = Value::Null;
+                } else if pr.is_null() {
+                    errs.push(
+                        json!({"type": "NOT_FOUND", "path": [alias, "pullRequest"], "message": "no pull request"}),
+                    );
+                }
+                let mut repository = st.repos[&repo].clone();
+                repository["pullRequest"] = pr;
+                data.insert(alias, repository);
+            }
+            let mut out = json!({"data": data});
+            if !errs.is_empty() {
+                out["errors"] = json!(errs);
+            }
+            return Ok(out);
+        }
+        if op == "read" {
+            let repo = format!("{}/{}", variables["owner"].as_str().unwrap(), variables["name"].as_str().unwrap())
+                .to_ascii_lowercase();
+            let Some(meta) = st.repos.get(&repo).cloned() else {
+                return Ok(gh_error(&format!("Could not resolve to a Repository with the name '{repo}'.")));
+            };
+            let number = variables["number"].as_u64().unwrap();
+            let mut pr = st.prs.get(&(repo, number)).cloned().unwrap_or(Value::Null);
+            if st.unknown_reads > 0 && !pr.is_null() {
+                st.unknown_reads -= 1;
+                pr["mergeStateStatus"] = json!("UNKNOWN");
+            }
+            if pr["headRef"].is_object() && pr["headRef"]["target"].is_null() {
+                pr["headRef"]["target"] = json!({"oid": pr["headRefOid"]});
+            }
+            let mut repository = meta;
+            repository["pullRequest"] = pr;
+            return Ok(json!({"data": {"repository": repository}}));
+        }
+        if op == "deleteRef" {
+            let wanted = variables["ref"].as_str().unwrap_or_default().to_string();
+            let Some(pr) = st.prs.values_mut().find(|p| p["headRef"]["id"] == wanted.as_str()) else {
+                return Ok(gh_error("Could not resolve to a node"));
+            };
+            pr["headRef"] = Value::Null;
+            return Ok(json!({"data": {"deleteRef": {"clientMutationId": null}}}));
+        }
+        let id = variables["id"].as_str().unwrap().to_string();
+        let head = variables["head"].as_str().unwrap().to_string();
+        let queue = st.queue;
+        st.merges += 1;
+        let merges = st.merges;
+        let Some(pr) = st.prs.values_mut().find(|p| p["id"] == id.as_str()) else {
+            return Ok(gh_error("Could not resolve to a node"));
+        };
+        if pr["headRefOid"] != head.as_str() {
+            return Ok(gh_error("Head branch was modified. Review and try the merge again."));
+        }
+        match op {
+            "enqueuePullRequest" => {
+                let position = queue + 1;
+                pr["isInMergeQueue"] = json!(true);
+                pr["mergeQueueEntry"] = json!({"position": position});
+                Ok(json!({"data": {"enqueuePullRequest": {"mergeQueueEntry": {"position": position}}}}))
+            }
+            "mergePullRequest" => {
+                let oid = format!("{merges:040x}");
+                pr["state"] = json!("MERGED");
+                pr["mergeCommit"] = json!({"oid": oid});
+                Ok(json!({"data": {"mergePullRequest": {"pullRequest": {"mergeCommit": {"oid": oid}}}}}))
+            }
+            _ => Ok(gh_error("the fake does not support this mutation")),
+        }
     }
 }
 
@@ -2553,6 +2578,148 @@ mod tests {
         };
         join(a, b).await;
         assert_eq!(*log.lock().unwrap(), vec!["a:start", "b:start", "a:end", "b:end"]);
+    }
+
+    #[tokio::test]
+    async fn a_rule_fires_on_the_nth_call_that_matches_its_op_and_target() {
+        let t3 = FakeT3::new();
+        t3.put(thread("mcp:a", "idle", "2026-11-17T12:00:00Z"));
+        t3.put(thread("mcp:b", "idle", "2026-11-17T12:00:00Z"));
+        t3.fault(Rule::on("t3_thread_read").target("mcp:a").call(2).fail(Failure::down("down")));
+        let read = |id: &'static str| t3.call("t3_thread_read", json!({"threadId": id}));
+
+        assert!(read("mcp:b").await.is_ok());
+        assert!(read("mcp:a").await.is_ok());
+        assert!(read("mcp:b").await.is_ok());
+        assert!(matches!(read("mcp:a").await, Err(T3Error::Unavailable(m)) if m == "down"));
+        assert!(read("mcp:a").await.is_ok());
+
+        t3.fault(Rule::on("t3_thread_read").nth(Nth::From(2)).fail(Failure::refused("refused")));
+        assert!(read("mcp:b").await.is_ok());
+        assert!(matches!(read("mcp:b").await, Err(T3Error::Tool(m)) if m == "refused"));
+        assert!(read("mcp:a").await.is_err());
+        t3.clear_faults_on("t3_thread_read");
+        assert!(read("mcp:a").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn fail_after_effect_applies_the_call_then_returns_the_error() {
+        use crate::github::GitHub;
+
+        let t3 = FakeT3::new();
+        t3.fault(Rule::on("t3_thread_send").call(1).fail_after_effect(Failure::down("lost reply")));
+
+        let r = t3.call("t3_thread_send", json!({"threadId": "mcp:a", "message": "hi"})).await;
+
+        assert!(matches!(r, Err(T3Error::Unavailable(_))), "{r:?}");
+        assert_eq!(t3.sent().len(), 1);
+
+        let gh = FakeGitHub::default();
+        gh.set_pr("acme/widgets", 7, github_pr("1111111", "CLEAN", false));
+        let id = gh.pr("acme/widgets", 7)["id"].clone();
+        gh.fault(Rule::on("mergePullRequest").pr("acme/widgets", 7).fail_after_effect(Failure::down("timeout")));
+        let q = "mutation { mergePullRequest(input: {}) { clientMutationId } }";
+
+        assert!(gh.graphql(q, json!({"id": id, "head": "1111111"})).await.is_err());
+        assert_eq!(gh.pr("acme/widgets", 7)["state"], "MERGED");
+    }
+
+    #[tokio::test]
+    async fn a_gate_parks_a_call_until_it_is_released() {
+        let t3 = FakeT3::new();
+        let gate = Gate::new();
+        t3.fault(Rule::on("t3_thread_send").call(1).gate(&gate));
+        let mut parked = Box::pin(t3.call("t3_thread_send", json!({"threadId": "mcp:a", "message": "hi"})));
+
+        tokio::select! {
+            _ = &mut parked => panic!("the gated call finished before its release"),
+            _ = gate.arrived() => {}
+        }
+        assert!(t3.sent().is_empty());
+        assert!(t3.call("t3_thread_send", json!({"threadId": "mcp:b", "message": "hi"})).await.is_ok());
+        assert_eq!(t3.sent().len(), 1);
+        gate.release();
+        assert!(parked.await.is_ok());
+        assert_eq!(t3.sent().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_gate_releases_a_parked_call_to_run_its_effect() {
+        let t3 = FakeT3::new();
+        let gate = Gate::new();
+        t3.fault(Rule::on("t3_thread_send").gate(&gate));
+        let send = t3.call("t3_thread_send", json!({"threadId": "mcp:a", "message": "hi"}));
+        let release = async {
+            gate.arrived().await;
+            assert!(t3.sent().is_empty());
+            gate.release();
+        };
+
+        let (r, ()) = futures_util::future::join(send, release).await;
+
+        assert!(r.is_ok());
+        assert_eq!(t3.sent().len(), 1);
+        assert_eq!(gate.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_batch_read_fails_only_the_targeted_pull_request() {
+        use crate::github::GitHub;
+
+        let gh = FakeGitHub::default();
+        gh.set_pr("acme/widgets", 7, github_pr("1111111", "CLEAN", false));
+        gh.set_pr("acme/widgets", 8, github_pr("2222222", "CLEAN", false));
+        gh.fault(Rule::on("reconcile.pr").pr("acme/widgets", 8).call(1).fail(Failure::refused("transient")));
+        let q = "query Reconcile($o0: String!) { }";
+        let vars = json!({"o0": "acme", "r0": "widgets", "n0": 7, "o1": "acme", "r1": "widgets", "n1": 8});
+
+        let first = gh.graphql(q, vars.clone()).await.unwrap();
+        let second = gh.graphql(q, vars).await.unwrap();
+
+        assert_eq!(first["data"]["p0"]["pullRequest"]["headRefOid"], "1111111");
+        assert!(first["data"]["p1"]["pullRequest"].is_null());
+        assert_eq!(first["errors"], json!([{"path": ["p1", "pullRequest"], "message": "transient"}]));
+        assert_eq!(second["data"]["p1"]["pullRequest"]["headRefOid"], "2222222");
+        assert!(second.get("errors").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_outage_wins_over_earlier_rules_and_spares_per_pr_counts() {
+        use crate::github::GitHub;
+
+        let gh = FakeGitHub::default();
+        gh.set_pr("acme/widgets", 7, github_pr("1111111", "CLEAN", false));
+        gh.fault(Rule::on("reconcile").fail(Failure::refused("refused")));
+        gh.fault(Rule::on("reconcile.pr").pr("acme/widgets", 7).call(1).fail(Failure::refused("transient")));
+        gh.unreachable();
+        let q = "query Reconcile($o0: String!) { }";
+        let vars = json!({"o0": "acme", "r0": "widgets", "n0": 7});
+
+        let down = gh.graphql(q, vars.clone()).await.unwrap_err();
+        gh.clear_faults_on("*");
+        gh.clear_faults_on("reconcile");
+        let read = gh.graphql(q, vars).await.unwrap();
+
+        assert_eq!(down.to_string(), GH_DOWN);
+        assert_eq!(read["errors"], json!([{"path": ["p0", "pullRequest"], "message": "transient"}]));
+    }
+
+    #[tokio::test]
+    async fn seeded_jitter_yields_the_same_extra_steps_for_the_same_seed() {
+        let mut a = fault::Faults::default();
+        let mut b = fault::Faults::default();
+        let mut c = fault::Faults::default();
+        a.set_jitter(Some(7));
+        b.set_jitter(Some(7));
+        c.set_jitter(Some(8));
+        let run = |f: &mut fault::Faults| (0..32).map(|_| f.yields()).collect::<Vec<_>>();
+
+        let (ra, rb, rc) = (run(&mut a), run(&mut b), run(&mut c));
+
+        assert_eq!(ra, rb);
+        assert_ne!(ra, rc);
+        assert!(ra.iter().all(|n| *n < 4) && ra.iter().any(|n| *n > 0));
+        assert_eq!(run(&mut fault::Faults::default()), vec![0; 32]);
     }
 
     #[cfg(unix)]

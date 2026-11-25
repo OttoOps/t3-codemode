@@ -4,7 +4,7 @@ use crate::common::*;
 use serde_json::{Value, json};
 use t3_codemode::board::BOARD;
 use t3_codemode::config::Config;
-use t3_codemode::fake::{check_run, github_pr, project, pull_request};
+use t3_codemode::fake::{Failure, Rule, check_run, github_pr, project, pull_request};
 use t3_codemode::server;
 
 const REPO: &str = "acme/widgets";
@@ -528,7 +528,9 @@ async fn a_waiting_pr_github_refuses_three_times_becomes_a_card() {
     h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
     wf_merge(&h, 7, HEAD).await;
     h.github.update_pr(REPO, 7, json!({"mergeStateStatus": "CLEAN"}));
-    h.github.fail_operation("enqueuePullRequest", "Pull request is in clean status but is not mergeable");
+    h.github.fault(
+        Rule::on("enqueuePullRequest").fail(Failure::refused("Pull request is in clean status but is not mergeable")),
+    );
 
     check(&h, 2).await;
     check(&h, 4).await;
@@ -553,7 +555,7 @@ async fn a_refusal_card_keeps_its_lowercase_label_after_a_long_multiline_error()
         let code = format!("async () => wf.merge({})", json!({"repo": "Acme/Widgets", "pr": 7, "head": HEAD}));
         assert_eq!(result(&h.exec_as(TICKET, &code).await)["status"], "waiting");
         h.github.update_pr(REPO, 7, json!({"mergeStateStatus": "CLEAN"}));
-        h.github.fail_operation("enqueuePullRequest", &error);
+        h.github.fault(Rule::on("enqueuePullRequest").fail(Failure::refused(&error)));
 
         check(&h, 2).await;
         check(&h, 4).await;
@@ -573,7 +575,7 @@ async fn github_down_changes_nothing_and_the_board_pass_still_runs() {
     ticket_with_worker(&h, 0).await;
     h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
     merge_gate(&h, Some(HEAD)).await;
-    h.github.set_down(true);
+    h.github.unreachable();
 
     assert!(h.app.wf.reconcile().await.is_err());
     h.clock.set(&at(10));
@@ -1238,13 +1240,13 @@ async fn a_wake_that_t3_cannot_take_is_kept_and_delivered_once() {
     merge_gate(&h, Some(HEAD)).await;
     check(&h, 0).await;
     h.github.update_pr(REPO, 7, merged_at(1));
-    h.fake.set_send_fails(true);
+    h.fake.fail_tool("t3_thread_send");
 
     check(&h, 2).await;
     assert!(github_events(&h).is_empty());
     assert_eq!(h.app.store.outbox_all().unwrap().len(), 1);
 
-    h.fake.set_send_fails(false);
+    h.fake.clear_faults_on("t3_thread_send");
     h.tick(3).await;
     check(&h, 4).await;
     h.tick(5).await;
@@ -1317,7 +1319,9 @@ async fn a_read_error_for_one_pr_leaves_its_approval_alone() {
     ticket_with_worker(&h, 0).await;
     h.github.set_pr(REPO, 7, github_pr(HEAD, "BLOCKED", true));
     assert_eq!(wf_merge(&h, 7, HEAD).await["status"], "waiting");
-    h.github.fail_read(REPO, 7, "Something went wrong while executing your query");
+    h.github.fault(
+        Rule::on("reconcile.pr").pr(REPO, 7).fail(Failure::refused("Something went wrong while executing your query")),
+    );
 
     for m in [2, 4, 6] {
         h.clock.set(&at(m));
@@ -1376,11 +1380,15 @@ async fn a_read_with_a_field_error_is_retried_and_wakes_the_ticket_once() {
     h.tick(0).await;
     h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
     h.github.update_pr(REPO, 7, merged_at(1));
-    h.github.fail_field(REPO, 7, "mergeCommit", "Something went wrong while resolving mergeCommit");
+    h.github.fault(
+        Rule::on("reconcile.pr")
+            .pr(REPO, 7)
+            .fail(Failure::field("mergeCommit", "Something went wrong while resolving mergeCommit")),
+    );
     h.clock.set(&at(2));
 
     let err = h.app.wf.reconcile().await.unwrap_err();
-    h.github.clear_read_errors();
+    h.github.clear_faults_on("reconcile.pr");
     check(&h, 4).await;
 
     assert!(format!("{err:#}").contains("resolving mergeCommit"), "{err:#}");
@@ -1577,7 +1585,9 @@ async fn a_reconcile_card_carries_its_approvals_id_and_unrelated_cards_do_not() 
 
     // Three enqueue refusals retire approval A1 and stamp A1 on the reconcile report card.
     h.github.update_pr(REPO, 7, json!({"mergeStateStatus": "CLEAN"}));
-    h.github.fail_operation("enqueuePullRequest", "Pull request is in clean status but is not mergeable");
+    h.github.fault(
+        Rule::on("enqueuePullRequest").fail(Failure::refused("Pull request is in clean status but is not mergeable")),
+    );
     check(&h, 2).await;
     check(&h, 4).await;
     check(&h, 6).await;
