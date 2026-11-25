@@ -4033,7 +4033,11 @@ return {{ loaded, cards, ws, back, noStore }};
     assert_eq!(r["ws"]["cards"], r["cards"], "switching keeps every card: {r}");
     assert_eq!(r["ws"]["color"], json!("#0d1117"), "{r}");
     assert_eq!(r["back"]["layout"], json!("dispatch"), "{r}");
-    assert_eq!(r["back"]["stored"], Value::Null, "Dispatch clears the saved pick: {r}");
+    assert_eq!(
+        r["back"]["stored"],
+        json!("dispatch"),
+        "a Dispatch pick is saved, so it beats a Workspace default: {r}"
+    );
     assert_eq!(r["noStore"]["layout"], json!("workspace"), "a storage error still switches the layout: {r}");
     let saved = run_page_async_with(
         &html,
@@ -4095,6 +4099,41 @@ return {{ counts, nav, followed, jumped, routed: step("acme/r#10"), plain: step(
     assert_eq!(r["jumped"], json!("needs"), "g d shows Needs you even when it is clear: {r}");
     assert_eq!(r["routed"], json!(["", false, "Step 2/3"]), "{r}");
     assert_eq!(r["plain"], json!([null, null, null]), "a one-PR ticket keeps its status pill: {r}");
+}
+
+#[tokio::test]
+async fn the_server_default_layout_applies_until_this_browser_picks_one() {
+    let (plain, _) = two_gate_page().await;
+    let boot = &plain[..plain.find("</script>").unwrap()];
+    assert!(boot.contains(r#"if (l !== "workspace" && l !== "dispatch") l = "dispatch";"#), "{boot}");
+
+    let config = Config::from_value(json!({"board": {"layout": "workspace"}})).unwrap();
+    let s = start(H::build(Vec::new(), config)).await;
+    let html = s.http.get(format!("{}/", s.base)).send().await.unwrap().text().await.unwrap();
+    assert!(!html.contains("{{LAYOUT}}"));
+    let boot = &html[..html.find("</script>").unwrap()];
+    assert!(
+        boot.contains(r#"if (l !== "workspace" && l !== "dispatch") l = "workspace";"#),
+        "the head script applies the default before paint"
+    );
+    let read = r#"() => [document.documentElement.getAttribute("data-layout"), document.getElementById("layout-btn").getAttribute("aria-label"), localStorage.getItem("t3board.layout")]"#;
+    assert_eq!(
+        run_page_async_with(&html, "", read),
+        json!(["workspace", "Layout: Workspace. Switch to Dispatch", null]),
+        "a browser with no pick opens in the server default"
+    );
+    assert_eq!(
+        run_page_async_with(&html, r#"globalThis.__storage = { "t3board.layout": "dispatch" };"#, read)[0],
+        json!("dispatch"),
+        "this browser's pick wins over the default"
+    );
+    assert_eq!(
+        run_page_async_with(&html, r#"globalThis.__storage = { "t3board.layout": "grid" };"#, read)[0],
+        json!("workspace"),
+        "an unknown saved value falls back to the default"
+    );
+    assert!(Config::from_value(json!({"board": {"layout": "grid"}})).is_err());
+    assert_eq!(Config::default().board.layout, t3_codemode::config::BoardLayout::Dispatch);
 }
 
 #[tokio::test]

@@ -89,6 +89,8 @@ pub struct BoardConfig {
     pub reconcile_idle_minutes: u64,
     pub open_links: OpenLinks,
     #[serde(default)]
+    pub layout: BoardLayout,
+    #[serde(default)]
     pub remote: Option<BoardRemoteConfig>,
     #[serde(skip)]
     pub legacy_ticket_keys: Vec<String>,
@@ -293,6 +295,23 @@ fn parse_port(raw: &str) -> Option<u16> {
 pub enum OpenLinks {
     Desktop,
     Tab,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BoardLayout {
+    #[default]
+    Dispatch,
+    Workspace,
+}
+
+impl BoardLayout {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BoardLayout::Dispatch => "dispatch",
+            BoardLayout::Workspace => "workspace",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -598,6 +617,7 @@ pub fn builtin_defaults() -> Value {
             "reconcileActiveMinutes": 2,
             "reconcileIdleMinutes": 10,
             "openLinks": "desktop",
+            "layout": "dispatch",
             "remote": null
         },
         "trackers": {
