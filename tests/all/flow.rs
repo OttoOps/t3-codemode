@@ -4327,12 +4327,12 @@ return {{ blockedRows, legend, edgeInfo, hover2Edges, hover2Marks, drawer2, note
         .iter()
         .find(|e| e["kind"] == "fileConflict" && e["title"].as_str().unwrap().contains("src/board.html"))
         .expect("fileConflict edge");
-    assert_eq!(conflict_e["cls"], "ge conflict src-code");
+    assert_eq!(conflict_e["cls"], "ge conflict src-code off");
     assert_eq!(conflict_e["source"], "code");
     assert_eq!(conflict_e["marker"], Value::Null);
 
     // Hovering #2 traces upstream prStack (#1 -> up), keeps incident fileConflict peer #3 undimmed,
-    // highlights incident conflict edge (#2/#3 -> hot), and dims unrelated #4 and its conflict edge.
+    // highlights incident conflict edge (#2/#3 -> hot), dims unrelated #4, and hides its conflict edge.
     assert_eq!(r["hover2Marks"]["acme/widgets#2"], "hot", "{r}");
     assert_eq!(r["hover2Marks"]["acme/widgets#1"], "up", "{r}");
     assert_eq!(r["hover2Marks"]["acme/widgets#3"], "", "{r}");
@@ -4340,7 +4340,7 @@ return {{ blockedRows, legend, edgeInfo, hover2Edges, hover2Marks, drawer2, note
     let h2 = r["hover2Edges"].as_array().unwrap();
     assert!(h2.contains(&json!(["prStack", "ge stack src-git up"])), "{h2:?}");
     assert!(h2.contains(&json!(["fileConflict", "ge conflict src-code hot"])), "{h2:?}");
-    assert!(h2.contains(&json!(["fileConflict", "ge conflict src-code dim"])), "{h2:?}");
+    assert!(h2.contains(&json!(["fileConflict", "ge conflict src-code off"])), "{h2:?}");
 
     // Inspector for #2 lists PR stack + branch/PR details and File conflicts + overlapping path.
     let d2: Vec<&str> = r["drawer2"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
@@ -5293,7 +5293,7 @@ return {{ legend, edgeInfo, hover2Edges, hover2Marks, drawer2, drawer1 }};
         .iter()
         .find(|e| e["kind"] == "codeDep" && e["title"].as_str().unwrap().contains("src/service.rs -> src/storage.rs"))
         .expect("service -> storage codeDep edge");
-    assert_eq!(cd["cls"], "ge codedep src-code");
+    assert_eq!(cd["cls"], "ge codedep src-code off");
     assert_eq!(cd["source"], "code");
     assert_eq!(cd["marker"], "url(#gm-code)");
     assert!(cd["title"].as_str().unwrap().starts_with("Code dependency hint (code):"), "{cd}");
@@ -5315,14 +5315,14 @@ return {{ legend, edgeInfo, hover2Edges, hover2Marks, drawer2, drawer1 }};
     );
 
     // Hovering #2 highlights incident #2->#1 codeDep as hot (keeping code marker) and keeps #1 undimmed (not red "up"),
-    // while dimming unrelated #3, #4 and their #4->#3 codeDep edge.
+    // while dimming unrelated #3, #4 and hiding their #4->#3 codeDep edge.
     assert_eq!(r["hover2Marks"]["acme/widgets#2"], "hot", "{r}");
     assert_eq!(r["hover2Marks"]["acme/widgets#1"], "", "{r}");
     assert_eq!(r["hover2Marks"]["acme/widgets#3"], "dim", "{r}");
     assert_eq!(r["hover2Marks"]["acme/widgets#4"], "dim", "{r}");
     let h2 = r["hover2Edges"].as_array().unwrap();
     assert!(h2.contains(&json!(["codeDep", "ge codedep src-code hot", "url(#gm-code)"])), "{h2:?}");
-    assert!(h2.contains(&json!(["codeDep", "ge codedep src-code dim", "url(#gm-code)"])), "{h2:?}");
+    assert!(h2.contains(&json!(["codeDep", "ge codedep src-code off", "url(#gm-code)"])), "{h2:?}");
 
     // Inspector shows outgoing Code deps on #2 and incoming Code used by on #1 with module details.
     let d2: Vec<&str> = r["drawer2"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
@@ -7215,12 +7215,12 @@ return verifyGraphEdges();
     assert!(by_kind("prStack")["title"].as_str().unwrap().contains("feat/3 (PR #30) on feat/1 (PR #10)"));
     assert_eq!(
         (&by_kind("fileConflict")["cls"], &by_kind("fileConflict")["marker"]),
-        (&json!("ge conflict src-code"), &Value::Null)
+        (&json!("ge conflict src-code off"), &Value::Null)
     );
     assert!(by_kind("fileConflict")["title"].as_str().unwrap().contains("src/board.html"));
     assert_eq!(
         (&by_kind("codeDep")["cls"], &by_kind("codeDep")["marker"]),
-        (&json!("ge codedep src-code"), &json!("url(#gm-code)"))
+        (&json!("ge codedep src-code off"), &json!("url(#gm-code)"))
     );
     assert!(by_kind("codeDep")["title"].as_str().unwrap().contains("src/c.rs -> src/a.rs"));
 

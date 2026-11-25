@@ -10488,6 +10488,101 @@ return {{ loading, emptyFlow, filtered, clicked, afterJoinOpenDrawer, restoredFo
     );
 }
 
+const ADVISORY_GRAPH: &str = r##"
+const N = (n, state) => ({ id: "acme/a#" + n, repo: "acme/a", number: n, label: "a#" + n, title: "Issue " + n, state, tracked: true });
+const view = { enabled: true, launch: "ask", maxTickets: 2, free: 2, running: [], queue: [], blocked: [], skipped: [],
+  graph: { nodes: [N(1, "open"), N(2, "open"), N(3, "open"), N(4, "closed"), N(5, "closed")], warnings: [], edges: [
+    { from: "acme/a#2", to: "acme/a#1", kind: "blockedBy", source: "github" },
+    { from: "acme/a#3", to: "acme/a#1", kind: "codeDep", source: "code", modules: ["src/c.rs -> src/a.rs"] },
+    { from: "acme/a#2", to: "acme/a#3", kind: "fileConflict", source: "code", files: ["src/b.rs"] },
+    { from: "acme/a#5", to: "acme/a#4", kind: "codeDep", source: "code", modules: ["src/e.rs -> src/d.rs"] },
+  ] } };
+fetchReply = (url) => url === "/api/flow" ? Promise.resolve({ ok: true, status: 200, json: async () => view }) : new Promise(() => {});
+emitState({ ...base, cards: [] });
+for (let i = 0; i < 8; i++) await Promise.resolve();
+const btn = (id) => q('.gnode[data-id="' + id + '"]');
+const edges = () => Object.fromEntries(document.querySelectorAll(".ge").map((p) => [p.getAttribute("data-kind") + " " + p.getAttribute("data-from").slice(-1) + p.getAttribute("data-to").slice(-1), p.getAttribute("class")]));
+const keys = () => [q("#graph-show-conflict").getAttribute("aria-pressed"), q("#graph-show-codedep").getAttribute("aria-pressed")];
+"##;
+
+#[tokio::test]
+async fn advisory_graph_edges_hide_until_traced_or_toggled_and_the_toggle_is_remembered() {
+    let (html, st) = two_gate_page().await;
+    let r = run_page_async_with(
+        &html,
+        r#"globalThis.__storage = { "t3board.view": "queue" };"#,
+        &format!(
+            r##"async () => {{
+{PAGE_HELPERS}
+const base = {st};
+{ADVISORY_GRAPH}
+const rest = {{ edges: edges(), keys: keys() }};
+btn("acme/a#3").dispatch("pointerover");
+const hover = edges();
+q("#gscroll").dispatch("pointerleave");
+btn("acme/a#3").dispatch("click");
+const pinned = edges();
+q("#graph-clear").dispatch("click");
+q("#graph-show-codedep").dispatch("click");
+const toggled = {{ edges: edges(), keys: keys(), saved: localStorage.getItem("t3board.graph.advisory") }};
+return {{ rest, hover, pinned, toggled }};
+}}"##
+        ),
+    );
+    assert_eq!(
+        r["rest"]["edges"],
+        json!({
+            "blockedBy 21": "ge",
+            "codeDep 31": "ge codedep src-code off",
+            "fileConflict 23": "ge conflict src-code off",
+            "codeDep 54": "ge codedep src-code off",
+        }),
+        "at rest only hard edges draw: {r}"
+    );
+    assert_eq!(r["rest"]["keys"], json!(["false", "false"]), "{r}");
+    for traced in ["hover", "pinned"] {
+        assert_eq!(r[traced]["codeDep 31"], "ge codedep src-code hot", "{traced}: {r}");
+        assert_eq!(r[traced]["fileConflict 23"], "ge conflict src-code hot", "{traced}: {r}");
+        assert_eq!(r[traced]["codeDep 54"], "ge codedep src-code off", "{traced}: {r}");
+    }
+    assert_eq!(
+        r["toggled"],
+        json!({
+            "edges": {
+                "blockedBy 21": "ge",
+                "codeDep 31": "ge codedep src-code",
+                "fileConflict 23": "ge conflict src-code off",
+                "codeDep 54": "ge codedep src-code off",
+            },
+            "keys": ["false", "true"],
+            "saved": "codeDep",
+        }),
+        "the code dep toggle draws every code dep between open issues and is saved: {r}"
+    );
+
+    let again = run_page_async_with(
+        &html,
+        r#"globalThis.__storage = { "t3board.view": "queue", "t3board.graph.advisory": "codeDep" };"#,
+        &format!(
+            r##"async () => {{
+{PAGE_HELPERS}
+const base = {st};
+{ADVISORY_GRAPH}
+const restored = {{ edges: edges(), keys: keys() }};
+q("#graph-show-codedep").dispatch("click");
+q("#graph-show-conflict").dispatch("click");
+return {{ restored, flipped: {{ edges: edges(), keys: keys(), saved: localStorage.getItem("t3board.graph.advisory") }} }};
+}}"##
+        ),
+    );
+    assert_eq!(again["restored"]["keys"], json!(["false", "true"]), "the toggle survives a refresh: {again}");
+    assert_eq!(again["restored"]["edges"]["codeDep 31"], "ge codedep src-code", "{again}");
+    assert_eq!(again["flipped"]["keys"], json!(["true", "false"]), "{again}");
+    assert_eq!(again["flipped"]["saved"], "fileConflict", "{again}");
+    assert_eq!(again["flipped"]["edges"]["fileConflict 23"], "ge conflict src-code", "{again}");
+    assert_eq!(again["flipped"]["edges"]["codeDep 31"], "ge codedep src-code off", "{again}");
+}
+
 #[test]
 fn human_titles_drop_the_label_and_skip_urls_refs_and_slugs() {
     use t3_codemode::board::human_title;

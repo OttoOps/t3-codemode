@@ -1272,6 +1272,10 @@ kbd { font-family: var(--mono); font-size: 12px; }
 .gsync-res ul { display: grid; gap: 2px; list-style: disc; padding-left: 16px; }
 .gkey { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .gkey svg { width: 22px; height: 8px; flex: none; }
+.gtoggle { height: 24px; padding: 0 6px; margin: 0 -6px; border: 1px solid transparent; border-radius: 4px; background: none; color: inherit; font: inherit; cursor: pointer; }
+.gtoggle:hover { background: var(--surface-hover); }
+.gtoggle[aria-pressed="false"] svg { opacity: 0.45; }
+.gtoggle[aria-pressed="true"] { border-color: var(--border-strong); background: var(--surface); color: var(--fg); }
 .gkey .k-up { stroke: var(--fail); }
 .gkey .k-down { stroke: var(--unlock); }
 .gkey .k-par { stroke: var(--border-strong); stroke-dasharray: 3 3; }
@@ -1298,6 +1302,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
 .ge.up { stroke: var(--fail); stroke-width: 2.5; }
 .ge.down { stroke: var(--unlock); stroke-width: 2.5; }
 .ge.dim { stroke-opacity: 0.25; }
+.ge.off { display: none; }
 .gmk { fill: var(--border-strong); }
 .gmk.body { fill: var(--pause); }
 .gmk.git { fill: var(--s3); }
@@ -1871,8 +1876,8 @@ kbd { font-family: var(--mono); font-size: 12px; }
             <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-par" d="M1 4h20" stroke-width="1.5"/></svg>parent</span>
             <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-body" d="M1 4h20" stroke-width="1.5"/></svg>from body</span>
             <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-stack" d="M1 4h20" stroke-width="2"/></svg>PR stack</span>
-            <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-conflict" d="M1 4h20" stroke-width="1.75"/></svg>file conflict</span>
-            <span class="gkey"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-codedep" d="M1 4h20" stroke-width="1.75"/></svg>code dep</span>
+            <button class="gkey gtoggle" type="button" id="graph-show-conflict" aria-pressed="false" title="Show every file conflict, not only the traced issue's"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-conflict" d="M1 4h20" stroke-width="1.75"/></svg>file conflict</button>
+            <button class="gkey gtoggle" type="button" id="graph-show-codedep" aria-pressed="false" title="Show every code dep, not only the traced issue's"><svg viewBox="0 0 22 8" aria-hidden="true"><path class="k-codedep" d="M1 4h20" stroke-width="1.75"/></svg>code dep</button>
             <span class="gacts">
               <button class="btn quiet gclear" type="button" id="graph-clear" hidden>Clear trace</button>
               <button class="btn gsync" type="button" id="graph-sync" hidden></button>
@@ -2119,6 +2124,11 @@ try {
   if (v === "light" || v === "system") theme.pref = v;
 } catch (_) {}
 const DENSITY_KEY = "t3board.density";
+const ADV_KEY = "t3board.graph.advisory";
+const advisory = { fileConflict: false, codeDep: false };
+try {
+  for (const k of String(localStorage.getItem(ADV_KEY) || "").split(",")) if (k in advisory) advisory[k] = true;
+} catch (_) {}
 const LAYOUT_KEY = "t3board.layout";
 const LAYOUT_WORD = { dispatch: "Dispatch", workspace: "Workspace" };
 const LAYOUT_NEXT = { dispatch: "workspace", workspace: "dispatch" };
@@ -5904,6 +5914,16 @@ function edgeDirected(e) {
   return e.kind === "blockedBy" || e.kind === "prStack" || e.kind === "codeDep";
 }
 
+function edgeAdvisory(e) {
+  return e.kind === "fileConflict" || e.kind === "codeDep";
+}
+
+function advisoryShown(e) {
+  if (!advisory[e.kind]) return false;
+  const a = graph.nodes.get(e.from), b = graph.nodes.get(e.to);
+  return !(a && b && a.state === "closed" && b.state === "closed");
+}
+
 function edgeHardDirected(e) {
   return e.kind === "blockedBy" || e.kind === "prStack";
 }
@@ -6599,9 +6619,10 @@ function graphMark() {
       if ((e.from === hot || up.has(e.from)) && up.has(e.to)) cls += " up";
       else if ((e.to === hot || down.has(e.to)) && down.has(e.from)) cls += " down";
       else cls += " dim";
-    } else if (hot && (e.kind === "fileConflict" || e.kind === "codeDep")) {
-      if (e.from === hot || e.to === hot) cls += " hot";
-      else cls += " dim";
+    } else if (edgeAdvisory(e)) {
+      if (hot && (e.from === hot || e.to === hot)) cls += " hot";
+      else if (!advisoryShown(e)) cls += " off";
+      else if (hot) cls += " dim";
     } else if (hot && e.from !== hot && e.to !== hot) cls += " dim";
     if (el.getAttribute("class") !== cls) {
       el.setAttribute("class", cls);
@@ -6676,8 +6697,22 @@ function graphRelease() {
   paintGraph();
 }
 
+function paintAdvisoryKeys() {
+  for (const [id, k] of [["graph-show-conflict", "fileConflict"], ["graph-show-codedep", "codeDep"]]) setAttr($(id), "aria-pressed", advisory[k] ? "true" : "false");
+}
+
+function toggleAdvisory(kind) {
+  advisory[kind] = !advisory[kind];
+  try { localStorage.setItem(ADV_KEY, Object.keys(advisory).filter((k) => advisory[k]).join(",")); } catch (_) {}
+  paintAdvisoryKeys();
+  graphMark();
+}
+
 function initGraph() {
   const box = $("gscroll");
+  $("graph-show-conflict").addEventListener("click", () => toggleAdvisory("fileConflict"));
+  $("graph-show-codedep").addEventListener("click", () => toggleAdvisory("codeDep"));
+  paintAdvisoryKeys();
   $("graph-clear").addEventListener("click", () => {
     graph.focus = null;
     graph.hover = null;

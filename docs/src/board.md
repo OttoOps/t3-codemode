@@ -1075,6 +1075,12 @@ Queue & Graph, and an older `#tickets-graph` link still lands there.
   shows a tooltip naming its source, branch/PR or part chain for `prStack`,
   overlapping file paths for `fileConflict`, or the module edges and symbols
   for `codeDep`.
+- **Advisory links.** At rest the graph draws only blockers, parents and PR
+  stacks. An issue's `fileConflict` and `codeDep` links appear while it is
+  hovered, focused or pinned. The **file conflict** and **code dep** legend
+  entries are toggles, off by default: turning one on draws every link of
+  that kind, except links between two closed issues. Each viewer's toggles
+  are kept in the browser.
 - **Sync parsed links.** When the graph holds `blockedBy` or `parent` links
   with `source: "body"` that are not yet on GitHub, the panel heading shows
   **Sync N parsed links to GitHub**. Clicking it calls
