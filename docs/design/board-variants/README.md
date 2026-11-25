@@ -17,4 +17,8 @@ name in the status line is made up.
 
 [`captures/`](captures/) holds the shipped Workspace layout at 1440x900 and
 1280x800 in dark mode, replayed against the anonymized state in
-[`../board-ux/live/`](../board-ux/live/README.md).
+[`../board-ux/live/`](../board-ux/live/README.md). The `workspace-needs`,
+`workspace-prs`, `workspace-overview` and `workspace-activity` captures show
+the nav views and the 390px section switcher from #316's second PR, and
+`dispatch-1024-header-before-after.png` shows the 1024px top bar with the
+update button before and after that PR's header fix.
