@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/OttoOps/t3-codemode/compare/v0.13.5...v0.14.0) - 2026-11-25
+
+### Added
+
+- name upstreams in MCP instructions
+
+### Fixed
+
+- accept colon directives after a clause break
+- parse inline dep refs without prose hits
+- hide advisory graph edges until selected
+
 ## [0.13.5](https://github.com/OttoOps/t3-codemode/compare/v0.13.4...v0.13.5) - 2026-11-25
 
 ### Other
