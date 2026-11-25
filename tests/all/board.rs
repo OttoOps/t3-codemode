@@ -10080,6 +10080,185 @@ return {{ restored, lanes, nodes, moved, end, keysOff, keysOn, tabs, opened, dep
     assert!(doc.contains("### The Queue & Graph view"), "docs/src/board.md documents the graph view");
 }
 
+#[tokio::test]
+async fn without_a_flow_the_graph_view_shows_pending_launching_tickets_and_migrates_them_on_join() {
+    let (html, st) = two_gate_page().await;
+    let r = run_page_async_with(
+        &html,
+        r#"globalThis.__storage = { "t3board.view": "queue" };"#,
+        &format!(
+            r##"async () => {{
+{PAGE_HELPERS}
+const base = {st};
+{ROWS}
+const emptyGraph = {{ enabled: false, launch: null, maxTickets: 0, free: 0, running: [], queue: [], blocked: [], skipped: [], graph: {{ nodes: [], edges: [], warnings: [] }} }};
+let resolveFlow = null;
+fetchReply = (url) => url === "/api/flow"
+  ? new Promise((resolve) => {{ resolveFlow = resolve; }})
+  : new Promise(() => {{}});
+const P1 = {{ ...T("acme/a#9", {{ repo: "acme/a" }}), thread: null, ticket: null, link: null, joined: false, status: "launching", title: null, humanTitle: null, issueTitle: null }};
+const P2 = {{ ...T("loose#10", {{}}), thread: null, ticket: null, link: null, joined: false, status: null, title: null, humanTitle: null, issueTitle: null }};
+const live = T("acme/a#1", {{ repo: "acme/a", status: "paused", paused: true }});
+const done = T("acme/a#4", {{ repo: "acme/a", done: true }});
+const snap = {{ ...base, cards: [], tree: [live, P1, P2, done] }};
+emitState(snap);
+const btn = (id) => q('.gnode[data-id="' + id + '"]');
+const gnodes = () => document.querySelectorAll(".gnode").map((b) => [b.dataset.id, b.querySelector('[data-part="st"]').textContent]);
+const openKeys = () => [...document.getElementById("open").children].filter((el) => el.dataset.key).map((el) => el.dataset.key);
+const loading = {{ nOpen: q("#n-open").textContent, nGraph: q("#n-graph").textContent, openKeys: openKeys(), nodes: gnodes() }};
+
+// When /api/flow responds with empty graph.nodes (no repos discovered), degraded mode still keeps pending tickets.
+resolveFlow({{ ok: true, status: 200, json: async () => emptyGraph }});
+for (let i = 0; i < 8; i++) await Promise.resolve();
+const emptyFlow = {{ nOpen: q("#n-open").textContent, nGraph: q("#n-graph").textContent, nodes: gnodes(), note: q("#graph-note").textContent }};
+
+// Status filter "running" matches pending launching tickets on both Open and Graph tabs.
+setFilter({{ statuses: ["running"] }});
+const filtered = {{
+  nOpen: q("#n-open").textContent,
+  nGraph: q("#n-graph").textContent,
+  outIds: document.querySelectorAll(".gnode.out").map((b) => b.dataset.id),
+}};
+setFilter({{}});
+
+// Clicking a pending node announces "not joined yet" and opens the launching view instead of a missing thread.
+btn("pending:acme/a#9").dispatch("click");
+advance(100);
+const clicked = {{
+  live: q("#live").textContent,
+  open: q("#drawer").classList.contains("open"),
+  kind: q("#drawer").getAttribute("data-kind"),
+  goneHidden: q('#drawer [data-part="gone"]').hidden,
+  id: q('#drawer [data-part="id"]').textContent,
+  st: q('#drawer [data-part="st"]').textContent,
+  note: q('#drawer [data-part="note-m"]').textContent,
+  t3Empty: !q('#drawer [data-part="t3"]').firstChild,
+}};
+
+// When the thread joins while the drawer is open, it transitions to the real ticket key with no duplicate.
+const joined1 = {{ ...P1, thread: "th-9", ticket: "th-9", joined: true, status: "running", link: "https://t3/th-9" }};
+emitState({{ ...snap, tree: [live, joined1, P2, done] }});
+const afterJoinOpenDrawer = {{
+  nodes: gnodes(),
+  nOpen: q("#n-open").textContent,
+  nGraph: q("#n-graph").textContent,
+  drawerKind: q("#drawer").getAttribute("data-kind"),
+  drawerSt: q('#drawer [data-part="st"]').textContent,
+  drawerGoneHidden: q('#drawer [data-part="gone"]').hidden,
+}};
+closeDrawer(true);
+const restoredFocus = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.id : null;
+
+// When a pending node has focus inside #gscroll and joins, its button migrates in place without duplicating.
+const p2Btn = btn("pending:loose#10");
+p2Btn.focus();
+const joined2 = {{ ...P2, thread: "th-10", ticket: "th-10", joined: true, status: "running", link: "https://t3/th-10" }};
+emitState({{ ...snap, tree: [live, joined1, joined2, done] }});
+const migratedInPlace = {{
+  sameBtn: btn("t:th-10") === p2Btn,
+  oldGone: !btn("pending:loose#10"),
+  nodes: gnodes(),
+}};
+btn("t:th-10").dispatch("click");
+const clickedAfterJoin = {{ kind: q("#drawer").getAttribute("data-kind"), id: q('#drawer [data-part="id"]').textContent }};
+closeDrawer(false);
+
+// Ambiguous join (two threads with the same label) never guesses which gets the pending node and leaves no pending duplicate.
+const P3 = {{ ...T("acme/a#11", {{ repo: "acme/a" }}), thread: null, ticket: null, link: null, joined: false, status: "launching" }};
+p2Btn.blur();
+q("#gscroll").dispatch("focusout");
+advance(1);
+emitState({{ ...snap, tree: [live, P3] }});
+const p3Btn = btn("pending:acme/a#11");
+p3Btn.focus();
+emitState({{ ...snap, tree: [live, {{ ...P3, thread: "th-11a", joined: true, status: "running" }}, {{ ...P3, thread: "th-11b", joined: true, status: "running" }}] }});
+const ambiguousHeldId = p3Btn.dataset.id;
+p3Btn.blur();
+q("#gscroll").dispatch("focusout");
+advance(1);
+const ambiguous = gnodes();
+
+return {{ loading, emptyFlow, filtered, clicked, afterJoinOpenDrawer, restoredFocus, migratedInPlace, clickedAfterJoin, ambiguousHeldId, ambiguous }};
+}}"##
+        ),
+    );
+    assert_eq!(r["loading"]["nOpen"], "3", "{r}");
+    assert_eq!(r["loading"]["nGraph"], "3", "{r}");
+    assert_eq!(r["loading"]["openKeys"], json!(["pending:acme/a#9", "pending:loose#10", "t-acme/a#1"]), "{r}");
+    assert_eq!(
+        r["loading"]["nodes"],
+        json!([["t:t-acme/a#1", "paused"], ["pending:acme/a#9", "launching"], ["pending:loose#10", "launching"]]),
+        "pending launching tickets appear alongside threaded tickets with pending:<label> keys: {r}"
+    );
+    assert_eq!(
+        (&r["emptyFlow"]["nOpen"], &r["emptyFlow"]["nGraph"]),
+        (&json!("3"), &json!("3")),
+        "empty /api/flow graph keeps degraded pending tickets: {r}"
+    );
+    assert!(
+        r["emptyFlow"]["note"].as_str().unwrap().starts_with("No GitHub repositories found"),
+        "empty /api/flow switches to degraded tickets mode: {r}"
+    );
+    assert_eq!(r["emptyFlow"]["nodes"], r["loading"]["nodes"], "{r}");
+    assert_eq!(
+        (&r["filtered"]["nOpen"], &r["filtered"]["nGraph"], &r["filtered"]["outIds"]),
+        (&json!("2/3"), &json!("2/3"), &json!(["t:t-acme/a#1"])),
+        "running status filter matches launching tickets identically on Open and Graph tabs: {r}"
+    );
+    assert!(
+        r["clicked"]["live"].as_str().unwrap().contains("has not joined yet"),
+        "clicking a pending node announces it has not joined yet: {r}"
+    );
+    assert_eq!(
+        (
+            &r["clicked"]["open"],
+            &r["clicked"]["kind"],
+            &r["clicked"]["goneHidden"],
+            &r["clicked"]["id"],
+            &r["clicked"]["st"],
+            &r["clicked"]["t3Empty"]
+        ),
+        (&json!(true), &json!("issue"), &json!(true), &json!("acme/a#9"), &json!("launching"), &json!(true)),
+        "{r}"
+    );
+    assert!(
+        r["clicked"]["note"].as_str().unwrap().contains("has not joined yet"),
+        "drawer says the thread has not joined yet: {r}"
+    );
+    assert_eq!(
+        r["afterJoinOpenDrawer"],
+        json!({
+            "nodes": [["t:t-acme/a#1", "paused"], ["t:th-9", "running"], ["pending:loose#10", "launching"]],
+            "nOpen": "3",
+            "nGraph": "3",
+            "drawerKind": "ticket",
+            "drawerSt": "running",
+            "drawerGoneHidden": true,
+        }),
+        "joining replaces pending:<label> with t:<thread> without duplicates and upgrades open drawer: {r}"
+    );
+    assert_eq!(r["restoredFocus"], "t:th-9", "{r}");
+    assert_eq!(
+        r["migratedInPlace"],
+        json!({
+            "sameBtn": true,
+            "oldGone": true,
+            "nodes": [["t:t-acme/a#1", "paused"], ["t:th-9", "running"], ["t:th-10", "running"]],
+        }),
+        "{r}"
+    );
+    assert_eq!(r["clickedAfterJoin"], json!({"kind": "ticket", "id": "loose#10"}), "{r}");
+    assert_eq!(
+        r["ambiguousHeldId"], "pending:acme/a#11",
+        "ambiguous join must not migrate the pending button to one of two matching threads: {r}"
+    );
+    assert_eq!(
+        r["ambiguous"],
+        json!([["t:t-acme/a#1", "paused"], ["t:th-11b", "running"], ["t:th-11a", "running"]]),
+        "{r}"
+    );
+}
+
 #[test]
 fn human_titles_drop_the_label_and_skip_urls_refs_and_slugs() {
     use t3_codemode::board::human_title;

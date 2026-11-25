@@ -1590,6 +1590,7 @@ impl Wf {
         for ln in links {
             ids.extend(self.hydrate(&ln).await?);
         }
+        ids.extend(self.store.pending_all()?.into_iter().filter(|p| p.parent == BOARD).filter_map(|p| p.project));
         ids.extend(
             self.live
                 .lock()
@@ -3426,7 +3427,7 @@ impl Wf {
             let live = p.thread.as_deref().and_then(|t| self.live_of(t));
             let status = if p.thread.is_none() { "launching" } else { chip(live.as_ref()) };
             let live = live.unwrap_or(Value::Null);
-            let (repo, project) = self.place(None, &live);
+            let (repo, project) = self.place(p.project.as_deref(), &live);
             let v = json!({
                 "title": live["title"], "repo": repo, "project": project,
                 "ticket": p.thread, "thread": p.thread, "label": p.label, "status": status,
