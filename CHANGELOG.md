@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3](https://github.com/OttoOps/t3-codemode/compare/v0.13.2...v0.13.3) - 2026-11-25
+
+### Fixed
+
+- use jiff 1.0 to_zoned_datetime
+
+### Other
+
+- Bump jiff from 0.2.46 to 1.0.2
+- Bump unicase from 2.9.0 to 2.10.0
+- Bump webpki-roots from 1.0.9 to 1.0.12
+- Bump clap from 4.6.8 to 4.6.9
+- Bump rusqlite from 0.42.0 to 0.43.0
+- split a colon-joined sentence
+- summarize diff mutants only after grading
+- pin diff prefixes for cargo-mutants
+- describe the diff mutation check
+- add advisory diff-mutation check on PRs
+
 ## [0.13.2](https://github.com/OttoOps/t3-codemode/compare/v0.13.1...v0.13.2) - 2026-11-25
 
 ### Other
