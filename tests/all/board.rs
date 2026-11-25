@@ -4087,8 +4087,11 @@ return {{ counts, nav, followed, jumped, routed: step("acme/r#10"), plain: step(
 "##
         ),
     );
-    assert_eq!(r["counts"], json!({"overview": "10", "needs": "2", "hot": true, "prs": r["counts"]["prs"]}), "{r}");
-    assert_ne!(r["counts"]["prs"], json!(""), "{r}");
+    assert_eq!(
+        r["counts"],
+        json!({"overview": "10", "needs": "2", "hot": true, "prs": "9"}),
+        "PRs counts 8 open pull requests and the WIP branch of #1's running worker: {r}"
+    );
     assert_eq!(r["nav"]["graph"], json!(["queue", "graph", "page"]), "{r}");
     assert_eq!(r["nav"]["activity"], json!(["activity", "activity", "page"]), "{r}");
     assert_eq!(r["nav"]["issues"], json!(["issues", "issues", "page"]), "{r}");
@@ -4099,6 +4102,88 @@ return {{ counts, nav, followed, jumped, routed: step("acme/r#10"), plain: step(
     assert_eq!(r["jumped"], json!("needs"), "g d shows Needs you even when it is clear: {r}");
     assert_eq!(r["routed"], json!(["", false, "Step 2/3"]), "{r}");
     assert_eq!(r["plain"], json!([null, null, null]), "a one-PR ticket keeps its status pill: {r}");
+}
+
+const HASH_PRELUDE: &str = r#"globalThis.__location = { hostname: "127.0.0.1", hash: "", pathname: "/", origin: "http://127.0.0.1:47731", reload() {} };
+globalThis.history = { replaceState(_s, _t, tag) { globalThis.__location.hash = tag; } };"#;
+
+#[tokio::test]
+async fn workspace_nav_views_keep_their_address_and_reveal_a_hidden_list() {
+    let (html, st) = two_gate_page().await;
+    let body = format!(
+        r##"() => {{
+{PAGE_HELPERS}
+const base = {st};
+{ROWS}
+{PR_TREE}
+emitState({{ ...base, tree }});
+document.getElementById("layout-btn").dispatch("click");
+const app = document.getElementById("app");
+const go = (k) => {{ document.getElementById("wn-" + k).dispatch("click"); return [app.getAttribute("data-wsnav"), location.hash]; }};
+const hashes = {{ needs: go("needs"), prs: go("prs"), overview: go("overview"), activity: go("activity") }};
+go("needs");
+jump("tickets");
+const tickets = app.getAttribute("data-wsnav");
+go("prs");
+focusList(document.getElementById("open"));
+const openFromPrs = app.getAttribute("data-wsnav");
+go("prs");
+focusList(document.getElementById("prs"));
+const prsStays = app.getAttribute("data-wsnav");
+go("needs");
+document.getElementById("layout-btn").dispatch("click");
+const dispatchHash = location.hash;
+document.getElementById("layout-btn").dispatch("click");
+const backHash = location.hash;
+return {{ hashes, tickets, openFromPrs, prsStays, dispatchHash, backHash }};
+}}"##
+    );
+    let r = run_page_async_with(&html, HASH_PRELUDE, &body);
+    assert_eq!(
+        r["hashes"],
+        json!({"needs": ["needs", "#needs"], "prs": ["prs", "#prs"], "overview": ["overview", "#dispatch"], "activity": ["activity", "#activity"]}),
+        "{r}"
+    );
+    assert_eq!(r["tickets"], json!("overview"), "g t from Needs you shows Issues in progress on the Overview: {r}");
+    assert_eq!(r["openFromPrs"], json!("overview"), "focusing a list PRs hides goes back to the Overview: {r}");
+    assert_eq!(r["prsStays"], json!("prs"), "{r}");
+    assert_eq!(r["dispatchHash"], json!("#dispatch"), "Dispatch has no Needs you address: {r}");
+    assert_eq!(r["backHash"], json!("#needs"), "{r}");
+
+    let reload = |hash: &str| {
+        run_page_async_with(
+            &html,
+            &format!(
+                r#"{}
+globalThis.__location.hash = "{hash}";
+globalThis.__storage = {{ "t3board.layout": "workspace" }};"#,
+                HASH_PRELUDE
+            ),
+            r#"() => [document.getElementById("app").getAttribute("data-view"), document.getElementById("app").getAttribute("data-wsnav"), document.getElementById("wn-prs").getAttribute("aria-current")]"#,
+        )
+    };
+    assert_eq!(reload("#prs"), json!(["dispatch", "prs", "page"]), "a reload keeps the PRs view");
+    assert_eq!(reload("#needs")[1], json!("needs"));
+
+    for rule in [
+        r#":root[data-layout="workspace"] .app[data-wsnav="needs"] .dgrid,"#,
+        r#":root[data-layout="workspace"] .app[data-wsnav="prs"] #p-dec,"#,
+        r#":root[data-layout="workspace"] .app[data-wsnav="prs"] #p-tix { display: none; }"#,
+        r#":root[data-layout="workspace"] .app:not([data-wsnav="needs"]) #p-dec > .ph h2 { position: absolute;"#,
+        r#":root[data-layout="workspace"] .app[data-wsnav="needs"] .card > .detail { display: block;"#,
+        r#":root[data-layout="workspace"] .tr { grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; row-gap: 2px; align-items: center; padding: var(--row-pad) 18px; }"#,
+        r#":root[data-layout="workspace"] .prow { gap: 2px; padding: var(--row-pad) 18px; }"#,
+        r#":root[data-layout="workspace"] .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: 56px auto auto minmax(0, 1fr); }"#,
+        r#"grid-column: 1; grid-row: 2; flex-direction: row; gap: 4px; padding: 6px 12px; overflow-x: auto;"#,
+    ] {
+        assert!(html.contains(rule), "missing {rule}");
+    }
+    assert!(
+        !html.contains(
+            r#":root[data-layout="workspace"] .top .brand, :root[data-layout="workspace"] .views { display: flex; }"#
+        ),
+        "Workspace never brings the Dispatch view tabs back"
+    );
 }
 
 #[tokio::test]
