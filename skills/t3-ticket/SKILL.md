@@ -536,9 +536,17 @@ a merge card t3cm opened arrives only when t3cm could not merge on it
   head or whose `ref` is `refs/merge-requests/<iid>/merge`, the ref a
   merged-results pipeline runs on. A merged-results pipeline counts only
   when the head is one of the `parent_ids` of its commit
-  (`projects/<enc path>/repository/commits/<pipeline sha>`). Every page of
-  `projects/<enc path>/repository/commits/<sha>/statuses?per_page=100`,
-  read until a page holds fewer than 100, holds no status that blocks:
+  (`projects/<enc path>/repository/commits/<pipeline sha>`). The statuses
+  that count are that pipeline's own, from
+  `projects/<enc path>/repository/commits/<pipeline sha>/statuses?pipeline_id=<pipeline id>&per_page=100`,
+  and the head's external checks, such as CodeRabbit's, from
+  `projects/<enc path>/repository/commits/<sha>/statuses?stage=external&per_page=100`.
+  GitLab files every status posted through its commit status API in the
+  `external` stage, on whichever pipeline at that commit took it, and the
+  external read keeps it from any pipeline. Any other status from another
+  pipeline at the head does not count. With no pipeline,
+  only the external read applies. Read every page of each, until a page
+  holds fewer than 100. None of them may block:
   `success`, `skipped` and `manual` pass, a pending or running one is
   waited out, and a `failed` or `canceled` one goes back to the worker. The changed files are the `old_path` and
   `new_path` of each entry in
