@@ -136,6 +136,35 @@ invariant should notice the change, or the line is outside what the chaos
 oracle checks. It needs no secrets and runs with `contents: read`, so it works
 the same on pull requests from forks.
 
+### Fuzzing
+
+`fuzz/` holds a [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) target,
+`decode_ops`, that decodes libFuzzer's bytes into a chaos program with
+`OpWeights::UNIFORM` and runs it through the `pr_chaos` sequential executor and
+oracle on the in-memory store. It includes `tests/common/mod.rs` and
+`tests/all/pr_chaos.rs` with `#[path]`, so it checks the same invariants as the
+Swarm sweep, and it is its own workspace, so `cargo test` never builds it. It
+needs a nightly toolchain and `cargo install --locked cargo-fuzz@0.13.2`:
+
+```bash
+cd fuzz
+cargo +nightly fuzz run decode_ops -- -max_total_time=300 -max_len=768
+```
+
+The default build uses AddressSanitizer, which also instruments the bundled
+SQLite and QuickJS C code on `x86_64` Linux. `-s none` runs two to three times
+faster, which suits a session that hunts oracle failures and can do without the
+memory checks. `FUZZ_FILE_STORE=1` switches to the file-backed store, and
+`FUZZ_DUMP_OPS=1` prints each input as an `.ops` file, which turns a crasher
+into a `CHAOS_OPS` replay for the shrinker.
+
+`.github/workflows/fuzz-nightly.yml` runs the target for 30 minutes every night
+on Linux, from the cached corpus plus 16 random 768-byte inputs, keeps the
+corpus in the Actions cache from one run to the next, and uploads crashers, with
+their `.ops` files, as the `fuzz-crashers` artifact.
+`docs/research/decode-ops-fuzzing-2026-11.md` has the exec/s measurements and
+the sanitizer results.
+
 ## This site
 
 `docs/build.sh` generates the [API reference](api.md) page from `t3cm types`,
