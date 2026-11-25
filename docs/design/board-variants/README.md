@@ -14,3 +14,7 @@ the layouts the board ships can be checked against them.
 
 The mocks use sample data from the project's own public issues. The pool
 name in the status line is made up.
+
+[`captures/`](captures/) holds the shipped Workspace layout at 1440x900 and
+1280x800 in dark mode, replayed against the anonymized state in
+[`../board-ux/live/`](../board-ux/live/README.md).
