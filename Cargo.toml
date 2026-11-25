@@ -81,3 +81,7 @@ inherits = "release"
 strip = true
 lto = "thin"
 codegen-units = 4
+
+[profile.mutants]
+inherits = "test"
+debug = "none"
