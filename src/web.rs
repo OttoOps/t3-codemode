@@ -763,7 +763,8 @@ async fn page(State(web): State<Web>, Extension(kind): Extension<RequestKind>) -
         ],
         PAGE.replace("{{CSRF}}", &web.app.csrf)
             .replace("{{VERSION}}", env!("CARGO_PKG_VERSION"))
-            .replace("{{LOCAL}}", &(kind == RequestKind::Local).to_string()),
+            .replace("{{LOCAL}}", &(kind == RequestKind::Local).to_string())
+            .replace("{{LAYOUT}}", web.app.config().board.layout.as_str()),
     )
         .into_response()
 }

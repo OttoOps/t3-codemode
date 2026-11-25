@@ -222,8 +222,10 @@ switches the rows between comfortable and compact. Below 640 px the button
 hides and rows stay comfortable.
 
 The layout button, next to the theme button, switches between two layouts of
-the same board, and this browser remembers the choice. **Dispatch**, the
-default, is the command bar, telemetry line and views this page describes.
+the same board, and this browser remembers the choice. A browser that never
+picked one opens in the layout `board.layout` names in
+[the config](config.md), Dispatch unless it says `workspace`. **Dispatch**
+is the command bar, telemetry line and views this page describes.
 **Workspace** is a calmer layout in a neutral palette with one accent color
 for primary actions: a left nav (Overview, Needs you, PRs, New issues, Graph
 and Activity, each with a count), and a top bar with search, the connection
@@ -284,7 +286,7 @@ read returns.
 |---|---|
 | Launches | The ticket and ask model pickers, and `board.runtimeMode` |
 | Pools | Each [pool](config.md#pools) and its members, with each member's live state |
-| Board | The other `board` keys, such as `feed`, the GitHub check intervals, `openLinks` and `remote` |
+| Board | The other `board` keys, such as `feed`, the GitHub check intervals, `openLinks`, `layout` and `remote` |
 | Flow | Launch mode, `maxTickets`, repository discovery (`repos`, `includeRepos`, `excludeRepos`), queue opt-in filter (`optIn.label`, `optIn.milestone`), and `serializeFileConflicts` |
 | Workflow links | `link`, `wake`, the body and reply caps, `digestLines`, and a JSON editor for `roles` |
 | Runtime | Timeouts, run limits, the watcher interval, the hold limits and `updateCheck` |

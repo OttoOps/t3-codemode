@@ -21,6 +21,7 @@
   const dark = p !== "light" && (p !== "system" || os);
   document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
   if (d === "compact") document.documentElement.setAttribute("data-density", "compact");
+  if (l !== "workspace" && l !== "dispatch") l = "{{LAYOUT}}";
   document.documentElement.setAttribute("data-layout", l === "workspace" ? "workspace" : "dispatch");
 })();
 </script>
@@ -2093,8 +2094,12 @@ const DENSITY_KEY = "t3board.density";
 const LAYOUT_KEY = "t3board.layout";
 const LAYOUT_WORD = { dispatch: "Dispatch", workspace: "Workspace" };
 const LAYOUT_NEXT = { dispatch: "workspace", workspace: "dispatch" };
-const layout = { pref: "dispatch", nav: "overview" };
-try { if (localStorage.getItem(LAYOUT_KEY) === "workspace") layout.pref = "workspace"; } catch (_) {}
+const LAYOUT_DEFAULT = "{{LAYOUT}}" === "workspace" ? "workspace" : "dispatch";
+const layout = { pref: LAYOUT_DEFAULT, nav: "overview" };
+try {
+  const v = localStorage.getItem(LAYOUT_KEY);
+  if (LAYOUT_WORD[v]) layout.pref = v;
+} catch (_) {}
 const WS_NAV = ["overview", "needs", "prs", "issues", "graph", "activity"];
 const WS_VIEW = { overview: "dispatch", needs: "dispatch", prs: "dispatch", issues: "issues", graph: "queue", activity: "activity" };
 const WS_WORD = { overview: "Overview", needs: "Needs you", prs: "PRs", issues: "New issues", graph: "Graph", activity: "Activity" };
@@ -2466,10 +2471,7 @@ function applyLayout() {
 
 function setLayout(pref) {
   layout.pref = pref;
-  try {
-    if (pref === "dispatch") localStorage.removeItem(LAYOUT_KEY);
-    else localStorage.setItem(LAYOUT_KEY, pref);
-  } catch (_) {}
+  try { localStorage.setItem(LAYOUT_KEY, pref); } catch (_) {}
   applyLayout();
   announce("Layout: " + LAYOUT_WORD[pref] + ".");
 }
@@ -10545,6 +10547,11 @@ function confBoard() {
       confSelect(sec, ["board", "openLinks"], {
         label: "Open thread links in",
         options: [["desktop", "Desktop app"], ["tab", "New tab"]],
+      }),
+      confSelect(sec, ["board", "layout"], {
+        label: "Default layout",
+        options: [["dispatch", "Dispatch"], ["workspace", "Workspace"]],
+        help: "A browser that never picked a layout opens in this one. A layout picked with the layout button wins in that browser.",
       })),
     h("div", { class: "conf-group" },
       h("h4", {}, "Remote board"),

@@ -214,6 +214,7 @@ All under `board`:
 | `reconcileActiveMinutes` | `2` | Minutes between pull request checks, on GitHub and on the GitLab hosts in `forges`, while any tracked pull request is queued or waiting to be queued. From 1 to `reconcileIdleMinutes`. |
 | `reconcileIdleMinutes` | `10` | Minutes between pull request checks otherwise; `0` turns the check off, page loads included. See [The board](board.md#github-reconcile). |
 | `openLinks` | `desktop` | `desktop`: thread links open in the running T3 Code desktop app, or in a new tab when it is not running. The app check needs Windows, natively or through WSL, so macOS and Linux without WSL always get a tab. `tab`: always a new tab. |
+| `layout` | `dispatch` | The board layout a browser opens in until it picks one with the layout button: `dispatch` or `workspace`. A browser's own pick always wins. See [The board](board.md). |
 | `remote` | `null` | Opt-in HTTPS remote board access behind a reverse proxy. `null` or `{"mode": "off"}` keeps the board loopback-only. See [Remote board](#remote-board). |
 
 #### Remote board
