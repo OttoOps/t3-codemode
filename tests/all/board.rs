@@ -10583,6 +10583,274 @@ return {{ restored, flipped: {{ edges: edges(), keys: keys(), saved: localStorag
     assert_eq!(again["flipped"]["edges"]["codeDep 31"], "ge codedep src-code off", "{again}");
 }
 
+const MENU_GRAPH: &str = r##"
+const N = (n, extra) => ({ id: "acme/a#" + n, repo: "acme/a", number: n, label: "a#" + n, title: "Issue " + n, state: "open", tracked: true,
+  url: "https://github.com/acme/a/issues/" + n, ...extra });
+const view = { enabled: true, launch: "ask", maxTickets: 2, free: 2, running: [], queue: [], blocked: [], skipped: [],
+  graph: { nodes: [N(1, { track: "core", trackBy: "label", unlocks: ["acme/a#2", "acme/a#3"] }), N(2, { track: "core", trackBy: "label", blockedBy: ["acme/a#1"] }),
+    N(3, { track: "docs", trackBy: "label", blockedBy: ["acme/a#1"] })], warnings: [], edges: [
+    { from: "acme/a#2", to: "acme/a#1", kind: "blockedBy", source: "github" },
+    { from: "acme/a#3", to: "acme/a#1", kind: "blockedBy", source: "body" },
+  ] } };
+const edited = { ok: true, status: 200, json: async () => ({ ok: true, action: "dismiss", kind: "blockedBy" }) };
+fetchReply = (url) => url === "/api/flow" ? Promise.resolve({ ok: true, status: 200, json: async () => view })
+  : url === "/api/flow/edge" ? Promise.resolve(edited) : new Promise(() => {});
+emitState({ ...base, cards: [] });
+for (let i = 0; i < 8; i++) await Promise.resolve();
+const btn = (id) => q('.gnode[data-id="' + id + '"]');
+const menu = () => q("#cmenu");
+const entries = () => menu().querySelectorAll('[role="menuitem"]');
+const names = () => entries().map((x) => x.textContent);
+const roles = () => menu().children.map((x) => x.getAttribute("role"));
+const at = () => entries().indexOf(document.activeElement);
+const fire = (type, target, extra) => {
+  const ev = { type, target, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, ...extra };
+  for (const f of document.listeners[type] || []) f(ev);
+  return ev;
+};
+const key = (k, extra) => menu().dispatch("keydown", { key: k, ...extra });
+const pick = (name) => {
+  if (!names().includes(name)) throw new Error("no menu item " + name + " in " + names().join(", "));
+  while (entries()[at()].textContent !== name) key("ArrowDown");
+  key("Enter");
+};
+const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+"##;
+
+#[tokio::test]
+async fn graph_node_and_lane_menus_open_by_pointer_and_keyboard_and_run_their_actions() {
+    let (html, st) = two_gate_page().await;
+    let r = run_page_async_with(
+        &html,
+        r#"globalThis.__storage = { "t3board.view": "queue" };"#,
+        &format!(
+            r##"async () => {{
+{PAGE_HELPERS}
+const base = {st};
+{MENU_GRAPH}
+const copied = [];
+globalThis.navigator = {{ clipboard: {{ writeText: async (t) => {{ copied.push(t); }} }} }};
+const b3 = btn("acme/a#3");
+const rc = fire("contextmenu", b3, {{ clientX: 40, clientY: 50 }});
+const right = {{ prevented: rc.defaultPrevented, shown: !menu().hidden, role: menu().getAttribute("role"), label: menu().getAttribute("aria-label"),
+  names: names(), roles: roles(), focus: at(), place: [menu().style.left, menu().style.top],
+  github: [entries()[1].getAttribute("href"), entries()[1].getAttribute("target")] }};
+key("Escape");
+const escaped = {{ hidden: menu().hidden, back: document.activeElement === b3 }};
+
+b3.focus();
+const sf = fire("keydown", b3, {{ key: "F10", shiftKey: true }});
+const keys = [sf.defaultPrevented && !menu().hidden];
+key("ArrowDown"); keys.push(at());
+key("ArrowUp"); key("ArrowUp"); keys.push(at() === entries().length - 1);
+key("Tab"); keys.push(at());
+key("Tab", {{ shiftKey: true }}); keys.push(at() === entries().length - 1);
+key("Home"); keys.push(at());
+key("s"); keys.push(document.activeElement.textContent);
+key("Enter");
+const inspected = {{ hidden: menu().hidden, open: q("#drawer").classList.contains("open"), id: q('#drawer [data-part="id"]').textContent,
+  edit: document.activeElement.getAttribute("data-edit") }};
+closeDrawer(false);
+
+b3.focus();
+fire("keydown", b3, {{ key: "ContextMenu" }});
+pick("Copy reference");
+await settle();
+fire("keydown", b3, {{ key: "ContextMenu" }});
+pick("Launch…");
+const launched = {{ composer: !q("#composer").hidden, draft: q("#issues").value, focus: document.activeElement.id }};
+closeComposer(false);
+
+b3.focus();
+fire("keydown", b3, {{ key: "ContextMenu" }});
+pick("Blocked by a#1 (body)…");
+const sub = {{ label: menu().getAttribute("aria-label"), names: names(), focus: at() }};
+key("Escape");
+const subBack = document.activeElement === b3;
+
+const lane = document.querySelectorAll(".glt").find((t) => t.childNodes.some((n) => n.nodeType === 3 && n.data === "docs"));
+fire("contextmenu", lane, {{ clientX: 5, clientY: 5 }});
+const laneMenu = {{ label: menu().getAttribute("aria-label"), names: names() }};
+pick("Go to first issue");
+const laneGo = {{ hidden: menu().hidden, focus: document.activeElement.dataset.id }};
+lane.focus();
+fire("keydown", lane, {{ key: "F10", shiftKey: true }});
+const shortcut = [key("l").defaultPrevented, key("/").defaultPrevented, menu().hidden];
+pick("Copy lane name");
+await settle();
+return {{ right, escaped, keys, inspected, copied, launched, sub, subBack, laneMenu, laneGo, shortcut, laneBack: document.activeElement === lane }};
+}}"##
+        ),
+    );
+    assert_eq!(r["right"]["prevented"], true, "{r}");
+    assert_eq!(r["right"]["shown"], true, "{r}");
+    assert_eq!(r["right"]["role"], "menu", "{r}");
+    assert_eq!(r["right"]["label"], "Actions for a#3", "{r}");
+    assert_eq!(
+        r["right"]["names"],
+        json!([
+            "Inspect",
+            "Open on GitHub",
+            "Launch…",
+            "Add blocker…",
+            "Set parent…",
+            "Set track…",
+            "Set priority…",
+            "Copy reference",
+            "Blocked by a#1 (body)…",
+            "Lane docs…"
+        ]),
+        "an issue node lists only what applies to it: {r}"
+    );
+    assert_eq!(
+        r["right"]["roles"],
+        json!([
+            "menuitem",
+            "menuitem",
+            "menuitem",
+            "separator",
+            "menuitem",
+            "menuitem",
+            "menuitem",
+            "menuitem",
+            "separator",
+            "menuitem",
+            "separator",
+            "menuitem",
+            "menuitem"
+        ]),
+        "{r}"
+    );
+    assert_eq!(r["right"]["focus"], 0, "the first item takes focus: {r}");
+    assert_eq!(r["right"]["place"], json!(["40px", "50px"]), "{r}");
+    assert_eq!(r["right"]["github"], json!(["https://github.com/acme/a/issues/3", "_blank"]), "{r}");
+    assert_eq!(r["escaped"], json!({"hidden": true, "back": true}), "Escape closes and returns focus: {r}");
+    assert_eq!(r["keys"], json!([true, 1, true, 0, true, 0, "Set parent…"]), "arrows wrap, Tab stays in the menu: {r}");
+    assert_eq!(
+        r["inspected"],
+        json!({"hidden": true, "open": true, "id": "a#3", "edit": "parent"}),
+        "Set parent opens the inspector on its parent field: {r}"
+    );
+    assert_eq!(r["copied"], json!(["acme/a#3", "docs"]), "{r}");
+    assert_eq!(
+        r["launched"],
+        json!({"composer": true, "draft": "acme/a#3", "focus": "launch-btn"}),
+        "Launch fills the launch form and waits on its button: {r}"
+    );
+    assert_eq!(
+        r["sub"]["names"],
+        json!(["Confirm: mark a#3 blocked by a#1 on GitHub", "Dismiss inferred edge", "Go to a#3", "Go to a#1"]),
+        "{r}"
+    );
+    assert_eq!(r["sub"]["focus"], 0, "{r}");
+    assert_eq!(r["subBack"], true, "a link menu opened from a node returns focus to the node: {r}");
+    assert_eq!(r["laneMenu"], json!({"label": "Lane docs", "names": ["Go to first issue", "Copy lane name"]}), "{r}");
+    assert_eq!(r["laneGo"], json!({"hidden": true, "focus": "acme/a#3"}), "{r}");
+    assert_eq!(r["shortcut"], json!([true, true, false]), "board shortcuts stay out of an open menu: {r}");
+    assert_eq!(r["laneBack"], true, "{r}");
+}
+
+#[tokio::test]
+async fn an_inferred_edge_menu_runs_the_same_edit_as_the_inspector() {
+    let (html, st) = two_gate_page().await;
+    let r = run_page_async_with(
+        &html,
+        r#"globalThis.__storage = { "t3board.view": "queue" };"#,
+        &format!(
+            r##"async () => {{
+{PAGE_HELPERS}
+const base = {st};
+{MENU_GRAPH}
+const edits = () => fetches.filter((f) => f.url === "/api/flow/edge").map((f) => [f.method, JSON.parse(f.body)]);
+const body = document.querySelectorAll(".ge").find((p) => p.getAttribute("data-source") === "body").nextSibling;
+const native = document.querySelectorAll(".ge").find((p) => p.getAttribute("data-source") === "github").nextSibling;
+fire("contextmenu", native, {{ clientX: 9, clientY: 9 }});
+const github = names();
+key("Escape");
+const rc = fire("contextmenu", body, {{ clientX: 9, clientY: 9 }});
+const opened = {{ prevented: rc.defaultPrevented, cls: body.getAttribute("class"), label: menu().getAttribute("aria-label"), names: names() }};
+pick("Dismiss inferred edge");
+await settle();
+const fromMenu = edits();
+btn("acme/a#3").dispatch("click");
+q('#drawer [data-edge-act="dismiss"]').dispatch("click");
+await settle();
+closeDrawer(false);
+fire("contextmenu", body, {{ clientX: 9, clientY: 9 }});
+key("Escape");
+const edgeBack = document.activeElement === body;
+fire("contextmenu", body, {{ clientX: 9, clientY: 9 }});
+pick("Go to a#1");
+return {{ github, opened, fromMenu, both: edits(), edgeBack, went: document.activeElement.dataset.id }};
+}}"##
+        ),
+    );
+    assert_eq!(r["github"], json!(["Remove native GitHub link", "Go to a#2", "Go to a#1"]), "{r}");
+    assert_eq!(r["opened"]["prevented"], true, "{r}");
+    assert_eq!(r["opened"]["cls"], "geh", "{r}");
+    assert_eq!(
+        r["opened"]["names"],
+        json!(["Confirm: mark a#3 blocked by a#1 on GitHub", "Dismiss inferred edge", "Go to a#3", "Go to a#1"]),
+        "{r}"
+    );
+    let want = json!(["POST", {"action": "dismiss", "from": "acme/a#3", "to": "acme/a#1", "kind": "blockedBy"}]);
+    assert_eq!(r["fromMenu"], json!([want.clone()]), "{r}");
+    assert_eq!(r["both"], json!([want.clone(), want]), "the menu and the inspector send the same edit: {r}");
+    assert_eq!(r["edgeBack"], true, "Escape returns focus to the right-clicked edge: {r}");
+    assert_eq!(r["went"], "acme/a#1", "{r}");
+}
+
+#[tokio::test]
+async fn the_context_menu_leaves_native_menus_alone_stays_on_screen_and_opens_on_long_press() {
+    let (html, st) = two_gate_page().await;
+    let r = run_page_async_with(
+        &html,
+        r#"globalThis.__storage = { "t3board.view": "queue" };"#,
+        &format!(
+            r##"async () => {{
+{PAGE_HELPERS}
+const base = {st};
+{MENU_GRAPH}
+const b1 = btn("acme/a#1");
+const field = fire("contextmenu", q("#filter-q"), {{ clientX: 1, clientY: 1 }});
+const onField = [field.defaultPrevented, menu().hidden];
+globalThis.getSelection = () => ({{ isCollapsed: false, toString: () => "Issue 1", containsNode: () => true }});
+const sel = fire("contextmenu", b1, {{ clientX: 1, clientY: 1 }});
+const selKey = fire("keydown", b1, {{ key: "F10", shiftKey: true }});
+const onSelection = [sel.defaultPrevented, selKey.defaultPrevented, menu().hidden];
+globalThis.getSelection = undefined;
+
+globalThis.innerWidth = 400;
+globalThis.innerHeight = 300;
+menu().rect = {{ left: 0, top: 0, right: 220, bottom: 180, width: 220, height: 180 }};
+fire("contextmenu", b1, {{ clientX: 390, clientY: 290 }});
+const clamped = [menu().style.left, menu().style.top];
+fire("pointerdown", q("#filter-q"), {{ pointerType: "mouse", clientX: 1, clientY: 1 }});
+const outside = menu().hidden;
+
+fire("pointerdown", b1, {{ pointerType: "touch", clientX: 30, clientY: 40 }});
+fire("pointermove", b1, {{ pointerType: "touch", clientX: 70, clientY: 40 }});
+advance(600);
+const moved = menu().hidden;
+fire("pointerdown", b1, {{ pointerType: "touch", clientX: 30, clientY: 40 }});
+advance(600);
+const pressed = {{ shown: !menu().hidden, label: menu().getAttribute("aria-label"), place: [menu().style.left, menu().style.top] }};
+fire("pointerup", b1, {{ pointerType: "touch" }});
+const click = fire("click", b1, {{ button: 0 }});
+return {{ onField, onSelection, clamped, outside, moved, pressed, swallowed: click.defaultPrevented, stillOpen: !menu().hidden }};
+}}"##
+        ),
+    );
+    assert_eq!(r["onField"], json!([false, true]), "a text field keeps the browser menu: {r}");
+    assert_eq!(r["onSelection"], json!([false, false, true]), "selected text keeps the browser menu: {r}");
+    assert_eq!(r["clamped"], json!(["172px", "110px"]), "the menu stays inside the viewport: {r}");
+    assert_eq!(r["outside"], true, "a press outside closes it: {r}");
+    assert_eq!(r["moved"], true, "a drag cancels the long press: {r}");
+    assert_eq!(r["pressed"], json!({"shown": true, "label": "Actions for a#1", "place": ["30px", "40px"]}), "{r}");
+    assert_eq!(r["swallowed"], true, "the click that ends a long press does not also open the node: {r}");
+    assert_eq!(r["stillOpen"], true, "{r}");
+}
+
 #[test]
 fn human_titles_drop_the_label_and_skip_urls_refs_and_slugs() {
     use t3_codemode::board::human_title;

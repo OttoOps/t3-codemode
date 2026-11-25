@@ -1299,6 +1299,26 @@ kbd { font-family: var(--mono); font-size: 12px; }
 .ge.conflict.hot { stroke-width: 2.5; }
 .ge.codedep { stroke: var(--s1); stroke-width: 1.75; stroke-dasharray: 5 4; }
 .ge.codedep.hot { stroke-width: 2.5; }
+.geh { fill: none; stroke: transparent; stroke-width: 12; pointer-events: stroke; }
+.geh.off { display: none; }
+.geh:focus { outline: none; stroke: var(--accent); stroke-opacity: 0.35; }
+.glt:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.gscroll { -webkit-touch-callout: none; }
+.cmenu {
+  position: fixed; left: 0; top: 0; z-index: 90; display: grid; min-width: 200px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px);
+  overflow-y: auto; padding: 4px; background: var(--surface); color: var(--fg); border: 1px solid var(--border-strong); border-radius: 4px;
+  box-shadow: var(--shadow-pop); font-size: 13px; line-height: 18px;
+}
+.cmenu[hidden] { display: none; }
+.cm-i {
+  display: block; width: 100%; padding: 6px 10px; margin: 0; border: 0; border-radius: 3px; background: transparent; color: inherit; font: inherit;
+  text-align: left; text-decoration: none; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cm-i:hover, .cm-i:focus { background: var(--surface-hover); outline: none; }
+.cm-i:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.cm-i[aria-disabled="true"] { opacity: 0.55; cursor: default; }
+.cm-sep { height: 1px; margin: 4px 0; background: var(--border); }
+@media (pointer: coarse) { .cm-i { padding: 10px 12px; } }
 .ge.up { stroke: var(--fail); stroke-width: 2.5; }
 .ge.down { stroke: var(--unlock); stroke-width: 2.5; }
 .ge.dim { stroke-opacity: 0.25; }
@@ -6490,7 +6510,7 @@ function paintGraph() {
   const box = $("gscroll");
   const sig = graphSig(lay, d.edges);
   if (sig !== graph.sig) {
-    if (graph.sig !== null && (graph.pointer || focusInside(box)) && graph.btns.size) graph.held = true;
+    if (graph.sig !== null && (graph.pointer || focusInside(box) || cmenuFrom(box)) && graph.btns.size) graph.held = true;
     else { graph.held = false; graphBuild(box, lay, d.edges); graph.sig = sig; }
   }
   const hit = new Set(hits.map((n) => n.id));
@@ -6521,7 +6541,9 @@ function graphBuild(box, lay, edges) {
     const name = l.name.length > max ? l.name.slice(0, max - 1) + "…" : l.name;
     root.append(svgEl("g", { class: "glg" },
       svgEl("rect", { class: "glane" + (i % 2 ? " alt" : ""), x: 0.5, y: l.top + 0.5, width: wide - 1, height: l.h - 1, rx: 6 }),
-      svgEl("text", { class: "glt", x: GEO.PAD, y: l.top + 18 }, svgEl("title", {}, words ? l.name + ", lane by " + words : l.name), name,
+      svgEl("text", { class: "glt", x: GEO.PAD, y: l.top + 18, tabindex: "-1", "data-lane": i, "aria-haspopup": "menu",
+        "aria-label": "Lane " + l.name + (words ? ", by " + words : "") + ", " + l.count + (l.count === 1 ? " issue" : " issues") },
+        svgEl("title", {}, words ? l.name + ", lane by " + words : l.name), name,
         svgEl("tspan", { class: "glb", dx: 8 }, (words ? words + " · " : "") + l.count))));
   });
   if (wide > lay.width) { root.setAttribute("width", wide); root.setAttribute("viewBox", "0 0 " + wide + " " + lay.height); }
@@ -6535,8 +6557,9 @@ function graphBuild(box, lay, edges) {
     const source = e.source || "github";
     const tip = edgeTooltip(e);
     const p = svgEl("path", { class: cls, "data-kind": e.kind, "data-source": source, "data-from": e.from, "data-to": e.to, d, "marker-end": directed ? edgeMarker(e, cls) : null }, svgEl("title", {}, tip));
-    graph.paths.push({ el: p, e });
-    eg.append(p);
+    const hit = svgEl("path", { class: "geh", "data-pi": graph.paths.length, d, tabindex: "-1" }, svgEl("title", {}, tip));
+    graph.paths.push({ el: p, hit, e });
+    eg.append(p, hit);
   }
   root.append(eg);
   const ng = svgEl("g", { class: "gnodes" });
@@ -6612,7 +6635,7 @@ function graphMark() {
     b.classList.toggle("down", down.has(id) && !up.has(id));
     b.classList.toggle("dim", !!hot && id !== hot && !up.has(id) && !down.has(id) && !kin.has(id));
   }
-  for (const { el, e } of graph.paths) {
+  for (const { el, hit, e } of graph.paths) {
     let cls = edgeBaseClass(e);
     const directed = edgeDirected(e);
     if (hot && edgeHardDirected(e)) {
@@ -6627,6 +6650,7 @@ function graphMark() {
     if (el.getAttribute("class") !== cls) {
       el.setAttribute("class", cls);
       if (directed) el.setAttribute("marker-end", edgeMarker(e, cls));
+      setAttr(hit, "class", / off$/.test(cls) ? "geh off" : "geh");
     }
   }
 }
@@ -6691,7 +6715,7 @@ function graphMove(delta) {
 }
 
 function graphRelease() {
-  if (!graph.held || graph.pointer || focusInside($("gscroll"))) return;
+  if (!graph.held || graph.pointer || focusInside($("gscroll")) || cmenuFrom($("gscroll"))) return;
   graph.held = false;
   graph.sig = null;
   paintGraph();
@@ -6725,6 +6749,7 @@ function initGraph() {
   if (triageBtn) triageBtn.addEventListener("click", startGraphTriage);
   paintGraphSyncResult(null, null);
   paintGraphTriage();
+  initGraphMenus();
   const nodeOf = (e) => e.target && e.target.closest ? e.target.closest(".gnode") : null;
   box.addEventListener("click", (e) => { const b = nodeOf(e); if (b) graphOpen(b); });
   box.addEventListener("pointerover", (e) => { const b = nodeOf(e); const id = b ? b.dataset.id : null; if (id !== graph.hover) graphHover(id); });
@@ -7933,7 +7958,7 @@ function trapTab(e) {
 function keepFocusIn(e) {
   const box = modalBox();
   const t = e.target;
-  if (!box || !t || box.contains(t) || (t.closest && t.closest("dialog[open]"))) return;
+  if (!box || !t || box.contains(t) || (t.closest && t.closest("dialog[open], #cmenu"))) return;
   (box === $("drawer") ? drPart("title") : $("composer-h")).focus();
 }
 
@@ -8582,59 +8607,64 @@ async function editGraphIssue(nodeId, payload) {
   }
 }
 
-function drEdgeActions(nodeId, rowKey, otherId, src, label) {
+function edgeActs(nodeId, rowKey, otherId, src, label) {
   const tup = drEdgeTuple(nodeId, rowKey, otherId);
   if (!tup) return [];
   const fromLbl = graphEdgeLabel(tup.from);
   const toLbl = graphEdgeLabel(tup.to);
-  const mkBtn = (act, aria, title, onClick) => {
-    const b = h("button", {
-      class: "btn quiet dep-act dep-act-" + act,
-      type: "button",
-      "aria-label": aria,
-      title,
-      "data-edge-act": act,
-      "data-from": tup.from,
-      "data-to": tup.to,
-      "data-kind": tup.kind,
-      "aria-disabled": graph.editing ? "true" : null,
-    });
-    b.addEventListener("click", () => {
-      if (b.getAttribute("aria-disabled") === "true") return;
-      if (onClick) onClick();
-      else editGraphEdge(nodeId, { action: act, from: tup.from, to: tup.to, kind: tup.kind });
-    });
-    return b;
-  };
+  const act = (name, aria, title, run) => ({
+    act: name, aria, title, tup, inDrawer: !!run,
+    run: run || (() => editGraphEdge(nodeId, { action: name, from: tup.from, to: tup.to, kind: tup.kind })),
+  });
   if (src === "body") {
     const dir = tup.kind === "parent" ? "set " + toLbl + " as parent of " + fromLbl : "mark " + fromLbl + " blocked by " + toLbl;
     return [
-      mkBtn("confirm", "Confirm inferred " + tup.kind + " link: " + dir, "Confirm: " + dir + " on GitHub"),
-      mkBtn("dismiss", "Dismiss inferred " + tup.kind + " link with " + label, "Dismiss inferred edge"),
+      act("confirm", "Confirm inferred " + tup.kind + " link: " + dir, "Confirm: " + dir + " on GitHub"),
+      act("dismiss", "Dismiss inferred " + tup.kind + " link with " + label, "Dismiss inferred edge"),
     ];
   }
   if (src === "code" && tup.kind === "fileConflict") {
     const dir = "mark " + tup.from + " blocked by " + tup.to;
     return [
-      mkBtn("confirm", "Confirm fileConflict: " + dir, "Review and confirm: " + dir + " on GitHub", () => {
+      act("confirm", "Confirm fileConflict: " + dir, "Review and confirm: " + dir + " on GitHub", () => {
         graph.editFeedback = null;
         graph.pendingConfirm = { nodeId, from: tup.from, to: tup.to, kind: "fileConflict" };
         if (dr.open) paintDrawer();
       }),
-      mkBtn("dismiss", "Dismiss advisory fileConflict with " + label, "Dismiss advisory edge"),
+      act("dismiss", "Dismiss advisory fileConflict with " + label, "Dismiss advisory edge"),
     ];
   }
   if (src === "code" && tup.kind === "codeDep") {
     const dir = "mark " + fromLbl + " blocked by " + toLbl;
     return [
-      mkBtn("confirm", "Confirm codeDep: " + dir, "Confirm: " + dir + " on GitHub"),
-      mkBtn("dismiss", "Dismiss advisory codeDep with " + label, "Dismiss advisory edge"),
+      act("confirm", "Confirm codeDep: " + dir, "Confirm: " + dir + " on GitHub"),
+      act("dismiss", "Dismiss advisory codeDep with " + label, "Dismiss advisory edge"),
     ];
   }
   if (src === "github" && (tup.kind === "blockedBy" || tup.kind === "parent")) {
-    return [mkBtn("remove", "Remove GitHub " + tup.kind + " link with " + label, "Remove native GitHub link")];
+    return [act("remove", "Remove GitHub " + tup.kind + " link with " + label, "Remove native GitHub link")];
   }
   return [];
+}
+
+function drEdgeActions(nodeId, rowKey, otherId, src, label) {
+  return edgeActs(nodeId, rowKey, otherId, src, label).map((a) => {
+    const b = h("button", {
+      class: "btn quiet dep-act dep-act-" + a.act,
+      type: "button",
+      "aria-label": a.aria,
+      title: a.title,
+      "data-edge-act": a.act,
+      "data-from": a.tup.from,
+      "data-to": a.tup.to,
+      "data-kind": a.tup.kind,
+      "aria-disabled": graph.editing ? "true" : null,
+    });
+    b.addEventListener("click", () => {
+      if (b.getAttribute("aria-disabled") !== "true") a.run();
+    });
+    return b;
+  });
 }
 
 function drHasExplicitTrackLabel(n) {
@@ -9056,6 +9086,348 @@ function listOf(el) {
   return null;
 }
 
+const cmenu = { el: null, from: null, at: null, onClose: null, open: false, sources: [], press: null, swallow: false };
+
+function cmenuOn(sel, build) {
+  cmenu.sources.push({ sel, build });
+}
+
+function cmenuFrom(box) {
+  return cmenu.open && !!cmenu.from && box.contains(cmenu.from);
+}
+
+function cmenuField(t) {
+  return !!(t && t.closest && t.closest("input, textarea, select, [contenteditable]"));
+}
+
+function cmenuNative(t) {
+  if (cmenuField(t)) return true;
+  const sel = window.getSelection ? window.getSelection() : null;
+  if (!sel || sel.isCollapsed || !String(sel)) return false;
+  return typeof sel.containsNode !== "function" || sel.containsNode(t, true);
+}
+
+function cmenuFind(t) {
+  for (const s of cmenu.sources) {
+    const el = t && t.closest ? t.closest(s.sel) : null;
+    const spec = el ? s.build(el) : null;
+    if (spec && (spec.items || []).some((x) => x && !x.sep)) return spec;
+  }
+  return null;
+}
+
+function cmenuList(items) {
+  const out = [];
+  for (const it of items) {
+    if (!it || (it.sep && (!out.length || out[out.length - 1].sep))) continue;
+    out.push(it);
+  }
+  while (out.length && out[out.length - 1].sep) out.pop();
+  return out;
+}
+
+function cmenuItem(it) {
+  if (it.sep) return h("div", { class: "cm-sep", role: "separator" });
+  const attrs = { class: "cm-i", role: "menuitem", tabindex: "-1", title: it.title || null,
+    "aria-label": it.name || null, "aria-disabled": it.disabled ? "true" : null, "aria-haspopup": it.menu ? "menu" : null };
+  let el = it.thread ? threadLink(it.href, it.label, it.name) : null;
+  if (el) for (const [k, v] of Object.entries(attrs)) setAttr(el, k, v);
+  else if (it.href) el = h("a", { ...attrs, href: it.href, target: "_blank", rel: "noopener noreferrer" }, it.label);
+  else el = h("button", { ...attrs, type: "button" }, it.label);
+  el._cm = it;
+  return el;
+}
+
+function cmenuItems() {
+  return cmenu.el ? [...cmenu.el.querySelectorAll('[role="menuitem"]')] : [];
+}
+
+function cmenuPlace(at) {
+  const m = cmenu.el;
+  m.style.left = "0px";
+  m.style.top = "0px";
+  const r = m.getBoundingClientRect();
+  const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+  const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+  const pad = 8;
+  let x = at.x, y = at.y;
+  if (vw) x = Math.max(pad, Math.min(x, vw - r.width - pad));
+  if (vh) {
+    if (y + r.height + pad > vh && at.above - r.height >= pad) y = at.above - r.height;
+    y = Math.max(pad, Math.min(y, vh - r.height - pad));
+  }
+  m.style.left = Math.round(x) + "px";
+  m.style.top = Math.round(y) + "px";
+}
+
+function cmenuAt(el) {
+  const r = el && el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, top: 0, bottom: 0 };
+  return { x: r.left, y: r.bottom + 2, above: r.top - 2 };
+}
+
+function cmenuOpen(spec, at) {
+  const m = cmenu.el;
+  if (!cmenu.open) {
+    cmenu.from = spec.from || null;
+    cmenu.onClose = spec.onClose || null;
+  }
+  cmenu.open = true;
+  cmenu.at = at;
+  setAttr(m, "aria-label", spec.label);
+  m.replaceChildren(...cmenuList(spec.items).map(cmenuItem));
+  m.hidden = false;
+  m.scrollTop = 0;
+  cmenuPlace(at);
+  const first = cmenuItems()[0];
+  if (first) first.focus({ preventScroll: true });
+}
+
+function cmenuClose(restore) {
+  cmenuPressEnd();
+  if (!cmenu.open) return;
+  const f = cmenu.from, done = cmenu.onClose;
+  cmenu.open = false;
+  cmenu.from = null;
+  cmenu.onClose = null;
+  const had = cmenu.el.contains(document.activeElement);
+  cmenu.el.hidden = true;
+  cmenu.el.replaceChildren();
+  if ((restore || had) && f && f.isConnected && !f.closest("[hidden]")) f.focus({ preventScroll: true });
+  if (done) done();
+}
+
+function cmenuRun(el) {
+  const it = el && el._cm;
+  if (!it || el.getAttribute("aria-disabled") === "true") return;
+  if (it.menu) {
+    const spec = it.menu();
+    if (spec) cmenuOpen(spec, cmenu.at);
+    return;
+  }
+  cmenuClose(true);
+  if (it.run) it.run();
+}
+
+function cmenuPressEnd() {
+  if (cmenu.press) clearTimeout(cmenu.press.timer);
+  cmenu.press = null;
+}
+
+function cmenuKey(e) {
+  const all = cmenuItems();
+  const i = all.indexOf(document.activeElement);
+  const go = (j) => { e.preventDefault(); if (all.length) all[((j % all.length) + all.length) % all.length].focus(); };
+  const k = e.key;
+  if (k === "ArrowDown") return go(i + 1);
+  if (k === "ArrowUp") return go(i < 0 ? -1 : i - 1);
+  if (k === "Home" || k === "PageUp") return go(0);
+  if (k === "End" || k === "PageDown") return go(-1);
+  if (k === "Tab") return go(e.shiftKey ? (i < 0 ? -1 : i - 1) : i + 1);
+  if (k === "Escape") { e.preventDefault(); return cmenuClose(true); }
+  if (k === "ContextMenu" || (k === "F10" && e.shiftKey)) { e.preventDefault(); return; }
+  if (k === "Enter" || k === " ") {
+    e.preventDefault();
+    const el = all[i];
+    if (!el) return;
+    if (el._cm.href && el.getAttribute("aria-disabled") !== "true") el.click();
+    else cmenuRun(el);
+    return;
+  }
+  if (k && k.length === 1 && k.trim() && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    const low = k.toLowerCase();
+    for (let s = 1; s <= all.length; s++) {
+      const el = all[(i + s) % all.length];
+      if (el.textContent.trim().toLowerCase().startsWith(low)) { e.preventDefault(); return el.focus(); }
+    }
+  }
+  if (!e.ctrlKey && !e.metaKey && !e.altKey) e.preventDefault();
+}
+
+function cmenuInit() {
+  const m = h("div", { id: "cmenu", class: "cmenu", role: "menu", hidden: true });
+  cmenu.el = m;
+  document.body.append(m);
+  m.addEventListener("keydown", cmenuKey);
+  m.addEventListener("contextmenu", (e) => e.preventDefault());
+  m.addEventListener("click", (e) => {
+    const el = e.target && e.target.closest ? e.target.closest('[role="menuitem"]') : null;
+    if (!el) return;
+    if (el._cm.href && el.getAttribute("aria-disabled") !== "true") return cmenuClose(true);
+    e.preventDefault();
+    cmenuRun(el);
+  });
+  document.addEventListener("contextmenu", (e) => {
+    cmenuPressEnd();
+    if (m.contains(e.target) || cmenuNative(e.target)) return;
+    const spec = cmenuFind(e.target);
+    if (!spec) return;
+    e.preventDefault();
+    if (cmenu.open && cmenu.from === (spec.from || null)) return;
+    cmenuClose(false);
+    cmenuOpen(spec, { x: e.clientX || 0, y: e.clientY || 0, above: e.clientY || 0 });
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key !== "ContextMenu" && !(e.key === "F10" && e.shiftKey)) return;
+    const t = e.target && e.target !== document.body ? e.target : document.activeElement;
+    if (!t || m.contains(t) || cmenuNative(t)) return;
+    const spec = cmenuFind(t);
+    if (!spec) return;
+    e.preventDefault();
+    cmenuClose(false);
+    cmenuOpen(spec, cmenuAt(spec.from || t));
+  });
+  document.addEventListener("pointerdown", (e) => {
+    cmenu.swallow = false;
+    if (cmenu.open && !m.contains(e.target)) cmenuClose(false);
+    cmenuPressEnd();
+    if (e.pointerType !== "touch" || cmenuNative(e.target) || !cmenuFind(e.target)) return;
+    const t = e.target, x = e.clientX || 0, y = e.clientY || 0;
+    cmenu.press = { x, y, timer: setTimeout(() => {
+      cmenu.press = null;
+      const spec = cmenuFind(t);
+      if (!spec || !t.isConnected) return;
+      cmenu.swallow = true;
+      cmenuOpen(spec, { x, y, above: y });
+    }, 550) };
+  }, true);
+  document.addEventListener("pointermove", (e) => {
+    const p = cmenu.press;
+    if (p && Math.hypot((e.clientX || 0) - p.x, (e.clientY || 0) - p.y) > 10) cmenuPressEnd();
+  }, true);
+  for (const type of ["pointerup", "pointercancel"]) document.addEventListener(type, cmenuPressEnd, true);
+  document.addEventListener("click", (e) => {
+    if (!cmenu.swallow) return;
+    cmenu.swallow = false;
+    if (m.contains(e.target)) return;
+    e.preventDefault();
+    if (e.stopPropagation) e.stopPropagation();
+  }, true);
+  document.addEventListener("focusin", (e) => { if (cmenu.open && !m.contains(e.target)) cmenuClose(false); });
+  document.addEventListener("scroll", (e) => { if (cmenu.open && !m.contains(e.target)) cmenuClose(false); }, true);
+  window.addEventListener("resize", () => cmenuClose(false));
+  window.addEventListener("blur", () => cmenuClose(false));
+}
+
+async function copyText(text, said) {
+  try {
+    await navigator.clipboard.writeText(text);
+    announce("Copied " + said + ".");
+  } catch (_) {
+    announce("Could not copy " + said + ". It is " + text + ".", true);
+  }
+}
+
+function graphGo(id) {
+  if (!graphFocus(id)) announce(graphEdgeLabel(id) + " is not drawn in the graph.");
+}
+
+function graphEditField(b, field) {
+  graphOpen(b);
+  const el = dr.open ? drPart("deps-edit").querySelector('[data-edit="' + field + '"]') : null;
+  if (el && !el.closest("[hidden]")) el.focus();
+}
+
+function graphLinkWord(e, id) {
+  const out = e.from === id;
+  const other = graphEdgeLabel(out ? e.to : e.from);
+  const word = {
+    blockedBy: out ? "Blocked by " : "Blocks ",
+    parent: out ? "Parent " : "Sub-issue ",
+    prStack: out ? "Stacked on " : "Base of ",
+    fileConflict: "File conflict with ",
+    codeDep: out ? "Uses code from " : "Code used by ",
+  }[e.kind] || "Linked to ";
+  const src = e.source && e.source !== "github" ? " (" + e.source + ")" : "";
+  return word + other + src;
+}
+
+function edgeRowKey(e) {
+  return ["blockedBy", "parent", "fileConflict", "codeDep"].includes(e.kind) ? e.kind : null;
+}
+
+function edgeMenu(e, from) {
+  const key = edgeRowKey(e);
+  const acts = key ? edgeActs(e.from, key, e.to, e.source || "github", graphEdgeLabel(e.to)) : [];
+  const ends = [...new Set([e.from, e.to])];
+  return {
+    label: edgeTooltip(e) + ", " + graphEdgeLabel(e.from) + " to " + graphEdgeLabel(e.to),
+    from,
+    onClose: graphRelease,
+    items: [
+      ...acts.map((a) => ({ label: a.title, name: a.aria, disabled: !!graph.editing, run: () => {
+        if (a.inDrawer && !(dr.open && dr.sub && dr.sub.kind === "issue" && dr.sub.key === e.from)) {
+          const n = graphNode(e.from);
+          if (n) openDrawer(graphSub(n), { el: graphBtn(n.id), graph: n.id });
+        }
+        a.run();
+      } })),
+      { sep: true },
+      ...ends.map((id) => ({ label: "Go to " + graphEdgeLabel(id), run: () => graphGo(id) })),
+    ],
+  };
+}
+
+function laneMenu(i, from) {
+  const lay = graph.lay;
+  const l = lay && lay.lanes[i];
+  if (!l) return null;
+  const first = lay.seq.find((id) => lay.pos.get(id).lane === i && graph.btns.has(id));
+  return {
+    label: "Lane " + l.name,
+    from,
+    onClose: graphRelease,
+    items: [
+      first ? { label: "Go to first issue", run: () => graphGo(first) } : null,
+      { label: "Copy lane name", run: () => copyText(l.name, "lane name " + l.name) },
+    ],
+  };
+}
+
+function nodeMenu(b) {
+  const n = graphNode(b.dataset.id);
+  if (!n) return null;
+  const label = n.label || n.id;
+  const ref = n.repo && typeof n.number === "number" ? n.repo + "#" + n.number : null;
+  const edit = graph.mode === "flow" && !!ref;
+  const u = safeUrl(n.url);
+  const th = n.ticket && safeUrl(n.ticket.link);
+  const lane = graph.lay && graph.lay.pos.get(n.id) ? graph.lay.pos.get(n.id).lane : -1;
+  const links = graph.paths.filter((p) => p.e.from === n.id || p.e.to === n.id);
+  return {
+    label: "Actions for " + label,
+    from: b,
+    onClose: graphRelease,
+    items: [
+      { label: "Inspect", run: () => graphOpen(b) },
+      u ? { label: "Open on GitHub", href: u, name: "Open issue " + label + " on GitHub" } : null,
+      th ? { label: "Open T3 thread", href: th, thread: true, name: "Open the T3 thread for " + label } : null,
+      ref && !n.ticket && n.state !== "closed" ? { label: "Launch…", name: "Launch a ticket for " + label, run: () => launchRef(ref) } : null,
+      { sep: true },
+      edit ? { label: "Add blocker…", run: () => graphEditField(b, "blocker") } : null,
+      edit ? { label: "Set parent…", run: () => graphEditField(b, "parent") } : null,
+      edit ? { label: "Set track…", run: () => graphEditField(b, "track") } : null,
+      edit ? { label: "Set priority…", run: () => graphEditField(b, "priority") } : null,
+      { sep: true },
+      ref ? { label: "Copy reference", run: () => copyText(ref, ref) } : null,
+      { sep: true },
+      ...links.map((p) => ({ label: graphLinkWord(p.e, n.id) + "…", menu: () => edgeMenu(p.e, b) })),
+      lane >= 0 ? { label: "Lane " + graph.lay.lanes[lane].name + "…", menu: () => laneMenu(lane, b) } : null,
+    ],
+  };
+}
+
+function initGraphMenus() {
+  cmenuOn(".gnode", nodeMenu);
+  cmenuOn(".geh", (el) => {
+    const p = graph.paths[Number(el.getAttribute("data-pi"))];
+    return p && p.hit === el ? edgeMenu(p.e, el) : null;
+  });
+  cmenuOn(".glt", (el) => laneMenu(Number(el.getAttribute("data-lane")), el));
+}
+
+cmenuInit();
+
 let gPending = false;
 document.addEventListener("keydown", (e) => {
   if (authBlocked || e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
@@ -9460,6 +9832,23 @@ function resolveIssueProject(issue, d) {
     mapped = findMapValueCI(trackers.hosts, issue.host);
   }
   return mapped ? pickProject(projects, mapped) : null;
+}
+
+function launchDraftChanged() {
+  launchProjectsErr = "";
+  paintLaunchProjects();
+  paintLaunchModelLine();
+}
+
+function launchRef(ref) {
+  openComposer("launch");
+  if (!typedLaunchRefs().some((x) => x.toLowerCase() === ref.toLowerCase())) {
+    const ta = $("issues");
+    const draft = ta.value.replace(/\s+$/, "");
+    ta.value = draft ? draft + "\n" + ref : ref;
+    launchDraftChanged();
+  }
+  $("launch-btn").focus();
 }
 
 function typedLaunchRefs() {
@@ -10029,11 +10418,7 @@ function closeDialog(dlg) {
 function initModels() {
   $("launch-model-edit").addEventListener("click", () => openSettings("ticket"));
   $("ask-model-edit").addEventListener("click", () => openSettings("ask"));
-  $("issues").addEventListener("input", () => {
-    launchProjectsErr = "";
-    paintLaunchProjects();
-    paintLaunchModelLine();
-  });
+  $("issues").addEventListener("input", launchDraftChanged);
   for (const which of ["ticket", "ask"]) {
     const p = pickerPrefix(which);
     $(p + "-mode-model").addEventListener("click", () => setPickerMode(which, "model", true));
