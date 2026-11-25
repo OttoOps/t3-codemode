@@ -114,6 +114,28 @@ The workflow does not file issues. A later job could read the hashes from the
 `chaos-failures` artifact and open or comment on one tracking issue per hash,
 with `issues: write` granted to that job alone.
 
+### Diff mutation check
+
+`.github/workflows/mutants-diff.yml` runs the same mutation grading on a pull
+request, limited to the lines the PR changes. It starts only when the PR
+touches a Rust file under `src/`, `.cargo/mutants.toml`, or the workflow and
+its scripts, and its first step skips the rest when none of the changed files
+is in `.cargo/mutants.toml`'s `examine_globs`. Otherwise it diffs the merge
+commit against the base it was merged onto, runs
+`cargo mutants --in-diff` with the `mutants` profile and the `pr_chaos` tests,
+and writes the caught, missed, timeout and unviable counts per file to the job
+summary, with each missed and timed-out mutant listed below the table. The
+`mutants-diff` artifact holds the same files.
+
+The check is advisory. It runs in its own workflow, outside the required
+`check` job in `ci.yml`, and passes when mutants survive: it fails only when
+cargo-mutants itself fails, such as when the unmutated tree does not build.
+Expect survivors in `src/board.rs` rendering code, which the chaos tests do not
+reach. A survivor in code your PR adds is worth a look: either a `pr_chaos`
+invariant should notice the change, or the line is outside what the chaos
+oracle checks. It needs no secrets and runs with `contents: read`, so it works
+the same on pull requests from forks.
+
 ## This site
 
 `docs/build.sh` generates the [API reference](api.md) page from `t3cm types`,
