@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/OttoOps/t3-codemode/compare/v0.12.0...v0.13.0) - 2026-11-25
+
+### Added
+
+- route board views in Workspace nav
+- add a server default board layout
+- route graph edges through lane gutters
+- add Workspace board layout and switch
+- edit graph dependencies from inspector
+- merge GitLab MRs and merge trains
+
+### Fixed
+
+- keep board header buttons on screen
+- guard non-GitHub and failed pending joins
+- show pending tickets on the Graph tab
+- keep board scrolling inside its panes
+- block body thread fallback during triage
+- address CodeRabbit review findings
+
+### Other
+
+- add Workspace view captures
+- give the layout comparison a dark page
+- let skipped and manual GitLab jobs pass
+- tie merged-results pipelines to the head
+- read merged-results pipelines and all pages
+- fix GitLab review findings in skills
+- add fake glab and GitLab skill evals
+- route tracked GitLab hosts through wf.pr
+- add Workspace layout captures
+- keep the board layout design mocks
+- document GitLab merges in wf.merge
+- add ignored live GitLab merge tests
+- run wf.merge chaos ops against GitLab
+
 ## [0.12.0](https://github.com/OttoOps/t3-codemode/compare/v0.11.0...v0.12.0) - 2026-11-24
 
 ### Added
