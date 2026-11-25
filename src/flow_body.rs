@@ -1663,7 +1663,8 @@ fn scan_prose_segment(default_repo: &str, segment: &str, line_start: bool, parse
                 let trimmed = after_kw.trim_start();
                 let has_colon = trimmed.starts_with(':');
                 let target_src = trimmed.strip_prefix(':').unwrap_or(trimmed).trim_start();
-                let opens_segment = prefix.trim().trim_matches(['*', '_']).trim().is_empty();
+                let lead = prefix.trim().trim_matches(['*', '_']).trim_end();
+                let opens_segment = lead.is_empty() || lead.ends_with([';', '.', '!', '?']);
                 if starts_with_inline_target(target_src) || (has_colon && kw != "after" && opens_segment) {
                     let (target, rem) = if starts_with_inline_target(target_src) {
                         capture_inline_target(target_src, paren_depth > 0)
@@ -2698,8 +2699,11 @@ The UI depends on the config file.
             vec![BodyRef::Symbolic("Epic: auth".into()), BodyRef::Issue { repo: REPO.into(), number: 9 }]
         );
 
-        let p = parse_body(REPO, "| Blocked by: Setup auth | Notes |\n|---|---|\n\n## Part of: Epic auth\n");
-        assert_eq!(p.blockers, vec![BodyRef::Symbolic("Setup auth".into())]);
+        let p = parse_body(
+            REPO,
+            "| Blocked by: Setup auth | Notes |\n|---|---|\n\n## Part of: Epic auth\n\nNotes; blocked by: Seed data.\n",
+        );
+        assert_eq!(p.blockers, vec![BodyRef::Symbolic("Setup auth".into()), BodyRef::Symbolic("Seed data".into())]);
         assert_eq!(p.parents, vec![BodyRef::Symbolic("Epic auth".into())]);
     }
 
