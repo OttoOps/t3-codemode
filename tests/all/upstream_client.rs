@@ -88,7 +88,14 @@ async fn stdio_handshake_server_info_and_paginated_tools() {
     assert_eq!(st.name, NS);
     assert_eq!(st.transport, Transport::Stdio);
     assert_eq!(st.state, UpstreamState::Ready);
-    assert_eq!(st.server, Some(json!({"name": "t3cm-fake-mcp", "version": "1.2.3"})));
+    assert_eq!(
+        st.server,
+        Some(json!({
+            "name": "t3cm-fake-mcp",
+            "version": "1.2.3",
+            "instructions": "Fake MCP server for t3cm tests.\nIt echoes, fails and pages on demand."
+        }))
+    );
     let tools = c.list_tools().await.unwrap();
     let names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(names.len(), 13, "{names:?}");

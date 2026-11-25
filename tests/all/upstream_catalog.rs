@@ -7,10 +7,11 @@ use t3_codemode::catalog::{Catalog, aliases};
 use t3_codemode::clock::FakeClock;
 use t3_codemode::config::Config;
 use t3_codemode::fake::{FakeT3, thread};
+use t3_codemode::mcp;
 use t3_codemode::server;
 use t3_codemode::store::Store;
 use t3_codemode::upstream::fake::{FakeConnector, FakeUpstream, tool};
-use t3_codemode::upstream::{ToolDef, UpstreamError, UpstreamManager};
+use t3_codemode::upstream::{MAX_ABOUT_CHARS, ToolDef, UpstreamError, UpstreamManager};
 
 const SECRET: &str = "sk-live-7f3a9c2e51";
 const MULTI: &str = "line-one-secret\nline-two-secret";
@@ -184,7 +185,7 @@ fn config(secret_path: &std::path::Path, multi_path: &std::path::Path) -> Config
             }},
             "deny": ["drop_*"]
         },
-        {"name": "gh", "transport": "stdio", "enabled": false, "stdio": {"command": FAKE_BIN}}
+        {"name": "gh", "transport": "stdio", "enabled": false, "about": "GitHub issues", "stdio": {"command": FAKE_BIN}}
     ]}))
     .unwrap()
 }
@@ -596,4 +597,85 @@ async fn the_server_refuses_a_foreign_host() {
     assert_eq!(post.status(), 403);
     let _ = tx.send(());
     let _ = task.await;
+}
+
+fn described(name: &str, about: Option<&str>) -> (String, Option<String>) {
+    (name.to_string(), about.map(String::from))
+}
+
+#[test]
+fn instructions_name_each_upstream_with_its_description() {
+    assert_eq!(mcp::instructions(&[]), mcp::DEFAULT_INSTRUCTIONS);
+    assert_eq!(
+        mcp::DEFAULT_INSTRUCTIONS,
+        "T3 Code and the configured MCP servers in two tools: `search` the API catalog with code, then `execute` code against it."
+    );
+    let text = mcp::instructions(&[
+        described("quotes", Some("Example brokerage API: quotes, price history")),
+        described("kb", Some("internal documentation search")),
+        described("browser", None),
+    ]);
+    assert_eq!(
+        text,
+        "T3 Code and these MCP servers, reached through `search` then `execute`: \
+         `quotes` (Example brokerage API: quotes, price history), `kb` (internal documentation search), `browser`. \
+         Prefer these over the web or a browser for the same data."
+    );
+}
+
+#[test]
+fn instructions_drop_descriptions_before_names_past_the_cap() {
+    let about = "d".repeat(MAX_ABOUT_CHARS);
+    let servers: Vec<_> =
+        (0..32).map(|i| described(&format!("server_{i:02}_{}", "n".repeat(20)), Some(&about))).collect();
+    let text = mcp::instructions(&servers);
+    assert!(text.chars().count() <= mcp::MAX_INSTRUCTIONS_CHARS, "{} chars", text.chars().count());
+    for (name, _) in &servers {
+        assert!(text.contains(&format!("`{name}`")), "{name} missing: {text}");
+    }
+    assert!(text.contains(&format!("`{}` ({about})", servers[0].0)), "{text}");
+    assert!(!text.contains(&format!("`{}` (", servers[31].0)), "{text}");
+    let tools = mcp::tools_with(&servers);
+    for t in tools.as_array().unwrap() {
+        let d = t["description"].as_str().unwrap();
+        let tail = d.rsplit("\n\n").next().unwrap();
+        assert!(tail.chars().count() <= mcp::MAX_INSTRUCTIONS_CHARS, "{} chars", tail.chars().count());
+        assert!(tail.contains(&servers[31].0), "{tail}");
+    }
+}
+
+#[test]
+fn tool_descriptions_keep_the_same_descriptions_as_instructions() {
+    let about = "d".repeat(MAX_ABOUT_CHARS);
+    let servers: Vec<_> = (0..16).map(|i| described(&format!("s{i:02}"), Some(&about))).collect();
+    let text = mcp::instructions(&servers);
+    let kept: Vec<bool> = servers.iter().map(|(n, _)| text.contains(&format!("`{n}` ("))).collect();
+    assert!(kept.contains(&true) && kept.contains(&false), "the cap must bite: {text}");
+    for t in mcp::tools_with(&servers).as_array().unwrap() {
+        let d = t["description"].as_str().unwrap();
+        let in_tool: Vec<bool> = servers.iter().map(|(n, _)| d.contains(&format!("{n} ("))).collect();
+        assert_eq!(in_tool, kept, "{d}");
+    }
+}
+
+#[tokio::test]
+async fn initialize_lists_enabled_upstreams_and_tools_carry_the_descriptions() {
+    let u = setup().await;
+    let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}});
+    let text = |r: Option<Value>| r.unwrap()["result"]["instructions"].as_str().unwrap().to_string();
+    let first = text(mcp::handle(&u.app, init.clone(), None).await);
+    assert!(first.contains("`cbm`"), "{first}");
+    assert!(!first.contains("`gh`") && !first.contains("GitHub"), "disabled upstreams stay out: {first}");
+    u.cbm.set_server(json!({"name": "fake-cbm", "title": "Code graph search"}));
+    u.cbm.set_down(true);
+    let _ = u.exec("async () => cbm.search_graph({ query: 'x' })").await;
+    u.cbm.set_down(false);
+    let _ = u.exec("async () => cbm.search_graph({ query: 'x' })").await;
+    let again = text(mcp::handle(&u.app, init, None).await);
+    assert!(again.contains("`cbm` (Code graph search)"), "{again}");
+    let listed = mcp::handle(&u.app, json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}), None).await.unwrap();
+    for t in listed["result"]["tools"].as_array().unwrap() {
+        let d = t["description"].as_str().unwrap();
+        assert!(d.ends_with("MCP server namespaces: cbm (Code graph search)."), "{d}");
+    }
 }

@@ -84,7 +84,8 @@ async fn start() -> Srv {
             {
                 "name": "web",
                 "transport": "http",
-                "http": {"url": url, "headers": {"Authorization": format!("Bearer ${{env:{HTTP_VAR}}}")}}
+                "http": {"url": url, "headers": {"Authorization": format!("Bearer ${{env:{HTTP_VAR}}}")}},
+                "about": "Example web API"
             }
         ]
     }))
@@ -183,7 +184,15 @@ async fn upstreams_end_to_end_over_http() {
     let worker = s.rpc(list.clone(), Some(WORKER)).await;
     assert_eq!(boss.to_string(), worker.to_string());
     assert_eq!(anon.to_string(), worker.to_string());
-    assert!(anon.to_string().contains("fake, web"), "{anon}");
+    assert!(anon.to_string().contains("fake (Fake MCP server for t3cm tests.), web (Example web API)."), "{anon}");
+    let init = json!({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}});
+    let init = s.rpc(init, None).await;
+    assert_eq!(
+        init["result"]["instructions"],
+        "T3 Code and these MCP servers, reached through `search` then `execute`: \
+         `fake` (Fake MCP server for t3cm tests.), `web` (Example web API). \
+         Prefer these over the web or a browser for the same data."
+    );
 
     let found = s
         .ok(

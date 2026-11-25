@@ -89,6 +89,7 @@ impl Fake {
                     "protocolVersion": self.version.clone().unwrap_or(asked),
                     "capabilities": {"tools": {"listChanged": true}},
                     "serverInfo": {"name": "t3cm-fake-mcp", "version": "1.2.3"},
+                    "instructions": "Fake MCP server for t3cm tests.\nIt echoes, fails and pages on demand.",
                 }))
             }
             "ping" => Ok(json!({})),
