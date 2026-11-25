@@ -294,7 +294,11 @@ const BLOCKER_GATE: &str = "relay:blocker";
 
 fn relays(kind: &str, gate: Option<&str>) -> bool {
     let ticket_owned = |g: &str| g == "merge" || g.starts_with("delivery:");
-    kind == "blocker" || (kind == "gate" && !gate.is_some_and(ticket_owned))
+    match kind {
+        "blocker" => true,
+        "gate" => !gate.is_some_and(ticket_owned),
+        _ => false,
+    }
 }
 
 fn release_hold(ln: &mut Link) {
