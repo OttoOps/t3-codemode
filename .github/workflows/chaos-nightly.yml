@@ -1,0 +1,222 @@
+name: chaos-nightly
+
+on:
+  schedule:
+    - cron: "23 9 * * *"
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: Sequential Swarm seeds to sweep
+        type: string
+        default: "200000"
+      seed_start:
+        description: First seed (empty derives it from the run ID)
+        type: string
+        default: ""
+      sentinel:
+        description: Planted sentinel to enable in the sweep (builds with test-sentinels, so the sweep fails on purpose)
+        type: choice
+        default: none
+        options:
+          - none
+          - board_card_wipes_ready
+          - close_keeps_gate
+          - gate_clear_wipes_other_ready
+          - reconcile_skips_independent_pr_seen
+          - outbox_no_purge
+      mutants:
+        description: Run the cargo-mutants grading
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chaos-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -C link-arg=-fuse-ld=mold
+
+jobs:
+  sweep:
+    name: swarm sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SEEDS: ${{ inputs.seeds || '200000' }}
+      SEED_START: ${{ inputs.seed_start }}
+      CHAOS_SENTINEL: ${{ inputs.sentinel != 'none' && inputs.sentinel || '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable as of 2026-10-16
+        with:
+          toolchain: stable
+      - name: Install mold
+        run: sudo apt-get update && sudo apt-get install -y mold
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: chaos-sweep
+      - name: Build the release test binary
+        id: build
+        run: |
+          features=()
+          if [ -n "$CHAOS_SENTINEL" ]; then
+            features=(--features test-sentinels)
+          fi
+          bin=$(cargo test --release --locked "${features[@]}" --test all --no-run --message-format=json \
+            | jq -r 'select(.executable != null and .target.name == "all") | .executable')
+          test -x "$bin"
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+      - name: Sweep
+        env:
+          BIN: ${{ steps.build.outputs.bin }}
+          RUN_ID: ${{ github.run_id }}
+        run: .github/scripts/chaos-sweep.sh "$BIN" "$SEED_START" "$SEEDS" chaos-out
+      - name: Job summary
+        if: always()
+        run: |
+          if [ -f chaos-out/summary.md ]; then
+            cat chaos-out/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: chaos-sweep-logs
+          path: chaos-out/logs/
+          if-no-files-found: ignore
+          retention-days: 14
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: chaos-failures
+          path: chaos-out/failures/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  coverage:
+    name: coverage and reach
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable as of 2026-10-16
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - name: Install mold
+        run: sudo apt-get update && sudo apt-get install -y mold
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: chaos-coverage
+      - name: Run pr_chaos under coverage
+        env:
+          CHAOS_REACH: "1"
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov --locked --test all --no-report -- pr_chaos:: --nocapture 2>&1 | tee coverage/pr_chaos.log
+      - name: Report
+        run: |
+          cargo llvm-cov report --summary-only | tee coverage/summary.txt
+          cargo llvm-cov report --lcov --output-path coverage/lcov.info
+          {
+            echo "## Coverage of src/ by pr_chaos"
+            echo
+            echo "cargo-llvm-cov line and region coverage on stable Rust."
+            echo
+            echo '```text'
+            cat coverage/summary.txt
+            echo '```'
+            echo
+            echo "## Reach hit rates (default seeds)"
+            echo
+            .github/scripts/reach-table.sh 60 coverage/pr_chaos.log
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: chaos-coverage
+          path: coverage/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  mutants:
+    name: mutants (${{ matrix.shard }}/8)
+    if: github.event_name == 'schedule' || inputs.mutants
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable as of 2026-10-16
+        with:
+          toolchain: stable
+      - name: Install mold
+        run: sudo apt-get update && sudo apt-get install -y mold
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.151
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: chaos-mutants
+          save-if: ${{ matrix.shard == 0 }}
+      - name: Grade
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set +e
+          cargo mutants --in-place --shard "$SHARD/8" --output "mutants-$SHARD"
+          code=$?
+          set -e
+          case $code in
+            0|2|3) ;;
+            *) echo "cargo-mutants exited $code"; exit "$code" ;;
+          esac
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants-${{ matrix.shard }}/mutants.out/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  mutants-report:
+    name: mutants report
+    needs: mutants
+    if: needs.mutants.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: mutants-shard-*
+          path: shards
+      - name: Summarize
+        run: |
+          .github/scripts/mutants-summary.sh shards mutants-survivors
+          cat mutants-survivors/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mutants-survivors
+          path: mutants-survivors/
+          retention-days: 30
