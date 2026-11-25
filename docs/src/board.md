@@ -1014,6 +1014,7 @@ Each node's `id` is `owner/name#N`, and its lists use those ids:
 | `external` | `true` when it is labelled `blocked: external`, or when it has open blockers, GitHub listed all of them, no blocker reference is unresolved, and none is in a covered repo. |
 | `ticket` | Its board ticket's `thread`, `link` and `status`, or `null`. |
 | `warnings` | Any `cycle`, `unresolved` or `blockedLabel` diagnostics affecting this node. |
+| `optIn` | Present only when `flow.optIn` is set. `on` is `true` when the issue carries the `flow.optIn.label` label, and `inFlow` is `true` when it matches the whole `flow.optIn` filter. `locked` says why the board cannot toggle it: its repository is not covered, it is closed or was not read, a ticket is running for it, it is external, or `flow.optIn` sets no label. |
 
 `external` here is wider than a `blocked` issue's `external`, which reports
 the label alone.
@@ -1111,6 +1112,18 @@ Queue & Graph, and an older `#tickets-graph` link still lands there.
     `blockedBy` or `parent` links, and set or clear an issue's `track: <slug>`
     or `priority: <high|medium|low>` label (`POST /api/flow/edge` and
     `POST /api/flow/issue`).
+  - **Put an issue in the flow or take it out.** With `flow.optIn.label` set,
+    the inspector shows an **In flow** switch for each issue in the graph.
+    Turning it on adds the label on GitHub, creating the label when the
+    repository lacks it, and turning it off removes it
+    (`POST /api/flow/opt-in`). The Graph and the Ready queue refresh as soon
+    as GitHub answers, so an issue with no open blocker goes straight into
+    Ready. The switch works on open issues in covered repositories, and is
+    disabled, with the reason beside it, for closed and external issues,
+    issues with a running ticket, and repositories the flow does not cover.
+    GitHub errors show under the switch. Graph nodes for open issues outside
+    the flow carry a dashed **not in flow** tag, so they read differently
+    from queued ones.
 - **Triage DAG.** Clicking **Triage DAG** starts a short-lived read-only scratch
   thread (`POST /api/flow/triage`) launched with `runtimeMode: "approval-required"`
   and `interactionMode: "plan"` (and blocked from calling `t3cm` `execute`
@@ -1777,6 +1790,7 @@ changes the ticket launch model with `PUT /api/models/ticket`, which writes
 | `POST /api/flow/sync-links` | Write every current `source: "body"` `blockedBy` and `parent` edge in the dependency graph to GitHub through `addBlockedBy` and `addSubIssue` idempotently with `replaceParent: false`, refresh the graph, and return `{ok, total, synced, alreadyLinked, failed, results, errors, flow, refreshError?}` with per-link `permission`, `conflict` and `existingParent` fields; 400 on malformed JSON or unknown keys, 502 with `error` when GitHub cannot be read |
 | `POST /api/flow/edge` `{action, from, to, kind, replaceParent?}` | Edit one graph edge and refresh the graph: `action` is `add`, `remove`, `confirm`, `dismiss` or `restore`; `kind` is `blockedBy`, `parent`, `fileConflict` or `codeDep` (`add`/`remove` apply to `blockedBy` and `parent` only). `confirm` writes native GitHub links (promoting `fileConflict`/`codeDep` to `blockedBy` and hiding the advisory hint on success); `dismiss`/`restore` update `flow_dismissed_edges` in `store.db`. Returns `{ok, action, from, to, kind, status, error?, permission?, conflict?, existingParent?, flow, refreshError?}` (400 on invalid input or unknown keys) |
 | `POST /api/flow/issue` `{issue, track?, priority?}` | Set or clear (`null` / empty string) an issue's `track: <slug>` and/or `priority: <high\|medium\|low>` labels on GitHub (removing conflicting `track:`/`priority:` labels first without touching other labels), refresh the graph, and return `{ok, issue, track?, priority?, labels, errors, flow, refreshError?}` (400 when neither field is provided or on invalid input/unknown keys) |
+| `POST /api/flow/opt-in` `{issue, on}` | Add (`on: true`) or remove (`on: false`) the `flow.optIn.label` label on an open issue in a covered repository, refresh the graph, and return `{ok, issue, on, label, status, error?, permission?, labels, errors, flow, refreshError?}`. `status` is `added`, `removed`, `unchanged` (a repeat toggle, which writes nothing), `refused` (closed, external, running or uncovered, with the reason in `error`) or `error` (GitHub's message in `error`). 400 when `flow.optIn.label` is not set, or on invalid input or unknown keys |
 | `POST /api/flow/triage` `{}` | Start a read-only scratch thread over open issues and tracked repo files to propose missing `blockedBy`, `parent`, `track`, and `priority` changes; writes nothing to GitHub. Returns the triage view (`{id, status, issueCount, repos, ...}`), 409 if a triage run is already active, or 400 when no open issues exist or unknown keys are sent |
 | `POST /api/flow/triage/{id}/apply` `{changeIds?, all?, replaceParent?}` | Apply user-confirmed triage changes (`all: true` for all pending changes, or explicit `changeIds`) through GitHub mutations, update the triage row, refresh the graph, and return `{ok, applied, alreadySet, failed, results, triage, flow, refreshError?}` (404 for unknown `t<n>`, 400 while still running or on unknown keys/ids) |
 | `POST /api/flow/triage/{id}/dismiss` `{changeIds?, all?}` | Skip specific triage proposals (`changeIds`) or dismiss/cancel the entire triage run (archiving a running scratch thread) without writing to GitHub; returns `{ok, dismissed, id, triage}` (404 for unknown `t<n>`) |

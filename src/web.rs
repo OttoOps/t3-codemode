@@ -22,7 +22,7 @@ use crate::config::{BoardRemoteConfig, RemoteMode, RemoteOrigin};
 use crate::config_edit::{Rejected, Stale};
 use crate::contexts::{ContextBody, ContextError};
 use crate::flow_triage::{TriageApplyArgs, TriageDismissArgs, TriageRunning};
-use crate::issues::{FlowEdgeArgs, FlowIssueUpdateArgs};
+use crate::issues::{FlowEdgeArgs, FlowIssueUpdateArgs, FlowOptInArgs};
 use crate::pairing::{self, CookieExtract};
 use crate::server::{RequestKind, SingleHeader, classify_request, is_own_loopback_host_str, single_header};
 use crate::settings::SettingsBody;
@@ -1281,6 +1281,20 @@ async fn post_flow_issue(State(web): State<Web>, raw: Bytes) -> Response {
     }
 }
 
+async fn post_flow_opt_in(State(web): State<Web>, raw: Bytes) -> Response {
+    let b: FlowOptInArgs = match body(&raw) {
+        Ok(b) => b,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e),
+    };
+    match web.app.wf.set_flow_opt_in(b).await {
+        Ok(res) => match serde_json::to_value(res) {
+            Ok(v) => json_ok(StatusCode::OK, web.app.redact_value(v)),
+            Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, web.app.t3.redact(format!("{e:#}"))),
+        },
+        Err(e) => failed(&web.app, e),
+    }
+}
+
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct TriageStartBody {}
@@ -1536,6 +1550,7 @@ pub fn routes(app: Arc<App>, port: u16) -> Router {
         .route("/api/flow/sync-links", post(post_flow_sync_links))
         .route("/api/flow/edge", post(post_flow_edge))
         .route("/api/flow/issue", post(post_flow_issue))
+        .route("/api/flow/opt-in", post(post_flow_opt_in))
         .route("/api/flow/triage", post(post_flow_triage))
         .route("/api/flow/triage/{id}/apply", post(post_flow_triage_apply))
         .route("/api/flow/triage/{id}/dismiss", post(post_flow_triage_dismiss))

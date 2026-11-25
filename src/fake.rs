@@ -1319,6 +1319,7 @@ fn issue_node_query(st: &mut GhState, variables: &Value) -> Value {
                     "number": number,
                     "url": format!("https://github.com/{name_with_owner}/issues/{number}"),
                     "title": i["title"],
+                    "state": i["state"],
                     "parent": parent,
                     "blockedBy": {"nodes": blockers},
                     "labels": {"nodes": labels},

@@ -7421,3 +7421,266 @@ return verifyGraphEdges();
         "same-column reciprocal curves must keep distinct bend X: {sc25} vs {sc52}"
     );
 }
+
+fn graph_node<'a>(res: &'a Value, id: &str) -> &'a Value {
+    res["flow"]["graph"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id)
+        .unwrap_or_else(|| panic!("no node {id} in {res}"))
+}
+
+fn gh_labels(h: &H, repo: &str, number: u64) -> Vec<String> {
+    labels_of(&h.github.issue(repo, number).unwrap())
+}
+
+fn labels_of(issue: &Value) -> Vec<String> {
+    issue["labels"]["nodes"].as_array().unwrap().iter().map(|l| l["name"].as_str().unwrap().to_string()).collect()
+}
+
+fn queue_ids(res: &Value) -> Vec<String> {
+    labels(&res["flow"]["queue"])
+}
+
+#[tokio::test]
+async fn board_flow_opt_in_toggles_the_label_and_refreshes_the_ready_queue() {
+    let h = flowing(4);
+    issue(&h, REPO, 1, &["area: core"], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    h.github.close_issue(REPO, 2);
+    issue(&h, REPO, 3, &[FLOW, "blocked: external"], 3);
+    issue(&h, REPO, 4, &[FLOW], 4);
+    h.github.add_repo("acme/other");
+    issue(&h, "acme/other", 5, &[], 5);
+    ticket(&h, "t-4", "widgets#4").await;
+    let s = crate::board::start(h).await;
+    let post = |body: Value| {
+        let http = s.http.clone();
+        let url = format!("{}/api/flow/opt-in", s.base);
+        let origin = s.base.clone();
+        let csrf = s.csrf().to_string();
+        async move {
+            let r =
+                http.post(url).header("Origin", origin).header("X-T3CM-CSRF", csrf).json(&body).send().await.unwrap();
+            let st = r.status().as_u16();
+            let v: Value = r.json().await.unwrap();
+            (st, v)
+        }
+    };
+
+    let no_csrf = s
+        .http
+        .post(format!("{}/api/flow/opt-in", s.base))
+        .header("Origin", &s.base)
+        .json(&json!({"issue": "acme/widgets#1", "on": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_csrf.status(), 403);
+    assert_eq!(post(json!({"issue": "acme/widgets#1"})).await.0, 400);
+    assert_eq!(post(json!({"issue": "acme/widgets#1", "on": true, "label": "x"})).await.0, 400);
+    assert_eq!(post(json!({"issue": "not an issue", "on": true})).await.0, 400);
+
+    let before = graph(&s.h).await;
+    let n1 = node(&before, "acme/widgets#1");
+    assert_eq!(n1["optIn"], json!({"on": false, "inFlow": false}), "{n1}");
+    assert_eq!(node(&before, "acme/widgets#4")["optIn"]["locked"], "A ticket is running for this issue");
+    assert_eq!(node(&before, "acme/widgets#3")["optIn"]["locked"], "External issues wait on work outside the flow");
+
+    let writes = |h: &H| {
+        h.github
+            .operations()
+            .into_iter()
+            .filter(|o| o == "addLabelsToLabelable" || o == "removeLabelsFromLabelable" || o == "createLabel")
+            .count()
+    };
+
+    let (st, on) = post(json!({"issue": "acme/widgets#1", "on": true})).await;
+    assert_eq!(st, 200, "{on}");
+    assert_eq!(on["ok"], true, "{on}");
+    assert_eq!(on["status"], "added", "{on}");
+    assert_eq!(on["label"], FLOW, "{on}");
+    assert!(gh_labels(&s.h, REPO, 1).contains(&FLOW.to_string()), "label added on GitHub");
+    assert!(gh_labels(&s.h, REPO, 1).contains(&"area: core".to_string()), "other labels kept");
+    assert!(queue_ids(&on).contains(&"widgets#1".to_string()), "unblocked issue goes straight into Ready: {on}");
+    assert_eq!(graph_node(&on, "acme/widgets#1")["optIn"], json!({"on": true, "inFlow": true}));
+    assert_eq!(graph_node(&on, "acme/widgets#1")["ready"], true);
+
+    let after_on = writes(&s.h);
+    let (st, again) = post(json!({"issue": "acme/widgets#1", "on": true})).await;
+    assert_eq!(st, 200, "{again}");
+    assert_eq!((again["ok"].clone(), again["status"].clone()), (json!(true), json!("unchanged")), "{again}");
+    assert_eq!(writes(&s.h), after_on, "a repeat toggle on writes nothing");
+
+    let (st, off) = post(json!({"issue": "acme/widgets#1", "on": false})).await;
+    assert_eq!(st, 200, "{off}");
+    assert_eq!((off["ok"].clone(), off["status"].clone()), (json!(true), json!("removed")), "{off}");
+    assert!(!gh_labels(&s.h, REPO, 1).contains(&FLOW.to_string()), "label removed on GitHub");
+    assert!(gh_labels(&s.h, REPO, 1).contains(&"area: core".to_string()), "other labels kept");
+    assert!(!queue_ids(&off).contains(&"widgets#1".to_string()), "{off}");
+    assert_eq!(graph_node(&off, "acme/widgets#1")["optIn"], json!({"on": false, "inFlow": false}));
+
+    let after_off = writes(&s.h);
+    let (_, again) = post(json!({"issue": "acme/widgets#1", "on": false})).await;
+    assert_eq!((again["ok"].clone(), again["status"].clone()), (json!(true), json!("unchanged")), "{again}");
+    assert_eq!(writes(&s.h), after_off, "a repeat toggle off writes nothing");
+
+    for (issue, on, why) in [
+        ("acme/widgets#2", false, "Closed issues stay out of the flow"),
+        ("acme/widgets#3", false, "External issues wait on work outside the flow"),
+        ("acme/widgets#4", false, "A ticket is running for this issue"),
+        ("acme/other#5", true, "The flow does not cover this repository"),
+    ] {
+        let (st, res) = post(json!({"issue": issue, "on": on})).await;
+        assert_eq!(st, 200, "{res}");
+        assert_eq!(res["ok"], false, "{issue}: {res}");
+        assert_eq!(res["status"], "refused", "{issue}: {res}");
+        assert_eq!(res["error"], why, "{issue}: {res}");
+    }
+    assert_eq!(writes(&s.h), after_off, "refused toggles write nothing");
+    assert!(gh_labels(&s.h, REPO, 3).contains(&FLOW.to_string()));
+    assert!(gh_labels(&s.h, REPO, 4).contains(&FLOW.to_string()));
+    assert!(!gh_labels(&s.h, "acme/other", 5).contains(&FLOW.to_string()));
+
+    s.h.github.fault(
+        Rule::on("addLabelsToLabelable").fail(Failure::typed("FORBIDDEN", "Resource not accessible by integration")),
+    );
+    let (st, denied) = post(json!({"issue": "acme/widgets#1", "on": true})).await;
+    assert_eq!(st, 200, "{denied}");
+    assert_eq!(denied["ok"], false, "{denied}");
+    assert_eq!(denied["status"], "error", "{denied}");
+    assert_eq!(denied["permission"], true, "{denied}");
+    assert_eq!(denied["error"], "Resource not accessible by integration", "{denied}");
+    assert!(!gh_labels(&s.h, REPO, 1).contains(&FLOW.to_string()));
+    assert!(denied["flow"]["graph"].is_object(), "a failed toggle still refreshes the graph: {denied}");
+    s.h.github.clear_faults();
+
+    let (_, on) = post(json!({"issue": "acme/widgets#1", "on": true})).await;
+    assert_eq!(on["status"], "added", "{on}");
+    s.h.github.fault(Rule::on("removeLabelsFromLabelable").fail(Failure::refused("label removal refused")));
+    let (_, stuck) = post(json!({"issue": "acme/widgets#1", "on": false})).await;
+    assert_eq!((stuck["ok"].clone(), stuck["status"].clone()), (json!(false), json!("error")), "{stuck}");
+    assert_eq!(stuck["error"], "label removal refused", "{stuck}");
+    assert!(gh_labels(&s.h, REPO, 1).contains(&FLOW.to_string()));
+}
+
+#[tokio::test]
+async fn board_flow_opt_in_needs_an_opt_in_label() {
+    let cfg = Config::from_value(json!({"flow": {"repos": [REPO], "optIn": {"milestone": "v1"}, "maxTickets": 2}}));
+    let h = H::build(Vec::new(), cfg.unwrap());
+    h.github.add_repo(REPO);
+    issue(&h, REPO, 1, &[], 1);
+    let g = graph(&h).await;
+    assert_eq!(node(&g, "acme/widgets#1")["optIn"]["locked"], "flow.optIn sets no label to toggle");
+    let s = crate::board::start(h).await;
+    let r = s
+        .http
+        .post(format!("{}/api/flow/opt-in", s.base))
+        .header("Origin", &s.base)
+        .header("X-T3CM-CSRF", s.csrf())
+        .json(&json!({"issue": "acme/widgets#1", "on": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+    let body: Value = r.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("flow.optIn.label is not set"), "{body}");
+}
+
+#[tokio::test]
+async fn with_no_opt_in_filter_graph_nodes_carry_no_opt_in_state() {
+    let cfg = Config::from_value(json!({"flow": {"repos": [REPO], "maxTickets": 2}}));
+    let h = H::build(Vec::new(), cfg.unwrap());
+    h.github.add_repo(REPO);
+    issue(&h, REPO, 1, &[], 1);
+    let g = graph(&h).await;
+    assert!(node(&g, "acme/widgets#1").get("optIn").is_none(), "{g}");
+}
+
+#[tokio::test]
+async fn the_inspector_switch_toggles_flow_opt_in_and_marks_opted_out_nodes() {
+    let (html, st, view) = graph_page().await;
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        &format!(
+            r##"{GRAPH}
+const after = JSON.parse(JSON.stringify(view));
+const n5 = after.graph.nodes.find((n) => n.id === "acme/widgets#5");
+n5.optIn = {{ on: true, inFlow: true }};
+n5.ready = true;
+n5.flowList = "queue";
+n5.labels = ["flow"];
+after.queue.push({{ ...after.queue[0], number: 5, label: "widgets#5", url: "https://github.com/acme/widgets/issues/5", title: "Issue 5", priority: null, milestone: null, unblockedBy: [] }});
+const reqs = [];
+let deny = false;
+fetchReply = (url, opts) => {{
+  if (url === "/api/flow") return reply(200, view);
+  if (url === "/api/flow/opt-in") {{
+    const payload = JSON.parse(opts.body);
+    reqs.push(payload);
+    if (deny) return reply(200, {{ ok: false, issue: payload.issue, on: payload.on, label: "flow", status: "error", error: "Resource not accessible by integration", permission: true, labels: [], errors: [], flow: after }});
+    return reply(200, {{ ok: true, issue: payload.issue, on: payload.on, label: "flow", status: "added", labels: [], errors: [], flow: after }});
+  }}
+  return new Promise(() => {{}});
+}};
+emitState(base);
+await tick();
+selectTab("graph");
+const tag = (id) => !part(btn(id), "optout").hidden;
+const marked = {{ n1: [btn("acme/widgets#1").classList.contains("optout"), tag("acme/widgets#1")],
+  n5: [btn("acme/widgets#5").classList.contains("optout"), tag("acme/widgets#5")],
+  n6: tag("acme/widgets#6"), label5: btn("acme/widgets#5").getAttribute("aria-label") }};
+const sw = () => q("#drawer [data-optin]");
+btn("acme/widgets#5").dispatch("click");
+const open5 = {{ shown: !dp("optin").hidden, checked: !!sw().checked, disabled: sw().disabled, why: dp("optin-why").hidden }};
+sw().checked = true;
+sw().dispatch("change");
+await tick();
+const toggled = {{ msg: dp("optin-msg").textContent, ok: dp("optin-msg").classList.contains("ok"), checked: !!sw().checked,
+  tag: tag("acme/widgets#5"), queue: document.querySelectorAll("#flow-q li").map((li) => li.querySelector(".tl").textContent) }};
+deny = true;
+sw().checked = false;
+sw().dispatch("change");
+await tick();
+const denied = {{ msg: dp("optin-msg").textContent, err: dp("optin-msg").classList.contains("err"), invalid: sw().getAttribute("aria-invalid"), checked: !!sw().checked }};
+btn("acme/widgets#6").dispatch("click");
+const running = {{ kind: q("#drawer").getAttribute("data-kind"), shown: !dp("optin").hidden, disabled: sw().disabled, why: dp("optin-why").textContent, msg: dp("optin-msg").hidden }};
+btn("acme/widgets#3").dispatch("click");
+const closed = {{ shown: !dp("optin").hidden, disabled: sw().disabled, why: dp("optin-why").textContent }};
+return {{ marked, open5, toggled, denied, running, closed, reqs }};
+"##
+        ),
+    );
+    assert_eq!(r["marked"]["n1"], json!([false, false]), "an opted-in issue is not marked: {r}");
+    assert_eq!(r["marked"]["n5"], json!([true, true]), "an opted-out issue is marked: {r}");
+    assert_eq!(r["marked"]["n6"], true, "a ticket on an unlabelled issue still reads as outside the flow: {r}");
+    assert!(r["marked"]["label5"].as_str().unwrap().contains("not in the flow"), "{r}");
+    assert_eq!(r["open5"], json!({"shown": true, "checked": false, "disabled": false, "why": true}), "{r}");
+    assert_eq!(r["reqs"][0], json!({"issue": "acme/widgets#5", "on": true}), "{r}");
+    let t = &r["toggled"];
+    assert_eq!(
+        (&t["msg"], &t["ok"], &t["checked"], &t["tag"]),
+        (&json!("Added “flow” on GitHub."), &json!(true), &json!(true), &json!(false)),
+        "{r}"
+    );
+    assert!(t["queue"].as_array().unwrap().contains(&json!("widgets#5")), "the Ready queue refreshes at once: {r}");
+    assert_eq!(r["reqs"][1], json!({"issue": "acme/widgets#5", "on": false}), "{r}");
+    assert_eq!(
+        r["denied"],
+        json!({"msg": "[permission] Resource not accessible by integration", "err": true, "invalid": "true", "checked": true}),
+        "a GitHub error shows on the control and the label stays on: {r}"
+    );
+    assert_eq!(
+        r["running"],
+        json!({"kind": "ticket", "shown": true, "disabled": true, "why": "A ticket is running for this issue.", "msg": true}),
+        "{r}"
+    );
+    assert_eq!(
+        r["closed"],
+        json!({"shown": true, "disabled": true, "why": "Closed issues stay out of the flow."}),
+        "{r}"
+    );
+}
