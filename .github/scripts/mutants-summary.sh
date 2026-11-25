@@ -7,7 +7,7 @@ mode=${3:-nightly}
 mkdir -p "$out"
 
 for kind in caught missed timeout unviable; do
-  { find "$shards_dir" -name "$kind.txt" -exec cat {} + 2>/dev/null || true; } | sort -u >"$out/$kind.txt"
+  find "$shards_dir" -name "$kind.txt" -exec cat {} + 2>/dev/null | sort -u >"$out/$kind.txt"
 done
 
 count() { grep -c . "$1" || true; }
