@@ -65,11 +65,11 @@ fn local_zone() -> &'static TimeZone {
 
 pub fn local_clock(s: &str) -> String {
     match parse_ts(s) {
-        Some(t) => t.to_zoned(local_zone().clone()).strftime("%H:%M %Z").to_string(),
+        Some(t) => t.to_zoned_datetime(local_zone().clone()).strftime("%H:%M %Z").to_string(),
         None => "-".into(),
     }
 }
 
 pub fn local_datetime(t: Timestamp) -> String {
-    t.to_zoned(local_zone().clone()).strftime("%Y-%m-%d %H:%M %Z").to_string()
+    t.to_zoned_datetime(local_zone().clone()).strftime("%Y-%m-%d %H:%M %Z").to_string()
 }
