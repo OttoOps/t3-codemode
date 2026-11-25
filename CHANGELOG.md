@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2](https://github.com/OttoOps/t3-codemode/compare/v0.13.1...v0.13.2) - 2026-11-25
+
+### Other
+
+- describe the nightly chaos workflow
+- add nightly chaos sweep and mutation grading
+- add cargo-mutants profile and config
+
 ## [0.13.1](https://github.com/OttoOps/t3-codemode/compare/v0.13.0...v0.13.1) - 2026-11-25
 
 ### Other
