@@ -257,6 +257,50 @@ pub struct FlowIssueUpdateResponse {
     pub refresh_error: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FlowOptInArgs {
+    pub issue: String,
+    pub on: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlowOptInResponse {
+    pub ok: bool,
+    pub issue: String,
+    pub on: bool,
+    pub label: String,
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub permission: bool,
+    pub labels: Vec<LabelReport>,
+    pub errors: Vec<WiringError>,
+    pub flow: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_error: Option<String>,
+}
+
+struct OptInOutcome {
+    issue: String,
+    status: &'static str,
+    refused: Option<&'static str>,
+    labels: Vec<LabelReport>,
+    errors: Vec<WiringError>,
+}
+
+impl OptInOutcome {
+    fn refused(issue: String, why: &'static str) -> Self {
+        Self { issue, status: "refused", refused: Some(why), labels: Vec::new(), errors: Vec::new() }
+    }
+
+    fn failed(issue: String, error: WiringError) -> Self {
+        Self { issue, status: "error", refused: None, labels: Vec::new(), errors: vec![error] }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FlowMeta {
     pub(crate) parent: Option<String>,
@@ -1953,6 +1997,144 @@ impl Wf {
         })
     }
 
+    pub async fn set_flow_opt_in(&self, args: FlowOptInArgs) -> Result<FlowOptInResponse> {
+        let label = self
+            .config()
+            .flow
+            .as_ref()
+            .and_then(|f| f.opt_in.as_ref())
+            .and_then(|o| o.label.as_deref())
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .ok_or_else(|| anyhow!("set_flow_opt_in: flow.optIn.label is not set, so there is no label to toggle"))?;
+        let parsed = parse_github_issue_only(args.issue.trim()).ok_or_else(|| {
+            anyhow!(
+                "set_flow_opt_in: issue {:?} is not a GitHub issue; use <owner>/<repo>#<n> or a GitHub issue URL",
+                args.issue
+            )
+        })?;
+        let (owner, repo, number) = parsed.github_parts().expect("GitHub issue has parts");
+        if number == 0 || number > MAX_GRAPHQL_ISSUE_NUMBER {
+            bail!("set_flow_opt_in: issue {:?} has an out-of-range issue number", args.issue);
+        }
+        let full_repo = format!("{owner}/{repo}");
+
+        let outcome = {
+            let _pick = self.flow_lock.lock().await;
+            let _issue_guard = self.issue_edit_lock(&full_repo, number).lock_owned().await;
+            self.toggle_opt_in_label(&full_repo, number, &label, args.on).await?
+        };
+
+        let (flow, refresh_error) = match self.flow_view(true).await {
+            Ok(fresh) => (Some(serde_json::to_value(fresh)?), None),
+            Err(e) => (None, Some(format!("{e:#}"))),
+        };
+        let error = outcome.errors.first().map(|e| e.message.clone()).or(outcome.refused.map(String::from));
+        Ok(FlowOptInResponse {
+            ok: outcome.errors.is_empty() && outcome.refused.is_none(),
+            issue: outcome.issue,
+            on: args.on,
+            label,
+            status: outcome.status,
+            error,
+            permission: outcome.errors.iter().any(|e| e.permission),
+            labels: outcome.labels,
+            errors: outcome.errors,
+            flow,
+            refresh_error,
+        })
+    }
+
+    async fn toggle_opt_in_label(&self, repo: &str, number: u64, label: &str, on: bool) -> Result<OptInOutcome> {
+        let mut caches = WireCaches::new();
+        let node = match self.resolve_issue_cached(&mut caches, repo, number).await {
+            Ok(node) => node,
+            Err(e) => {
+                let target = ref_slug(repo, number);
+                return Ok(OptInOutcome::failed(
+                    target.clone(),
+                    WiringError { op: "readIssue", target, message: e.message, permission: e.permission },
+                ));
+            }
+        };
+        let canon = ref_slug(&node.repo, node.number);
+        if node.closed {
+            return Ok(OptInOutcome::refused(canon, crate::flow::OPT_IN_CLOSED));
+        }
+        let view = match self.flow_view(true).await {
+            Ok(view) => view,
+            Err(e) => {
+                let target = canon.clone();
+                return Ok(OptInOutcome::failed(
+                    canon,
+                    WiringError { op: "readFlow", target, message: format!("{e:#}"), permission: false },
+                ));
+            }
+        };
+        let locked = view
+            .graph
+            .as_ref()
+            .and_then(|g| g.nodes.iter().find(|n| n.repo.eq_ignore_ascii_case(&node.repo) && n.number == node.number))
+            .map_or(Some(crate::flow::OPT_IN_UNCOVERED), |n| n.opt_in.as_ref().and_then(|o| o.locked));
+        if let Some(why) = locked {
+            return Ok(OptInOutcome::refused(canon, why));
+        }
+        let present: Vec<&LabelNode> = node.labels.iter().filter(|l| l.name.eq_ignore_ascii_case(label)).collect();
+        if on != present.is_empty() {
+            let name = present.first().map_or_else(|| label.to_string(), |l| l.name.clone());
+            let labels =
+                vec![LabelReport { name, status: if on { "alreadyApplied" } else { "notApplied" }, error: None }];
+            return Ok(OptInOutcome { issue: canon, status: "unchanged", refused: None, labels, errors: Vec::new() });
+        }
+        if on {
+            let plan = WiringPlan {
+                blocked_by: Vec::new(),
+                parent: None,
+                replace_parent: false,
+                labels: desired_labels(None, None, Some(label), &[]),
+            };
+            let report = self.wire_issue_node(&node, &plan, &mut caches).await;
+            let status = if report.errors.is_empty() { "added" } else { "error" };
+            return Ok(OptInOutcome {
+                issue: canon,
+                status,
+                refused: None,
+                labels: report.labels,
+                errors: report.errors,
+            });
+        }
+        let ids: Vec<String> = present.iter().map(|l| l.id.clone()).collect();
+        Ok(match github::remove_labels(&*self.github, &node.id, &ids).await {
+            Ok(()) => OptInOutcome {
+                issue: canon,
+                status: "removed",
+                refused: None,
+                labels: present
+                    .iter()
+                    .map(|l| LabelReport { name: l.name.clone(), status: "removed", error: None })
+                    .collect(),
+                errors: Vec::new(),
+            },
+            Err(e) => {
+                let mut out = OptInOutcome::failed(
+                    canon.clone(),
+                    WiringError {
+                        op: "removeLabels",
+                        target: canon,
+                        message: e.message.clone(),
+                        permission: e.permission,
+                    },
+                );
+                out.labels = present
+                    .iter()
+                    .map(|l| LabelReport { name: l.name.clone(), status: "error", error: Some(e.message.clone()) })
+                    .collect();
+                out
+            }
+        })
+    }
+
     pub async fn report_issue(&self, me: &str, a: IssueArgs) -> Result<Value> {
         let issue = parse_github_issue_only(&a.url).ok_or_else(|| {
             anyhow!(
@@ -2193,6 +2375,7 @@ impl Wf {
                 number: created.number,
                 url: created.url.clone(),
                 title: created.title.clone(),
+                closed: false,
                 parent: None,
                 blocked_by: Vec::new(),
                 labels: Vec::new(),

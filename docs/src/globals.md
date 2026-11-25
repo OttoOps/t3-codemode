@@ -152,7 +152,8 @@ parent and a child, and the service keeps every link and message in its store.
   `message`. From the board's [dependency graph](board.md#the-queue--graph-view)
   you can also sync body-parsed links (`POST /api/flow/sync-links`), edit edges
   and tracks directly from the inspector (`POST /api/flow/edge`,
-  `POST /api/flow/issue`), or run read-only **Triage DAG** proposals
+  `POST /api/flow/issue`), toggle an issue's flow opt-in label
+  (`POST /api/flow/opt-in`), or run read-only **Triage DAG** proposals
   (`POST /api/flow/triage`) before confirming writes.
 - `wf.fileIssues({ repo?, parent?, track?, priority?, labels?, queue?, report?, sync?, issues })`
   creates a batch of GitHub issues forming a dependency DAG in one call. See

@@ -28,6 +28,7 @@ pub const ISSUE_NODE: &str = "query IssueNode($owner: String!, $name: String!, $
       number
       url
       title
+      state
       parent { id number repository { nameWithOwner } }
       blockedBy(first: 100) {
         nodes { id number repository { nameWithOwner } }
@@ -351,6 +352,7 @@ pub struct IssueNode {
     pub number: u64,
     pub url: String,
     pub title: String,
+    pub closed: bool,
     pub parent: Option<IssueNodeRef>,
     pub blocked_by: Vec<IssueNodeRef>,
     pub labels: Vec<LabelNode>,
@@ -445,6 +447,7 @@ pub async fn read_issue_node(
     let url =
         issue["url"].as_str().map_or_else(|| format!("https://github.com/{repo_name}/issues/{num}"), String::from);
     let title = issue["title"].as_str().unwrap_or_default().to_string();
+    let closed = issue["state"] == "CLOSED";
     let parent = parse_issue_node_ref(&issue["parent"]);
     let blocked_by =
         issue["blockedBy"]["nodes"].as_array().into_iter().flatten().filter_map(parse_issue_node_ref).collect();
@@ -454,7 +457,7 @@ pub async fn read_issue_node(
         .flatten()
         .filter_map(|l| Some(LabelNode { id: l["id"].as_str()?.to_string(), name: l["name"].as_str()?.to_string() }))
         .collect();
-    Ok(IssueNode { id, repo_id, repo: repo_name, number: num, url, title, parent, blocked_by, labels })
+    Ok(IssueNode { id, repo_id, repo: repo_name, number: num, url, title, closed, parent, blocked_by, labels })
 }
 
 pub async fn find_label(

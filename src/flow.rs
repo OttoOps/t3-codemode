@@ -340,7 +340,25 @@ pub struct GraphNode {
     pub external: bool,
     pub ticket: Option<GraphTicket>,
     pub warnings: Vec<NodeWarning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opt_in: Option<NodeOptIn>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeOptIn {
+    pub on: bool,
+    pub in_flow: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked: Option<&'static str>,
+}
+
+pub const OPT_IN_UNCOVERED: &str = "The flow does not cover this repository";
+pub const OPT_IN_CLOSED: &str = "Closed issues stay out of the flow";
+pub const OPT_IN_UNREAD: &str = "This issue was not read from GitHub";
+pub const OPT_IN_RUNNING: &str = "A ticket is running for this issue";
+pub const OPT_IN_EXTERNAL: &str = "External issues wait on work outside the flow";
+pub const OPT_IN_NO_LABEL: &str = "flow.optIn sets no label to toggle";
 
 #[derive(Clone, Default)]
 struct CoveredRepos {
@@ -974,6 +992,7 @@ impl GraphBuild {
             external: false,
             ticket: None,
             warnings: Vec::new(),
+            opt_in: None,
         });
         n.title = n.title.take().or_else(|| r.title.clone());
         n.state = n.state.or(state);
@@ -1443,18 +1462,26 @@ impl GraphBuild {
     }
 }
 
-fn graph(
-    covered: &CoveredRepos,
-    aliases: &std::collections::HashMap<String, String>,
-    reads: Vec<Read>,
-    tickets: &[Ticket],
-    lists: &BTreeMap<String, &'static str>,
-    sc: &SourceControlEdges,
-) -> Graph {
+struct GraphInputs<'a> {
+    covered: &'a CoveredRepos,
+    aliases: &'a std::collections::HashMap<String, String>,
+    tickets: &'a [Ticket],
+    lists: &'a BTreeMap<String, &'static str>,
+    sc: &'a SourceControlEdges,
+    opt_in: Option<&'a OptIn>,
+}
+
+fn graph(inputs: GraphInputs<'_>, reads: Vec<Read>) -> Graph {
+    let GraphInputs { covered, aliases, tickets, lists, sc, opt_in } = inputs;
     let tracked = covered.tracked_set();
     let mut g = GraphBuild::default();
+    let mut opt_in_reads: BTreeMap<String, (bool, bool)> = BTreeMap::new();
     for r in reads {
-        let list = lists.get(&node_key(&r.issue.repo, r.issue.number)).copied();
+        let key = node_key(&r.issue.repo, r.issue.number);
+        if let Some(opt) = opt_in {
+            opt_in_reads.insert(key.clone(), (has_opt_in_label(opt, &r), matches_opt_in(Some(opt), &r)));
+        }
+        let list = lists.get(&key).copied();
         g.read(r, list, &tracked);
     }
     for t in tickets {
@@ -1471,7 +1498,30 @@ fn graph(
     for e in &sc.code_deps {
         g.add_code_dep(e, &sc.known_refs);
     }
-    g.finish()
+    let mut out = g.finish();
+    if let Some(opt) = opt_in {
+        for n in &mut out.nodes {
+            let read = opt_in_reads.get(&node_key(&n.repo, n.number)).copied();
+            let (on, in_flow) = read.unwrap_or((false, false));
+            let locked = if !covered.contains(&n.repo) {
+                Some(OPT_IN_UNCOVERED)
+            } else if n.state == Some("closed") {
+                Some(OPT_IN_CLOSED)
+            } else if read.is_none() {
+                Some(OPT_IN_UNREAD)
+            } else if n.ticket.is_some() {
+                Some(OPT_IN_RUNNING)
+            } else if n.external {
+                Some(OPT_IN_EXTERNAL)
+            } else if opt.label.is_none() {
+                Some(OPT_IN_NO_LABEL)
+            } else {
+                None
+            };
+            n.opt_in = Some(NodeOptIn { on, in_flow, locked });
+        }
+    }
+    out
 }
 
 pub fn why(i: &FlowIssue) -> String {
@@ -1569,15 +1619,16 @@ struct FlowPlan {
     meta_ops: Vec<FlowMetaOp>,
 }
 
+fn has_opt_in_label(opt: &OptIn, r: &Read) -> bool {
+    opt.label.as_deref().is_some_and(|label| r.labels.iter().any(|l| l.eq_ignore_ascii_case(label.trim())))
+}
+
 fn matches_opt_in(opt_in: Option<&OptIn>, r: &Read) -> bool {
     let Some(opt) = opt_in else {
         return true;
     };
-    if let Some(label) = opt.label.as_deref() {
-        let want = label.trim();
-        if !r.labels.iter().any(|l| l.eq_ignore_ascii_case(want)) {
-            return false;
-        }
+    if opt.label.is_some() && !has_opt_in_label(opt, r) {
+        return false;
     }
     if let Some(milestone) = opt.milestone.as_deref() {
         let want = milestone.trim();
@@ -3745,7 +3796,17 @@ impl Wf {
             lists.extend(list.iter().map(|i| (node_key(&i.repo, i.number), name)));
         }
         lists.extend(view.blocked.iter().map(|b| (node_key(&b.issue.repo, b.issue.number), "blocked")));
-        let mut g = graph(&covered, &aliases, all, &tickets, &lists, &sc);
+        let mut g = graph(
+            GraphInputs {
+                covered: &covered,
+                aliases: &aliases,
+                tickets: &tickets,
+                lists: &lists,
+                sc: &sc,
+                opt_in: cfg.as_ref().and_then(|c| c.opt_in.as_ref()),
+            },
+            all,
+        );
         g.dismissed_edges = dismissed_edges_for_graph_from(&dismissed_rows, &g, &covered, &aliases);
         let triage = if capture_triage {
             let mut repo_trees: BTreeMap<String, Vec<String>> = BTreeMap::new();
