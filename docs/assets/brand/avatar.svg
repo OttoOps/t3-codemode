@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">t3-codemode</title>
+  <desc id="desc">Four incoming rails converge into two signal tracks. A ring marks search and a forward triangle marks execute.</desc>
+  <rect width="512" height="512" fill="#0c1017"/>
+  <g fill="none" stroke-width="28">
+    <path d="M88 142H268 M88 218H164L240 142 M88 294H164L240 370 M88 370H268" stroke="#8395ae" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M260 142H356 M260 370H362" stroke="#e29524"/>
+    <circle cx="392" cy="142" r="36" fill="#0c1017" stroke="#e29524"/>
+  </g>
+  <path d="M352 320L446 370 352 420Z" fill="#e29524"/>
+</svg>

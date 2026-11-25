@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">t3-codemode</title>
+  <desc id="desc">Code Mode MCP service for T3 Code. Four incoming rails converge into two signal tracks.</desc>
+  <rect width="1280" height="640" fill="#0c1017"/>
+  <path d="M96 112H1184 M96 528H1184" fill="none" stroke="#233044" stroke-width="2"/>
+  <rect x="96" y="160" width="320" height="320" rx="8" fill="#131c2b" stroke="#233044" stroke-width="2"/>
+  <g transform="translate(96 160) scale(.625)">
+    <g fill="none" stroke-width="28">
+      <path d="M88 142H268 M88 218H164L240 142 M88 294H164L240 370 M88 370H268" stroke="#8395ae" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M260 142H356 M260 370H362" stroke="#e29524"/>
+      <circle cx="392" cy="142" r="36" fill="#131c2b" stroke="#e29524"/>
+    </g>
+    <path d="M352 320L446 370 352 420Z" fill="#e29524"/>
+  </g>
+  <g font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
+    <text x="472" y="315" fill="#eef2f7" font-size="92" font-weight="800" letter-spacing="-2.1">t3-codemode</text>
+    <text x="476" y="377" fill="#a3b3c9" font-size="34" font-weight="400">Code Mode MCP service for T3 Code</text>
+  </g>
+</svg>

@@ -1,3 +1,5 @@
+<img src="docs/assets/brand/avatar.svg" alt="" width="96" align="right">
+
 # t3-codemode
 
 `t3cm` is a Code Mode MCP service for T3 Code. It puts T3's MCP tools, and the
