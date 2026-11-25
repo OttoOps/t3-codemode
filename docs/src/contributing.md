@@ -37,6 +37,43 @@ work needs no T3 Code server. `tests/fixtures/t3-tools.json` is a snapshot of
 T3's 74 tools. At runtime the catalog comes live from `tools/list`, refreshed
 every 10 minutes and cached in the store for when T3 is down.
 
+### Fault rules
+
+`FakeT3` and `FakeGitHub` fail or hold calls by rule. A rule names an op, an
+optional target, and the matching call it fires on. The op is a T3 tool such
+as `t3_thread_send`, or a GitHub operation such as `read` or
+`mergePullRequest`, and `*` matches every call. The target is a thread id on
+T3, or `owner/name#number` on GitHub:
+
+```rust
+h.github.fault(Rule::on("read").pr("acme/widgets", 7).call(1).fail(Failure::refused("try again")));
+h.fake.fault(Rule::on("t3_thread_send").fail_after_effect(Failure::down("reply lost")));
+```
+
+A gate holds one call while the test runs another, on a harness with no other
+`t3_thread_send` rule:
+
+```rust
+let gate = Gate::new();
+h.fake.fault(Rule::on("t3_thread_send").call(1).gate(&gate));
+let parked = h.fake.call("t3_thread_send", json!({"threadId": "mcp:a", "message": "first"}));
+let race = async {
+    gate.arrived().await;
+    h.fake.call("t3_thread_send", json!({"threadId": "mcp:b", "message": "second"})).await.unwrap();
+    gate.release();
+};
+let (parked, ()) = tokio::join!(parked, race);
+```
+
+- `fail` returns the error before the call takes effect.
+- `fail_after_effect` applies the call, then returns the error.
+- `gate` parks the call until `release()`, and `arrived()` waits for it to
+  park.
+
+The op `reconcile.pr` targets one pull request inside the batched reconcile
+read. `set_jitter(Some(seed))` adds seeded `yield_now()` calls to every fake
+call, and the concurrent chaos tests pass their seed.
+
 A hidden `bench` command measures latency and RSS against the in-process fake
 T3:
 
