@@ -1,0 +1,113 @@
+name: fuzz-nightly
+
+on:
+  schedule:
+    - cron: "53 10 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: libFuzzer time budget for the decode_ops target, in seconds
+        type: string
+        default: "1800"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  NIGHTLY: nightly-2026-10-28
+
+jobs:
+  decode-ops:
+    name: decode_ops (libFuzzer, ASan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      BUDGET: ${{ inputs.seconds || '1800' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable as of 2026-10-16
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: fuzz-decode-ops
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz@0.13.2
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/decode_ops
+          key: fuzz-decode-ops-corpus-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-decode-ops-corpus-
+      - name: Build
+        working-directory: fuzz
+        run: cargo "+$NIGHTLY" fuzz build decode_ops
+      - name: Fuzz
+        id: fuzz
+        working-directory: fuzz
+        run: |
+          if ! [[ "$BUDGET" =~ ^[1-9][0-9]{0,3}$ ]] || (( BUDGET > 3000 )); then
+            echo "seconds must be an integer from 1 to 3000, got '$BUDGET'"
+            exit 1
+          fi
+          mkdir -p corpus/decode_ops seeds
+          echo "corpus_in=$(find corpus/decode_ops -type f | wc -l)" >> "$GITHUB_OUTPUT"
+          head -c $((16 * 768)) /dev/urandom | split -b 768 -d - seeds/random-
+          cargo "+$NIGHTLY" fuzz run decode_ops corpus/decode_ops seeds -- \
+            -max_total_time="$BUDGET" -timeout=120 -max_len=768 -print_final_stats=1 2>&1 | tee fuzz.log
+      - name: Replay crashers as ops
+        if: failure()
+        working-directory: fuzz
+        run: |
+          bin=target/x86_64-unknown-linux-gnu/release/decode_ops
+          shopt -s nullglob
+          for f in artifacts/decode_ops/*; do
+            FUZZ_DUMP_OPS=1 timeout 300 "$bin" "$f" > "$f.replay.log" 2>&1 || true
+            grep -E '^(#|\{)' "$f.replay.log" > "$f.ops" || true
+          done
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: fuzz-crashers
+          path: |
+            fuzz/artifacts/decode_ops/
+            fuzz/fuzz.log
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Minimize the corpus
+        id: cmin
+        if: always() && steps.fuzz.outcome != 'skipped'
+        timeout-minutes: 20
+        working-directory: fuzz
+        run: cargo "+$NIGHTLY" fuzz cmin decode_ops -- -timeout=120 -max_len=768
+      - name: Job summary
+        if: always() && steps.fuzz.outcome != 'skipped'
+        working-directory: fuzz
+        env:
+          CORPUS_IN: ${{ steps.fuzz.outputs.corpus_in }}
+        run: |
+          {
+            echo "## decode_ops fuzzing"
+            echo
+            echo "Budget ${BUDGET}s, corpus ${CORPUS_IN:-0} inputs in, $(find corpus/decode_ops -type f | wc -l) after cmin."
+            echo
+            echo '```text'
+            grep -E '^stat::|^#[0-9]+[[:space:]]+DONE|^SUMMARY|panicked at' fuzz.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: always() && steps.cmin.outcome == 'success'
+        with:
+          path: fuzz/corpus/decode_ops
+          key: fuzz-decode-ops-corpus-${{ github.run_id }}-${{ github.run_attempt }}
