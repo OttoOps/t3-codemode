@@ -3,18 +3,25 @@ set -euo pipefail
 
 shards_dir=$1
 out=$2
+mode=${3:-nightly}
 mkdir -p "$out"
 
 for kind in caught missed timeout unviable; do
-  find "$shards_dir" -name "$kind.txt" -exec cat {} + 2>/dev/null | sort -u >"$out/$kind.txt"
+  { find "$shards_dir" -name "$kind.txt" -exec cat {} + 2>/dev/null || true; } | sort -u >"$out/$kind.txt"
 done
 
 count() { grep -c . "$1" || true; }
 
 {
-  echo "## Mutation grading"
-  echo
-  echo "cargo-mutants over the files in \`.cargo/mutants.toml\`, graded by the \`pr_chaos\` tests."
+  if [[ $mode == diff ]]; then
+    echo "## Diff mutation grading"
+    echo
+    echo "cargo-mutants over the lines this PR changes in the files in \`.cargo/mutants.toml\`, graded by the \`pr_chaos\` tests. Advisory: a missed mutant does not block the merge."
+  else
+    echo "## Mutation grading"
+    echo
+    echo "cargo-mutants over the files in \`.cargo/mutants.toml\`, graded by the \`pr_chaos\` tests."
+  fi
   echo
   echo "| file | caught | missed | timeout | unviable |"
   echo "| --- | ---: | ---: | ---: | ---: |"
@@ -28,5 +35,21 @@ count() { grep -c . "$1" || true; }
   done
   echo "| **total** | $(count "$out/caught.txt") | $(count "$out/missed.txt") | $(count "$out/timeout.txt") | $(count "$out/unviable.txt") |"
   echo
-  echo "Survivors are listed in \`missed.txt\` and \`timeout.txt\` in the \`mutants-survivors\` artifact."
+  if [[ $mode == diff ]]; then
+    if ! grep -q . "$out"/{caught,missed,timeout,unviable}.txt; then
+      echo "The changed lines hold no mutants."
+      echo
+    fi
+    for kind in missed timeout; do
+      [[ -s $out/$kind.txt ]] || continue
+      echo "### ${kind^}"
+      echo
+      echo '```text'
+      cat "$out/$kind.txt"
+      echo '```'
+      echo
+    done
+  else
+    echo "Survivors are listed in \`missed.txt\` and \`timeout.txt\` in the \`mutants-survivors\` artifact."
+  fi
 } >"$out/summary.md"
