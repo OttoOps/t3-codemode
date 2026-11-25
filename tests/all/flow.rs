@@ -2556,6 +2556,58 @@ async fn sibling_title_and_phase_references_resolve_unambiguously_and_flag_unres
 }
 
 #[tokio::test]
+async fn backticked_phase_titles_resolve_and_backticked_prose_raises_no_parent() {
+    let h = flowing(4);
+    h.github.set_issue(REPO, github_issue(39, "Epic: fuzzing", &[], "2026-10-01T09:00:00Z"));
+    h.github.set_issue(
+        REPO,
+        github_issue(120, "feat: board primitives for answers and notes", &[], "2026-10-02T09:00:00Z"),
+    );
+    h.github.set_issue(
+        REPO,
+        github_issue(
+            244,
+            "test: add shared arbitrary op decoder, swarm weights, and ddmin shrinker",
+            &[],
+            "2026-10-03T09:00:00Z",
+        ),
+    );
+    h.github.set_issue(
+        REPO,
+        github_issue(
+            256,
+            "feat: wire native GitHub dependencies on issue filing and sync parsed links",
+            &[],
+            "2026-10-04T09:00:00Z",
+        ),
+    );
+    h.github.set_issue(REPO, github_issue(245, "test: add gate-able fakes", &[FLOW], "2026-10-05T09:00:00Z"));
+    h.github.set_issue(REPO, github_issue(187, "feat: adopt cargo-mutants", &[FLOW], "2026-10-06T09:00:00Z"));
+    h.github.set_body(REPO, 120, "## Scope (Phase P2 of #39)\n");
+    h.github.set_body(REPO, 244, "## Scope (Phase P2 of #39)\n");
+    h.github.set_body(REPO, 256, "## Scope (Phase P2 of #39)\n");
+    h.github.set_body(
+        REPO,
+        245,
+        "Depends on Phase P2 (`test: add shared arbitrary op decoder, swarm weights, and ddmin shrinker`).\n\n## Scope (Phases P3 + P4 of #39)\n",
+    );
+    h.github.set_body(
+        REPO,
+        187,
+        "Adopt `cargo-mutants` as a full, low-friction part of `t3cm`'s testing workflow and CI without slowing down normal PR turnaround.\n",
+    );
+    h.github.close_issue(REPO, 244);
+    h.github.close_issue(REPO, 256);
+
+    let g = graph(&h).await;
+    assert_eq!(labels(&g["queue"]), ["widgets#245", "widgets#187"], "{g}");
+    assert_eq!(ids(&node(&g, "acme/widgets#245")["blockedBy"]), ["acme/widgets#244"]);
+    assert_eq!(node(&g, "acme/widgets#245")["warnings"], json!([]));
+    assert_eq!(node(&g, "acme/widgets#187")["warnings"], json!([]));
+    assert_eq!(g["graph"]["warnings"], json!([]));
+}
+
+#[tokio::test]
 async fn cycles_unresolved_refs_and_edge_sources_surface_in_graph_warnings_and_board_ui() {
     let h = flowing(4);
     issue(&h, REPO, 1, &[FLOW], 1);

@@ -388,6 +388,77 @@ fn strip_inline_code(line: &str) -> String {
     out
 }
 
+fn strip_inline_code_keeping_phase_titles(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            if let Some((content_start, end)) = find_inline_code_end(bytes, i) {
+                let inner = &line[content_start..end - (content_start - i)];
+                if ends_with_phase_label(&out) && inner.chars().any(char::is_alphanumeric) {
+                    out.push('"');
+                    out.push_str(&inert_title_words(inner));
+                    out.push('"');
+                } else {
+                    out.push(' ');
+                }
+                i = end;
+            } else {
+                let start = i;
+                while i < bytes.len() && bytes[i] == b'`' {
+                    i += 1;
+                }
+                out.push_str(&line[start..i]);
+            }
+        } else if matches!(bytes[i], b'"' | b'\'')
+            && is_opening_quote_byte(bytes, i)
+            && ends_with_phase_label(&out)
+            && let Some(close) = closing_quote(&line[i + 1..], bytes[i] as char)
+            && line[i + 1..i + 1 + close].chars().any(char::is_alphanumeric)
+        {
+            out.push('"');
+            out.push_str(&inert_title_words(&line[i + 1..i + 1 + close]));
+            out.push('"');
+            i += 1 + close + 1;
+        } else {
+            let ch = line[i..].chars().next().expect("valid utf-8 boundary");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+fn ends_with_phase_label(s: &str) -> bool {
+    let t = s.trim_end();
+    let t = t.strip_suffix(['(', ':', '-', '—', '–']).map_or(t, str::trim_end);
+    let bytes = t.as_bytes();
+    let last_token = t.rsplit(char::is_whitespace).next().map_or(0, |tok| t.len() - tok.len());
+    let phase_word = t.to_ascii_lowercase().rfind("phase");
+    [Some(last_token), phase_word].into_iter().flatten().any(|start| {
+        is_boundary_before(bytes, start)
+            && extract_leading_phase(&t[start..]).is_some_and(|(_, len)| start + len == t.len())
+    })
+}
+
+fn inert_title_words(inner: &str) -> String {
+    inner.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join("\u{a0}")
+}
+
+fn closing_quote(s: &str, q: char) -> Option<usize> {
+    s.match_indices(q).map(|(j, _)| j).find(|&j| q == '"' || !s[j + 1..].starts_with(char::is_alphanumeric))
+}
+
+fn phase_title_end(tail: &str, after_label: usize) -> usize {
+    let rest = tail[after_label..].trim_start();
+    let quoted = rest.strip_prefix([':', '-', '—', '–']).map_or(rest, str::trim_start);
+    quoted
+        .strip_prefix('"')
+        .and_then(|q| q.find('"'))
+        .map_or(after_label, |close| tail.len() - quoted.len() + 1 + close + 1)
+}
+
 fn parse_heading(line: &str) -> Option<(usize, &str)> {
     let bytes = line.as_bytes();
     let mut i = 0;
@@ -948,6 +1019,40 @@ fn starts_with_quoted(s: &str) -> bool {
     t.starts_with(['"', '\''])
 }
 
+fn starts_with_whole_quoted_target(s: &str) -> bool {
+    let t = s.trim_start();
+    let (bold, t) = match t.strip_prefix("**").or_else(|| t.strip_prefix("__")) {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, t),
+    };
+    let Some(q) = t.chars().next().filter(|c| matches!(c, '"' | '\'')) else {
+        return false;
+    };
+    let Some(close) = t[1..].find(q) else {
+        return false;
+    };
+    if t[1..1 + close].trim().is_empty() {
+        return false;
+    }
+    let mut after = &t[1 + close + 1..];
+    if bold {
+        after = after.strip_prefix("**").or_else(|| after.strip_prefix("__")).unwrap_or(after);
+    }
+    let after = after.trim_start();
+    if let Some(next) = strip_leading_kw(after, "and").or_else(|| after.strip_prefix('&')) {
+        return starts_with_inline_target(next);
+    }
+    after.is_empty() || after.starts_with(['.', ',', ';', ':', '!', '?', ')', '('])
+}
+
+fn starts_with_inline_target(s: &str) -> bool {
+    if starts_with_explicit_ref(s) || starts_with_whole_quoted_target(s) {
+        return true;
+    }
+    let t = s.trim_start().trim_start_matches("**").trim_start_matches("__").trim_start();
+    extract_leading_phase(t).is_some()
+}
+
 fn starts_with_explicit_or_phase_or_quote(s: &str) -> bool {
     if starts_with_explicit_ref(s) || starts_with_quoted(s) {
         return true;
@@ -1190,7 +1295,7 @@ fn capture_inline_target(rest: &str, inside_parens: bool) -> (&str, &str) {
         let item_end = if let Some(q @ (b'"' | b'\'')) = bytes.get(inner_pos).copied() {
             tail[inner_pos + 1..].find(q as char).map(|k| inner_pos + 1 + k + 1)
         } else if let Some((_, plen)) = extract_leading_phase(inner) {
-            Some(inner_pos + plen)
+            Some(phase_title_end(tail, inner_pos + plen))
         } else if inner.starts_with('[')
             && let Some(cb) = inner[1..].find(']')
             && inner[1 + cb + 1..].starts_with('(')
@@ -1243,14 +1348,14 @@ fn capture_inline_target(rest: &str, inside_parens: bool) -> (&str, &str) {
             } else {
                 tail.len() - after_sep.len()
             };
-            if starts_with_explicit_or_phase_or_quote(&tail[sep_advance..]) {
+            if starts_with_inline_target(&tail[sep_advance..]) {
                 pos = sep_advance;
                 continue;
             }
             break;
         } else if let Some(and_rest) = strip_leading_kw(after_ws, "and").or_else(|| after_ws.strip_prefix('&')) {
             let after_and = and_rest.trim_start();
-            if starts_with_explicit_or_phase_or_quote(after_and) {
+            if starts_with_inline_target(after_and) {
                 pos = pos + ws_skip + (after_ws.len() - after_and.len());
                 continue;
             }
@@ -1333,7 +1438,7 @@ fn parse_line_blocker_refs<'a>(default_repo: &str, rest: &'a str) -> (Vec<BodyRe
         } else if let Some((_, plen)) = extract_leading_phase(inner)
             && !inner[plen..].trim_start().starts_with([':', '-', '—', '–'])
         {
-            Some(inner_pos + plen)
+            Some(phase_title_end(tail, inner_pos + plen))
         } else if inner.starts_with('[')
             && let Some(cb) = inner[1..].find(']')
             && inner[1 + cb + 1..].starts_with('(')
@@ -1527,7 +1632,7 @@ fn scan_prose_segment(default_repo: &str, segment: &str, line_start: bool, parse
         if let Some((k, rest)) = match_phase_of(rest_here) {
             if !is_negated_prefix(prefix) {
                 parsed.declared_phase = parsed.declared_phase.or(Some(k));
-                if starts_with_explicit_or_phase_or_quote(rest) {
+                if starts_with_inline_target(rest) {
                     let (target, rem) = capture_inline_target(rest, paren_depth > 0);
                     for r in parse_ref_list(default_repo, target, false) {
                         push_unique_ref(&mut parsed.parents, r);
@@ -1558,8 +1663,9 @@ fn scan_prose_segment(default_repo: &str, segment: &str, line_start: bool, parse
                 let trimmed = after_kw.trim_start();
                 let has_colon = trimmed.starts_with(':');
                 let target_src = trimmed.strip_prefix(':').unwrap_or(trimmed).trim_start();
-                if starts_with_explicit_or_phase_or_quote(target_src) || (has_colon && kw != "after") {
-                    let (target, rem) = if starts_with_explicit_or_phase_or_quote(target_src) {
+                let opens_segment = prefix.trim().trim_matches(['*', '_']).trim().is_empty();
+                if starts_with_inline_target(target_src) || (has_colon && kw != "after" && opens_segment) {
+                    let (target, rem) = if starts_with_inline_target(target_src) {
                         capture_inline_target(target_src, paren_depth > 0)
                     } else {
                         slice_directive_tail(target_src, paren_depth > 0)
@@ -1914,7 +2020,7 @@ pub(crate) fn parse_body(default_repo: &str, body: &str) -> ParsedBody {
         }
 
         // Outside ## Flow: strip inline code spans before parsing prose & tasklists.
-        let clean = strip_inline_code(&line);
+        let clean = strip_inline_code_keeping_phase_titles(&line);
         let trimmed = clean.trim();
         if trimmed.is_empty() {
             continue;
@@ -2066,6 +2172,11 @@ fn parse_phase_query(raw: &str) -> Option<(u32, String)> {
     Some((k, subtitle))
 }
 
+fn title_matches_exactly(c: &Candidate, normalized: &str) -> bool {
+    normalize_title(&c.title) == normalized
+        || strip_conventional_prefix(&c.title).is_some_and(|s| normalize_title(s) == normalized)
+}
+
 fn resolve_in_scope(query: &str, scope: &[&Candidate], optional: bool) -> ResolveOutcome {
     if scope.is_empty() {
         return ResolveOutcome::NotFound;
@@ -2088,28 +2199,31 @@ fn resolve_in_scope(query: &str, scope: &[&Candidate], optional: bool) -> Resolv
         }
     };
 
-    // Tier 1: exact normalized title match (full or conventional-commit-stripped).
-    let exact: Vec<&Candidate> = scope
-        .iter()
-        .copied()
-        .filter(|c| {
-            normalize_title(&c.title) == q_norm
-                || strip_conventional_prefix(&c.title).is_some_and(|s| normalize_title(s) == q_norm)
-        })
-        .collect();
-    if !exact.is_empty() {
-        return decide(exact);
-    }
+    let exact: Vec<&Candidate> = scope.iter().copied().filter(|c| title_matches_exactly(c, &q_norm)).collect();
 
-    // Tier 2: phase reference match (e.g. "Phase 1", "P1", "Phase P1: foo").
+    // Phase reference (e.g. "Phase 1", "P1", "Phase P1: foo"): the phase and any title it names
+    // outrank a title that merely spells out the whole query.
     if let Some((phase_num, subtitle)) = parse_phase_query(query) {
-        let phase_hits: Vec<&Candidate> = scope
-            .iter()
-            .copied()
-            .filter(|c| c.declared_phase == Some(phase_num) || title_contains_phase(&c.title, phase_num))
-            .collect();
-        if !phase_hits.is_empty() {
-            if !subtitle.is_empty() {
+        let in_phase = |c: &Candidate| c.declared_phase == Some(phase_num) || title_contains_phase(&c.title, phase_num);
+        let phase_hits: Vec<&Candidate> = scope.iter().copied().filter(|c| in_phase(c)).collect();
+        if subtitle.is_empty() {
+            if !phase_hits.is_empty() {
+                return decide(phase_hits);
+            }
+        } else {
+            let titled: Vec<&Candidate> =
+                scope.iter().copied().filter(|c| title_matches_exactly(c, &subtitle)).collect();
+            let titled_in_phase: Vec<&Candidate> = titled.iter().copied().filter(|c| in_phase(c)).collect();
+            if !titled_in_phase.is_empty() {
+                return decide(titled_in_phase);
+            }
+            if !titled.is_empty() {
+                return decide(titled);
+            }
+            if !exact.is_empty() {
+                return decide(exact);
+            }
+            if !phase_hits.is_empty() {
                 let narrowed: Vec<&Candidate> = phase_hits
                     .iter()
                     .copied()
@@ -2117,8 +2231,12 @@ fn resolve_in_scope(query: &str, scope: &[&Candidate], optional: bool) -> Resolv
                     .collect();
                 return decide(narrowed);
             }
-            return decide(phase_hits);
         }
+    }
+
+    // Exact normalized title match (full or conventional-commit-stripped).
+    if !exact.is_empty() {
+        return decide(exact);
     }
 
     // Tier 3: word-bounded substring match on normalized title (guard against tiny/generic tokens).
@@ -2492,6 +2610,97 @@ The UI depends on the config file.
             resolve_symbolic("Phase 2", RefRole::Blocker, REPO, 22, Some("acme/widgets#20"), &cands),
             ResolveOutcome::NotFound
         );
+    }
+
+    #[test]
+    fn phase_ref_with_backticked_title_resolves_by_that_title() {
+        let body =
+            "Depends on Phase P2 (`test: add shared arbitrary op decoder, swarm weights, and ddmin shrinker`).\n";
+        let p = parse_body(REPO, body);
+        let [BodyRef::Symbolic(raw)] = p.blockers.as_slice() else {
+            panic!("expected one symbolic blocker, got {:?}", p.blockers);
+        };
+        let phase_two = |number: u64, title: &str| Candidate {
+            repo: REPO.into(),
+            number,
+            label: format!("widgets#{number}"),
+            title: title.into(),
+            parent_key: None,
+            declared_phase: Some(2),
+        };
+        let cands = vec![
+            phase_two(120, "feat: board primitives for answers and notes"),
+            phase_two(244, "test: add shared arbitrary op decoder, swarm weights, and ddmin shrinker"),
+            phase_two(256, "feat: wire native GitHub dependencies on issue filing and sync parsed links"),
+        ];
+        assert_eq!(
+            resolve_symbolic(raw, RefRole::Blocker, REPO, 245, None, &cands),
+            ResolveOutcome::Resolved(REPO.into(), 244)
+        );
+        assert_eq!(
+            resolve_symbolic("Phase P2", RefRole::Blocker, REPO, 245, None, &cands),
+            ResolveOutcome::Ambiguous(vec!["widgets#120".into(), "widgets#244".into(), "widgets#256".into()])
+        );
+
+        let scoped = [phase_two(300, "fix(api): refresh cache #12 via https://example.com")];
+        for line in [
+            "Depends on Phase P2 `fix(api): refresh cache #12 via https://example.com`.",
+            "Work happens after Phase P2 (`fix(api): refresh cache #12 via https://example.com`).",
+            "Depends on Phase P2 \"fix(api): refresh cache #12 via https://example.com\".",
+            "Depends on Phase P2 ('fix(api): refresh cache #12 via https://example.com').",
+            "Depends on Phase P2 'fix api refresh cache 12 via https example com'.",
+            "Work happens after Phase P2: \"fix(api): refresh cache #12 via https://example.com\".",
+        ] {
+            let p = parse_body(REPO, line);
+            let [BodyRef::Symbolic(raw)] = p.blockers.as_slice() else {
+                panic!("{line}: expected one symbolic blocker, got {:?}", p.blockers);
+            };
+            assert_eq!(
+                resolve_symbolic(raw, RefRole::Blocker, REPO, 245, None, &scoped),
+                ResolveOutcome::Resolved(REPO.into(), 300),
+                "{line}"
+            );
+        }
+        assert_eq!(parse_body(REPO, "Document Phase P2 (`blocked by Phase P1`).\n").blockers, vec![]);
+        let p = parse_body(REPO, "Depends on Phase P2 ('fix: don't drop cache #12').\n");
+        assert_eq!(
+            p.blockers,
+            vec![BodyRef::Symbolic("Phase P2 (\"fix\u{a0}don\u{a0}t\u{a0}drop\u{a0}cache\u{a0}12\")".into())]
+        );
+
+        let titled = [
+            phase_two(301, "Phase P2"),
+            phase_two(302, "feat: refresh cache"),
+            phase_two(303, "Phase P2 refresh cache"),
+        ];
+        assert_eq!(
+            resolve_symbolic("Phase P2", RefRole::Blocker, REPO, 245, None, &titled),
+            ResolveOutcome::Ambiguous(vec!["widgets#301".into(), "widgets#302".into(), "widgets#303".into()])
+        );
+        assert_eq!(
+            resolve_symbolic("Phase P2 \"refresh cache\"", RefRole::Blocker, REPO, 245, None, &titled),
+            ResolveOutcome::Resolved(REPO.into(), 302)
+        );
+    }
+
+    #[test]
+    fn backticked_word_followed_by_prose_is_not_an_inline_target() {
+        let body = "Adopt `cargo-mutants` as a full, low-friction part of `t3cm`'s testing workflow and CI without slowing down normal PR turnaround.\n";
+        let p = parse_body(REPO, body);
+        assert_eq!(p, ParsedBody::default());
+
+        let p = parse_body(
+            REPO,
+            "This is part of 'the plan' we agreed on.\nThis is part of 'the plan' and we agreed on a deadline.\nIt is also part of \"Epic: auth\" and #9 and 'the plan' we agreed on.\nThis is part of: setup auth.\n",
+        );
+        assert_eq!(
+            p.parents,
+            vec![BodyRef::Symbolic("Epic: auth".into()), BodyRef::Issue { repo: REPO.into(), number: 9 }]
+        );
+
+        let p = parse_body(REPO, "| Blocked by: Setup auth | Notes |\n|---|---|\n\n## Part of: Epic auth\n");
+        assert_eq!(p.blockers, vec![BodyRef::Symbolic("Setup auth".into())]);
+        assert_eq!(p.parents, vec![BodyRef::Symbolic("Epic auth".into())]);
     }
 
     #[test]
