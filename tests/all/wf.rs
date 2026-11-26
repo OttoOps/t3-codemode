@@ -291,13 +291,13 @@ async fn the_gate_kind_opens_the_gate_and_wakes() {
 async fn a_busy_child_is_left_alone_but_a_long_silence_is_reported_once() {
     let h = H::new();
     link_ticket_worker(&h).await;
-    h.fake.update(WORKER, json!({"status": "running", "updatedAt": at(200)}));
-    assert!(h.tick(200).await.is_empty());
+    h.fake.update(WORKER, json!({"status": "running", "updatedAt": at(1)}));
+    assert!(h.tick(1).await.is_empty());
     h.fake.update(WORKER, json!({"status": "idle", "pendingBackgroundTasks": [{"id": "b1"}], "updatedAt": at(100)}));
     assert!(h.tick(200).await.is_empty());
     let out = h.tick(241).await;
     assert!(out.iter().any(|a| a.starts_with("report to mcp:ticket")), "{out:?}");
-    assert!(h.last_message().contains("sent nothing for 241 min"), "{}", h.last_message());
+    assert!(h.last_message().contains("sent nothing for 240 min"), "{}", h.last_message());
     let n = h.sent().len();
     h.tick(400).await;
     assert_eq!(h.sent().len(), n);
@@ -567,6 +567,7 @@ fn bare_link(child: &str, parent: &str, label: &str) -> Link {
         base: Default::default(),
         project: None,
         paused_at: None,
+        busy_since: None,
         identity: Default::default(),
         brief: None,
         pr: None,

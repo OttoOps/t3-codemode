@@ -895,6 +895,7 @@ impl Wf {
                 closed_how: None,
                 unread: old.as_ref().map(|o| o.unread.clone()).unwrap_or_default(),
                 bad_run: None,
+                busy_since: None,
                 settled_at: None,
                 restored_at: None,
                 base: Default::default(),
@@ -1755,13 +1756,18 @@ impl Wf {
         }
         let updated = th["updatedAt"].as_str();
         ln.last_seen = updated.map(String::from);
+        let status = th["status"].as_str().unwrap_or("");
+        let busy =
+            ACTIVE.contains(&status) || truthy(&th["blockedOnThreadWait"]) || truthy(&th["pendingBackgroundTasks"]);
+        if !busy {
+            ln.busy_since = None;
+        } else if ln.busy_since.is_none() {
+            ln.busy_since = Some(now.clone());
+        }
         if ln.paused_at.is_some() {
             self.reach.hit(ReachPoint::PausedLinkSkipped);
             return Ok(());
         }
-        let status = th["status"].as_str().unwrap_or("");
-        let busy =
-            ACTIVE.contains(&status) || truthy(&th["blockedOnThreadWait"]) || truthy(&th["pendingBackgroundTasks"]);
         let idle = self.mins(updated).unwrap_or(0.0);
         let latest_run = th["latestRunId"].as_str().map(String::from);
         if truthy(&th["pendingRequestCount"]) || status == "waiting" {
@@ -1777,14 +1783,16 @@ impl Wf {
             return Ok(());
         }
         if busy {
-            let quiet = self.mins(Some(&ln.last_up)).unwrap_or(0.0);
+            let since =
+                ln.busy_since.as_deref().filter(|b| *b > ln.last_up.as_str()).unwrap_or(&ln.last_up).to_string();
+            let quiet = self.mins(Some(&since)).unwrap_or(0.0);
             if ln.gate.is_none() && quiet >= p.stall as f64 {
                 let text = format!(
                     "{} has been busy but sent nothing for {quiet:.0} min. t3.t3_thread_read shows where it is: {}",
                     ln.label,
                     Self::where_is(ln)
                 );
-                let key = format!("stall@{}", ln.last_up);
+                let key = format!("stall@{since}");
                 if !ln.reported.contains(&key) {
                     self.reach.hit(ReachPoint::StallReported);
                 }

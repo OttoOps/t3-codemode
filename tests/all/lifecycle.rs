@@ -88,7 +88,8 @@ async fn a_worker_busy_past_its_stall_minutes_is_reported_once() {
     link_worker(&h).await;
     h.fake.start_run(WORKER, None);
 
-    h.tick(239).await;
+    h.tick(1).await;
+    h.tick(240).await;
     let early = reach(&h, ReachPoint::StallReported);
     h.tick(241).await;
     h.tick(300).await;
@@ -99,6 +100,27 @@ async fn a_worker_busy_past_its_stall_minutes_is_reported_once() {
         sent_to(&h, TICKET).into_iter().filter(|m| m.contains("busy but sent nothing")).collect();
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert!(sent_to(&h, WORKER).is_empty());
+}
+
+#[tokio::test]
+async fn a_worker_woken_after_a_long_idle_gets_its_full_stall_minutes() {
+    let h = H::new();
+    link_worker(&h).await;
+    h.tick(300).await;
+    h.clock.set(&at(400));
+    h.fake.start_run(WORKER, None);
+
+    h.tick(401).await;
+    h.tick(639).await;
+    let early = reach(&h, ReachPoint::StallReported);
+    h.tick(641).await;
+
+    assert_eq!(early, 0);
+    assert_eq!(reach(&h, ReachPoint::StallReported), 1);
+    let reports: Vec<String> =
+        sent_to(&h, TICKET).into_iter().filter(|m| m.contains("busy but sent nothing")).collect();
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].contains("for 240 min"), "{}", reports[0]);
 }
 
 #[tokio::test]
