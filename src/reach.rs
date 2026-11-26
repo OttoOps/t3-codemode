@@ -78,6 +78,18 @@ pub enum ReachPoint {
     PrFilesPaginatedFallback,
     /// `reconcile::fix` reconciled a previously `CLOSED` PR after GitHub showed it reopened (`OPEN`).
     PrReopenedReconciled,
+    /// The outbox held a recipient's wakes because its thread was running.
+    OutboxHeld,
+    /// Watcher reported a link whose thread stayed busy past `stall` minutes with nothing sent.
+    StallReported,
+    /// Watcher escalated a link to its parent after `miss` unanswered nudges.
+    IdleEscalated,
+    /// Watcher nudged a link because its latest run ended failed, interrupted or cancelled.
+    BadEndNudged,
+    /// Watcher closed a worker link after T3 reported its thread gone.
+    WorkerThreadGone,
+    /// Watcher closed a worker link after T3 reported its thread archived.
+    WorkerArchived,
 }
 
 impl ReachPoint {
@@ -110,6 +122,12 @@ impl ReachPoint {
         Self::PrFollowupRecorded,
         Self::PrFilesPaginatedFallback,
         Self::PrReopenedReconciled,
+        Self::OutboxHeld,
+        Self::StallReported,
+        Self::IdleEscalated,
+        Self::BadEndNudged,
+        Self::WorkerThreadGone,
+        Self::WorkerArchived,
     ];
 
     pub const COUNT: usize = Self::ALL.len();
@@ -144,12 +162,25 @@ impl ReachPoint {
             Self::PrFollowupRecorded => "pr_followup_recorded",
             Self::PrFilesPaginatedFallback => "pr_files_paginated_fallback",
             Self::PrReopenedReconciled => "pr_reopened_reconciled",
+            Self::OutboxHeld => "outbox_held",
+            Self::StallReported => "stall_reported",
+            Self::IdleEscalated => "idle_escalated",
+            Self::BadEndNudged => "bad_end_nudged",
+            Self::WorkerThreadGone => "worker_thread_gone",
+            Self::WorkerArchived => "worker_archived",
         }
     }
 
     pub const fn tier(self) -> ReachTier {
         match self {
-            Self::OutboxHeldThenClosed | Self::PrReopenedReconciled => ReachTier::Tier2,
+            Self::OutboxHeldThenClosed
+            | Self::PrReopenedReconciled
+            | Self::OutboxHeld
+            | Self::StallReported
+            | Self::IdleEscalated
+            | Self::BadEndNudged
+            | Self::WorkerThreadGone
+            | Self::WorkerArchived => ReachTier::Tier2,
             _ => ReachTier::Tier1,
         }
     }
@@ -224,9 +255,15 @@ impl Reach {
 }
 
 /// Immutable point-in-time counts read from [`Reach`], mergeable across seeds.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReachSnapshot {
     counts: [u64; ReachPoint::COUNT],
+}
+
+impl Default for ReachSnapshot {
+    fn default() -> Self {
+        Self { counts: [0; ReachPoint::COUNT] }
+    }
 }
 
 impl ReachSnapshot {

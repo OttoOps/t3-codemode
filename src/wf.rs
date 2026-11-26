@@ -1621,6 +1621,7 @@ impl Wf {
             if !force && let Ok(th) = self.read_thread(&to).await {
                 let held = self.mins(Some(&items[0].queued)).unwrap_or(0.0);
                 if ACTIVE.contains(&th["status"].as_str().unwrap_or("")) && held < self.config().max_hold_minutes {
+                    self.reach.hit(ReachPoint::OutboxHeld);
                     continue;
                 }
             }
@@ -1703,6 +1704,7 @@ impl Wf {
                     self.flow_soon();
                     self.resolve_ticket_cards(&ln.child, "ticket thread gone")?;
                 } else {
+                    self.reach.hit(ReachPoint::WorkerThreadGone);
                     ln.unread.push(h);
                     self.drop_relayed(&ln.child, &ln.parent, "worker thread gone")?;
                 }
@@ -1726,6 +1728,7 @@ impl Wf {
                 self.flow_soon();
                 self.resolve_ticket_cards(&ln.child, "ticket archived")?;
             } else {
+                self.reach.hit(ReachPoint::WorkerArchived);
                 self.drop_relayed(&ln.child, &ln.parent, "worker archived")?;
             }
             actions.push(format!("closed {}: archived", ln.label));
@@ -1766,6 +1769,9 @@ impl Wf {
                     Self::where_is(ln)
                 );
                 let key = format!("stall@{}", ln.last_up);
+                if !ln.reported.contains(&key) {
+                    self.reach.hit(ReachPoint::StallReported);
+                }
                 self.report_once(ln, key, "report", &text, actions)?;
             }
             return Ok(());
@@ -1785,6 +1791,7 @@ impl Wf {
         if ln.nudges >= p.miss {
             if !ln.escalated {
                 ln.escalated = true;
+                self.reach.hit(ReachPoint::IdleEscalated);
                 let body = format!(
                     "{} has sat idle for {idle:.0} min through {} nudges, with no gate open. Look at it \
                      (t3.t3_thread_read), then wf.reply, relaunch it, or wf.close({{child: {}}}). Its thread: {}",
@@ -1802,6 +1809,7 @@ impl Wf {
         ln.nudges += 1;
         ln.last_nudge = Some(now.clone());
         if bad_end {
+            self.reach.hit(ReachPoint::BadEndNudged);
             ln.bad_run = latest_run;
         }
         let why = if bad_end {

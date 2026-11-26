@@ -73,6 +73,7 @@ impl H {
         }
         fake.set_providers(vec![provider("claudeAgent", "claudeAgent", &["claude-opus-5-5", "claude-haiku-5-5"])]);
         let clock = Arc::new(FakeClock::at(T0));
+        fake.set_clock(clock.clone());
         let store = Arc::new(store);
         let remotes = Arc::new(FakeRemotes::default());
         let github = Arc::new(FakeGitHub::default());

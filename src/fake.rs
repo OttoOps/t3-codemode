@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use jiff::Timestamp;
 use serde_json::{Value, json};
+
+use crate::clock::{Clock, iso, plus_minutes};
 
 use crate::t3::{BoxFut, T3Client, T3Error};
 use crate::tokens::{RunTokens, TokenSource};
@@ -33,6 +36,65 @@ struct State {
     pr_page: usize,
     short_list: usize,
     delay: Duration,
+    clock: Option<Arc<dyn Clock>>,
+    run_on_send: BTreeMap<String, i64>,
+    run_ends: BTreeMap<String, (Timestamp, String)>,
+    run_seq: BTreeMap<String, u64>,
+}
+
+impl State {
+    fn now(&self) -> Option<Timestamp> {
+        self.clock.as_ref().map(|c| c.now())
+    }
+
+    fn settle(&mut self) {
+        let Some(now) = self.now() else { return };
+        let ended: Vec<(String, Timestamp, String)> = self
+            .run_ends
+            .iter()
+            .filter(|(_, (end, _))| *end <= now)
+            .map(|(id, (end, status))| (id.clone(), *end, status.clone()))
+            .collect();
+        for (id, end, status) in ended {
+            self.run_ends.remove(&id);
+            if let Some(th) = self.threads.get_mut(&id) {
+                th["status"] = json!(status);
+                th["updatedAt"] = json!(iso(end));
+            }
+        }
+    }
+
+    fn touch(&mut self, id: &str) {
+        if let Some(now) = self.now()
+            && let Some(th) = self.threads.get_mut(id)
+        {
+            th["updatedAt"] = json!(iso(now));
+        }
+    }
+
+    fn begin_run(&mut self, id: &str, minutes: Option<i64>) {
+        let now = self.now();
+        let Some(th) = self.threads.get_mut(id) else { return };
+        let running = crate::wf::ACTIVE.contains(&th["status"].as_str().unwrap_or(""));
+        if !running {
+            let seq = self.run_seq.entry(id.to_string()).or_insert(1);
+            *seq += 1;
+            th["status"] = json!("running");
+            th["latestRunId"] = json!(format!("run:{id}:{seq}"));
+        }
+        if let Some(now) = now {
+            th["updatedAt"] = json!(iso(now));
+        }
+        match (minutes, now) {
+            (Some(m), Some(now)) => {
+                let from = self.run_ends.get(id).filter(|_| running).map_or(now, |(end, _)| (*end).max(now));
+                self.run_ends.insert(id.to_string(), (plus_minutes(from, m as f64), "idle".into()));
+            }
+            _ => {
+                self.run_ends.remove(id);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -241,7 +303,43 @@ impl FakeT3 {
     }
 
     pub fn remove(&self, id: &str) {
-        self.st().threads.remove(id);
+        let mut st = self.st();
+        st.threads.remove(id);
+        st.run_ends.remove(id);
+    }
+
+    pub fn set_clock(&self, clock: Arc<dyn Clock>) {
+        self.st().clock = Some(clock);
+    }
+
+    pub fn run_on_send(&self, id: &str, minutes: i64) {
+        self.st().run_on_send.insert(id.into(), minutes);
+    }
+
+    pub fn start_run(&self, id: &str, minutes: Option<i64>) {
+        let mut st = self.st();
+        st.settle();
+        st.begin_run(id, minutes);
+    }
+
+    pub fn finish_run(&self, id: &str, status: &str) {
+        let mut st = self.st();
+        st.settle();
+        st.run_ends.remove(id);
+        if let Some(th) = st.threads.get_mut(id) {
+            th["status"] = json!(status);
+        }
+        st.touch(id);
+    }
+
+    pub fn archive(&self, id: &str) {
+        let mut st = self.st();
+        st.settle();
+        st.run_ends.remove(id);
+        if let Some(th) = st.threads.get_mut(id) {
+            th["archived"] = json!(true);
+        }
+        st.touch(id);
     }
 
     pub fn set_pr_page(&self, size: usize) {
@@ -321,7 +419,9 @@ impl FakeT3 {
     }
 
     pub fn thread(&self, id: &str) -> Option<Value> {
-        self.st().threads.get(id).cloned()
+        let mut st = self.st();
+        st.settle();
+        st.threads.get(id).cloned()
     }
 
     pub fn calls(&self) -> Vec<String> {
@@ -330,6 +430,7 @@ impl FakeT3 {
 
     fn handle(&self, tool: &str, args: &Value) -> Result<Value, T3Error> {
         let mut st = self.st();
+        st.settle();
         match tool {
             "t3_thread_read" => {
                 let id = args["threadId"].as_str().unwrap_or_default();
@@ -351,8 +452,10 @@ impl FakeT3 {
             }
             "t3_thread_send" => {
                 st.sent.push(args.clone());
-                if let Some(id) = args["threadId"].as_str()
-                    && let Some(th) = st.threads.get_mut(id)
+                let id = args["threadId"].as_str().unwrap_or_default();
+                if let Some(&minutes) = st.run_on_send.get(id) {
+                    st.begin_run(id, Some(minutes));
+                } else if let Some(th) = st.threads.get_mut(id)
                     && th["status"] == "idle"
                     && th["latestRunId"].is_null()
                 {
@@ -528,8 +631,9 @@ impl T3Client for FakeT3 {
             let (yields, hit) = {
                 let mut st = self.st();
                 st.calls.push(tool.to_string());
-                let target = args["threadId"].as_str().or(args["search"].as_str());
-                (st.faults.yields(), st.faults.hit(&[tool], target))
+                let target: Vec<String> =
+                    args["threadId"].as_str().or(args["search"].as_str()).map(String::from).into_iter().collect();
+                (st.faults.yields(), st.faults.hit(&[tool], &target))
             };
             fault::jitter(yields).await;
             hit.pass_gates().await;
@@ -853,35 +957,53 @@ fn gh_ops(op: &'static str, query: &str, variables: &Value) -> Vec<&'static str>
     ops
 }
 
-fn gh_target(st: &GhState, variables: &Value) -> Option<String> {
+fn repo_names(st: &GhState, raw: &str) -> Vec<String> {
+    let key = raw.to_ascii_lowercase();
+    let canonical = st.repo_aliases.get(&key).map_or_else(|| key.clone(), |c| c.to_ascii_lowercase());
+    let mut out = vec![key, canonical.clone()];
+    out.extend(
+        st.repo_aliases.iter().filter(|(_, to)| to.eq_ignore_ascii_case(&canonical)).map(|(from, _)| from.clone()),
+    );
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn pr_names(st: &GhState, repo: &str, number: u64) -> Vec<String> {
+    repo_names(st, repo).into_iter().map(|r| format!("{r}#{number}")).collect()
+}
+
+fn gh_targets(st: &GhState, variables: &Value) -> Vec<String> {
     if let (Some(owner), Some(name)) = (variables["owner"].as_str(), variables["name"].as_str()) {
-        return Some(match variables["number"].as_u64() {
-            Some(n) => format!("{owner}/{name}#{n}"),
-            None => format!("{owner}/{name}"),
-        });
+        let repo = format!("{owner}/{name}");
+        return match variables["number"].as_u64() {
+            Some(n) => pr_names(st, &repo, n),
+            None => repo_names(st, &repo),
+        };
     }
-    if let Some(id) = variables["id"].as_str() {
-        return st.prs.iter().find(|(_, p)| p["id"] == id).map(|((r, n), _)| format!("{r}#{n}"));
-    }
-    if let Some(id) = variables["ref"].as_str() {
-        return st.prs.iter().find(|(_, p)| p["headRef"]["id"] == id).map(|((r, n), _)| format!("{r}#{n}"));
+    let by = |key: &str, field: fn(&Value) -> &Value| {
+        let id = variables[key].as_str()?;
+        st.prs.iter().find(|(_, p)| field(p) == id).map(|((r, n), _)| pr_names(st, r, *n))
+    };
+    if let Some(names) = by("id", |p| &p["id"]).or_else(|| by("ref", |p| &p["headRef"]["id"])) {
+        return names;
     }
     if let Some((repo, n)) =
         ["issueId", "labelableId"].iter().find_map(|k| variables[*k].as_str().and_then(parse_issue_node_id))
     {
-        return Some(format!("{repo}#{n}"));
+        return pr_names(st, &repo, n);
     }
-    variables["repoId"].as_str().and_then(|id| id.strip_prefix("R_")).map(String::from)
+    variables["repoId"].as_str().and_then(|id| id.strip_prefix("R_")).map(|r| repo_names(st, r)).unwrap_or_default()
 }
 
-fn batch_targets(variables: &Value) -> Vec<(String, String)> {
+fn batch_targets(st: &GhState, variables: &Value) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
     for i in 0.. {
         let Some(owner) = variables[format!("o{i}")].as_str() else { break };
         let (Some(name), Some(n)) = (variables[format!("r{i}")].as_str(), variables[format!("n{i}")].as_u64()) else {
             break;
         };
-        out.push((format!("p{i}"), format!("{owner}/{name}#{n}")));
+        out.push((format!("p{i}"), pr_names(st, &format!("{owner}/{name}"), n)));
     }
     out
 }
@@ -1608,12 +1730,12 @@ impl crate::github::GitHub for FakeGitHub {
                     call["headers"] = Value::Object(hdrs);
                 }
                 st.calls.push(call);
-                let target = gh_target(&st, &variables);
-                let hit = st.faults.hit(&gh_ops(op, query, &variables), target.as_deref());
+                let targets = gh_targets(&st, &variables);
+                let hit = st.faults.hit(&gh_ops(op, query, &variables), &targets);
                 let per_pr: Vec<(String, Hit)> = if op == "reconcile" && hit.before().is_none() {
-                    batch_targets(&variables)
+                    batch_targets(&st, &variables)
                         .into_iter()
-                        .map(|(alias, t)| (alias, st.faults.hit(&["reconcile.pr"], Some(&t))))
+                        .map(|(alias, t)| (alias, st.faults.hit(&["reconcile.pr"], &t)))
                         .collect()
                 } else {
                     Vec::new()
@@ -1621,10 +1743,8 @@ impl crate::github::GitHub for FakeGitHub {
                 (st.faults.yields(), hit, per_pr)
             };
             fault::jitter(yields).await;
-            hit.pass_gates().await;
-            for (_, h) in &per_pr {
-                h.pass_gates().await;
-            }
+            let hits: Vec<&Hit> = std::iter::once(&hit).chain(per_pr.iter().map(|(_, h)| h)).collect();
+            fault::pass_all(&hits).await;
             if let Some(f) = hit.before() {
                 return gh_failure(f);
             }
@@ -1719,7 +1839,11 @@ impl FakeGitHub {
                     errs.push(json!({"path": [alias, "pullRequest", field], "message": message}));
                     pr[field.as_str()] = Value::Null;
                 } else if let Some(f) = failed.get(&alias) {
-                    errs.push(json!({"path": [alias, "pullRequest"], "message": f.message()}));
+                    let mut err = json!({"path": [alias, "pullRequest"], "message": f.message()});
+                    if let Failure::Typed { kind, .. } = f {
+                        err["type"] = json!(kind);
+                    }
+                    errs.push(err);
                     pr = Value::Null;
                 } else if pr.is_null() {
                     errs.push(
@@ -2703,6 +2827,85 @@ mod tests {
 
         assert_eq!(down.to_string(), GH_DOWN);
         assert_eq!(read["errors"], json!([{"path": ["p0", "pullRequest"], "message": "transient"}]));
+    }
+
+    #[tokio::test]
+    async fn a_call_with_two_gates_arrives_at_both_before_either_releases() {
+        let t3 = FakeT3::new();
+        let (a, b) = (Gate::new(), Gate::new());
+        t3.fault(Rule::on("t3_thread_send").gate(&a));
+        t3.fault(Rule::on("t3_thread_send").target("mcp:a").gate(&b));
+        let send = t3.call("t3_thread_send", json!({"threadId": "mcp:a", "message": "hi"}));
+        let release = async {
+            a.arrived().await;
+            b.arrived().await;
+            assert!(t3.sent().is_empty());
+            b.release();
+            a.release();
+        };
+
+        let (r, ()) = futures_util::future::join(send, release).await;
+
+        assert!(r.is_ok());
+        assert_eq!((a.count(), b.count()), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_batch_read_arrives_at_its_op_gate_and_pull_request_gate_before_waiting() {
+        use crate::github::GitHub;
+
+        let gh = FakeGitHub::default();
+        gh.set_pr("acme/widgets", 7, github_pr("1111111", "CLEAN", false));
+        let (op, pr) = (Gate::new(), Gate::new());
+        gh.fault(Rule::on("reconcile").gate(&op));
+        gh.fault(Rule::on("reconcile.pr").pr("acme/widgets", 7).gate(&pr));
+        let read = gh.graphql("query Reconcile($o0: String!) { }", json!({"o0": "acme", "r0": "widgets", "n0": 7}));
+        let release = async {
+            op.arrived().await;
+            pr.arrived().await;
+            pr.release();
+            op.release();
+        };
+
+        let (r, ()) = futures_util::future::join(read, release).await;
+
+        assert_eq!(r.unwrap()["data"]["p0"]["pullRequest"]["headRefOid"], "1111111");
+    }
+
+    #[tokio::test]
+    async fn a_typed_failure_on_one_batched_pull_request_keeps_its_type() {
+        use crate::github::GitHub;
+
+        let gh = FakeGitHub::default();
+        gh.set_pr("acme/widgets", 7, github_pr("1111111", "CLEAN", false));
+        gh.fault(Rule::on("reconcile.pr").pr("acme/widgets", 7).fail(Failure::typed("RATE_LIMITED", "slow down")));
+        let vars = json!({"o0": "acme", "r0": "widgets", "n0": 7});
+
+        let read = gh.graphql("query Reconcile($o0: String!) { }", vars).await.unwrap();
+
+        assert_eq!(
+            read["errors"],
+            json!([{"path": ["p0", "pullRequest"], "message": "slow down", "type": "RATE_LIMITED"}])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_target_matches_across_a_repo_rename() {
+        use crate::github::GitHub;
+
+        let gh = FakeGitHub::default();
+        gh.set_pr("acme/widgets", 7, github_pr("1111111", "CLEAN", false));
+        gh.alias_repo("acme/gadgets", "acme/widgets");
+        gh.fault(Rule::on("read").pr("acme/gadgets", 7).call(1).fail(Failure::refused("old name")));
+        gh.fault(Rule::on("read").pr("acme/widgets", 7).call(2).fail(Failure::refused("new name")));
+        let q = "query { repository { pullRequest { state } } }";
+        let read = |name: &'static str| gh.graphql(q, json!({"owner": "acme", "name": name, "number": 7}));
+
+        let first = read("widgets").await.unwrap();
+        let second = read("gadgets").await.unwrap();
+
+        assert_eq!(first["errors"][0]["message"], "old name");
+        assert_eq!(second["errors"][0]["message"], "new name");
     }
 
     #[tokio::test]

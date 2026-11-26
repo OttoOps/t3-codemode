@@ -103,11 +103,11 @@ impl Match {
         Rule { on: self, fault: Fault::Gate(gate.clone()) }
     }
 
-    fn matches(&self, ops: &[&str], target: Option<&str>) -> bool {
+    fn matches(&self, ops: &[&str], targets: &[String]) -> bool {
         let op = ops.iter().any(|o| *o == self.op || (self.op == "*" && !o.contains('.')));
         op && match &self.target {
             Target::Any => true,
-            Target::Is(want) => target.is_some_and(|t| t.eq_ignore_ascii_case(want)),
+            Target::Is(want) => targets.iter().any(|t| t.eq_ignore_ascii_case(want)),
         }
     }
 }
@@ -137,9 +137,7 @@ pub(crate) struct Hit {
 
 impl Hit {
     pub(crate) async fn pass_gates(&self) {
-        for g in &self.gates {
-            g.pass().await;
-        }
+        pass_all(&[self]).await;
     }
 
     pub(crate) fn before(&self) -> Option<&Failure> {
@@ -174,10 +172,10 @@ impl Faults {
         self.jitter = seed;
     }
 
-    pub(crate) fn hit(&mut self, ops: &[&str], target: Option<&str>) -> Hit {
+    pub(crate) fn hit(&mut self, ops: &[&str], targets: &[String]) -> Hit {
         let mut hit = Hit::default();
         for (rule, seen) in &mut self.rules {
-            if !rule.on.matches(ops, target) {
+            if !rule.on.matches(ops, targets) {
                 continue;
             }
             *seen += 1;
@@ -204,6 +202,15 @@ impl Faults {
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
         (z ^ (z >> 31)) % 4
+    }
+}
+
+pub(crate) async fn pass_all(hits: &[&Hit]) {
+    for g in hits.iter().flat_map(|h| &h.gates) {
+        g.arrive();
+    }
+    for g in hits.iter().flat_map(|h| &h.gates) {
+        g.opened().await;
     }
 }
 
@@ -259,8 +266,11 @@ impl Gate {
         *self.0.released.borrow()
     }
 
-    async fn pass(&self) {
+    fn arrive(&self) {
         self.0.arrived.send_modify(|n| *n += 1);
+    }
+
+    async fn opened(&self) {
         let mut rx = self.0.released.subscribe();
         let _ = rx.wait_for(|open| *open).await;
     }
