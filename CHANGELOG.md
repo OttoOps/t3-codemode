@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0](https://github.com/OttoOps/t3-codemode/compare/v0.14.0...v0.15.0) - 2026-11-26
+
+### Added
+
+- toggle flow opt-in from the board
+- add board context menus on the graph
+
+### Fixed
+
+- keep triage list scroll on repaint
+
+### Other
+
+- describe fake fault rules
+- add fault rules and gates to the fakes
+
 ## [0.14.0](https://github.com/OttoOps/t3-codemode/compare/v0.13.5...v0.14.0) - 2026-11-25
 
 ### Added
