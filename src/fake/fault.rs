@@ -168,6 +168,11 @@ impl Faults {
         self.rules.retain(|(r, _)| op.is_some_and(|op| r.op() != op));
     }
 
+    pub(crate) fn clear_target(&mut self, op: &str, target: &str) {
+        self.rules
+            .retain(|(r, _)| r.op() != op || !matches!(&r.on.target, Target::Is(t) if t.eq_ignore_ascii_case(target)));
+    }
+
     pub(crate) fn set_jitter(&mut self, seed: Option<u64>) {
         self.jitter = seed;
     }

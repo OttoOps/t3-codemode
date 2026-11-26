@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use t3_codemode::board::{BOARD, Card, CardRef, LaunchArgs};
 use t3_codemode::clock::{Clock, iso};
 use t3_codemode::config::{Config, Launch};
-use t3_codemode::fake::{check_run, github_issue, github_pr, project, thread};
+use t3_codemode::fake::{check_run, github_issue, github_pr, pending_check, project, thread};
 
 const REPO: &str = "acme/widgets";
 const TOOLS: &str = "acme/tools";
@@ -125,36 +125,22 @@ fn put_issue(h: &H, repo: &str, number: u64, labels: &[&str], day: u32) {
     h.github.set_issue(repo, github_issue(number, &format!("Issue {number}"), labels, &created));
 }
 
-fn sync_gh(h: &H, prs: &BTreeMap<u64, GhPrModel>) {
-    h.github.clear_faults_on("reconcile.pr");
-    for (&number, m) in prs {
-        let mut pr = github_pr(HEADS[m.head_idx], m.merge_state, false);
-        pr["state"] = json!(m.state);
-        pr["isDraft"] = json!(m.draft);
-        pr["body"] = json!(GOOD_BODY);
-        pr["files"] = json!({"pageInfo": {"hasNextPage": false}, "nodes": [{"path": "src/lib.rs"}]});
-        if m.state == "MERGED" {
-            let oid = m.merge_commit.as_deref().unwrap_or(HEADS[(m.head_idx + 1) % HEADS.len()]);
-            pr["mergeCommit"] = json!({"oid": oid});
-            if let Some(at) = &m.ended_at {
-                pr["mergedAt"] = json!(at);
-            }
-        } else if m.state == "CLOSED"
-            && let Some(at) = &m.ended_at
-        {
-            pr["closedAt"] = json!(at);
-        }
-        h.github.set_pr(REPO, number, pr);
-        let checks = match m.checks {
-            GhChecks::Pending => {
-                json!([{"__typename": "CheckRun", "name": "ci", "status": "IN_PROGRESS", "conclusion": null}])
-            }
-            GhChecks::Passing => json!([check_run("ci", "SUCCESS")]),
-            GhChecks::Failing => json!([check_run("ci", "FAILURE")]),
-            GhChecks::Cancelled => json!([check_run("ci", "SUCCESS"), check_run("opt", "CANCELLED")]),
-        };
-        h.github.set_checks(REPO, number, checks);
+fn render_checks(checks: GhChecks) -> Value {
+    match checks {
+        GhChecks::Pending => json!([pending_check("ci")]),
+        GhChecks::Passing => json!([check_run("ci", "SUCCESS")]),
+        GhChecks::Failing => json!([check_run("ci", "FAILURE")]),
+        GhChecks::Cancelled => json!([check_run("ci", "SUCCESS"), check_run("opt", "CANCELLED")]),
     }
+}
+
+fn open_pr(h: &H, number: u64, m: &GhPrModel) {
+    let mut pr = github_pr(HEADS[m.head_idx], m.merge_state, false);
+    pr["isDraft"] = json!(m.draft);
+    pr["body"] = json!(GOOD_BODY);
+    pr["files"] = json!({"pageInfo": {"hasNextPage": false}, "nodes": [{"path": "src/lib.rs"}]});
+    h.github.set_pr(REPO, number, pr);
+    h.github.set_checks(REPO, number, render_checks(m.checks));
 }
 
 fn pull_gh_mutations(h: &H, prs: &mut BTreeMap<u64, GhPrModel>) {
@@ -232,7 +218,9 @@ fn setup_flow_chaos(max_tickets: usize, chained_delivery: bool) -> (H, BTreeMap<
     put_issue(&h, TOOLS, 201, &[FLOW, "priority: high"], 5);
 
     let prs: BTreeMap<u64, GhPrModel> = INIT_WORKERS.iter().map(|&(_, pr)| (pr, GhPrModel::default())).collect();
-    sync_gh(&h, &prs);
+    for (&n, m) in &prs {
+        open_pr(&h, n, m);
+    }
     (h, prs)
 }
 
@@ -730,36 +718,33 @@ async fn flow_auto_launch_isolation_holds_pr_and_gate_invariants() {
                         let pr_keys: Vec<u64> = gh.keys().copied().collect();
                         let pr = pr_keys[rng.pick(pr_keys.len())];
                         let now = iso(h.clock.now());
-                        let changed = {
-                            let m = gh.get_mut(&pr).unwrap();
-                            if m.state == "OPEN" {
-                                match rng.pick(4) {
-                                    0 => m.head_idx = (m.head_idx + 1) % HEADS.len(),
-                                    1 | 2 => {
-                                        m.checks = [
-                                            GhChecks::Pending,
-                                            GhChecks::Passing,
-                                            GhChecks::Failing,
-                                            GhChecks::Cancelled,
-                                        ][rng.pick(4)];
-                                        m.merge_state = ["CLEAN", "UNKNOWN", "BLOCKED", "BEHIND", "DIRTY"][rng.pick(5)];
-                                        if rng.pick(5) == 0 {
-                                            m.draft = !m.draft;
-                                        }
-                                    }
-                                    _ => {
-                                        m.state = if rng.coin() { "MERGED" } else { "CLOSED" };
-                                        m.ended_at = Some(now);
-                                    }
+                        let m = gh.get_mut(&pr).unwrap();
+                        if m.state == "OPEN" {
+                            match rng.pick(4) {
+                                0 => {
+                                    m.head_idx = (m.head_idx + 1) % HEADS.len();
+                                    m.checks = GhChecks::Pending;
+                                    h.github.push(REPO, pr, HEADS[m.head_idx]);
                                 }
-                                trace.push(format!("#{step} gh mutate #{pr} state={} checks={:?}", m.state, m.checks));
-                                true
-                            } else {
-                                false
+                                1 | 2 => {
+                                    m.checks =
+                                        [GhChecks::Pending, GhChecks::Passing, GhChecks::Failing, GhChecks::Cancelled]
+                                            [rng.pick(4)];
+                                    m.merge_state = ["CLEAN", "UNKNOWN", "BLOCKED", "BEHIND", "DIRTY"][rng.pick(5)];
+                                    if rng.pick(5) == 0 {
+                                        m.draft = !m.draft;
+                                    }
+                                    h.github.set_status(REPO, pr, m.merge_state, m.draft);
+                                    h.github.set_checks(REPO, pr, render_checks(m.checks));
+                                }
+                                _ => {
+                                    m.state = if rng.coin() { "MERGED" } else { "CLOSED" };
+                                    m.ended_at = Some(now);
+                                    let commit = HEADS[(m.head_idx + 1) % HEADS.len()];
+                                    h.github.finish(REPO, pr, m.state, m.ended_at.as_deref(), Some(commit));
+                                }
                             }
-                        };
-                        if changed {
-                            sync_gh(&h, &gh);
+                            trace.push(format!("#{step} gh mutate #{pr} state={} checks={:?}", m.state, m.checks));
                         }
                     }
                     5 => {
@@ -1042,7 +1027,7 @@ async fn flow_auto_launch_isolation_holds_pr_and_gate_invariants() {
                             th["link"] = json!(format!("https://t3.local/{w}"));
                             h.fake.put(th);
                             gh.insert(pr, GhPrModel::default());
-                            sync_gh(&h, &gh);
+                            open_pr(&h, pr, &gh[&pr]);
                             let label = format!("{} PR 1/1", p.label);
                             let iss = p.identity.issue.clone().unwrap_or_else(|| format!("{REPO}#101"));
                             h.wf(

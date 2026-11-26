@@ -672,6 +672,47 @@ struct GhState {
     merges: u64,
     label_seq: u64,
     unknown_reads: usize,
+    queues: BTreeMap<String, Vec<u64>>,
+    id_seq: u64,
+}
+
+impl GhState {
+    fn pr_mut(&mut self, repo: &str, number: u64) -> &mut Value {
+        self.prs.get_mut(&(repo.to_ascii_lowercase(), number)).expect("known pull request")
+    }
+
+    fn enqueue(&mut self, repo: &str, number: u64) -> u64 {
+        let key = repo.to_ascii_lowercase();
+        let queue = self.queues.entry(key.clone()).or_default();
+        if !queue.contains(&number) {
+            queue.push(number);
+        }
+        self.renumber(&key);
+        self.prs[&(key, number)]["mergeQueueEntry"]["position"].as_u64().unwrap_or(1)
+    }
+
+    fn dequeue(&mut self, repo: &str, number: u64) {
+        let key = repo.to_ascii_lowercase();
+        if let Some(queue) = self.queues.get_mut(&key) {
+            queue.retain(|n| *n != number);
+        }
+        if let Some(pr) = self.prs.get_mut(&(key.clone(), number)) {
+            pr["isInMergeQueue"] = json!(false);
+            pr["mergeQueueEntry"] = Value::Null;
+        }
+        self.renumber(&key);
+    }
+
+    fn renumber(&mut self, key: &str) {
+        let ahead = self.queue;
+        let queue = self.queues.get(key).cloned().unwrap_or_default();
+        for (i, n) in queue.iter().enumerate() {
+            if let Some(pr) = self.prs.get_mut(&(key.to_string(), *n)) {
+                pr["isInMergeQueue"] = json!(true);
+                pr["mergeQueueEntry"] = json!({"position": ahead + i as u64 + 1});
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -693,6 +734,10 @@ pub fn head_commit(head: &str, checks: Value) -> Value {
 
 pub fn check_run(name: &str, conclusion: &str) -> Value {
     json!({"__typename": "CheckRun", "name": name, "status": "COMPLETED", "conclusion": conclusion})
+}
+
+pub fn pending_check(name: &str) -> Value {
+    json!({"__typename": "CheckRun", "name": name, "status": "IN_PROGRESS", "conclusion": null})
 }
 
 pub fn github_issue(number: u64, title: &str, labels: &[&str], created_at: &str) -> Value {
@@ -754,7 +799,94 @@ impl FakeGitHub {
         }
         st.repos.entry(key.clone()).or_insert_with(|| json!({"viewerDefaultMergeMethod": "MERGE"}));
         st.repo_names.entry(key.clone()).or_insert_with(|| repo.to_string());
-        st.prs.insert((key, number), pr);
+        let queued = pr["isInMergeQueue"] == true;
+        let placed = pr["mergeQueueEntry"]["position"].is_u64();
+        st.prs.insert((key.clone(), number), pr);
+        let queue = st.queues.entry(key.clone()).or_default();
+        queue.retain(|n| *n != number);
+        if queued {
+            queue.push(number);
+            if !placed {
+                st.renumber(&key);
+            }
+        }
+    }
+
+    pub fn push(&self, repo: &str, number: u64, head: &str) {
+        let mut st = self.st();
+        st.dequeue(repo, number);
+        let pr = st.pr_mut(repo, number);
+        pr["headRefOid"] = json!(head);
+        pr["commits"] = head_commit(head, json!([pending_check("ci")]));
+    }
+
+    pub fn set_status(&self, repo: &str, number: u64, merge_state: &str, draft: bool) {
+        let mut st = self.st();
+        let pr = st.pr_mut(repo, number);
+        pr["mergeStateStatus"] = json!(merge_state);
+        pr["isDraft"] = json!(draft);
+    }
+
+    pub fn finish(&self, repo: &str, number: u64, state: &str, at: Option<&str>, commit: Option<&str>) {
+        let mut st = self.st();
+        st.dequeue(repo, number);
+        let pr = st.pr_mut(repo, number);
+        pr["state"] = json!(state);
+        let (when, other) = if state == "MERGED" { ("mergedAt", "closedAt") } else { ("closedAt", "mergedAt") };
+        pr[when] = json!(at);
+        pr[other] = Value::Null;
+        pr["mergeCommit"] = match commit.filter(|_| state == "MERGED") {
+            Some(oid) => json!({"oid": oid}),
+            None => Value::Null,
+        };
+    }
+
+    pub fn reopen(&self, repo: &str, number: u64) {
+        let mut st = self.st();
+        let pr = st.pr_mut(repo, number);
+        assert_eq!(pr["state"], "CLOSED", "only a closed pull request reopens");
+        pr["state"] = json!("OPEN");
+        pr["closedAt"] = Value::Null;
+    }
+
+    pub fn reassign_id(&self, repo: &str, number: u64) -> String {
+        let mut st = self.st();
+        st.id_seq += 1;
+        let id = format!("PR_{repo}_{number}_{}", st.id_seq);
+        st.pr_mut(repo, number)["id"] = json!(id);
+        id
+    }
+
+    pub fn set_queue(&self, repo: &str, number: u64, enabled: bool, queued: bool) {
+        let mut st = self.st();
+        st.pr_mut(repo, number)["isMergeQueueEnabled"] = json!(enabled);
+        st.pr_mut(repo, number)["timelineItems"] = json!({"nodes": []});
+        if enabled && queued {
+            st.enqueue(repo, number);
+        } else {
+            st.dequeue(repo, number);
+        }
+    }
+
+    pub fn advance_queue(&self, repo: &str, at: &str) -> Option<u64> {
+        let mut st = self.st();
+        let number = *st.queues.get(&repo.to_ascii_lowercase())?.first()?;
+        st.id_seq += 1;
+        let oid = format!("{:040x}", 0xe000_0000_0000_u64 + st.id_seq);
+        st.dequeue(repo, number);
+        let pr = st.pr_mut(repo, number);
+        pr["state"] = json!("MERGED");
+        pr["mergedAt"] = json!(at);
+        pr["mergeCommit"] = json!({"oid": oid});
+        Some(number)
+    }
+
+    pub fn set_files_paginated(&self, repo: &str, number: u64, paginated: bool) {
+        self.st().pr_mut(repo, number)["files"]["pageInfo"]["hasNextPage"] = json!(paginated);
+    }
+
+    pub fn clear_fault(&self, operation: &str, target: &str) {
+        self.st().faults.clear_target(operation, target);
     }
 
     pub fn update_pr(&self, repo: &str, number: u64, patch: Value) {
@@ -774,8 +906,18 @@ impl FakeGitHub {
         self.st().prs[&(repo.to_ascii_lowercase(), number)].clone()
     }
 
+    pub fn find_pr(&self, repo: &str, number: u64) -> Option<Value> {
+        self.st().prs.get(&(repo.to_ascii_lowercase(), number)).cloned()
+    }
+
+    pub fn queue(&self, repo: &str) -> Vec<u64> {
+        self.st().queues.get(&repo.to_ascii_lowercase()).cloned().unwrap_or_default()
+    }
+
     pub fn remove_pr(&self, repo: &str, number: u64) {
-        self.st().prs.remove(&(repo.to_ascii_lowercase(), number));
+        let mut st = self.st();
+        st.dequeue(repo, number);
+        st.prs.remove(&(repo.to_ascii_lowercase(), number));
     }
 
     pub fn set_default_branch(&self, repo: &str, branch: &str) {
@@ -795,12 +937,9 @@ impl FakeGitHub {
     }
 
     pub fn drop_from_queue(&self, repo: &str, number: u64, reason: &str, at: &str) {
-        self.update_pr(
-            repo,
-            number,
-            json!({"isInMergeQueue": false, "mergeQueueEntry": null,
-                   "timelineItems": {"nodes": [{"reason": reason, "createdAt": at}]}}),
-        );
+        let mut st = self.st();
+        st.dequeue(repo, number);
+        st.pr_mut(repo, number)["timelineItems"] = json!({"nodes": [{"reason": reason, "createdAt": at}]});
     }
 
     pub fn set_default_method(&self, repo: &str, method: &str) {
@@ -1888,24 +2027,24 @@ impl FakeGitHub {
         }
         let id = variables["id"].as_str().unwrap().to_string();
         let head = variables["head"].as_str().unwrap().to_string();
-        let queue = st.queue;
         st.merges += 1;
         let merges = st.merges;
-        let Some(pr) = st.prs.values_mut().find(|p| p["id"] == id.as_str()) else {
+        let Some(((repo, number), pr)) = st.prs.iter().find(|(_, p)| p["id"] == id.as_str()) else {
             return Ok(gh_error("Could not resolve to a node"));
         };
+        let (repo, number) = (repo.clone(), *number);
         if pr["headRefOid"] != head.as_str() {
             return Ok(gh_error("Head branch was modified. Review and try the merge again."));
         }
         match op {
             "enqueuePullRequest" => {
-                let position = queue + 1;
-                pr["isInMergeQueue"] = json!(true);
-                pr["mergeQueueEntry"] = json!({"position": position});
+                let position = st.enqueue(&repo, number);
                 Ok(json!({"data": {"enqueuePullRequest": {"mergeQueueEntry": {"position": position}}}}))
             }
             "mergePullRequest" => {
                 let oid = format!("{merges:040x}");
+                st.dequeue(&repo, number);
+                let pr = st.pr_mut(&repo, number);
                 pr["state"] = json!("MERGED");
                 pr["mergeCommit"] = json!({"oid": oid});
                 Ok(json!({"data": {"mergePullRequest": {"pullRequest": {"mergeCommit": {"oid": oid}}}}}))
@@ -2905,6 +3044,71 @@ mod tests {
 
         assert_eq!(first["errors"][0]["message"], "old name");
         assert_eq!(second["errors"][0]["message"], "new name");
+    }
+
+    #[tokio::test]
+    async fn the_merge_queue_advances_in_order_and_a_push_leaves_it() {
+        use crate::github::GitHub;
+
+        let gh = FakeGitHub::default();
+        for (n, head) in [(7, "1111111"), (8, "2222222"), (9, "3333333")] {
+            gh.set_pr("acme/widgets", n, github_pr(head, "CLEAN", true));
+        }
+        let enqueue = |n: u64, head: &'static str| {
+            let id = gh.pr("acme/widgets", n)["id"].clone();
+            gh.graphql(
+                "mutation { enqueuePullRequest(input: {}) { clientMutationId } }",
+                json!({"id": id, "head": head}),
+            )
+        };
+        let position = |n: u64| gh.pr("acme/widgets", n)["mergeQueueEntry"]["position"].clone();
+
+        let first = enqueue(7, "1111111").await.unwrap();
+        enqueue(8, "2222222").await.unwrap();
+        gh.set_queue("acme/widgets", 9, true, true);
+        let before = (position(7), position(8), position(9));
+        gh.push("acme/widgets", 8, "4444444");
+        let merged = gh.advance_queue("acme/widgets", "2026-11-17T12:30:00Z");
+
+        assert_eq!(first["data"]["enqueuePullRequest"]["mergeQueueEntry"]["position"], 1);
+        assert_eq!(before, (json!(1), json!(2), json!(3)));
+        assert_eq!(merged, Some(7));
+        assert_eq!(gh.pr("acme/widgets", 7)["state"], "MERGED");
+        assert_eq!(gh.pr("acme/widgets", 7)["mergedAt"], "2026-11-17T12:30:00Z");
+        let pushed = gh.pr("acme/widgets", 8);
+        assert_eq!(pushed["isInMergeQueue"], false);
+        assert_eq!(pushed["headRefOid"], "4444444");
+        assert_eq!(
+            pushed["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"][0]["status"],
+            "IN_PROGRESS"
+        );
+        assert_eq!(position(9), 1);
+    }
+
+    #[tokio::test]
+    async fn a_reassigned_node_id_refuses_a_merge_by_the_old_id_and_a_closed_pr_reopens() {
+        use crate::github::GitHub;
+
+        let gh = FakeGitHub::default();
+        gh.set_pr("acme/widgets", 7, github_pr("1111111", "CLEAN", false));
+        let old = gh.pr("acme/widgets", 7)["id"].clone();
+        let new = gh.reassign_id("acme/widgets", 7);
+        let merge = |id: Value| {
+            gh.graphql(
+                "mutation { mergePullRequest(input: {}) { clientMutationId } }",
+                json!({"id": id, "head": "1111111"}),
+            )
+        };
+
+        let refused = merge(old).await.unwrap();
+        gh.finish("acme/widgets", 7, "CLOSED", Some("2026-11-17T12:10:00Z"), None);
+        gh.reopen("acme/widgets", 7);
+        let merged = merge(json!(new)).await.unwrap();
+
+        assert_eq!(refused["errors"][0]["message"], "Could not resolve to a node");
+        assert!(gh.pr("acme/widgets", 7)["closedAt"].is_null());
+        assert!(merged["data"]["mergePullRequest"]["pullRequest"]["mergeCommit"]["oid"].is_string());
+        assert_eq!(gh.pr("acme/widgets", 7)["state"], "MERGED");
     }
 
     #[tokio::test]

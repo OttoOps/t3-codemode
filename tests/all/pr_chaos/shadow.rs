@@ -186,7 +186,7 @@ fn readiness(m: &GhPrModel) -> Ready {
     }
 }
 
-fn commit_of(m: &GhPrModel) -> String {
+pub fn commit_of(m: &GhPrModel) -> String {
     m.merge_commit.clone().unwrap_or_else(|| HEADS[(m.head_idx + 1) % HEADS.len()].to_string())
 }
 
@@ -244,6 +244,8 @@ pub struct Model {
     pub reopen_wakes: BTreeMap<String, usize>,
     pub retired: BTreeSet<(String, u64)>,
     busy: BTreeSet<String>,
+    approvals: u64,
+    bad_end: BTreeSet<String>,
     archived: BTreeSet<String>,
     gone: BTreeSet<String>,
     relay: bool,
@@ -271,6 +273,8 @@ impl Model {
             reopen_wakes: BTreeMap::new(),
             retired: BTreeSet::new(),
             busy: BTreeSet::new(),
+            approvals: 0,
+            bad_end: BTreeSet::new(),
             archived: BTreeSet::new(),
             gone: BTreeSet::new(),
             relay: true,
@@ -288,9 +292,21 @@ impl Model {
     pub fn set_busy(&mut self, id: &str, busy: bool) {
         if busy {
             self.busy.insert(id.into());
+            self.bad_end.remove(id);
         } else {
             self.busy.remove(id);
         }
+    }
+
+    pub fn run_ended(&mut self, id: &str, bad: bool) {
+        self.busy.remove(id);
+        if bad {
+            self.bad_end.insert(id.into());
+        }
+    }
+
+    pub fn ended_badly(&self, id: &str) -> bool {
+        self.bad_end.contains(id)
     }
 
     pub fn reply(&mut self, w: &str) {
@@ -1073,7 +1089,7 @@ impl Model {
                 }
                 continue;
             }
-            if l.pr.as_ref().is_some_and(|p| p.waiting) {
+            if l.pr.as_ref().is_some_and(|p| p.waiting) && !self.bad_end.contains(id) {
                 continue;
             }
             may.push((id.clone(), "nudge".into(), "watcher".into()));
@@ -1314,6 +1330,85 @@ impl Model {
 
     pub fn attempts(&self) -> u64 {
         self.merges
+    }
+
+    pub fn wf_merge(
+        &mut self,
+        caller: &str,
+        pr: u64,
+        head: &str,
+        approval: Option<&str>,
+        gh: &mut BTreeMap<u64, GhPrModel>,
+    ) -> &'static str {
+        let m = gh[&pr].clone();
+        if !m.exists || m.state == "CLOSED" {
+            return "refused";
+        }
+        if m.state == "MERGED" {
+            self.waits.remove(&pr);
+            if gh_head(&m) != head {
+                return "refused";
+            }
+            self.mark(pr, &format!("merged:{}", commit_of(&m)), caller);
+            return "merged";
+        }
+        if m.draft || gh_head(&m) != head {
+            return "refused";
+        }
+        let ready = readiness(&m);
+        let can_wait = !["BEHIND", "DIRTY"].contains(&m.merge_state) && check_state(&m) != Cs::Unread;
+        let record = |model: &mut Model, status: St| {
+            model.approvals += 1;
+            let approval = approval.map_or_else(|| format!("wf-merge-{}", model.approvals), String::from);
+            let wait = WaitM {
+                head: head.into(),
+                id_ok: true,
+                thread: caller.into(),
+                at: model.now.clone(),
+                status,
+                approval,
+                failures: 0,
+            };
+            model.waits.insert(pr, wait);
+        };
+        if m.queue_enabled {
+            if m.queued {
+                record(self, St::Sent);
+                return "queued";
+            }
+            match ready {
+                Ready::Failing => return "refused",
+                Ready::Not => {
+                    record(self, St::Waiting);
+                    return "waiting";
+                }
+                Ready::Yes => {}
+            }
+            self.merges += 1;
+            gh.get_mut(&pr).unwrap().queued = true;
+            record(self, St::Sent);
+            return "queued";
+        }
+        match ready {
+            Ready::Failing => "refused",
+            Ready::Not if can_wait => {
+                record(self, St::Waiting);
+                "waiting"
+            }
+            Ready::Not => "refused",
+            Ready::Yes => {
+                self.merges += 1;
+                let oid = format!("{:040x}", self.merges);
+                let g = gh.get_mut(&pr).unwrap();
+                g.state = "MERGED";
+                g.queued = false;
+                g.merge_commit = Some(oid.clone());
+                g.ended_at = None;
+                self.waits.remove(&pr);
+                self.mark(pr, &format!("merged:{oid}"), caller);
+                "merged"
+            }
+        }
     }
 
     fn fix(
