@@ -195,10 +195,20 @@ fn merge_fields(base: &str, ours: &str, theirs: &str) -> Result<String> {
             None => out.remove(key),
         };
     }
+    let closes = |row: &serde_json::Map<String, Value>| row.get("closed") == Some(&Value::Bool(true));
+    if closes(&ours) && !closes(&base) {
+        for key in CLOSE_FIELDS {
+            match ours.get(*key) {
+                Some(v) => out.insert(key.to_string(), v.clone()),
+                None => out.remove(*key),
+            };
+        }
+    }
     Ok(Value::Object(out).to_string())
 }
 
 const SET_FIELDS: &[&str] = &["unread", "reported"];
+const CLOSE_FIELDS: &[&str] = &["gate", "gateSince", "gatePr"];
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -938,6 +948,7 @@ impl Store {
         let theirs: Option<String> =
             tx.query_row("SELECT data FROM links WHERE child = ?1", [&ln.child], |r| r.get(0)).optional()?;
         let (data, merged) = match (ln.base.get(), theirs) {
+            (Some(_), None) => return Ok((ours, false)),
             (Some(base), Some(theirs)) if base != theirs => (merge_fields(&base, &ours, &theirs)?, true),
             _ => (ours.clone(), false),
         };
@@ -2455,5 +2466,39 @@ mod tests {
             merged,
             serde_json::json!({"gate": "review", "nudges": 1, "unread": ["m2", "m3"], "reported": ["stall"]})
         );
+    }
+
+    #[test]
+    fn a_close_merged_with_a_peers_gate_clears_the_gate() {
+        let base = serde_json::json!({"closed": false, "gate": null});
+        let ours = serde_json::json!({"closed": true, "gate": null, "closedHow": "handoff"});
+        let theirs = serde_json::json!({"closed": false, "gate": "review", "gateSince": "t"});
+        let merged: Value =
+            serde_json::from_str(&merge_fields(&base.to_string(), &ours.to_string(), &theirs.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(merged, serde_json::json!({"closed": true, "gate": null, "closedHow": "handoff"}));
+    }
+
+    #[test]
+    fn a_save_after_the_row_moved_away_does_not_bring_it_back() {
+        let store = Store::open_memory().unwrap();
+        let raw = serde_json::json!({"child": "mcp:old", "parent": "mcp:t", "label": "w", "role": "worker",
+            "parentRole": null, "params": {"down": 45, "miss": 2, "stall": 240}, "link": null, "opened": "t",
+            "lastUp": "t", "lastSeen": null, "lastNudge": null, "nudges": 0, "escalated": false, "reported": [],
+            "gate": null, "gateSince": null, "closed": false, "closedAt": null, "closedHow": null, "unread": [],
+            "badRun": null});
+        store
+            .with(|c| {
+                c.execute(
+                    "INSERT INTO links (child, parent, closed, data) VALUES ('mcp:old', 'mcp:t', 0, ?1)",
+                    [raw.to_string()],
+                )
+            })
+            .unwrap();
+        let mut ln = store.link_get("mcp:old").unwrap().unwrap();
+        store.with(|c| c.execute("DELETE FROM links WHERE child = 'mcp:old'", [])).unwrap();
+        ln.nudges = 1;
+        store.link_save(&ln).unwrap();
+        assert!(store.link_get("mcp:old").unwrap().is_none());
     }
 }
