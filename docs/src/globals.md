@@ -132,7 +132,9 @@ parent and a child, and the service keeps every link and message in its store.
   `paused: false` resumes it. The [board](board.md#pausing) shows it as
   paused, not idle.
 - `wf.launchTicket`, `wf.dispatch`, `wf.cards`, `wf.answer` and `wf.feed` work
-  with the [board](board.md).
+  with the [board](board.md). `wf.launchTicket` and `wf.dispatch` throw, and
+  leave an error card, when the board is at its
+  [ticket cap](config.md#the-ticket-cap).
 - `wf.issue({ url, title?, note?, blockedBy?, parent?, track?, priority?, sync? })`
   reports a GitHub issue the calling thread just filed. The board lists it under
   [new issues](board.md#new-issues) with the filing thread and the time. The call
@@ -490,7 +492,8 @@ GitHub remotes when `flow.repos` is omitted, with `flow.includeRepos` and
 |---|---|
 | `enabled` | `false` when `flow.maxTickets` is unset, whether the config has no `flow` block or sets repo overrides only. Without `{ graph: true }`, every list is empty and `wf.flow()` reads nothing from GitHub. |
 | `launch`, `maxTickets` | The config's values, or `null` and `0` when the launch queue is off. |
-| `free` | `maxTickets` minus the flow tickets running, never below zero. |
+| `maxTicketsTotal` | The config's [ticket cap](config.md#the-ticket-cap) on open board tickets, set even when the launch queue is off. |
+| `free` | `maxTickets` minus the flow tickets running, never below zero and never more than `maxTicketsTotal` minus every open board ticket. |
 | `running` | The flow tickets: `label`, `repo`, `number`, `url`, and the ticket's `thread` and `link`. `thread` is `null` for a launch that hasn't joined yet. A ticket whose issue has closed isn't listed. |
 | `queue` | The ready issues in launch order. |
 | `blocked` | The matching issues held back by an open native or body-parsed blocker, an open `prStack` dependency, a `fileConflict` with a running ticket when `flow.serializeFileConflicts` is enabled, an unresolved blocker reference, a plain `blocked` label, or `blocked: external`, in the same order. |
@@ -558,7 +561,7 @@ nothing and launches nothing. It returns:
 | `picked` | The issue it took, if any: `label`, `url`, `title`, `priority` and `why` (such as `priority: high, unblocked by #9`), with `card` for the card it raised, `launched` for the `wf.launchTicket` result, or `error` when the launch threw. |
 | `offered` | The launch cards still open, each `{ label, card }`. Each holds a slot. |
 | `retired` | The launch cards this pick resolved, because their issue is no longer ready or no slot is free. |
-| `reason` | Why `picked` is empty: `no free ticket slot`, `no ready issue to launch`, or the flow being off. |
+| `reason` | Why `picked` is empty: `no free ticket slot` (followed by the count when the board is at `maxTicketsTotal`), `no ready issue to launch`, or the flow being off. |
 
 ```js
 async () => (await wf.flow.next()).picked

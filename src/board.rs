@@ -2557,6 +2557,9 @@ impl Wf {
         };
         self.ensure_not_on_board(&issue.label(), identity.issue.as_deref())?;
         let err_label = if self.open_labels()?.contains(&issue.label()) { issue.slug() } else { issue.label() };
+        if let Some(full) = self.ticket_cap_full()? {
+            return self.at_ticket_cap(&err_label, &full);
+        }
         let wanted = nonempty(a.project);
         let model_arg = nonempty(a.model);
         let effort_arg = nonempty(a.effort);
@@ -2594,7 +2597,10 @@ impl Wf {
                 Ok(r) => r,
                 Err(e) => return self.launch_failed(&err_label, &format!("Cannot launch {err_label}: {e:#}")),
             };
-        let label = self.reserve_label(&issue.label(), false, Some(&project_id), Some(&issue), &identity).await?;
+        let label = match self.reserve_label(&issue.label(), false, Some(&project_id), Some(&issue), &identity).await? {
+            Ok(label) => label,
+            Err(full) => return self.at_ticket_cap(&err_label, &full),
+        };
         let title = match nonempty(a.title) {
             Some(t) => {
                 if let Some((owner, repo, n)) = issue.github_parts() {
@@ -2647,7 +2653,10 @@ impl Wf {
             Ok(r) => r,
             Err(e) => return self.launch_failed(&base, &format!("Cannot dispatch {base}: {e:#}")),
         };
-        let label = self.reserve_label(&base, true, Some(&project_id), None, &Identity::default()).await?;
+        let label = match self.reserve_label(&base, true, Some(&project_id), None, &Identity::default()).await? {
+            Ok(label) => label,
+            Err(full) => return self.at_ticket_cap(&base, &full),
+        };
         let message = dispatch_brief(request, &label);
         let out = match self.launch_reserved(&label, &label, &project_id, message, &resolved).await? {
             Ok(out) => out,
@@ -2705,6 +2714,34 @@ impl Wf {
         Ok(open)
     }
 
+    pub(crate) fn open_ticket_count(&self) -> Result<usize> {
+        let open: std::collections::HashSet<String> =
+            self.store.children(BOARD, true)?.into_iter().map(|l| l.child).collect();
+        let pending = self
+            .store
+            .pending_all()?
+            .into_iter()
+            .filter(|p| p.parent == BOARD && !p.thread.as_ref().is_some_and(|t| open.contains(t)))
+            .count();
+        Ok(open.len() + pending)
+    }
+
+    pub(crate) fn ticket_cap_full(&self) -> Result<Option<String>> {
+        let cap = self.config().max_tickets_total;
+        let running = self.open_ticket_count()?;
+        Ok((running >= cap).then(|| {
+            let tickets = if running == 1 { "ticket is" } else { "tickets are" };
+            format!("{running} {tickets} running, at the maxTicketsTotal cap of {cap}")
+        }))
+    }
+
+    pub(crate) fn at_ticket_cap(&self, label: &str, full: &str) -> Result<Value> {
+        let mut out =
+            self.launch_failed(label, &format!("Cannot launch {label}: {full}; close or finish a ticket first"))?;
+        out["atCap"] = json!(true);
+        Ok(out)
+    }
+
     async fn reserve_label(
         &self,
         wanted: &str,
@@ -2712,9 +2749,12 @@ impl Wf {
         project: Option<&str>,
         issue: Option<&Issue>,
         identity: &Identity,
-    ) -> Result<String> {
+    ) -> Result<std::result::Result<String, String>> {
         let params = self.config().link_params("overseer", "ticket")?;
         let _g = self.lock.lock().await;
+        if let Some(full) = self.ticket_cap_full()? {
+            return Ok(Err(full));
+        }
         let label = if suffix {
             let taken = self.board_labels()?;
             (1..)
@@ -2757,7 +2797,7 @@ impl Wf {
         })?;
         drop(_g);
         self.changed();
-        Ok(label)
+        Ok(Ok(label))
     }
 
     async fn launch_reserved(
@@ -3485,6 +3525,7 @@ impl Wf {
             "counts": {"cards": cards.len(), "tickets": open, "running": running, "settled": settled_total,
                        "newIssues": new_issues.len()},
             "flowMaxTickets": flow_queue.and_then(|f| f.max_tickets),
+            "maxTicketsTotal": self.config().max_tickets_total,
             "service": self.service_view(),
             "routing": self.routing_view(),
         }))

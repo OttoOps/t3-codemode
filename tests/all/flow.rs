@@ -15,9 +15,14 @@ fn flowing(max: usize) -> H {
 }
 
 fn flowing_with(max: usize, launch: &str) -> H {
-    let cfg = Config::from_value(
-        json!({"flow": {"repos": [REPO, TOOLS], "optIn": {"label": FLOW}, "maxTickets": max, "launch": launch}}),
-    );
+    capped(max.max(8), max, launch)
+}
+
+fn capped(total: usize, max: usize, launch: &str) -> H {
+    let cfg = Config::from_value(json!({
+        "maxTicketsTotal": total,
+        "flow": {"repos": [REPO, TOOLS], "optIn": {"label": FLOW}, "maxTickets": max, "launch": launch},
+    }));
     let h = H::build(Vec::new(), cfg.unwrap());
     h.github.add_repo(REPO);
     h.github.add_repo(TOOLS);
@@ -401,7 +406,7 @@ async fn with_no_flow_block_the_flow_is_off_and_reads_nothing() {
 
     assert_eq!(
         f,
-        json!({"enabled": false, "launch": null, "maxTickets": 0, "free": 0, "running": [], "queue": [], "blocked": [],
+        json!({"enabled": false, "launch": null, "maxTickets": 0, "maxTicketsTotal": 8, "free": 0, "running": [], "queue": [], "blocked": [],
                "skipped": []})
     );
     assert_eq!(graph(&h).await["graph"], json!({"nodes": [], "edges": [], "warnings": []}));
@@ -656,6 +661,131 @@ async fn an_issue_becomes_ready_on_the_next_reconcile_tick_after_its_last_blocke
     assert_eq!(c.len(), 1);
     assert_eq!(c[0]["label"], "widgets#5");
     assert!(c[0]["text"].as_str().unwrap().contains("(priority: none, unblocked by #6, tools#7)"), "{}", c[0]["text"]);
+}
+
+fn error_cards(h: &H) -> Vec<String> {
+    h.app
+        .wf
+        .cards()
+        .unwrap()
+        .into_iter()
+        .map(|c| serde_json::to_value(c).unwrap())
+        .filter(|c| c["kind"] == "error")
+        .map(|c| c["text"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn at_the_global_cap_every_launch_path_is_refused_and_the_queue_waits() {
+    let h = capped(2, 2, "auto");
+    issue(&h, REPO, 1, &[FLOW], 1);
+    issue(&h, REPO, 2, &[FLOW], 2);
+    ticket(&h, "mcp:t8", "gadgets#8").await;
+    ticket(&h, "mcp:t9", "other#9").await;
+
+    let f = flow(&h).await;
+    assert_eq!(f["maxTickets"], 2);
+    assert_eq!(f["maxTicketsTotal"], 2);
+    assert_eq!(f["running"], json!([]), "neither ticket is in a flow repo");
+    assert_eq!(f["free"], 0, "the global cap holds the flow's own free slots");
+    assert_eq!(labels(&f["queue"]), ["widgets#1", "widgets#2"]);
+
+    let r = next(&h).await;
+    assert_eq!(r["picked"], json!([]));
+    assert!(r["reason"].as_str().unwrap().contains("maxTicketsTotal cap of 2"), "{r}");
+
+    let err = err_text(&h.exec("async () => wf.launchTicket({ issue: 'acme/widgets#2' })").await).to_string();
+    assert!(err.contains("Cannot launch widgets#2: 2 tickets are running, at the maxTicketsTotal cap of 2"), "{err}");
+
+    let s = crate::board::start(h).await;
+    let r = s.post("/api/launch", json!({"issues": ["acme/widgets#1"]}), Some(&s.csrf()), None).await;
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    let res = &body["results"][0];
+    assert_eq!(res["ok"], false, "{res}");
+    assert_eq!(res["atCap"], true, "{res}");
+    assert!(res["error"].as_str().unwrap().contains("maxTicketsTotal cap of 2"), "{res}");
+    let h = &s.h;
+    assert!(h.fake.launched().is_empty());
+    let cards = error_cards(h);
+    assert_eq!(cards.len(), 2, "{cards:?}");
+    assert!(cards.iter().all(|c| c.contains("maxTicketsTotal cap of 2")), "{cards:?}");
+
+    let f = flow(h).await;
+    assert_eq!(f["skipped"], json!([]), "a refusal at the cap skips nothing");
+
+    h.wf("mcp:t8", "send", json!({"kind": "handoff", "body": "done"})).await;
+
+    let launched = h.fake.launched();
+    assert_eq!(launched.len(), 1, "a closed ticket frees one slot under the cap: {launched:?}");
+    assert_eq!(launched[0]["title"], "widgets#1: Issue 1");
+    let f = flow(h).await;
+    assert_eq!(f["free"], 0);
+    assert_eq!(labels(&f["queue"]), ["widgets#2"]);
+}
+
+#[tokio::test]
+async fn answering_a_launch_card_at_the_global_cap_refuses_and_keeps_the_issue_queued() {
+    let h = capped(2, 2, "ask");
+    issue(&h, REPO, 1, &[FLOW], 1);
+    ticket(&h, "mcp:t8", "gadgets#8").await;
+    let card = next(&h).await["picked"][0]["card"].as_str().unwrap().to_string();
+    ticket(&h, "mcp:t9", "other#9").await;
+
+    let e = h.app.wf.answer(&card, "launch").await.unwrap_err();
+
+    assert!(format!("{e:#}").contains("no ticket slot is free: 2 tickets are running"), "{e:#}");
+    assert!(h.fake.launched().is_empty());
+    let cards = error_cards(&h);
+    assert_eq!(cards.len(), 1, "{cards:?}");
+    assert!(cards[0].contains("Cannot launch widgets#1: 2 tickets are running, at the maxTicketsTotal cap of 2"));
+    let f = flow(&h).await;
+    assert_eq!(labels(&f["queue"]), ["widgets#1"]);
+    assert_eq!(f["skipped"], json!([]));
+}
+
+#[tokio::test]
+async fn the_global_cap_counts_each_open_ticket_even_when_two_share_a_label() {
+    let h = capped(2, 1, "off");
+    ticket(&h, "mcp:t8", "gadgets#8").await;
+    ticket(&h, "mcp:t9", "gadgets#8").await;
+
+    let err = err_text(&h.exec("async () => wf.launchTicket({ issue: 'acme/widgets#1' })").await).to_string();
+
+    assert!(err.contains("2 tickets are running, at the maxTicketsTotal cap of 2"), "{err}");
+    assert!(h.fake.launched().is_empty());
+}
+
+#[tokio::test]
+async fn a_dispatch_at_the_global_cap_is_refused() {
+    let h = capped(1, 1, "off");
+    ticket(&h, "mcp:t8", "gadgets#8").await;
+
+    let err = err_text(&h.exec("async () => wf.dispatch({ project: 'p-widgets', request: 'tidy the README' })").await)
+        .to_string();
+
+    assert!(err.contains("1 ticket is running, at the maxTicketsTotal cap of 1"), "{err}");
+    assert!(h.fake.launched().is_empty());
+    assert_eq!(error_cards(&h).len(), 1);
+}
+
+#[test]
+fn flow_max_tickets_above_the_global_cap_fails_naming_both_keys() {
+    let flow = |max: usize| json!({"repos": [REPO], "optIn": {"label": FLOW}, "maxTickets": max});
+    assert_eq!(Config::default().max_tickets_total, 8);
+    assert_eq!(Config::from_value(json!({"flow": flow(8)})).unwrap().flow.unwrap().max_tickets, Some(8));
+
+    let e = Config::from_value(json!({"flow": flow(9)})).unwrap_err();
+    assert_eq!(field::of(&e), "flow.maxTickets");
+    let msg = format!("{e:#}");
+    assert!(msg.contains("flow.maxTickets (9) must not exceed maxTicketsTotal (8)"), "{msg}");
+
+    let e = Config::from_value(json!({"maxTicketsTotal": 3, "flow": flow(4)})).unwrap_err();
+    assert!(format!("{e:#}").contains("flow.maxTickets (4) must not exceed maxTicketsTotal (3)"), "{e:#}");
+    assert_eq!(Config::from_value(json!({"maxTicketsTotal": 12, "flow": flow(9)})).unwrap().max_tickets_total, 12);
+
+    let e = Config::from_value(json!({"maxTicketsTotal": 0})).unwrap_err();
+    assert_eq!(field::of(&e), "maxTicketsTotal");
 }
 
 #[tokio::test]

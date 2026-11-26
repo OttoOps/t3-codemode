@@ -325,6 +325,7 @@ pub struct Config {
     pub max_timeout_ms: u64,
     pub max_concurrent_runs: usize,
     pub run_queue_ms: u64,
+    pub max_tickets_total: usize,
     pub link: LinkParams,
     pub wake: Vec<String>,
     pub body_cap: usize,
@@ -584,6 +585,7 @@ pub fn builtin_defaults() -> Value {
         "maxTimeoutMs": 600000,
         "maxConcurrentRuns": 16,
         "runQueueMs": 10000,
+        "maxTicketsTotal": 8,
         "link": {"down": 45, "miss": 2, "stall": 240},
         "wake": ["event", "gate", "blocker", "handoff", "closed", "report", "escalate", "reply"],
         "bodyCap": 1500,
@@ -730,6 +732,9 @@ impl Config {
         if self.max_timeout_ms < MIN_TIMEOUT_MS {
             return Err(invalid("maxTimeoutMs", format!("maxTimeoutMs must be at least {MIN_TIMEOUT_MS}")));
         }
+        if self.max_tickets_total == 0 {
+            return Err(invalid("maxTicketsTotal", "maxTicketsTotal must be at least 1"));
+        }
         self.link.validate().map_err(|e| within(e, "link", "link"))?;
         let (active, idle) = (self.board.reconcile_active_minutes, self.board.reconcile_idle_minutes);
         if idle > 0 && !(1..=idle).contains(&active) {
@@ -803,6 +808,17 @@ impl Config {
         }
         if let Some(flow) = &self.flow {
             flow.validate().map_err(|e| within(e, "flow", "flow"))?;
+            if let Some(max) = flow.max_tickets
+                && max > self.max_tickets_total
+            {
+                return Err(invalid(
+                    "flow.maxTickets",
+                    format!(
+                        "flow.maxTickets ({max}) must not exceed maxTicketsTotal ({}); lower flow.maxTickets or raise maxTicketsTotal",
+                        self.max_tickets_total
+                    ),
+                ));
+            }
         }
         self.trackers.validate().map_err(|e| within(e, "trackers", "trackers"))?;
         validate_forges(&self.forges)?;
