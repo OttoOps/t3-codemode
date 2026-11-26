@@ -600,3 +600,46 @@ async fn stages_approved_for_one_head_do_not_carry_to_an_accepted_queued_head() 
     assert_eq!(woke.len(), 1, "{woke:?}");
     assert!(woke[0].contains("The user's answer approved none of them."), "{}", woke[0]);
 }
+
+async fn answered_board(h: &H) -> String {
+    ticket_and_worker(h, "1/2", Some("squash")).await;
+    open_pr(h, false);
+    ready_card(h).await
+}
+
+#[tokio::test]
+async fn a_crash_after_an_answered_merge_lands_still_tells_the_ticket_and_drops_the_record() {
+    use futures_util::FutureExt;
+    let clean = setup(merge_and_deploy());
+    let card = answered_board(&clean).await;
+    let before = clean.app.store.writes();
+    clean.app.wf.answer(&card, "merge and deploy").await.unwrap();
+    let writes = clean.app.store.writes() - before;
+    let mut landed = 0;
+
+    for k in 1..=writes {
+        let mut h = setup(merge_and_deploy());
+        let card = answered_board(&h).await;
+        h.app.store.set_fault(Some(h.app.store.writes() + k));
+        let answer = h.app.wf.answer(&card, "merge and deploy");
+        assert!(std::panic::AssertUnwindSafe(answer).catch_unwind().await.is_err(), "write {k} did not crash");
+        h.reopen();
+        h.app.wf.reconcile().await.unwrap();
+        h.app.wf.tick().await.unwrap();
+        if h.github.pr(REPO, 7)["state"] != "MERGED" {
+            continue;
+        }
+        landed += 1;
+        let woke = to(&h, TICKET);
+        assert!(
+            woke.iter().any(|m| m.contains("#41 PR 1/2 is merged")),
+            "a crash at answer write {k} of {writes} never told the ticket: {woke:?}"
+        );
+        let told: std::collections::BTreeSet<&str> =
+            woke.iter().filter(|m| m.contains("#41 PR 1/2 is merged")).filter_map(|m| m.lines().next()).collect();
+        assert_eq!(told.len(), 1, "write {k} told the ticket in more than one message: {woke:?}");
+        assert_eq!(h.app.store.meta_get("merge_answer:acme/widgets#7").unwrap(), None, "write {k} kept the record");
+        assert!(cards(&h).is_empty(), "write {k}: {:?}", cards(&h));
+    }
+    assert!(landed > 0, "no crash point landed after the merge");
+}

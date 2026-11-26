@@ -6,7 +6,7 @@ use crate::board::{BOARD, Card};
 use crate::codehost::{Branch, ChangeRef, CodeHost, Forge};
 use crate::merge::MergeArgs;
 use crate::reconcile::{CardPr, CardStage};
-use crate::store::{Link, MergeWait, WaitStatus};
+use crate::store::{Link, MergeWait, WaitStatus, Wake};
 use crate::wf::{WATCHER, Wf, capped, header};
 use crate::wf_pr::{chain_label, same_head};
 
@@ -28,6 +28,8 @@ pub(crate) struct Answered {
     pub after: Vec<CardStage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
 }
 
 impl Answered {
@@ -60,12 +62,14 @@ impl Answered {
 }
 
 pub(crate) enum Job {
-    Merge(Answered),
+    Merge(Box<Answered>),
     Done(Value),
 }
 
+const ANSWERED: &str = "merge_answer:";
+
 fn key(repo: &str, pr: u64) -> String {
-    format!("merge_answer:{repo}#{pr}")
+    format!("{ANSWERED}{repo}#{pr}")
 }
 
 fn short(sha: &str) -> &str {
@@ -87,6 +91,11 @@ fn listed(ids: &[&str]) -> String {
 impl Wf {
     pub(crate) fn answered_get(&self, repo: &str, pr: u64) -> Result<Option<Answered>> {
         Ok(self.store.meta_get(&key(repo, pr))?.and_then(|s| serde_json::from_str(&s).ok()))
+    }
+
+    pub(crate) fn answered_all(&self) -> Result<Vec<Answered>> {
+        let rows = self.store.meta_prefixed(ANSWERED)?;
+        Ok(rows.into_iter().filter_map(|(_, v)| serde_json::from_str(&v).ok()).collect())
     }
 
     fn answered_put(&self, a: &Answered) -> Result<()> {
@@ -167,7 +176,7 @@ impl Wf {
         self.sync_merge_gate_pr(ticket)?;
         self.changed();
         if merge {
-            return Ok(Some(Job::Merge(rec)));
+            return Ok(Some(Job::Merge(Box::new(rec))));
         }
         let note = format!(
             "the board's answer \"ok\" on card {} accepted {} at head {}; t3cm keeps waiting for {} to merge it",
@@ -206,6 +215,7 @@ impl Wf {
             approved: after[..k].iter().map(|s| s.id.clone()).collect(),
             after: after.clone(),
             approval: None,
+            at: Some(self.now()),
         };
         self.answered_put(&rec)?;
         if !self.store.waiting_resolve_seq(BOARD, card.seq, Some(&format!("answered: {text}")), &self.now())? {
@@ -225,7 +235,7 @@ impl Wf {
         );
         self.handled(&rec.worker, ticket, &note)?;
         self.changed();
-        Ok(Some(Job::Merge(rec)))
+        Ok(Some(Job::Merge(Box::new(rec))))
     }
 
     pub(crate) async fn run_merge(&self, rec: Answered, said: &str, card_text: &str) -> Result<Value> {
@@ -319,6 +329,7 @@ impl Wf {
             approved: Vec::new(),
             after: p.after.clone().unwrap_or_default(),
             approval: None,
+            at: None,
         }))
     }
 
@@ -327,14 +338,40 @@ impl Wf {
         let mark = |to: &str, what: &str| {
             self.store.pr_event_mark(&rec.repo, rec.pr, &format!("{DONE}{what}"), to, &self.now()).map(|_| ())
         };
-        if done(&rec.worker, "")? {
+        let finished = || -> Result<bool> {
+            let finished = done(&rec.worker, "")?;
+            if finished {
+                self.answered_drop(&rec.repo, rec.pr)?;
+            }
+            Ok(finished)
+        };
+        if finished()? {
             return Ok(Vec::new());
         }
         let branch = self.delete_branch(&rec.repo, rec.pr).await;
         let _g = self.lock.lock().await;
-        if done(&rec.worker, "")? {
+        if finished()? {
             return Ok(Vec::new());
         }
+        let now = self.now();
+        let wake = |to: &str, what: &str, kind: &str, body: &str, cap: Option<usize>| {
+            let event = format!("{DONE}{what}");
+            let w = Wake {
+                repo: &rec.repo,
+                pr: rec.pr,
+                event: Some(&event),
+                ticket: to,
+                from: WATCHER,
+                kind,
+                body,
+                at: &now,
+            };
+            let text = |h: &str| match cap {
+                Some(cap) => format!("{}\n{}", header(kind, WATCHER, h, None), capped(body, h, cap)),
+                None => format!("{}\n{body}", header(kind, WATCHER, h, None)),
+            };
+            self.store.pr_event_wake(&w, text).map(|_| ())
+        };
         let parent = self.store.link_get(&rec.worker)?.map(|l| l.parent).filter(|p| p != BOARD);
         let ticket = parent.as_deref().unwrap_or(&rec.ticket);
         let pr_left: Vec<&str> = rec.after.iter().filter(|s| s.scope == "pr").map(|s| s.id.as_str()).collect();
@@ -342,10 +379,7 @@ impl Wf {
         let mut flush = Vec::new();
         let worker_line = match self.store.link_get(&rec.worker)?.filter(|l| !l.closed) {
             Some(mut wl) if pr_left.is_empty() => {
-                if !done(&rec.worker, ":handoff")? {
-                    self.queue_worker_reply(&rec.worker, &handoff)?;
-                    mark(&rec.worker, ":handoff")?;
-                }
+                wake(&rec.worker, ":handoff", "reply", &handoff, None)?;
                 if wl.gate.as_deref() == Some("merge") {
                     wl.gate = None;
                     wl.gate_since = None;
@@ -377,12 +411,7 @@ impl Wf {
                 rec.worker_label,
                 stages.join(", ")
             );
-            let now = self.now();
-            let h = self.store.msg_new(WATCHER, ticket, "event", &body, &now)?;
-            let text =
-                format!("{}\n{}", header("event", WATCHER, &h, None), capped(&body, &h, self.config().reply_cap));
-            self.store.outbox_push(ticket, &text, &h, &now)?;
-            mark(ticket, ":ticket")?;
+            wake(ticket, ":ticket", "event", &body, Some(self.config().reply_cap))?;
             flush.push(ticket.to_string());
         }
         let own: Vec<i64> = self
@@ -401,8 +430,8 @@ impl Wf {
         self.sync_merge_gate_pr(ticket)?;
         self.sync_relay_gate(ticket)?;
         self.store.merge_wait_remove(&rec.repo, rec.pr)?;
-        self.answered_drop(&rec.repo, rec.pr)?;
         mark(&rec.worker, "")?;
+        self.answered_drop(&rec.repo, rec.pr)?;
         self.flow_soon();
         self.changed();
         Ok(flush)

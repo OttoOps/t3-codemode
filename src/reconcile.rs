@@ -443,6 +443,10 @@ impl Wf {
                 t.cards.push(card.seq);
             }
         }
+        for rec in self.answered_all()? {
+            let t = add(&mut map, &rec.repo, rec.pr);
+            t.add(Some(&rec.ticket), rec.at.as_deref().unwrap_or(floor));
+        }
         for w in self.store.merge_waits()? {
             let t = add(&mut map, &w.repo, w.pr);
             t.add(w.thread.as_deref(), &w.at);

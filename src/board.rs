@@ -1872,7 +1872,7 @@ impl Wf {
             drop(g);
             return match job {
                 crate::merge_answer::Job::Done(v) => Ok(v),
-                crate::merge_answer::Job::Merge(rec) => self.run_merge(rec, text, &card.text).await,
+                crate::merge_answer::Job::Merge(rec) => self.run_merge(*rec, text, &card.text).await,
             };
         }
         if let Some(w) = card.worker.clone()
