@@ -144,7 +144,11 @@ fn op_adopt(h: Rc<H>, _: Rc<Ctx>) -> LocalBoxFuture<'static, String> {
 }
 
 async fn board(queue: bool) -> H {
-    let (h, _) = setup_chaos(true);
+    board_in(queue, true, None).await
+}
+
+pub(super) async fn board_in(queue: bool, in_memory: bool, method: Option<&str>) -> H {
+    let (h, _) = setup_chaos(in_memory);
     h.app.wf.set_id_source(Arc::new(SeqIds::new("appr-")));
     for &n in &[7, 8, 9] {
         h.github.set_queue(REPO, n, queue, false);
@@ -155,8 +159,11 @@ async fn board(queue: bool) -> H {
     for (i, &w) in WORKERS.iter().take(2).enumerate() {
         let part = format!("{}/3", i + 1);
         let label = format!("#41 PR {part}");
-        let args = json!({"role": "worker", "label": label, "issue": "acme/widgets#41", "part": part,
-                          "pr": {"format": "pr"}});
+        let mut pr = json!({"format": "pr"});
+        if let Some(m) = method {
+            pr["method"] = json!(m);
+        }
+        let args = json!({"role": "worker", "label": label, "issue": "acme/widgets#41", "part": part, "pr": pr});
         h.wf(TICKETS[0], "openChild", args).await;
         h.wf(w, "join", json!({"parent": TICKETS[0], "label": label, "role": "worker"})).await;
         let opened = json!({"event": "opened", "repo": REPO, "pr": 7 + i as u64, "head": HEADS[0],
@@ -240,7 +247,7 @@ fn normalize(s: String) -> String {
     out
 }
 
-fn state(h: &H) -> Vec<String> {
+pub(super) fn state(h: &H) -> Vec<String> {
     let snap = h.snapshot();
     let mut delivered = snap.delivered.clone();
     delivered.sort();
@@ -283,7 +290,7 @@ async fn quiesce(h: &H) {
     panic!("reconcile did not reach a fixpoint in {QUIESCE_PASSES} passes:\n{}", last.join("\n"));
 }
 
-fn check_safety(h: &H, what: &str) {
+pub(super) fn check_safety(h: &H, what: &str) {
     let snap = h.snapshot();
     for ((repo, n), w) in &snap.merge_waits {
         let pr = h.github.pr(repo, *n);
