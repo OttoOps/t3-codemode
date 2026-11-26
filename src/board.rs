@@ -3526,6 +3526,7 @@ impl Wf {
                        "newIssues": new_issues.len()},
             "flowMaxTickets": flow_queue.and_then(|f| f.max_tickets),
             "maxTicketsTotal": self.config().max_tickets_total,
+            "openTickets": self.open_ticket_count()?,
             "service": self.service_view(),
             "routing": self.routing_view(),
         }))
