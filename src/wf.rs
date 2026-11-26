@@ -1032,14 +1032,16 @@ impl Wf {
             header(&a.kind, &ln.label, &handle, ln.gate.as_deref()),
             capped(&a.body, &handle, policy.body_cap)
         );
-        self.store.link_save(&ln)?;
-        if closing && !self.sentinel(Sentinel::OutboxNoPurge) && self.store.outbox_drop_to(&ln.child)? > 0 {
+        if !closing {
+            self.store.link_save(&ln)?;
+            return self.send_wake(&ln.parent, &text, &handle).await;
+        }
+        let purge = !self.sentinel(Sentinel::OutboxNoPurge);
+        if self.store.link_close(&ln, purge, Some((&ln.parent, &text, &handle)), &now)? > 0 {
             self.reach.hit(ReachPoint::OutboxHeldThenClosed);
         }
-        let mut out = self.send_wake(&ln.parent, &text, &handle).await?;
-        if closing {
-            out["closed"] = json!(true);
-        }
+        let mut out = self.deliver_queued(&ln.parent, &handle).await?;
+        out["closed"] = json!(true);
         Ok(out)
     }
 
@@ -1530,6 +1532,10 @@ impl Wf {
 
     async fn send_wake_inner(&self, to: &str, text: &str, handle: &str, allow_closed: bool) -> Result<Value> {
         self.store.outbox_push_with(to, text, handle, &self.now(), allow_closed)?;
+        self.deliver_queued(to, handle).await
+    }
+
+    async fn deliver_queued(&self, to: &str, handle: &str) -> Result<Value> {
         let force = !self.watcher_alive();
         let f = self.flush_outbox(Some(to), force).await?;
         if f.dropped.iter().any(|(_, hs)| hs.iter().any(|h| h == handle)) {
