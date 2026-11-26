@@ -119,6 +119,8 @@ pub struct Link {
     pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_since: Option<String>,
     #[serde(flatten)]
     pub identity: Identity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1349,6 +1351,7 @@ impl Store {
                 nudges: 0,
                 escalated: false,
                 bad_run: None,
+                busy_since: None,
                 settled_at: None,
                 ..ln
             };
@@ -2323,6 +2326,7 @@ mod tests {
             base: Default::default(),
             project: None,
             paused_at: None,
+            busy_since: None,
             identity: Identity::default(),
             brief: None,
             pr: None,
