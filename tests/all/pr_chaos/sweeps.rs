@@ -51,6 +51,8 @@ pub(super) type Make = fn(usize) -> Inject;
 
 const KNOWN: &[(&str, &str)] = &[("answer merge", "#365")];
 
+const HELD_REPLY: (&str, &str, &str, &str) = ("mcp:w1", "reply", "mcp:t1", "Merged #7 at abc1234. Hand off.");
+
 type Wake = (String, String, String, String);
 
 fn core(h: &H) -> Vec<String> {
@@ -366,6 +368,10 @@ async fn drive(sc: &Scenario, inject: Inject) -> Run {
             if trace {
                 eprintln!("{} {inject:?} retry {i}: {again}", sc.name);
             }
+            if out.is_some() {
+                statuses.pop();
+                statuses.push(again);
+            }
         }
         closings(&h, &mut closed, sent);
     }
@@ -430,7 +436,8 @@ fn without(line: &str, drop: impl Fn(&&str) -> bool) -> Vec<&str> {
 }
 
 fn approval_lost(got: &str, want: &str) -> bool {
-    let pr7 = |e: &&str| e.starts_with(r#"("acme/widgets", 7,"#) || e.starts_with(r#"("acme/widgets", 7):"#);
+    let merge_event = |e: &&str| e.starts_with(r#"("acme/widgets", 7, "merged"#);
+    let open_seen = |e: &&str| e.starts_with(r#"("acme/widgets", 7): (false, "#) && e.ends_with(", None, None)");
     let merged = |e: &&str| *e == r#""\"event\" \"mcp:t1\" #41 PR 1/3 is merged""#;
     let open =
         r#""mcp:t1": LinkView { parent: "board", closed: false, paused: false, gate: None, gate_pr: None, pr: None }"#;
@@ -441,10 +448,10 @@ fn approval_lost(got: &str, want: &str) -> bool {
     };
     let prefix = |p: &str| got.starts_with(p) && want.starts_with(p);
     if prefix("events ") {
-        return entries(got) == without(want, pr7);
+        return entries(got) == without(want, merge_event);
     }
     if prefix("live seen ") {
-        return without(got, pr7) == entries(want);
+        return without(got, open_seen) == entries(want);
     }
     if prefix("feed ") {
         return entries(got) == without(want, merged);
@@ -453,7 +460,7 @@ fn approval_lost(got: &str, want: &str) -> bool {
         let (got, want) = (entries(got), entries(want));
         return got.len() == want.len() && got.iter().zip(&want).all(|(g, w)| g == w || (*w == open && gated(g)));
     }
-    prefix("github #7 ")
+    prefix("github #7 ") && got == want.replace(r#""MERGED""#, r#""OPEN""#)
 }
 
 fn known(run: &Run, base: &Run, inject: Inject) -> Option<&'static str> {
@@ -476,8 +483,9 @@ fn verdict(run: &Run, base: &Run, inject: Inject) -> Vec<String> {
         out.push(format!("{inject:?} {:?}:{}", run.statuses, diff(&run.state, &base.state)));
     }
     let lost: Vec<&Wake> = base.wakes.difference(&run.wakes).collect();
-    let extra: Vec<&Wake> = run.wakes.difference(&base.wakes).collect();
-    if (!lost.is_empty() && (strict || !told(run, base))) || (strict && !extra.is_empty()) {
+    let fail_open = |w: &&Wake| !strict && (w.0.as_str(), w.1.as_str(), w.2.as_str(), w.3.as_str()) == HELD_REPLY;
+    let extra: Vec<&Wake> = run.wakes.difference(&base.wakes).filter(|w| !fail_open(w)).collect();
+    if (!lost.is_empty() || !extra.is_empty()) && (strict || !told(run, base)) {
         out.push(format!("{inject:?} {:?}: lost wakes {lost:?}, extra wakes {extra:?}", run.statuses));
     }
     out
