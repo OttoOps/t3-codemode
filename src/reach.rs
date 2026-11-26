@@ -92,6 +92,8 @@ pub enum ReachPoint {
     WorkerArchived,
     /// `reconcile::fix` skipped a pull request that stopped being tracked while the batched read was in flight.
     ReconcileDroppedUntracked,
+    /// `Store::link_save` found the row changed by another process since it was read and merged field by field.
+    LinkSaveMerged,
 }
 
 impl ReachPoint {
@@ -131,6 +133,7 @@ impl ReachPoint {
         Self::WorkerThreadGone,
         Self::WorkerArchived,
         Self::ReconcileDroppedUntracked,
+        Self::LinkSaveMerged,
     ];
 
     pub const COUNT: usize = Self::ALL.len();
@@ -172,6 +175,7 @@ impl ReachPoint {
             Self::WorkerThreadGone => "worker_thread_gone",
             Self::WorkerArchived => "worker_archived",
             Self::ReconcileDroppedUntracked => "reconcile_dropped_untracked",
+            Self::LinkSaveMerged => "link_save_merged",
         }
     }
 
@@ -182,7 +186,8 @@ impl ReachPoint {
             | Self::BadEndNudged
             | Self::WorkerThreadGone
             | Self::WorkerArchived
-            | Self::ReconcileDroppedUntracked => ReachTier::Tier2,
+            | Self::ReconcileDroppedUntracked
+            | Self::LinkSaveMerged => ReachTier::Tier2,
             _ => ReachTier::Tier1,
         }
     }

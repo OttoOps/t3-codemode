@@ -484,6 +484,7 @@ fn retire_t3wf_warns_and_nudges_open_links_without_blocking() {
             bad_run: None,
             settled_at: None,
             restored_at: None,
+            base: Default::default(),
             project: None,
             paused_at: None,
             identity: Default::default(),

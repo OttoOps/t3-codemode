@@ -348,7 +348,7 @@ pub struct Wf {
     pub(crate) state_rev: AtomicU64,
     pub(crate) context_writes: Mutex<()>,
     pub(crate) routing: Mutex<Option<Value>>,
-    pub(crate) reach: Reach,
+    pub(crate) reach: Arc<Reach>,
     pub(crate) sentinels: Sentinels,
 }
 
@@ -375,6 +375,8 @@ impl Wf {
         github: Arc<dyn GitHub>,
         gitlab: Arc<dyn crate::gitlab::GitLab>,
     ) -> Wf {
+        let reach = Arc::new(Reach::new());
+        store.report_to(reach.clone());
         if store.node_role(BOARD).ok().flatten().as_deref() != Some("overseer") {
             let _ = store.node_set(BOARD, "overseer", &iso(clock.now()));
         }
@@ -429,7 +431,7 @@ impl Wf {
             state_rev: AtomicU64::new(rev),
             context_writes: Mutex::new(()),
             routing: Mutex::new(None),
-            reach: Reach::new(),
+            reach,
             sentinels: Sentinels::new(),
         }
     }
@@ -895,6 +897,7 @@ impl Wf {
                 bad_run: None,
                 settled_at: None,
                 restored_at: None,
+                base: Default::default(),
                 project: project
                     .or_else(|| launch.and_then(|p| p.project.clone()))
                     .or_else(|| old.as_ref().and_then(|o| o.project.clone()))

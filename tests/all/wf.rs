@@ -564,6 +564,7 @@ fn bare_link(child: &str, parent: &str, label: &str) -> Link {
         bad_run: None,
         settled_at: None,
         restored_at: None,
+        base: Default::default(),
         project: None,
         paused_at: None,
         identity: Default::default(),
