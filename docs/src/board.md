@@ -298,7 +298,7 @@ read returns.
 | Launches | The ticket and ask model pickers, and `board.runtimeMode` |
 | Pools | Each [pool](config.md#pools) and its members, with each member's live state |
 | Board | The other `board` keys, such as `feed`, the GitHub check intervals, `openLinks`, `layout` and `remote` |
-| Flow | Launch mode, `maxTickets`, repository discovery (`repos`, `includeRepos`, `excludeRepos`), queue opt-in filter (`optIn.label`, `optIn.milestone`), and `serializeFileConflicts` |
+| Flow | Launch mode, `maxTickets`, the ticket cap `maxTicketsTotal`, repository discovery (`repos`, `includeRepos`, `excludeRepos`), queue opt-in filter (`optIn.label`, `optIn.milestone`), and `serializeFileConflicts` |
 | Workflow links | `link`, `wake`, the body and reply caps, `digestLines`, and a JSON editor for `roles` |
 | Runtime | Timeouts, run limits, the watcher interval, the hold limits and `updateCheck` |
 | Upstreams and deny list | `deny`, one tool per line, and a JSON editor for `upstreams` |

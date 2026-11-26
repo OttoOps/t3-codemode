@@ -203,8 +203,12 @@ whether the Launch form, a new-issue launch, `wf.launchTicket`, `wf.dispatch`
 or the flow queue started it. A launch at the cap is refused: it launches
 nothing, returns an error that names the cap, and leaves an error card on the
 board. The flow queue holds instead, and picks again when a ticket closes.
-Nothing raises the cap at run time; change it in the config. `flow.maxTickets`
-must not be above it, and a config that sets it higher fails validation.
+Nothing raises the cap at run time; change it in the config, from the
+board's [Settings](board.md#settings) under **Flow**, or from the
+`setup-t3-workflow` flow step. `flow.maxTickets` must not be above it: a
+config that sets it higher fails validation, and Settings refuses to save it.
+The board header shows the count against the cap, such as
+"4 running · flow 6 · cap 8".
 
 ### Board
 
