@@ -1048,17 +1048,26 @@ impl Store {
         Ok(self.with(|c| c.execute(sql, params![w.repo, w.pr as i64, w.approval]))? > 0)
     }
 
+    /// Save a pull request's last-seen state under a revision no earlier save in this store has used,
+    /// so a row deleted and tracked again never repeats one.
     pub fn pr_seen_put(&self, p: &PrSeen) -> Result<()> {
         let data = serde_json::to_string(p)?;
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO pr_seen (repo, pr, data) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (repo, pr) DO UPDATE SET data = json_set(excluded.data, '$.rev',
-                     COALESCE(json_extract(pr_seen.data, '$.rev'), 0) + 1)",
-                params![p.repo, p.pr as i64, data],
-            )
-        })?;
-        Ok(())
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let rev: i64 = tx.query_row(
+            "INSERT INTO meta (key, value) VALUES ('pr_seen_rev',
+                 (SELECT COALESCE(MAX(CAST(json_extract(data, '$.rev') AS INTEGER)), 0) + 1 FROM pr_seen))
+             ON CONFLICT (key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
+             RETURNING CAST(value AS INTEGER)",
+            [],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO pr_seen (repo, pr, data) VALUES (?1, ?2, json_set(?3, '$.rev', ?4))
+             ON CONFLICT (repo, pr) DO UPDATE SET data = excluded.data",
+            params![p.repo, p.pr as i64, data, rev],
+        )?;
+        self.commit(tx)
     }
 
     pub fn pr_seen_all(&self) -> Result<Vec<PrSeen>> {
@@ -2348,5 +2357,42 @@ mod tests {
         let reopened = Store::open(dir.path()).unwrap();
         assert!(reopened.pr_events_all().unwrap().is_empty());
         assert!(reopened.outbox_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_pr_seen_row_tracked_again_never_repeats_a_revision() {
+        let store = Store::open_memory().unwrap();
+        let seen = |state: &str| PrSeen {
+            repo: "acme/widgets".into(),
+            pr: 7,
+            state: state.into(),
+            head: "a".repeat(40),
+            ..PrSeen::default()
+        };
+        let rev = |store: &Store| store.pr_seen_get("acme/widgets", 7).unwrap().unwrap().rev;
+        store.pr_seen_put(&seen("OPEN")).unwrap();
+        store.pr_seen_put(&seen("MERGED")).unwrap();
+        let merged = rev(&store);
+        store.pr_seen_remove("acme/widgets", 7).unwrap();
+        store.pr_seen_put(&seen("OPEN")).unwrap();
+        store.pr_seen_put(&seen("MERGED")).unwrap();
+        assert!(rev(&store) > merged, "a MERGED row tracked again reused revision {merged}");
+    }
+
+    #[test]
+    fn pr_seen_revisions_continue_past_rows_saved_before_the_sequence() {
+        let store = Store::open_memory().unwrap();
+        let old = serde_json::json!({"repo": "acme/widgets", "pr": 7, "state": "OPEN", "head": "a", "queued": false,
+                                     "since": "t", "tickets": [], "at": "t", "rev": 41});
+        store
+            .with(|c| {
+                c.execute("INSERT INTO pr_seen (repo, pr, data) VALUES ('acme/widgets', 7, ?1)", [old.to_string()])
+            })
+            .unwrap();
+        let mut next = store.pr_seen_get("acme/widgets", 8).unwrap().unwrap_or_default();
+        next.repo = "acme/widgets".into();
+        next.pr = 8;
+        store.pr_seen_put(&next).unwrap();
+        assert_eq!(store.pr_seen_get("acme/widgets", 8).unwrap().unwrap().rev, 42);
     }
 }
