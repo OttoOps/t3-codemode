@@ -466,6 +466,9 @@ async fn an_invalid_save_names_its_field_and_leaves_the_file() {
         (json!({"board": {"typo": 1}}), "board.typo"),
         (json!({"board": {"askPool": "ghost"}}), "board.askPool"),
         (json!({"link": {"stall": 1}}), "link.stall"),
+        (json!({"flow": {"maxTickets": 9}}), "flow.maxTickets"),
+        (json!({"maxTicketsTotal": 2, "flow": {"maxTickets": 3}}), "flow.maxTickets"),
+        (json!({"maxTicketsTotal": 0}), "maxTicketsTotal"),
         (json!({"wake": ["event", "note"]}), "wake.1"),
         (json!({"deny": "t3_thread_launch"}), "deny"),
         (json!({"board": {"remote": {"mode": "pairing"}}}), "board.remote.origin"),
@@ -836,7 +839,6 @@ async fn the_dialog_has_a_control_or_an_editor_for_every_key() {
             "board.ticketEffort",
             "board.ticketModel",
             "forges",
-            "maxTicketsTotal",
             "trackers.hosts",
             "trackers.jira",
         ],
@@ -849,6 +851,69 @@ async fn the_dialog_has_a_control_or_an_editor_for_every_key() {
         }
     }
     assert_eq!(r["restart"], opened["restart"], "the restart badges follow the service's list");
+}
+
+#[tokio::test]
+async fn the_flow_section_sets_the_ticket_cap_beside_the_flow_limit() {
+    let before = json!({"flow": {"maxTickets": 2}});
+    let (b, r) = drive(
+        &before,
+        r#"await open();
+  showSection("flow");
+  const cap = field("maxTicketsTotal");
+  const shown = cap.value;
+  type(cap, "12");
+  type(field("flow.maxTickets"), "10");
+  await saveSettings();
+  return { shown, section: conf.fields.get("flow").some((f) => f.key === "maxTicketsTotal"), puts: puts() };"#,
+    )
+    .await;
+    assert_eq!((&r["shown"], &r["section"]), (&json!("8"), &json!(true)), "the cap shows its default in Flow: {r}");
+    let puts = r["puts"].as_array().unwrap();
+    assert_eq!(puts.len(), 1, "{r}");
+    let want = json!({"flow": {"maxTickets": 10}, "maxTicketsTotal": 12});
+    assert_eq!(puts[0]["file"], want, "{r}");
+    assert_eq!(b.put(&puts[0]).await.0, 200);
+    assert_eq!(b.h.app.config().max_tickets_total, 12, "the cap applies on save");
+}
+
+#[tokio::test]
+async fn the_dialog_refuses_a_flow_limit_above_the_ticket_cap() {
+    let before = json!({"maxTicketsTotal": 4, "flow": {"maxTickets": 2}});
+    let (b, r) = drive(
+        &before,
+        r#"await open();
+  showSection("flow");
+  type(field("flow.maxTickets"), "5");
+  showSection("board");
+  await saveSettings();
+  const limit = field("flow.maxTickets");
+  const error = limit.parentNode.parentNode.querySelector(".conf-err");
+  const refused = {
+    puts: puts().length, tab: conf.tab, focused: document.activeElement === limit,
+    invalid: limit.getAttribute("aria-invalid"), shown: error.hidden ? "" : error.textContent,
+  };
+  type(field("maxTicketsTotal"), "5");
+  const cleared = error.hidden;
+  await saveSettings();
+  return { refused, cleared, puts: puts() };"#,
+    )
+    .await;
+    let refused = &r["refused"];
+    assert_eq!(
+        (&refused["puts"], &refused["tab"], &refused["focused"], &refused["invalid"]),
+        (&json!(0), &json!("flow"), &json!(true), &json!("true")),
+        "{r}"
+    );
+    assert_eq!(
+        refused["shown"], "Max open tickets (5) must not exceed the ticket cap (4). Lower it or raise the ticket cap.",
+        "{r}"
+    );
+    assert_eq!(r["cleared"], true, "raising the cap clears the error: {r}");
+    let puts = r["puts"].as_array().unwrap();
+    assert_eq!(puts.len(), 1, "{r}");
+    assert_eq!(puts[0]["file"], json!({"maxTicketsTotal": 5, "flow": {"maxTickets": 5}}), "{r}");
+    assert_eq!(b.put(&puts[0]).await.0, 200);
 }
 
 #[tokio::test]

@@ -11378,7 +11378,11 @@ function confFlow() {
       }),
       confNumber(sec, at("maxTickets"), {
         label: "Max open tickets", unit: "tickets", min: 1, placeholder: "Off",
-        help: "Enables the flow queue and caps open flow tickets at once (1 or more). Leave blank to keep the queue off.",
+        help: "Enables the flow queue and caps open flow tickets at once (1 or more), never above the ticket cap. Leave blank to keep the queue off.",
+      }),
+      confNumber(sec, ["maxTicketsTotal"], {
+        label: "Ticket cap", unit: "tickets", min: 1,
+        help: "The most tickets open on the board at once, from every launch, flow or not (1 or more). A launch at the cap is refused.",
       }),
       confToggle(sec, at("serializeFileConflicts"), {
         label: "Serialize file conflicts", preset: false,
@@ -11841,8 +11845,20 @@ function confFieldFor(key) {
   return best;
 }
 
+function confOverCap() {
+  const max = getAt(conf.draft, ["flow", "maxTickets"]);
+  const cap = confShown(["maxTicketsTotal"]);
+  if (typeof max !== "number" || typeof cap !== "number" || max <= cap || conf.bad.has("maxTicketsTotal")) return null;
+  return {
+    field: "flow.maxTickets",
+    message: "Max open tickets (" + max + ") must not exceed the ticket cap (" + cap + "). Lower it or raise the ticket cap.",
+  };
+}
+
 function confProblems() {
-  return [...[...conf.bad].map(([field, { message }]) => ({ field, message })), ...conf.errors];
+  const over = confOverCap();
+  const local = over && !conf.errors.some((e) => e.field === over.field) ? [over] : [];
+  return [...[...conf.bad].map(([field, { message }]) => ({ field, message })), ...conf.errors, ...local];
 }
 
 function confGoTo(key) {
@@ -12064,6 +12080,13 @@ async function saveSettings() {
   if (active && $("settings-panels").contains(active)) active.blur();
   if (conf.bad.size) return confGoTo(conf.bad.has("") ? "" : [...conf.bad.keys()][0]);
   if (!confCanSave()) return;
+  const over = confOverCap();
+  if (over) {
+    conf.said = "Not saved.";
+    paintSettings();
+    confAlert("Not saved. " + over.message);
+    return confGoTo(over.field);
+  }
   if (conf.newPool.trim()) {
     const pools = getAt(conf.draft, ["pools"]);
     if (pools === undefined || isObj(pools)) {
