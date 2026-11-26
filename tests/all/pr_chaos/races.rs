@@ -79,6 +79,18 @@ fn op_merge_t1_7(h: Rc<H>, _: Rc<Ctx>) -> LocalBoxFuture<'static, String> {
     merge(TICKETS[0], 7, 0)(h)
 }
 
+fn op_merge_t1_7_after_landing(h: Rc<H>, c: Rc<Ctx>) -> LocalBoxFuture<'static, String> {
+    Box::pin(async move {
+        let status = op_merge_t1_7(h.clone(), c).await;
+        let snap = h.snapshot();
+        let retired = snap.pr_events.iter().any(|(_, pr, e, _)| *pr == 7 && e.starts_with("merged:"))
+            || h.app.store.pr_seen_get(REPO, 7).unwrap().is_some_and(|s| s.state == "MERGED");
+        let wait = snap.merge_waits.iter().find(|((_, n), _)| *n == 7);
+        assert!(!retired || wait.is_none(), "wf.merge resurrected #7's wait after reconcile saw it merge: {wait:?}");
+        status
+    })
+}
+
 fn op_reconcile(h: Rc<H>, _: Rc<Ctx>) -> LocalBoxFuture<'static, String> {
     Box::pin(async move {
         match h.app.wf.reconcile_ran().await {
@@ -557,7 +569,7 @@ fn r1_landing(wait: bool) -> Table {
         },
         setup: if wait { setup_waiting_merge } else { setup_ready_queue },
         steps: vec![
-            Step { name: "wf.merge", at: At::After("enqueuePullRequest", 1), run: op_merge_t1_7 },
+            Step { name: "wf.merge", at: At::After("enqueuePullRequest", 1), run: op_merge_t1_7_after_landing },
             Step { name: "land", at: At::Now, run: op_land_queue },
             Step { name: "reconcile", at: At::Now, run: op_reconcile },
         ],
