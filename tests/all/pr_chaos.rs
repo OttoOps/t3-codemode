@@ -19,6 +19,7 @@ use t3_codemode::sentinels::Sentinel;
 use t3_codemode::store::{MergeWait, WaitStatus};
 use t3_codemode::wf::LAST_PASS;
 
+mod faults;
 mod ops;
 mod races;
 mod shadow;

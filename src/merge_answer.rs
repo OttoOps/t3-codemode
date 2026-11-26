@@ -333,6 +333,10 @@ impl Wf {
         }))
     }
 
+    pub(crate) fn merge_unfinished(&self, rec: &Answered) -> Result<bool> {
+        Ok(!rec.answer.is_empty() && !self.store.pr_event_seen(&rec.repo, rec.pr, DONE, &rec.worker)?)
+    }
+
     pub(crate) async fn after_merge(&self, rec: &Answered, commit: &str) -> Result<Vec<String>> {
         let done = |to: &str, what: &str| self.store.pr_event_seen(&rec.repo, rec.pr, &format!("{DONE}{what}"), to);
         let mark = |to: &str, what: &str| {

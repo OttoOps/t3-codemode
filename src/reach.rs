@@ -94,6 +94,14 @@ pub enum ReachPoint {
     ReconcileDroppedUntracked,
     /// `Store::link_save` found the row changed by another process since it was read and merged field by field.
     LinkSaveMerged,
+    /// `flush_outbox` kept a wake queued for the watcher to retry because T3 refused the send.
+    OutboxSendFailed,
+    /// `wf.merge` reread a pull request after the forge refused the merge and found it merged or queued anyway.
+    LandedAfterError,
+    /// `reconcile` kept a pull request for the next pass because its read failed inside an otherwise good batch.
+    ReconcilePrReadFailed,
+    /// `reconcile` finished an in-code merge's handoff that the answer that merged it never completed.
+    InCodeMergeResumed,
 }
 
 impl ReachPoint {
@@ -134,6 +142,10 @@ impl ReachPoint {
         Self::WorkerArchived,
         Self::ReconcileDroppedUntracked,
         Self::LinkSaveMerged,
+        Self::OutboxSendFailed,
+        Self::LandedAfterError,
+        Self::ReconcilePrReadFailed,
+        Self::InCodeMergeResumed,
     ];
 
     pub const COUNT: usize = Self::ALL.len();
@@ -176,6 +188,10 @@ impl ReachPoint {
             Self::WorkerArchived => "worker_archived",
             Self::ReconcileDroppedUntracked => "reconcile_dropped_untracked",
             Self::LinkSaveMerged => "link_save_merged",
+            Self::OutboxSendFailed => "outbox_send_failed",
+            Self::LandedAfterError => "landed_after_error",
+            Self::ReconcilePrReadFailed => "reconcile_pr_read_failed",
+            Self::InCodeMergeResumed => "in_code_merge_resumed",
         }
     }
 
@@ -187,7 +203,11 @@ impl ReachPoint {
             | Self::WorkerThreadGone
             | Self::WorkerArchived
             | Self::ReconcileDroppedUntracked
-            | Self::LinkSaveMerged => ReachTier::Tier2,
+            | Self::LinkSaveMerged
+            | Self::OutboxSendFailed
+            | Self::LandedAfterError
+            | Self::ReconcilePrReadFailed
+            | Self::InCodeMergeResumed => ReachTier::Tier2,
             _ => ReachTier::Tier1,
         }
     }

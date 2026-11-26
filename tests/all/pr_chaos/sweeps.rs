@@ -24,7 +24,7 @@ struct Scenario {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Inject {
+pub(super) enum Inject {
     None,
     T3Fail(usize),
     T3FailAfterEffect(usize),
@@ -33,21 +33,21 @@ enum Inject {
     Crash(usize),
 }
 
-struct Run {
+pub(super) struct Run {
     state: Vec<String>,
     wakes: BTreeSet<Wake>,
     statuses: Vec<String>,
     reach: ReachSnapshot,
-    writes: usize,
-    t3_calls: usize,
-    gh_calls: usize,
+    pub(super) writes: usize,
+    pub(super) t3_calls: usize,
+    pub(super) gh_calls: usize,
     crashed_in: Option<&'static str>,
     landed: bool,
     broke: Option<String>,
 }
 
-type Count = fn(&Run) -> usize;
-type Make = fn(usize) -> Inject;
+pub(super) type Count = fn(&Run) -> usize;
+pub(super) type Make = fn(usize) -> Inject;
 
 const KNOWN: &[(&str, &str)] = &[("answer merge", "#365")];
 
@@ -294,7 +294,9 @@ fn arm(h: &H, inject: Inject) {
         Inject::T3Fail(n) => h.fake.fault(Rule::on("*").call(n).fail(down())),
         Inject::T3FailAfterEffect(n) => h.fake.fault(Rule::on("*").call(n).fail_after_effect(down())),
         Inject::GitHubFail(n) => h.github.fault(Rule::on("*").call(n).fail(down())),
-        Inject::GitHubFailAfterEffect(n) => h.github.fault(Rule::on("*").call(n).fail_after_effect(down())),
+        Inject::GitHubFailAfterEffect(n) => {
+            h.github.fault(Rule::on("*").call(n).fail_after_effect(Failure::refused("injected error after the write")))
+        }
         Inject::Crash(n) => h.app.store.set_fault(Some(h.app.store.writes() + n)),
     }
 }
@@ -443,6 +445,14 @@ async fn sweep_all(sc: &Scenario, of: Count, inject: Make) -> Swept {
         }
     }
     swept
+}
+
+pub(super) async fn reach_of(of: Count, inject: Make) -> ReachSnapshot {
+    let mut reach = ReachSnapshot::default();
+    for sc in SCENARIOS {
+        reach.merge(&sweep(sc, of, inject).await.reach);
+    }
+    reach
 }
 
 async fn sweep(sc: &Scenario, of: Count, inject: Make) -> Swept {

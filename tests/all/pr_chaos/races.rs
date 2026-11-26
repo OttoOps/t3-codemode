@@ -16,7 +16,7 @@ const BURST_SEEDS: u64 = 24;
 const QUIESCE_PASSES: usize = 6;
 const STALL: Duration = Duration::from_secs(30);
 
-type Ctx = BTreeMap<&'static str, String>;
+pub(super) type Ctx = BTreeMap<&'static str, String>;
 type Run = fn(Rc<H>, Rc<Ctx>) -> LocalBoxFuture<'static, String>;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -177,7 +177,7 @@ fn set_checks(h: &H, pr: u64, checks: Value) {
     h.github.set_checks(REPO, pr, checks);
 }
 
-fn setup_waiting_merge(queue: bool) -> LocalBoxFuture<'static, (H, Ctx)> {
+pub(super) fn setup_waiting_merge(queue: bool) -> LocalBoxFuture<'static, (H, Ctx)> {
     Box::pin(async move {
         let h = board(queue).await;
         h.github.set_status(REPO, 7, "BLOCKED", false);
@@ -211,7 +211,7 @@ fn setup_ready_waiting(queue: bool) -> LocalBoxFuture<'static, (H, Ctx)> {
     })
 }
 
-async fn ready_card(queue: bool) -> (H, Ctx) {
+pub(super) async fn ready_card(queue: bool) -> (H, Ctx) {
     let h = board(queue).await;
     let r = h.wf(WORKERS[0], "pr", json!({"event": "ready", "repo": REPO, "pr": 7, "head": HEADS[0]})).await;
     assert_eq!(r["status"], "gated", "{r}");
