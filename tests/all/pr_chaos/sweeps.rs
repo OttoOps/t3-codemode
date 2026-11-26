@@ -403,17 +403,58 @@ fn told(run: &Run, base: &Run) -> bool {
     run.statuses.iter().zip(&base.statuses).any(|(got, want)| got != want && fallback(got))
 }
 
+fn entries(line: &str) -> Vec<&str> {
+    let Some(inner) = line.find(['{', '[']).map(|i| &line[i + 1..line.len() - 1]) else { return Vec::new() };
+    let (mut out, mut depth, mut quoted, mut escaped, mut from) = (Vec::new(), 0, false, false, 0);
+    for (i, c) in inner.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            '(' | '[' | '{' if !quoted => depth += 1,
+            ')' | ']' | '}' if !quoted => depth -= 1,
+            ',' if !quoted && depth == 0 => {
+                out.push(inner[from..i].trim());
+                from = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(inner[from..].trim());
+    out.retain(|e| !e.is_empty());
+    out
+}
+
+fn without(line: &str, drop: impl Fn(&&str) -> bool) -> Vec<&str> {
+    entries(line).into_iter().filter(|e| !drop(e)).collect()
+}
+
 fn approval_lost(got: &str, want: &str) -> bool {
-    let unmerged = want.replace(r#""\"event\" \"mcp:t1\" #41 PR 1/3 is merged", "#, "");
-    let gated = |gate_pr: &str| {
-        got.replace(
-            &format!(r#"gate: Some("merge"), gate_pr: {gate_pr}, pr: None"#),
-            "gate: None, gate_pr: None, pr: None",
-        )
+    let pr7 = |e: &&str| e.starts_with(r#"("acme/widgets", 7,"#) || e.starts_with(r#"("acme/widgets", 7):"#);
+    let merged = |e: &&str| *e == r#""\"event\" \"mcp:t1\" #41 PR 1/3 is merged""#;
+    let gated = |e: &str| {
+        let open = r#""mcp:t1": LinkView { parent: "board", closed: false, paused: false, gate: None, gate_pr: None, pr: None }"#;
+        [r#"Some(("acme/widgets", 7))"#, "None"].iter().any(|g| {
+            e.replace(&format!(r#"gate: Some("merge"), gate_pr: {g}, pr: None"#), "gate: None, gate_pr: None, pr: None")
+                == open
+        })
     };
-    ["events ", "github #7 ", "live seen "].iter().any(|p| got.starts_with(p) && want.starts_with(p))
-        || (got.starts_with("feed ") && got == unmerged)
-        || (got.starts_with("links ") && [r#"Some(("acme/widgets", 7))"#, "None"].iter().any(|g| gated(g) == want))
+    let prefix = |p: &str| got.starts_with(p) && want.starts_with(p);
+    if prefix("events ") {
+        return entries(got) == without(want, pr7);
+    }
+    if prefix("live seen ") {
+        return without(got, pr7) == entries(want);
+    }
+    if prefix("feed ") {
+        return entries(got) == without(want, merged);
+    }
+    if prefix("links ") {
+        let (got, want) = (entries(got), entries(want));
+        return got.len() == want.len()
+            && got.iter().zip(&want).all(|(g, w)| g == w || (w.starts_with(r#""mcp:t1":"#) && gated(g) && gated(w)));
+    }
+    prefix("github #7 ")
 }
 
 fn known(run: &Run, base: &Run, inject: Inject) -> Option<&'static str> {
