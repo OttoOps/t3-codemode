@@ -110,8 +110,7 @@ fn gist(text: &str) -> String {
         .join(" ")
 }
 
-fn closings(h: &H, seen: &mut BTreeMap<String, usize>) {
-    let sent = h.sent().len();
+fn closings(h: &H, seen: &mut BTreeMap<String, usize>, sent: usize) {
     for ln in h.app.store.links_all().unwrap().into_iter().filter(|l| l.closed) {
         seen.entry(ln.child).or_insert(sent);
     }
@@ -347,6 +346,7 @@ async fn drive(sc: &Scenario, inject: Inject) -> Run {
     let mut closed = BTreeMap::new();
     for (i, (name, step)) in sc.steps.iter().enumerate() {
         h.clock.set(&at(i as i64 + 1));
+        let sent = h.sent().len();
         let out = attempt(&mut h, *step, &mut reach).await;
         if trace {
             eprintln!("{} {inject:?} step {i}: {out:?}", sc.name);
@@ -363,7 +363,7 @@ async fn drive(sc: &Scenario, inject: Inject) -> Run {
                 eprintln!("{} {inject:?} retry {i}: {again}", sc.name);
             }
         }
-        closings(&h, &mut closed);
+        closings(&h, &mut closed, sent);
     }
     let (writes, t3_calls, gh_calls) = match crashed_in {
         Some(_) => (0, 0, 0),
@@ -394,12 +394,20 @@ fn diff(got: &[String], want: &[String]) -> String {
     out
 }
 
+fn fallback(status: &str) -> bool {
+    status.starts_with("ticket: ")
+        || status.starts_with("error: ")
+        || status.ends_with(" refused")
+        || status.ends_with(" error")
+}
+
 fn told(run: &Run, base: &Run) -> bool {
-    run.statuses.iter().zip(&base.statuses).any(|(got, want)| got != want && got != "crashed")
+    run.statuses.iter().zip(&base.statuses).any(|(got, want)| got != want && fallback(got))
 }
 
 fn known(run: &Run, inject: Inject) -> Option<&'static str> {
-    if !matches!(inject, Inject::Crash(_)) || run.landed {
+    let own = run.broke.as_deref().is_none_or(|b| b.contains("points its merge gate at #7"));
+    if !matches!(inject, Inject::Crash(_)) || run.landed || !own {
         return None;
     }
     let step = run.crashed_in?;
@@ -417,7 +425,7 @@ fn verdict(run: &Run, base: &Run, inject: Inject) -> Vec<String> {
     }
     let lost: Vec<&Wake> = base.wakes.difference(&run.wakes).collect();
     let extra: Vec<&Wake> = run.wakes.difference(&base.wakes).collect();
-    if (!lost.is_empty() && !told(run, base)) || (strict && !extra.is_empty()) {
+    if (!lost.is_empty() && (strict || !told(run, base))) || (strict && !extra.is_empty()) {
         out.push(format!("{inject:?} {:?}: lost wakes {lost:?}, extra wakes {extra:?}", run.statuses));
     }
     out
