@@ -70,6 +70,8 @@ let (parked, ()) = tokio::join!(parked, race);
 - `gate` parks the call until `release()`, and `arrived()` waits for it to
   park. A call that matches two gates arrives at both before it waits on
   either.
+- `gate_after_effect` applies the call, then parks it before the caller sees
+  the result. A test uses it to hold a read whose answer goes stale.
 
 The op `reconcile.pr` targets one pull request inside the batched reconcile
 read, and a `Failure::typed` there keeps its type on that pull request's error.
@@ -166,6 +168,44 @@ cargo test --locked --features test-sentinels --test all sentinel_acceptance -- 
 under `tests/chaos_corpus/` during plain `cargo test --locked`. The NDJSON
 loader ignores blank lines and `#` comment lines, so a file can carry
 `# source:` and `# failure:` headers above its ops.
+
+### Race tables
+
+`tests/all/pr_chaos/races.rs` runs each ranked race in every order. A table
+has 2 to 4 steps, and each step runs in one of these ways:
+
+- `At::Now` runs the step when its turn comes.
+- `At::Start` runs it while the gated steps start, in table order.
+- `At::Before(op, n)` parks the step's `n`-th GitHub `op` call before it takes
+  effect.
+- `At::After(op, n)` parks that call after it takes effect.
+
+The gated steps start in table order and park. The table then releases the
+other steps one at a time, in every order, and each finishes before the next
+starts. Four steps make at most 24 schedules.
+
+After each schedule the table clears the faults and calls
+`Wf::reconcile_ran` until the state stops changing. `reconcile_ran` returns
+`None` when another pass held the reconcile lock, so a skipped pass never
+counts as a quiet one. The table then checks the safety invariants. The step
+statuses and the end state must match some serial order of the same steps.
+A step that returns `superseded`, or a reconcile that returns `skipped`, may
+drop out of that order. The late enqueue reply table skips the serial match,
+because reconcile can see that queue entry on GitHub before `wf.merge` records
+it. It checks instead that the merge reaches the board or a ticket, never both.
+Approval tokens come from `SeqIds` through
+`Wf::set_id_source`, so they are the same on every run.
+
+| Table | Race |
+| --- | --- |
+| R1 | `wf.merge` against `reconcile::advance`, after a fresh read, after a stale one, and with a late enqueue reply |
+| R2 | `advance` against `answer` and `dismiss_at` on the ready card |
+| R3 | a worker's `ready` against reconcile's retry of it |
+| R4 | reconcile's `tracked` snapshot against `adopt`, `ready` and `answer` |
+
+`bounded_bursts_quiesce_safely_and_match_a_serial_order` runs 2 to 5 of these
+ops at once under seeded jitter. Then it settles the state, checks the same
+invariants, and compares the result with every serial order, at most 120.
 
 ### Nightly chaos
 
