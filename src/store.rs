@@ -170,11 +170,12 @@ impl PartialEq for LinkBase {
 }
 
 fn merge_fields(base: &str, ours: &str, theirs: &str) -> Result<String> {
-    let (Value::Object(base), Value::Object(ours), Value::Object(mut out)) =
+    let (Value::Object(base), Value::Object(ours), Value::Object(theirs)) =
         (serde_json::from_str(base)?, serde_json::from_str(ours)?, serde_json::from_str(theirs)?)
     else {
         return Ok(ours.to_string());
     };
+    let mut out = theirs.clone();
     let keys: std::collections::BTreeSet<&String> = base.keys().chain(ours.keys()).collect();
     for key in keys {
         if base.get(key) == ours.get(key) {
@@ -196,9 +197,14 @@ fn merge_fields(base: &str, ours: &str, theirs: &str) -> Result<String> {
         };
     }
     let closes = |row: &serde_json::Map<String, Value>| row.get("closed") == Some(&Value::Bool(true));
-    if closes(&ours) && !closes(&base) {
+    let closer = match (closes(&base), closes(&ours), closes(&theirs)) {
+        (false, true, _) => Some(&ours),
+        (false, false, true) => Some(&theirs),
+        _ => None,
+    };
+    if let Some(closer) = closer {
         for key in CLOSE_FIELDS {
-            match ours.get(*key) {
+            match closer.get(*key) {
                 Some(v) => out.insert(key.to_string(), v.clone()),
                 None => out.remove(*key),
             };
@@ -2473,6 +2479,17 @@ mod tests {
         let base = serde_json::json!({"closed": false, "gate": null});
         let ours = serde_json::json!({"closed": true, "gate": null, "closedHow": "handoff"});
         let theirs = serde_json::json!({"closed": false, "gate": "review", "gateSince": "t"});
+        let merged: Value =
+            serde_json::from_str(&merge_fields(&base.to_string(), &ours.to_string(), &theirs.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(merged, serde_json::json!({"closed": true, "gate": null, "closedHow": "handoff"}));
+    }
+
+    #[test]
+    fn a_stale_gate_save_after_a_peer_closed_keeps_the_close_clean() {
+        let base = serde_json::json!({"closed": false, "gate": null});
+        let ours = serde_json::json!({"closed": false, "gate": "review", "gateSince": "t"});
+        let theirs = serde_json::json!({"closed": true, "gate": null, "closedHow": "handoff"});
         let merged: Value =
             serde_json::from_str(&merge_fields(&base.to_string(), &ours.to_string(), &theirs.to_string()).unwrap())
                 .unwrap();
