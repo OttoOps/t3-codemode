@@ -90,6 +90,8 @@ pub enum ReachPoint {
     WorkerThreadGone,
     /// Watcher closed a worker link after T3 reported its thread archived.
     WorkerArchived,
+    /// `reconcile::fix` skipped a pull request that stopped being tracked while the batched read was in flight.
+    ReconcileDroppedUntracked,
 }
 
 impl ReachPoint {
@@ -128,6 +130,7 @@ impl ReachPoint {
         Self::BadEndNudged,
         Self::WorkerThreadGone,
         Self::WorkerArchived,
+        Self::ReconcileDroppedUntracked,
     ];
 
     pub const COUNT: usize = Self::ALL.len();
@@ -168,6 +171,7 @@ impl ReachPoint {
             Self::BadEndNudged => "bad_end_nudged",
             Self::WorkerThreadGone => "worker_thread_gone",
             Self::WorkerArchived => "worker_archived",
+            Self::ReconcileDroppedUntracked => "reconcile_dropped_untracked",
         }
     }
 
@@ -177,7 +181,8 @@ impl ReachPoint {
             | Self::PrReopenedReconciled
             | Self::BadEndNudged
             | Self::WorkerThreadGone
-            | Self::WorkerArchived => ReachTier::Tier2,
+            | Self::WorkerArchived
+            | Self::ReconcileDroppedUntracked => ReachTier::Tier2,
             _ => ReachTier::Tier1,
         }
     }

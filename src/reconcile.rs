@@ -550,6 +550,11 @@ impl Wf {
         self.name_workers(t, &o).await?;
         let (advance, merged) = {
             let _g = self.lock.lock().await;
+            if !self.tracked(floor)?.contains_key(&(t.repo.clone(), t.number)) {
+                self.reach.hit(ReachPoint::ReconcileDroppedUntracked);
+                self.store.pr_seen_remove(&t.repo, t.number)?;
+                return Ok(());
+            }
             let cards: Vec<Card> = self.cards()?.into_iter().filter(|c| t.cards.contains(&c.seq)).collect();
             let wait = self.wait(t)?;
             let sent = wait.as_ref().filter(|w| w.status == WaitStatus::Sent).map(|w| w.at.clone());
