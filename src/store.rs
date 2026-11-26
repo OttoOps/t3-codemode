@@ -177,8 +177,9 @@ fn merge_fields(base: &str, ours: &str, theirs: &str) -> Result<String> {
     };
     let mut out = theirs.clone();
     let keys: std::collections::BTreeSet<&String> = base.keys().chain(ours.keys()).collect();
+    let set = |row: &serde_json::Map<String, Value>, key: &str| row.get(key).filter(|v| !v.is_null()).cloned();
     for key in keys {
-        if base.get(key) == ours.get(key) {
+        if set(&base, key) == set(&ours, key) {
             continue;
         }
         let merged = match (base.get(key), ours.get(key), out.get(key)) {
@@ -2479,6 +2480,20 @@ mod tests {
         assert_eq!(
             merged,
             serde_json::json!({"gate": "review", "nudges": 1, "unread": ["m2", "m3"], "reported": ["stall"]})
+        );
+    }
+
+    #[test]
+    fn a_null_field_left_out_on_save_keeps_a_peers_value() {
+        let base = serde_json::json!({"closed": false, "gatePr": null, "nudges": 0});
+        let ours = serde_json::json!({"closed": false, "nudges": 1});
+        let theirs = serde_json::json!({"closed": false, "gatePr": {"repo": "acme/widgets", "number": 7}, "nudges": 0});
+        let merged: Value =
+            serde_json::from_str(&merge_fields(&base.to_string(), &ours.to_string(), &theirs.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(
+            merged,
+            serde_json::json!({"closed": false, "gatePr": {"repo": "acme/widgets", "number": 7}, "nudges": 1})
         );
     }
 
