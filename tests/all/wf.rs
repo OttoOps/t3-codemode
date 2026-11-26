@@ -1046,3 +1046,37 @@ async fn answering_a_card_for_a_closed_ticket_errors_and_keeps_the_card_open() {
     assert!(h.sent().is_empty(), "{:?}", h.sent());
     assert!(h.app.store.outbox_all().unwrap().is_empty());
 }
+
+fn handoff_args() -> Value {
+    json!({"kind": "handoff", "body": "## Handoff\n\nPR merged."})
+}
+
+#[tokio::test]
+async fn a_crash_at_any_write_of_a_handoff_still_hands_off_to_the_parent() {
+    use futures_util::FutureExt;
+    let clean = H::new();
+    link_ticket_worker(&clean).await;
+    let before = clean.app.store.writes();
+    clean.app.wf.dispatch("send", Some(WORKER), handoff_args()).await.unwrap();
+    let writes = clean.app.store.writes() - before;
+    assert!(writes > 1, "a handoff writes {writes} times");
+
+    for k in 1..=writes {
+        let mut h = H::new();
+        link_ticket_worker(&h).await;
+        h.app.store.set_fault(Some(h.app.store.writes() + k));
+        let send = h.app.wf.dispatch("send", Some(WORKER), handoff_args());
+        if std::panic::AssertUnwindSafe(send).catch_unwind().await.is_err() {
+            h.reopen();
+            let _ = h.app.wf.dispatch("send", Some(WORKER), handoff_args()).await;
+        }
+        h.app.wf.tick().await.unwrap();
+        let handoffs = h
+            .sent()
+            .iter()
+            .filter(|s| s["threadId"] == TICKET && s["message"].as_str().is_some_and(|m| m.contains("[t3cm handoff")))
+            .count();
+        assert!(handoffs >= 1, "a crash at handoff write {k} of {writes} lost the handoff");
+        assert!(link(&h, WORKER).closed, "a crash at handoff write {k} left the link open");
+    }
+}

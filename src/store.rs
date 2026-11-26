@@ -887,9 +887,35 @@ impl Store {
 
     /// Save a link, merged field by field with any change another process made since `ln` was read.
     pub fn link_save(&self, ln: &Link) -> Result<()> {
-        let ours = serde_json::to_string(ln)?;
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let saved = Self::save_link(&tx, ln)?;
+        self.commit(tx)?;
+        self.saved(ln, saved);
+        Ok(())
+    }
+
+    /// Save a closing link, drop its own held wakes when `purge`, and queue `last` (to, text, handle)
+    /// in one transaction, so a crash never closes the link without its last wake.
+    /// Returns how many held wakes it dropped.
+    pub fn link_close(&self, ln: &Link, purge: bool, last: Option<(&str, &str, &str)>, at: &str) -> Result<usize> {
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let saved = Self::save_link(&tx, ln)?;
+        let dropped = if purge { tx.execute("DELETE FROM outbox WHERE to_id = ?1", [&ln.child])? } else { 0 };
+        if let Some((to, text, handle)) = last {
+            tx.execute(
+                "INSERT INTO outbox (to_id, text, handle, queued) VALUES (?1, ?2, ?3, ?4)",
+                params![to, text, handle, at],
+            )?;
+        }
+        self.commit(tx)?;
+        self.saved(ln, saved);
+        Ok(dropped)
+    }
+
+    fn save_link(tx: &rusqlite::Transaction, ln: &Link) -> Result<(String, bool)> {
+        let ours = serde_json::to_string(ln)?;
         let theirs: Option<String> =
             tx.query_row("SELECT data FROM links WHERE child = ?1", [&ln.child], |r| r.get(0)).optional()?;
         let (data, merged) = match (ln.base.get(), theirs) {
@@ -902,12 +928,14 @@ impl Store {
              ON CONFLICT (child) DO UPDATE SET parent = excluded.parent, closed = excluded.closed, data = excluded.data",
             params![row.child, row.parent, row.closed as i64, data],
         )?;
-        self.commit(tx)?;
+        Ok((ours, merged))
+    }
+
+    fn saved(&self, ln: &Link, (ours, merged): (String, bool)) {
         ln.base.set(ours);
         if merged && let Some(reach) = self.reach.get() {
             reach.hit(crate::reach::ReachPoint::LinkSaveMerged);
         }
-        Ok(())
     }
 
     pub fn link_bind(
