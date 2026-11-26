@@ -731,6 +731,13 @@ impl Store {
         })
     }
 
+    pub fn meta_prefixed(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT key, value FROM meta WHERE substr(key, 1, length(?1)) = ?1 ORDER BY key")?;
+            st.query_map([prefix], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+        })
+    }
+
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
         self.with(|c| c.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).optional())
     }
