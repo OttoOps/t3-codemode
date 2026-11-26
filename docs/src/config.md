@@ -514,7 +514,9 @@ to enable the flow queue and automatic ticket launches as
 board's [Settings](board.md#settings) under **Flow**, from the
 `setup-t3-workflow` interview, or with `t3cm config` without editing JSON by
 hand, and changes apply on reload with no restart. Existing `flow` blocks keep
-working unchanged.
+working unchanged, except one that sets `flow.maxTickets` above 8: it needs
+[`maxTicketsTotal`](#the-ticket-cap) set at least that high, or the config
+fails validation.
 
 ```json
 {
