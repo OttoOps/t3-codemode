@@ -176,8 +176,10 @@ has 2 to 4 steps, and each step runs in one of these ways:
 
 - `At::Now` runs the step when its turn comes.
 - `At::Start` runs it while the gated steps start, in table order.
-- `At::Before(op, n)` parks the step's `n`-th GitHub `op` call before it takes
-  effect.
+- `At::Before(op, n)` parks the `n`-th GitHub `op` call before it takes
+  effect. The count covers every step's matching calls, so in R3 the gate on
+  `read` call 2 parks reconcile's first read, because the direct `ready` made
+  read 1.
 - `At::After(op, n)` parks that call after it takes effect.
 
 The gated steps start in table order and park. The table then releases the
@@ -192,7 +194,9 @@ statuses and the end state must match some serial order of the same steps.
 A step that returns `superseded`, or a reconcile that returns `skipped`, may
 drop out of that order. The late enqueue reply table skips the serial match,
 because reconcile can see that queue entry on GitHub before `wf.merge` records
-it. It checks instead that the merge reaches the board or a ticket, never both.
+it. It checks instead that no merge is reported to both the board and a ticket,
+and that `wf.merge` never leaves a wait behind once reconcile has seen the
+pull request merge.
 Approval tokens come from `SeqIds` through
 `Wf::set_id_source`, so they are the same on every run.
 
