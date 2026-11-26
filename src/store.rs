@@ -180,13 +180,25 @@ fn merge_fields(base: &str, ours: &str, theirs: &str) -> Result<String> {
         if base.get(key) == ours.get(key) {
             continue;
         }
-        match ours.get(key) {
-            Some(v) => out.insert(key.clone(), v.clone()),
+        let merged = match (base.get(key), ours.get(key), out.get(key)) {
+            (Some(Value::Array(b)), Some(Value::Array(o)), Some(Value::Array(t)))
+                if SET_FIELDS.contains(&key.as_str()) =>
+            {
+                let mut items: Vec<Value> = t.iter().filter(|v| o.contains(v) || !b.contains(v)).cloned().collect();
+                items.extend(o.iter().filter(|v| !b.contains(v) && !t.contains(v)).cloned());
+                Some(Value::Array(items))
+            }
+            (_, ours, _) => ours.cloned(),
+        };
+        match merged {
+            Some(v) => out.insert(key.clone(), v),
             None => out.remove(key),
         };
     }
     Ok(Value::Object(out).to_string())
 }
+
+const SET_FIELDS: &[&str] = &["unread", "reported"];
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -2429,5 +2441,19 @@ mod tests {
         next.pr = 8;
         store.pr_seen_put(&next).unwrap();
         assert_eq!(store.pr_seen_get("acme/widgets", 8).unwrap().unwrap().rev, 42);
+    }
+
+    #[test]
+    fn merge_fields_keeps_both_sides_changes_and_merges_set_fields() {
+        let base = serde_json::json!({"gate": null, "nudges": 0, "unread": ["m1", "m2"], "reported": []});
+        let ours = serde_json::json!({"gate": null, "nudges": 1, "unread": ["m2"], "reported": ["stall"]});
+        let theirs = serde_json::json!({"gate": "review", "nudges": 0, "unread": ["m1", "m2", "m3"], "reported": []});
+        let merged: Value =
+            serde_json::from_str(&merge_fields(&base.to_string(), &ours.to_string(), &theirs.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(
+            merged,
+            serde_json::json!({"gate": "review", "nudges": 1, "unread": ["m2", "m3"], "reported": ["stall"]})
+        );
     }
 }
