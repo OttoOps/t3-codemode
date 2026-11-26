@@ -9,7 +9,7 @@ use t3_codemode::fake::{Failure, Rule, SeqIds};
 use t3_codemode::reach::ReachSnapshot;
 use t3_codemode::store::StoreCrash;
 
-use super::races::{board_in, check_safety, state};
+use super::races::{board_in, safety_faults, state};
 use super::{REPO, TICKETS, WORKERS};
 use crate::common::*;
 
@@ -43,7 +43,7 @@ pub(super) struct Run {
     pub(super) gh_calls: usize,
     crashed_in: Option<&'static str>,
     landed: bool,
-    broke: Option<String>,
+    broke: Vec<String>,
 }
 
 pub(super) type Count = fn(&Run) -> usize;
@@ -116,16 +116,20 @@ fn closings(h: &H, seen: &mut BTreeMap<String, usize>, sent: usize) {
     }
 }
 
-fn no_wake_after_close(h: &H, closed: &BTreeMap<String, usize>, what: &str) {
+fn woken_after_close(h: &H, closed: &BTreeMap<String, usize>, what: &str) -> Vec<String> {
     let sent = h.sent();
+    let mut out = Vec::new();
     for (child, &at) in closed {
         let late: Vec<&str> = sent[at.min(sent.len())..]
             .iter()
             .filter(|s| s["threadId"] == child.as_str())
             .filter_map(|s| s["message"].as_str())
             .collect();
-        assert!(late.is_empty(), "{what}: {child} was woken after its link closed: {late:?}");
+        if !late.is_empty() {
+            out.push(format!("{what}: {child} was woken after its link closed: {late:?}"));
+        }
     }
+    out
 }
 
 fn status(r: anyhow::Result<Value>) -> String {
@@ -371,14 +375,8 @@ async fn drive(sc: &Scenario, inject: Inject) -> Run {
     };
     let state = settle(&mut h, &mut reach).await;
     let what = format!("{} under {inject:?}", sc.name);
-    let broke = AssertUnwindSafe(async {
-        check_safety(&h, &what);
-        no_wake_after_close(&h, &closed, &what);
-    })
-    .catch_unwind()
-    .await
-    .err()
-    .map(|p| p.downcast_ref::<String>().cloned().unwrap_or_else(|| format!("{what}: a safety check failed")));
+    let mut broke = safety_faults(&h, &what);
+    broke.extend(woken_after_close(&h, &closed, &what));
     reach.merge(&h.app.wf.reach().snapshot());
     let landed = h.github.pr(REPO, 7)["state"] == "MERGED";
     Run { state, wakes: wakes(&h), statuses, reach, writes, t3_calls, gh_calls, crashed_in, landed, broke }
@@ -405,21 +403,35 @@ fn told(run: &Run, base: &Run) -> bool {
     run.statuses.iter().zip(&base.statuses).any(|(got, want)| got != want && fallback(got))
 }
 
-fn known(run: &Run, inject: Inject) -> Option<&'static str> {
-    let own = run.broke.as_deref().is_none_or(|b| b.contains("points its merge gate at #7"));
-    if !matches!(inject, Inject::Crash(_)) || run.landed || !own {
+fn approval_lost(got: &str, want: &str) -> bool {
+    let unmerged = want.replace(r#""\"event\" \"mcp:t1\" #41 PR 1/3 is merged", "#, "");
+    let gated = |gate_pr: &str| {
+        got.replace(
+            &format!(r#"gate: Some("merge"), gate_pr: {gate_pr}, pr: None"#),
+            "gate: None, gate_pr: None, pr: None",
+        )
+    };
+    ["events ", "github #7 ", "live seen "].iter().any(|p| got.starts_with(p) && want.starts_with(p))
+        || (got.starts_with("feed ") && got == unmerged)
+        || (got.starts_with("links ") && [r#"Some(("acme/widgets", 7))"#, "None"].iter().any(|g| gated(g) == want))
+}
+
+fn known(run: &Run, base: &Run, inject: Inject) -> Option<&'static str> {
+    if !matches!(inject, Inject::Crash(_)) || run.landed {
         return None;
     }
-    let step = run.crashed_in?;
-    KNOWN.iter().find(|(prefix, _)| step.starts_with(prefix)).map(|(_, issue)| *issue)
+    let issue = KNOWN.iter().find(|(prefix, _)| run.crashed_in.is_some_and(|s| s.starts_with(prefix)))?.1;
+    let lost: Vec<&Wake> = base.wakes.difference(&run.wakes).collect();
+    let only_merge_wake = matches!(lost[..], [(to, kind, _, body)] if to == "mcp:t1" && kind == "event" && body == "#41 PR 1/3 is merged");
+    let state = run.state.iter().zip(&base.state).all(|(g, w)| g == w || approval_lost(g, w));
+    let broke =
+        run.broke.iter().all(|b| b.ends_with("mcp:t1 points its merge gate at #7, which holds no card of its own"));
+    (only_merge_wake && run.wakes.is_subset(&base.wakes) && state && broke).then_some(issue)
 }
 
 fn verdict(run: &Run, base: &Run, inject: Inject) -> Vec<String> {
     let strict = matches!(inject, Inject::Crash(_));
-    let mut out = Vec::new();
-    if let Some(why) = &run.broke {
-        out.push(format!("{inject:?}: {why}"));
-    }
+    let mut out: Vec<String> = run.broke.iter().map(|why| format!("{inject:?}: {why}")).collect();
     if run.state != base.state && (strict || !told(run, base)) {
         out.push(format!("{inject:?} {:?}:{}", run.statuses, diff(&run.state, &base.state)));
     }
@@ -440,14 +452,14 @@ struct Swept {
 
 async fn sweep_all(sc: &Scenario, of: Count, inject: Make) -> Swept {
     let base = drive(sc, Inject::None).await;
-    assert_eq!(base.broke, None, "{}: the clean run broke a safety check", sc.name);
+    assert!(base.broke.is_empty(), "{}: the clean run broke a safety check: {:?}", sc.name, base.broke);
     let only: Option<usize> = std::env::var("SWEEP_K").ok().and_then(|v| v.parse().ok());
     let mut swept = Swept { runs: of(&base), known: Vec::new(), failures: Vec::new(), reach: ReachSnapshot::default() };
     for k in (1..=swept.runs).filter(|k| only.is_none_or(|o| o == *k)) {
         let run = drive(sc, inject(k)).await;
         swept.reach.merge(&run.reach);
         let failed = verdict(&run, &base, inject(k));
-        match known(&run, inject(k)) {
+        match known(&run, &base, inject(k)) {
             Some(issue) if !failed.is_empty() => swept.known.push((inject(k), issue)),
             _ => swept.failures.extend(failed),
         }
