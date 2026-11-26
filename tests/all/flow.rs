@@ -1304,14 +1304,14 @@ setFilter({ statuses: ["paused", "blocked", "external"] });
 const held = open();
 setFilter({});
 emitState({ ...base, flow: false, flowMaxTickets: null });
-const off = { pill: pill("mcp:t3"), slots: byId("t-slots").hidden };
+const off = { pill: pill("mcp:t3"), slots: [byId("t-slots").hidden, byId("t-slots-n").textContent] };
 return { before, external, ready, held, off };
 "##,
     );
 
     let b = &r["before"];
     assert_eq!(b["pills"], json!([true, false]), "{r}");
-    assert_eq!(b["slots"], json!([false, "2 / 3"]), "{r}");
+    assert_eq!(b["slots"], json!([false, "2 running · flow 3 · cap 8"]), "{r}");
     assert_eq!(b["queueTab"], json!(["1", "Queue and Graph, 1 ready to launch"]), "{r}");
     assert_eq!(b["queue"], json!([{"label": "widgets#1", "hidden": false, "pill": "ready"}]), "{r}");
     assert_eq!(b["blocked"], json!([{"label": "widgets#2", "hidden": false, "pill": "external"}]), "{r}");
@@ -1325,7 +1325,70 @@ return { before, external, ready, held, off };
     assert_eq!(rd["queue"][0]["hidden"], false, "{r}");
     assert_eq!((rd["n"].as_str(), rd["nb"].as_str()), (Some("1/1"), Some("0/1")), "{r}");
     assert_eq!(r["held"], json!(["mcp:t3"]), "{r}");
-    assert_eq!(r["off"], json!({"pill": false, "slots": true}), "{r}");
+    assert_eq!(r["off"], json!({"pill": false, "slots": [false, "2 running · cap 8"]}), "{r}");
+}
+
+#[tokio::test]
+async fn the_header_counts_every_open_ticket_and_pending_launch_against_the_cap() {
+    let h = capped(3, 2, "ask");
+    ticket(&h, "mcp:t8", "gadgets#8").await;
+    ticket(&h, "mcp:t9", "other#9").await;
+    let params = h.app.wf.config().link_params("overseer", "ticket").unwrap();
+    let pending = Pending {
+        parent: BOARD.into(),
+        label: "tools#9".into(),
+        role: "ticket".into(),
+        params,
+        at: T0.into(),
+        reported: false,
+        thread: None,
+        link: None,
+        project: None,
+        identity: Default::default(),
+        brief: None,
+    };
+    h.app.store.pending_put(&pending).unwrap();
+    let (html, st, view) = panel_page(h).await;
+    assert_eq!(
+        (&st["openTickets"], &st["flowMaxTickets"], &st["maxTicketsTotal"]),
+        (&json!(3), &json!(2), &json!(3)),
+        "{st}"
+    );
+
+    let r = panel(
+        &html,
+        &st,
+        &view,
+        r##"
+fetchReply = (url) => url === "/api/flow" ? reply(200, view) : new Promise(() => {});
+const byId = (id) => document.getElementById(id);
+const read = () => ({ text: byId("t-slots-n").textContent, dot: byId("t-slots-dot").className,
+  label: byId("t-slots").getAttribute("aria-label") });
+emitState(base);
+await tick();
+const full = read();
+emitState({ ...base, openTickets: 1 });
+await tick();
+const one = read();
+emitState({ ...base, openTickets: 1, flowMaxTickets: 3 });
+await tick();
+const raised = read().text;
+return { full, one, raised };
+"##,
+    );
+    assert_eq!(
+        r["full"],
+        json!({"text": "3 running · flow 2 · cap 3", "dot": "dot warn",
+               "label": "3 tickets running, flow limit 2, ticket cap 3, at the cap. Open Queue and Graph"}),
+        "{r}"
+    );
+    assert_eq!(
+        r["one"],
+        json!({"text": "1 running · flow 2 · cap 3", "dot": "dot info",
+               "label": "1 ticket running, flow limit 2, ticket cap 3. Open Queue and Graph"}),
+        "{r}"
+    );
+    assert_eq!(r["raised"], "1 running · flow 3 · cap 3", "the latest state wins over the loaded flow view: {r}");
 }
 
 #[tokio::test]

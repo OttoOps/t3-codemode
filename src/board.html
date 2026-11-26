@@ -1494,7 +1494,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
 :root[data-layout="workspace"] .tele .fbar .ctx { flex: none; }
 :root[data-layout="workspace"] .fbar .fpop { left: 0; right: auto; }
 :root[data-layout="workspace"] .fbar #filter-q { height: 32px; border-radius: 6px; border-color: var(--border); background: var(--surface); }
-:root[data-layout="workspace"] .facets, :root[data-layout="workspace"] #t-slots, :root[data-layout="workspace"] #t-merged { display: none; }
+:root[data-layout="workspace"] .facets, :root[data-layout="workspace"] #t-merged { display: none; }
 :root[data-layout="workspace"] .conn .facts { display: inline; }
 :root[data-layout="workspace"] .conn .short { display: none !important; }
 :root[data-layout="workspace"] .top {
@@ -1696,7 +1696,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
       <span class="facts clip" id="svc-text">Connecting</span>
       <span class="short" id="svc-short">Connecting</span>
     </span>
-    <button class="t-btn" type="button" id="t-slots" hidden title="Open Queue and Graph"><span class="dot info" aria-hidden="true"></span><span><b class="num" id="t-slots-n"></b> slots</span></button>
+    <button class="t-btn" type="button" id="t-slots" hidden title="Open Queue and Graph"><span class="dot info" id="t-slots-dot" aria-hidden="true"></span><span class="num" id="t-slots-n"></span></button>
     <span class="t-item" id="t-merged" hidden><span class="dot ok" aria-hidden="true"></span><span><b class="num" id="t-merged-n"></b> merged</span></span>
     <span class="route" id="route" hidden>
       <button class="route-btn t-btn" type="button" id="route-btn" aria-describedby="route-tip">
@@ -4671,14 +4671,16 @@ function paintViews(s, v) {
 }
 
 function paintTele(s) {
-  const fv = flow.view && flow.view.enabled && typeof flow.view.free === "number" && flow.view.maxTickets ? flow.view : null;
-  const max = fv ? fv.maxTickets : s.flowMaxTickets;
+  const max = s.flowMaxTickets;
+  const cap = s.maxTicketsTotal;
   const slots = $("t-slots");
-  slots.hidden = !max;
-  if (max) {
-    const open = fv ? Math.max(0, fv.maxTickets - fv.free) : s.tree.filter((t) => !t.done).length;
-    setText($("t-slots-n"), open + " / " + max);
-    setAttr(slots, "aria-label", open + " of " + max + " ticket slots in use. Open Queue and Graph");
+  slots.hidden = !cap;
+  if (cap) {
+    const open = typeof s.openTickets === "number" ? s.openTickets : s.tree.filter((t) => !t.done).length;
+    setText($("t-slots-n"), [open + " running", max ? "flow " + max : "", "cap " + cap].filter(Boolean).join(" · "));
+    setAttr($("t-slots-dot"), "class", "dot " + (open >= cap ? "warn" : "info"));
+    setAttr(slots, "aria-label", open + " " + (open === 1 ? "ticket" : "tickets") + " running"
+      + (max ? ", flow limit " + max : "") + ", ticket cap " + cap + (open >= cap ? ", at the cap" : "") + ". Open Queue and Graph");
   }
   $("t-merged").hidden = !prs.merged;
   setText($("t-merged-n"), String(prs.merged));
@@ -5250,7 +5252,6 @@ function flowToggle(id) {
 
 function paintFlow(v) {
   flow.view = v;
-  if (state) paintTele(state);
   const key = JSON.stringify([v, filtering() ? filterSpec() : null]);
   if (key === flow.shown) return;
   flow.shown = key;
