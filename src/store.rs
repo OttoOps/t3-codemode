@@ -926,17 +926,25 @@ impl Store {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let saved = Self::save_link(&tx, ln)?;
         self.commit(tx)?;
-        self.saved(ln, saved);
+        if let Some(saved) = saved {
+            self.saved(ln, saved);
+        }
         Ok(())
     }
 
     /// Save a closing link, drop its own held wakes when `purge`, and queue `last` (to, text, handle)
     /// in one transaction, so a crash never closes the link without its last wake.
-    /// Returns how many held wakes it dropped.
-    pub fn link_close(&self, ln: &Link, purge: bool, last: Option<(&str, &str, &str)>, at: &str) -> Result<usize> {
+    /// Returns how many held wakes it dropped, or `None` when the link moved away since it was read.
+    pub fn link_close(
+        &self,
+        ln: &Link,
+        purge: bool,
+        last: Option<(&str, &str, &str)>,
+        at: &str,
+    ) -> Result<Option<usize>> {
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let saved = Self::save_link(&tx, ln)?;
+        let Some(saved) = Self::save_link(&tx, ln)? else { return Ok(None) };
         let dropped = if purge { tx.execute("DELETE FROM outbox WHERE to_id = ?1", [&ln.child])? } else { 0 };
         if let Some((to, text, handle)) = last {
             tx.execute(
@@ -946,15 +954,15 @@ impl Store {
         }
         self.commit(tx)?;
         self.saved(ln, saved);
-        Ok(dropped)
+        Ok(Some(dropped))
     }
 
-    fn save_link(tx: &rusqlite::Transaction, ln: &Link) -> Result<(String, bool)> {
+    fn save_link(tx: &rusqlite::Transaction, ln: &Link) -> Result<Option<(String, bool)>> {
         let ours = serde_json::to_string(ln)?;
         let theirs: Option<String> =
             tx.query_row("SELECT data FROM links WHERE child = ?1", [&ln.child], |r| r.get(0)).optional()?;
         let (data, merged) = match (ln.base.get(), theirs) {
-            (Some(_), None) => return Ok((ours, false)),
+            (Some(_), None) => return Ok(None),
             (Some(base), Some(theirs)) if base != theirs => (merge_fields(&base, &ours, &theirs)?, true),
             _ => (ours.clone(), false),
         };
@@ -964,7 +972,7 @@ impl Store {
              ON CONFLICT (child) DO UPDATE SET parent = excluded.parent, closed = excluded.closed, data = excluded.data",
             params![row.child, row.parent, row.closed as i64, data],
         )?;
-        Ok((ours, merged))
+        Ok(Some((ours, merged)))
     }
 
     fn saved(&self, ln: &Link, (ours, merged): (String, bool)) {
@@ -2517,5 +2525,8 @@ mod tests {
         ln.nudges = 1;
         store.link_save(&ln).unwrap();
         assert!(store.link_get("mcp:old").unwrap().is_none());
+        ln.closed = true;
+        assert_eq!(store.link_close(&ln, true, Some(("mcp:t", "bye", "m1")), "t").unwrap(), None);
+        assert!(store.outbox_all().unwrap().is_empty(), "a close of a moved link queued its wake");
     }
 }

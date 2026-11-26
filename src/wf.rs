@@ -1037,8 +1037,10 @@ impl Wf {
             return self.send_wake(&ln.parent, &text, &handle).await;
         }
         let purge = !self.sentinel(Sentinel::OutboxNoPurge);
-        if self.store.link_close(&ln, purge, Some((&ln.parent, &text, &handle)), &now)? > 0 {
-            self.reach.hit(ReachPoint::OutboxHeldThenClosed);
+        match self.store.link_close(&ln, purge, Some((&ln.parent, &text, &handle)), &now)? {
+            None => bail!("this thread's link moved while it closed; send it again"),
+            Some(dropped) if dropped > 0 => self.reach.hit(ReachPoint::OutboxHeldThenClosed),
+            Some(_) => {}
         }
         let mut out = self.deliver_queued(&ln.parent, &handle).await?;
         out["closed"] = json!(true);
