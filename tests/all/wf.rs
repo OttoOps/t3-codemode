@@ -1066,10 +1066,12 @@ async fn a_crash_at_any_write_of_a_handoff_still_hands_off_to_the_parent() {
         link_ticket_worker(&h).await;
         h.app.store.set_fault(Some(h.app.store.writes() + k));
         let send = h.app.wf.dispatch("send", Some(WORKER), handoff_args());
-        if std::panic::AssertUnwindSafe(send).catch_unwind().await.is_err() {
-            h.reopen();
-            let _ = h.app.wf.dispatch("send", Some(WORKER), handoff_args()).await;
-        }
+        assert!(
+            std::panic::AssertUnwindSafe(send).catch_unwind().await.is_err(),
+            "write {k} of {writes} did not crash"
+        );
+        h.reopen();
+        let _ = h.app.wf.dispatch("send", Some(WORKER), handoff_args()).await;
         h.app.wf.tick().await.unwrap();
         let handoffs = h
             .sent()
