@@ -359,7 +359,7 @@ GitHub computes the merge state lazily, so while an open pull request reports
 | Is a draft or closed | Nothing | `refused` |
 | Is already merged | Nothing | `merged` with its merge commit |
 | Is already in the merge queue | Nothing | `queued` with its position and `approval` id |
-| Has a merge queue and is mergeable | `enqueuePullRequest` with `expectedHeadOid = head` | `queued` with its position and `approval` id |
+| Has a merge queue and is mergeable | `enqueuePullRequest` with `expectedHeadOid = head` | `queued` with its position and `approval` id. The id is `null` when reconcile retired the wait while the enqueue was in flight |
 | Has a merge queue and is not mergeable yet | Records it as waiting to be queued | `waiting` with its `mergeState` and `approval` id |
 | Is `CLEAN` or `HAS_HOOKS` with a check on its head still running | Records it as waiting | `waiting` with its `mergeState` and `approval` id |
 | Has no merge queue and is mergeable | `mergePullRequest` with `method`, else the repo's default, and `expectedHeadOid = head` | `merged` with the commit |
