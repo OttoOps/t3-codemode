@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0](https://github.com/OttoOps/t3-codemode/compare/v0.15.0...v0.16.0) - 2026-11-26
+
+### Added
+
+- ask about the ticket cap in setup
+- set the ticket cap in Settings
+- show the ticket cap in the board header
+- add context menus to board lists
+- cap running tickets across every launch
+
+### Fixed
+
+- start the stall clock when a link goes busy
+- treat a null link field as left out
+- skip a close's wake when its link moved
+- keep a peer's close in a link merge
+- keep closes and moves intact in link merges
+- merge a link's note and report sets
+- finish an in-code merge after a crash
+- close a link and queue its handoff at once
+- draw pr_seen revisions from one sequence
+- merge a peer's link changes on save
+- keep wf.merge refusals and raced approvals
+- lock wf.merge and CAS its merge waits
+- skip PRs reconcile stopped tracking
+
+### Other
+
+- excuse only the fallback's own wakes
+- keep handoffs out of the fallback excuse
+- excuse fallback wakes only at the ticket
+- assert each handoff write crashes
+- tighten the sweep oracle's excuses
+- excuse only a gated crash ticket link
+- hold the #365 excuse to PR 7 and its ticket
+- match #365 runs by their exact diff
+- narrow what the sweep oracle excuses
+- confirm all nine fault classes in Reach
+- race serve and stdio on one store
+- sweep N-th call faults and store crashes
+- add a store write crash hook
+- allow a null approval on a queued merge
+- bound the approval race test's waits
+- catch a resurrected wait before quiesce
+- describe race tables and gate hooks
+- add R1-R4 race tables and burst checks
+- add race hooks to reconcile and fakes
+- describe fake lifecycle and PR state
+- drive chaos through a stateful FakeGitHub
+- model thread lifecycle in FakeT3
+- note the cap for flow limits above 8
+
 ## [0.15.0](https://github.com/OttoOps/t3-codemode/compare/v0.14.0...v0.15.0) - 2026-11-26
 
 ### Added
