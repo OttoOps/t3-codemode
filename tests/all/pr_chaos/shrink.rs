@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::ops::{
-    CardKind, CardSym, GhChecks, GhEndState, GhMergeState, Op, PauseTarget, PrSym, QueueDropReason, SweepTarget, TSym,
-    WSym, deserialize_ops, serialize_ops,
+    CardKind, CardSym, GhChecks, GhEndState, GhMergeState, Op, PauseTarget, PrSym, QueueDropReason, RunEnd,
+    SweepTarget, TSym, WSym, deserialize_ops, serialize_ops,
 };
 use super::{PRS, TICKETS, WORKERS};
 use crate::common::ProbeResult;
@@ -541,6 +541,12 @@ fn simplify_op_fields(op: &Op) -> Vec<Op> {
         Op::GhFilesPaginated { pr, paginated: true } => {
             out.push(Op::GhFilesPaginated { pr, paginated: false });
         }
+        Op::WfMerge { ticket, pr, stale: true } => {
+            out.push(Op::WfMerge { ticket, pr, stale: false });
+        }
+        Op::WorkerRunEnds { worker, status } if status != RunEnd::Completed => {
+            out.push(Op::WorkerRunEnds { worker, status: RunEnd::Completed });
+        }
         _ => {}
     }
     out
@@ -752,6 +758,19 @@ fn lower_op_indices(op: &Op) -> Vec<Op> {
                 out.push(Op::GhReopen { pr: PrSym(p) });
             }
         }
+        Op::WfMerge { ticket, pr, stale } => {
+            for t in 0..ticket.0.min(max_t) {
+                out.push(Op::WfMerge { ticket: TSym(t), pr, stale });
+            }
+            for p in 0..pr.0.min(max_p) {
+                out.push(Op::WfMerge { ticket, pr: PrSym(p), stale });
+            }
+        }
+        Op::WorkerRunEnds { worker, status } => {
+            for w in 0..worker.0.min(max_w) {
+                out.push(Op::WorkerRunEnds { worker: WSym(w), status });
+            }
+        }
         _ => {}
     }
     out
@@ -837,6 +856,8 @@ fn remap_ops(
             }
             &Op::GhFilesPaginated { pr, paginated } => Op::GhFilesPaginated { pr: rp(pr), paginated },
             &Op::GhReopen { pr } => Op::GhReopen { pr: rp(pr) },
+            &Op::WfMerge { ticket, pr, stale } => Op::WfMerge { ticket: rt(ticket), pr: rp(pr), stale },
+            &Op::WorkerRunEnds { worker, status } => Op::WorkerRunEnds { worker: rw(worker), status },
             other => other.clone(),
         })
         .collect()
@@ -878,7 +899,8 @@ fn first_positions(ops: &[Op]) -> FirstUse {
             | Op::WorkerSetBusy { worker, .. }
             | Op::ParentReply { worker }
             | Op::WfReply { worker, .. }
-            | Op::WorkerSetMergeOnly { worker, .. } => rec_w(worker, i),
+            | Op::WorkerSetMergeOnly { worker, .. }
+            | Op::WorkerRunEnds { worker, .. } => rec_w(worker, i),
             Op::GhPush { pr }
             | Op::GhStatus { pr, .. }
             | Op::GhFinish { pr, .. }
@@ -898,7 +920,7 @@ fn first_positions(ops: &[Op]) -> FirstUse {
             | Op::TicketClose { ticket, .. }
             | Op::TicketArchive { ticket, .. }
             | Op::TicketThreadGone { ticket, .. } => rec_t(ticket, i),
-            Op::MergeWaitPut { pr, ticket, .. } => {
+            Op::MergeWaitPut { pr, ticket, .. } | Op::WfMerge { pr, ticket, .. } => {
                 rec_p(pr, i);
                 rec_t(ticket, i);
             }
@@ -1206,6 +1228,13 @@ pub fn format_op_rust(op: &Op) -> String {
             format!("Op::GhFilesPaginated {{ pr: PrSym({}), paginated: {paginated} }}", pr.0)
         }
         Op::GhReopen { pr } => format!("Op::GhReopen {{ pr: PrSym({}) }}", pr.0),
+        Op::WfMerge { ticket, pr, stale } => {
+            format!("Op::WfMerge {{ ticket: TSym({}), pr: PrSym({}), stale: {stale} }}", ticket.0, pr.0)
+        }
+        Op::GhQueueAdvance => "Op::GhQueueAdvance".to_string(),
+        Op::WorkerRunEnds { worker, status } => {
+            format!("Op::WorkerRunEnds {{ worker: WSym({}), status: RunEnd::{status:?} }}", worker.0)
+        }
     }
 }
 

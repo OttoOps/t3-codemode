@@ -175,9 +175,6 @@ impl ReachPoint {
         match self {
             Self::OutboxHeldThenClosed
             | Self::PrReopenedReconciled
-            | Self::OutboxHeld
-            | Self::StallReported
-            | Self::IdleEscalated
             | Self::BadEndNudged
             | Self::WorkerThreadGone
             | Self::WorkerArchived => ReachTier::Tier2,

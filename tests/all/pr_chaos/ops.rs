@@ -130,6 +130,30 @@ impl QueueDropReason {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunEnd {
+    Completed,
+    Failed,
+    Interrupted,
+    Cancelled,
+}
+
+impl RunEnd {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub const fn is_bad(self) -> bool {
+        !matches!(self, Self::Completed)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PauseTarget {
     Ticket { ticket: TSym },
@@ -199,6 +223,9 @@ pub enum Op {
     PrFollowup { worker: WSym, pr: PrSym, event: PrEventKind, short_sha: bool, no_ci: bool },
     GhFilesPaginated { pr: PrSym, paginated: bool },
     GhReopen { pr: PrSym },
+    WfMerge { ticket: TSym, pr: PrSym, stale: bool },
+    GhQueueAdvance,
+    WorkerRunEnds { worker: WSym, status: RunEnd },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -242,6 +269,9 @@ pub enum OpKind {
     PrFollowup,
     GhFilesPaginated,
     GhReopen,
+    WfMerge,
+    GhQueueAdvance,
+    WorkerRunEnds,
 }
 
 impl OpKind {
@@ -284,6 +314,9 @@ impl OpKind {
         Self::PrFollowup,
         Self::GhFilesPaginated,
         Self::GhReopen,
+        Self::WfMerge,
+        Self::GhQueueAdvance,
+        Self::WorkerRunEnds,
     ];
 
     pub const COUNT: usize = Self::ALL.len();
@@ -328,6 +361,9 @@ impl OpKind {
             Self::PrFollowup => "pr_followup",
             Self::GhFilesPaginated => "gh_files_paginated",
             Self::GhReopen => "gh_reopen",
+            Self::WfMerge => "wf_merge",
+            Self::GhQueueAdvance => "gh_queue_advance",
+            Self::WorkerRunEnds => "worker_run_ends",
         }
     }
 
@@ -343,6 +379,7 @@ impl OpKind {
                 | Self::ParentReply
                 | Self::WfReply
                 | Self::PrFollowup
+                | Self::WfMerge
         )
     }
 
@@ -378,7 +415,9 @@ impl OpKind {
             | Self::Sweep
             | Self::PrFollowup
             | Self::GhFilesPaginated
-            | Self::GhReopen => 2,
+            | Self::GhReopen
+            | Self::WfMerge
+            | Self::WorkerRunEnds => 2,
             Self::GhReadError
             | Self::GhRemovePr
             | Self::GhClearReadErrors
@@ -386,7 +425,8 @@ impl OpKind {
             | Self::TicketArchive
             | Self::TicketThreadGone
             | Self::SetRelay
-            | Self::WorkerSetMergeOnly => 1,
+            | Self::WorkerSetMergeOnly
+            | Self::GhQueueAdvance => 1,
         }
     }
 }
@@ -432,6 +472,9 @@ impl Op {
             Self::PrFollowup { .. } => OpKind::PrFollowup,
             Self::GhFilesPaginated { .. } => OpKind::GhFilesPaginated,
             Self::GhReopen { .. } => OpKind::GhReopen,
+            Self::WfMerge { .. } => OpKind::WfMerge,
+            Self::GhQueueAdvance => OpKind::GhQueueAdvance,
+            Self::WorkerRunEnds { .. } => OpKind::WorkerRunEnds,
         }
     }
 }
@@ -754,6 +797,14 @@ fn decode_one(u: &mut Unstructured<'_>, weights: &OpWeights, total: u32) -> arbi
         }
         OpKind::GhFilesPaginated => Op::GhFilesPaginated { pr: decode_pr(u)?, paginated: u.int_in_range(0..=2)? != 0 },
         OpKind::GhReopen => Op::GhReopen { pr: decode_pr(u)? },
+        OpKind::WfMerge => {
+            Op::WfMerge { ticket: decode_ticket(u)?, pr: decode_pr(u)?, stale: u.int_in_range(0..=4)? == 0 }
+        }
+        OpKind::GhQueueAdvance => Op::GhQueueAdvance,
+        OpKind::WorkerRunEnds => {
+            const ENDS: &[RunEnd] = &[RunEnd::Completed, RunEnd::Failed, RunEnd::Interrupted, RunEnd::Cancelled];
+            Op::WorkerRunEnds { worker: decode_worker(u)?, status: *u.choose(ENDS)? }
+        }
     };
     Ok(op)
 }

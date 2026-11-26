@@ -11,8 +11,8 @@ use t3_codemode::board::{BOARD, Card, CardRef};
 use t3_codemode::clock::{Clock, iso, plus_minutes};
 use t3_codemode::config::Config;
 use t3_codemode::fake::{
-    Failure, Rule, check_run, github_pr, gitlab_gid, gitlab_mr, gitlab_pipeline, merge_request, project, pull_request,
-    thread,
+    Failure, Rule, check_run, github_pr, gitlab_gid, gitlab_mr, gitlab_pipeline, merge_request, pending_check, project,
+    pull_request, thread,
 };
 use t3_codemode::reach::{ReachPoint, ReachSnapshot};
 use t3_codemode::sentinels::Sentinel;
@@ -25,7 +25,7 @@ mod shrink;
 
 use ops::{
     CardKind, CardSym, GhChecks, GhEndState, GhMergeState, Op, OpKind, OpStats, OpWeights, PauseTarget, PrEventKind,
-    PrSym, QueueDropReason, SweepTarget, TSym, WSym, decode_ops, deserialize_ops, seed_bytes, serialize_ops,
+    PrSym, QueueDropReason, RunEnd, SweepTarget, TSym, WSym, decode_ops, deserialize_ops, seed_bytes, serialize_ops,
 };
 use shadow::{AdvanceRace, Model, Predicted, St, WaitM, wakes_of};
 use shrink::{
@@ -249,10 +249,6 @@ fn pull_gh_mutations(h: &H, prs: &mut BTreeMap<u64, GhPrModel>) {
     }
 }
 
-fn pending_check(name: &str) -> Value {
-    json!({"__typename": "CheckRun", "name": name, "status": "IN_PROGRESS", "conclusion": null})
-}
-
 fn setup_chaos(in_memory: bool) -> (H, BTreeMap<u64, GhPrModel>) {
     let config = match forge() {
         Forge::Github => Config::default(),
@@ -293,7 +289,7 @@ fn setup_chaos(in_memory: bool) -> (H, BTreeMap<u64, GhPrModel>) {
     for &n in PRS {
         prs.insert(n, GhPrModel::default());
     }
-    sync_gh(&h, &prs);
+    seed_prs(&h, &prs);
     (h, prs)
 }
 
@@ -367,53 +363,173 @@ fn sync_lab(h: &H, prs: &BTreeMap<u64, GhPrModel>) {
     }
 }
 
-fn sync_gh(h: &H, prs: &BTreeMap<u64, GhPrModel>) {
+fn render_checks(checks: GhChecks) -> Value {
+    match checks {
+        GhChecks::Pending => json!([pending_check("ci")]),
+        GhChecks::Passing => json!([check_run("ci", "SUCCESS")]),
+        GhChecks::Failing => json!([check_run("ci", "FAILURE")]),
+        GhChecks::Cancelled => json!([check_run("ci", "SUCCESS"), check_run("opt", "CANCELLED")]),
+        GhChecks::Unread => json!([]),
+    }
+}
+
+fn seed_prs(h: &H, prs: &BTreeMap<u64, GhPrModel>) {
     if forge() == Forge::Gitlab {
         return sync_lab(h, prs);
     }
-    h.github.clear_faults_on("reconcile.pr");
     for (&number, m) in prs {
-        if !m.exists {
-            h.github.remove_pr(REPO, number);
-            continue;
-        }
+        assert!(m.exists && m.state == "OPEN" && !m.queued, "seed_prs opens fresh pull requests only");
         let mut pr = github_pr(HEADS[m.head_idx], m.merge_state, m.queue_enabled);
-        pr["state"] = json!(m.state);
         pr["isDraft"] = json!(m.draft);
-        pr["isInMergeQueue"] = json!(m.queued);
-        if m.queued {
-            pr["mergeQueueEntry"] = json!({"position": 1});
-        }
         pr["body"] = json!(GOOD_BODY);
         pr["files"] = json!({"pageInfo": {"hasNextPage": m.many_files}, "nodes": [{"path": "src/lib.rs"}]});
-        if let Some((reason, at)) = &m.removed {
-            pr["timelineItems"] = json!({"nodes": [{"reason": reason, "createdAt": at}]});
-        }
-        if m.state == "MERGED" {
-            let oid = m.merge_commit.as_deref().unwrap_or(HEADS[(m.head_idx + 1) % HEADS.len()]);
-            pr["mergeCommit"] = json!({"oid": oid});
-            if let Some(at) = &m.ended_at {
-                pr["mergedAt"] = json!(at);
-            }
-        } else if m.state == "CLOSED"
-            && let Some(at) = &m.ended_at
-        {
-            pr["closedAt"] = json!(at);
-        }
         h.github.set_pr(REPO, number, pr);
-        let checks = match m.checks {
-            GhChecks::Pending => json!([pending_check("ci")]),
-            GhChecks::Passing => json!([check_run("ci", "SUCCESS")]),
-            GhChecks::Failing => json!([check_run("ci", "FAILURE")]),
-            GhChecks::Cancelled => json!([check_run("ci", "SUCCESS"), check_run("opt", "CANCELLED")]),
-            GhChecks::Unread => json!([]),
+        h.github.set_checks(REPO, number, render_checks(m.checks));
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GhChange {
+    Push(u64),
+    Status(u64),
+    Finish(u64),
+    ReadError(u64),
+    Remove(u64),
+    ClearReadErrors,
+    Queue(u64),
+    QueueDrop(u64),
+    QueueAdvance(u64),
+    Files(u64),
+    Reopen(u64),
+}
+
+fn push_model(m: &mut GhPrModel) {
+    m.head_idx = (m.head_idx + 1) % HEADS.len();
+    if forge() == Forge::Github {
+        m.checks = GhChecks::Pending;
+        m.queued = false;
+    }
+}
+
+fn gh_apply(h: &H, prs: &BTreeMap<u64, GhPrModel>, change: GhChange) {
+    if forge() == Forge::Gitlab {
+        return sync_lab(h, prs);
+    }
+    let gh = &h.github;
+    match change {
+        GhChange::Push(n) => gh.push(REPO, n, HEADS[prs[&n].head_idx]),
+        GhChange::Status(n) => {
+            let m = &prs[&n];
+            gh.set_status(REPO, n, m.merge_state, m.draft);
+            gh.set_checks(REPO, n, render_checks(m.checks));
+        }
+        GhChange::Finish(n) => {
+            let m = &prs[&n];
+            let commit = (m.state == "MERGED").then(|| shadow::commit_of(m));
+            gh.finish(REPO, n, m.state, m.ended_at.as_deref(), commit.as_deref());
+        }
+        GhChange::ReadError(n) => {
+            gh.clear_fault("reconcile.pr", &format!("{REPO}#{n}"));
+            if prs[&n].read_err {
+                gh.fault(Rule::on("reconcile.pr").pr(REPO, n).fail(Failure::refused("transient chaos read error")));
+            }
+        }
+        GhChange::Remove(n) => {
+            gh.clear_fault("reconcile.pr", &format!("{REPO}#{n}"));
+            gh.remove_pr(REPO, n);
+        }
+        GhChange::ClearReadErrors => gh.clear_faults_on("reconcile.pr"),
+        GhChange::Queue(n) => gh.set_queue(REPO, n, prs[&n].queue_enabled, prs[&n].queued),
+        GhChange::QueueDrop(n) => match &prs[&n].removed {
+            Some((reason, at)) => gh.drop_from_queue(REPO, n, reason, at),
+            None => gh.set_queue(REPO, n, prs[&n].queue_enabled, false),
+        },
+        GhChange::QueueAdvance(n) => {
+            let at = prs[&n].ended_at.clone().unwrap();
+            assert_eq!(gh.advance_queue(REPO, &at), Some(n), "the fake's merge queue head moved");
+        }
+        GhChange::Files(n) => gh.set_files_paginated(REPO, n, prs[&n].many_files),
+        GhChange::Reopen(n) => gh.reopen(REPO, n),
+    }
+}
+
+fn assert_fake_mirrors(h: &H, prs: &BTreeMap<u64, GhPrModel>, seed: impl fmt::Display, trace: &[String]) {
+    if let Some(d) = fake_mirror_diff(h, prs) {
+        oracle_fail(format!("the fake GitHub drifted from the model: {d}\nseed={seed}\ntrace:\n{}", trace.join("\n")));
+    }
+}
+
+fn fake_mirror_diff(h: &H, prs: &BTreeMap<u64, GhPrModel>) -> Option<String> {
+    if forge() == Forge::Gitlab {
+        return None;
+    }
+    for (&n, m) in prs {
+        let Some(pr) = h.github.find_pr(REPO, n) else {
+            if m.exists {
+                return Some(format!("#{n} is missing from the fake"));
+            }
+            continue;
         };
-        h.github.set_checks(REPO, number, checks);
-        if m.read_err {
-            h.github
-                .fault(Rule::on("reconcile.pr").pr(REPO, number).fail(Failure::refused("transient chaos read error")));
+        if !m.exists {
+            return Some(format!("#{n} was removed but the fake still has it"));
+        }
+        let contexts = &pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"];
+        let pending = contexts.as_array().into_iter().flatten().any(|c| c["status"] != "COMPLETED");
+        let failing = contexts.as_array().into_iter().flatten().any(|c| c["conclusion"] == "FAILURE");
+        let checks = match (contexts.as_array().is_some_and(Vec::is_empty), failing, pending) {
+            (true, ..) => "unread",
+            (_, true, _) => "failing",
+            (_, _, true) => "pending",
+            _ => "passed",
+        };
+        let want_checks = match m.checks {
+            GhChecks::Pending => "pending",
+            GhChecks::Failing => "failing",
+            GhChecks::Unread => "unread",
+            GhChecks::Passing | GhChecks::Cancelled => "passed",
+        };
+        let removed = pr["timelineItems"]["nodes"][0].as_object().map(|r| {
+            (
+                r["reason"].as_str().unwrap_or_default().to_string(),
+                r["createdAt"].as_str().unwrap_or_default().to_string(),
+            )
+        });
+        let got = (
+            pr["state"].as_str().unwrap_or_default(),
+            pr["isDraft"] == true,
+            pr["headRefOid"].as_str().unwrap_or_default(),
+            pr["mergeStateStatus"].as_str().unwrap_or_default(),
+            pr["isMergeQueueEnabled"] == true,
+            pr["isInMergeQueue"] == true,
+            pr["files"]["pageInfo"]["hasNextPage"] == true,
+            checks,
+            removed,
+        );
+        let want = (
+            m.state,
+            m.draft,
+            HEADS[m.head_idx],
+            m.merge_state,
+            m.queue_enabled,
+            m.queued,
+            m.many_files,
+            want_checks,
+            m.removed.clone().map(|(r, at)| (r.to_string(), at)),
+        );
+        if got != want {
+            return Some(format!("#{n} fake {got:?} != model {want:?}"));
+        }
+        if m.state != "OPEN" {
+            let when = if m.state == "MERGED" { "mergedAt" } else { "closedAt" };
+            if pr[when].as_str() != m.ended_at.as_deref() {
+                return Some(format!("#{n} fake {when} {} != model {:?}", pr[when], m.ended_at));
+            }
+        }
+        if m.state == "MERGED" && pr["mergeCommit"]["oid"].as_str() != Some(shadow::commit_of(m).as_str()) {
+            return Some(format!("#{n} fake merge commit {} != model {}", pr["mergeCommit"], shadow::commit_of(m)));
         }
     }
+    None
 }
 
 fn sent_counts(h: &H) -> BTreeMap<String, usize> {
@@ -988,7 +1104,7 @@ fn resolve_raced(
     }
 }
 
-const DEFAULT_SEQ_SEEDS: u64 = 60;
+const DEFAULT_SEQ_SEEDS: u64 = 150;
 const DEFAULT_CONCURRENT_SEEDS: u64 = 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1167,7 +1283,7 @@ async fn run_tick(
         .filter(|w| !closed_workers.contains_key(*w))
         .filter_map(|w| {
             let wl = h.app.store.link_get(w).unwrap()?;
-            wl.pr.as_ref().filter(|p| p.waiting).map(|_| {
+            wl.pr.as_ref().filter(|p| p.waiting && !model.ended_badly(w)).map(|_| {
                 let nudges = h
                     .sent()
                     .into_iter()
@@ -1246,7 +1362,7 @@ async fn run_sequential_ops(
         m.queue_enabled = INIT_PR_QUEUE_ENABLED[if forge() == Forge::Gitlab { 0 } else { idx }];
         m.checks = INIT_PR_CHECKS[idx];
     }
-    sync_gh(&h, &gh);
+    seed_prs(&h, &gh);
     let t0 = h.clock.now();
     let mut trace: Vec<String> = Vec::new();
     let mut closed_tickets: BTreeMap<String, usize> = BTreeMap::new();
@@ -1343,7 +1459,7 @@ async fn run_sequential_ops(
                     let changed = {
                         let m = gh.get_mut(&pr_num).unwrap();
                         if m.exists && m.state == "OPEN" {
-                            m.head_idx = (m.head_idx + 1) % HEADS.len();
+                            push_model(m);
                             trace.push(format!("#{step} gh push #{pr_num} -> head {}", &HEADS[m.head_idx][..7]));
                             true
                         } else {
@@ -1352,7 +1468,7 @@ async fn run_sequential_ops(
                         }
                     };
                     if changed {
-                        sync_gh(&h, &gh);
+                        gh_apply(&h, &gh, GhChange::Push(pr_num));
                     }
                     changed
                 }
@@ -1378,7 +1494,7 @@ async fn run_sequential_ops(
                         }
                     };
                     if changed {
-                        sync_gh(&h, &gh);
+                        gh_apply(&h, &gh, GhChange::Status(pr_num));
                     }
                     changed
                 }
@@ -1404,7 +1520,7 @@ async fn run_sequential_ops(
                         }
                     };
                     if changed {
-                        sync_gh(&h, &gh);
+                        gh_apply(&h, &gh, GhChange::Finish(pr_num));
                     }
                     changed
                 }
@@ -1425,7 +1541,7 @@ async fn run_sequential_ops(
                         }
                     };
                     if changed {
-                        sync_gh(&h, &gh);
+                        gh_apply(&h, &gh, GhChange::ReadError(pr_num));
                     }
                     changed
                 }
@@ -1446,7 +1562,7 @@ async fn run_sequential_ops(
                         }
                     };
                     if changed {
-                        sync_gh(&h, &gh);
+                        gh_apply(&h, &gh, GhChange::Remove(pr_num));
                     }
                     changed
                 }
@@ -1462,7 +1578,7 @@ async fn run_sequential_ops(
                         trace.push(format!("#{step} noop (clear read_err: none active)"));
                         false
                     } else {
-                        sync_gh(&h, &gh);
+                        gh_apply(&h, &gh, GhChange::ClearReadErrors);
                         trace.push(format!("#{step} clear read_err {cleared:?}"));
                         true
                     }
@@ -1831,11 +1947,17 @@ async fn run_sequential_ops(
                         return false;
                     }
                     let head = HEADS[m.head_idx].to_string();
-                    let id = match forge() {
-                        Forge::Github => format!("PR_{REPO}_{pr_num}"),
+                    let pull_request_id = match forge() {
+                        Forge::Github => {
+                            let id = h.github.pr(REPO, pr_num)["id"].as_str().unwrap().to_string();
+                            if reassigned_id {
+                                h.github.reassign_id(REPO, pr_num);
+                            }
+                            id
+                        }
+                        Forge::Gitlab if reassigned_id => format!("{}_reassigned", gitlab_gid(pr_num)),
                         Forge::Gitlab => gitlab_gid(pr_num),
                     };
-                    let pull_request_id = if reassigned_id { format!("{id}_reassigned") } else { id };
                     let approval = if reassigned_id {
                         format!("appr-{step}-reassigned")
                     } else {
@@ -1883,7 +2005,7 @@ async fn run_sequential_ops(
                     };
                     if changed {
                         queue_enabled(&mut gh, pr_num, enabled);
-                        sync_gh(&h, &gh);
+                        gh_apply(&h, &gh, GhChange::Queue(pr_num));
                     }
                     changed
                 }
@@ -1906,7 +2028,7 @@ async fn run_sequential_ops(
                         }
                     };
                     if changed {
-                        sync_gh(&h, &gh);
+                        gh_apply(&h, &gh, GhChange::QueueDrop(pr_num));
                     }
                     changed
                 }
@@ -1930,7 +2052,11 @@ async fn run_sequential_ops(
                         return false;
                     }
                     let status = if busy { "running" } else { "idle" };
-                    h.fake.update(w, json!({"status": status, "updatedAt": clock_now(&h)}));
+                    if busy {
+                        h.fake.start_run(w, None);
+                    } else {
+                        h.fake.finish_run(w, status);
+                    }
                     if busy {
                         busy_workers.insert(w);
                     } else {
@@ -2260,7 +2386,7 @@ async fn run_sequential_ops(
                         }
                     };
                     if changed {
-                        sync_gh(&h, &gh);
+                        gh_apply(&h, &gh, GhChange::Files(pr_num));
                     }
                     changed
                 }
@@ -2283,9 +2409,72 @@ async fn run_sequential_ops(
                         }
                     };
                     if changed {
-                        sync_gh(&h, &gh);
+                        gh_apply(&h, &gh, GhChange::Reopen(pr_num));
                     }
                     changed
+                }
+                Op::WfMerge { ticket, pr, stale } => {
+                    let (Some(t), Some(pr_num)) = (resolve_ticket(ticket), resolve_pr(pr)) else {
+                        trace.push(format!("#{step} noop (wf.merge {ticket:?} {pr:?})"));
+                        return false;
+                    };
+                    let m = &gh[&pr_num];
+                    if forge() == Forge::Gitlab || (m.exists && m.state == "OPEN" && m.merge_state == "UNKNOWN") {
+                        trace.push(format!("#{step} noop (wf.merge #{pr_num} on {} at {})", forge_name(), m.merge_state));
+                        return false;
+                    }
+                    let idx = if stale { (m.head_idx + HEADS.len() - 1) % HEADS.len() } else { m.head_idx };
+                    let head = HEADS[idx];
+                    let r = h.wf(t, "merge", json!({"repo": REPO, "pr": pr_num, "head": head})).await;
+                    let mut predicted = gh.clone();
+                    let want = model.wf_merge(t, pr_num, head, r["approval"].as_str(), &mut predicted);
+                    pull_gh_mutations(&h, &mut gh);
+                    trace.push(format!("#{step} {t} wf.merge #{pr_num}@{} -> {}", &head[..7], r["status"]));
+                    oracle.status(&r, want, &trace, run_id);
+                    if let Some(n) = mutation_diff(&predicted, &gh) {
+                        oracle_fail(format!(
+                            "wf.merge mutations on #{n} diverged from the shadow model\nseed={run_id}\ntrace:\n{}",
+                            trace.join("\n")
+                        ));
+                    }
+                    true
+                }
+                Op::GhQueueAdvance => {
+                    let first = match forge() {
+                        Forge::Github => h.github.queue(REPO).first().copied(),
+                        Forge::Gitlab => gh.iter().find(|(_, m)| m.exists && m.state == "OPEN" && m.queued).map(|(n, _)| *n),
+                    };
+                    let Some(n) = first else {
+                        trace.push(format!("#{step} noop (gh queue advance: queue empty)"));
+                        return false;
+                    };
+                    {
+                        let m = gh.get_mut(&n).unwrap();
+                        m.state = "MERGED";
+                        m.queued = false;
+                        m.ended_at = Some(clock_now(&h));
+                    }
+                    gh_apply(&h, &gh, GhChange::QueueAdvance(n));
+                    if forge() == Forge::Github {
+                        gh.get_mut(&n).unwrap().merge_commit =
+                            h.github.pr(REPO, n)["mergeCommit"]["oid"].as_str().map(String::from);
+                    }
+                    trace.push(format!("#{step} gh queue advance merges #{n}"));
+                    true
+                }
+                Op::WorkerRunEnds { worker, status } => {
+                    let Some((w, _)) = resolve_worker(worker, &closed_workers) else {
+                        trace.push(format!("#{step} noop (run ends {worker:?})"));
+                        return false;
+                    };
+                    if !busy_workers.remove(w) {
+                        trace.push(format!("#{step} noop ({w} is not running)"));
+                        return false;
+                    }
+                    h.fake.finish_run(w, status.as_str());
+                    model.run_ended(w, status.is_bad());
+                    trace.push(format!("#{step} {w} run ended {}", status.as_str()));
+                    true
                 }
             }
         })
@@ -2305,6 +2494,7 @@ async fn run_sequential_ops(
             }
         }
         assert_invariants(&h, run_id, &trace, &closed_tickets, &closed_workers, healthy_reconcile, &gh);
+        assert_fake_mirrors(&h, &gh, run_id, &trace);
         oracle.check(&h, &mut model, sent_before, &trace, run_id);
     }
     (trace, h.app.wf.reach().snapshot(), op_stats)
@@ -2438,7 +2628,7 @@ async fn seeded_sequential_chaos_holds_all_invariants_on_gitlab() {
         op_stats.merge(&stats);
     }
     if range.count >= DEFAULT_SEQ_SEEDS {
-        for &kind in OpKind::ALL {
+        for &kind in OpKind::ALL.iter().filter(|k| **k != OpKind::WfMerge) {
             assert!(op_stats.executed(kind) > 0, "the GitLab chaos run never executed {kind:?}\n{op_stats}");
         }
         reach.assert_all(
@@ -2489,7 +2679,7 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
     for m in gh.values_mut() {
         m.queue_enabled = rng.coin();
     }
-    sync_gh(&h, &gh);
+    seed_prs(&h, &gh);
     let t0 = h.clock.now();
     let mut trace = Vec::new();
     let mut model = Model::new(&clock_now(&h));
@@ -2557,20 +2747,24 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
                 }
                 1 => {
                     // Reconcile races with adopt + PR merge/move
-                    {
+                    let change = {
                         let m = gh.get_mut(&7).unwrap();
-                        if m.state == "OPEN" {
-                            if rng.coin() {
-                                m.head_idx = (m.head_idx + 1) % HEADS.len();
-                            } else {
-                                m.state = "MERGED";
-                                m.queued = false;
-                                let predates = rng.pick(4) == 0;
-                                m.ended_at = Some(if predates { before_tracking(t0) } else { clock_now(&h) });
-                            }
+                        if m.state != "OPEN" {
+                            None
+                        } else if rng.coin() {
+                            push_model(m);
+                            Some(GhChange::Push(7))
+                        } else {
+                            m.state = "MERGED";
+                            m.queued = false;
+                            let predates = rng.pick(4) == 0;
+                            m.ended_at = Some(if predates { before_tracking(t0) } else { clock_now(&h) });
+                            Some(GhChange::Finish(7))
                         }
+                    };
+                    if let Some(change) = change {
+                        gh_apply(&h, &gh, change);
                     }
-                    sync_gh(&h, &gh);
                     let from = TICKETS[rng.pick(2)];
                     let to = if from == TICKETS[0] { TICKETS[1] } else { TICKETS[2] };
                     ops_gh = gh.clone();
@@ -2615,8 +2809,11 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
                     r.unwrap();
                     pull_gh_mutations(&h, &mut gh);
                     actual_gh = Some(gh.clone());
-                    gh.get_mut(&8).unwrap().head_idx = next_idx;
-                    sync_gh(&h, &gh);
+                    if gh[&8].state == "OPEN" {
+                        push_model(gh.get_mut(&8).unwrap());
+                        assert_eq!(gh[&8].head_idx, next_idx);
+                        gh_apply(&h, &gh, GhChange::Push(8));
+                    }
                     trace.push(format!("round {round}: ready(#8) racing with updated + reconcile"));
                 }
                 3 => {
@@ -2647,7 +2844,9 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
                                 if m.checks == GhChecks::Pending { GhChecks::Passing } else { GhChecks::Pending };
                         }
                     }
-                    sync_gh(&h, &gh);
+                    if gh[&9].state == "OPEN" {
+                        gh_apply(&h, &gh, GhChange::Status(9));
+                    }
                     ops_gh = gh.clone();
                     ops = vec![Raced::Ready(WORKERS[2], 9, HEADS[gh[&9].head_idx].into()), Raced::Reconcile];
                     let rdy = h.wf(
@@ -2687,7 +2886,8 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
                             m.queued = false;
                             m.removed = None;
                         }
-                        sync_gh(&h, &gh);
+                        gh_apply(&h, &gh, GhChange::Status(pr));
+                        gh_apply(&h, &gh, GhChange::Queue(pr));
                         ops_gh = gh.clone();
                         let w1 = MergeWait {
                             repo: REPO.into(),
@@ -2727,12 +2927,13 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
                         let rec = h.app.wf.reconcile();
                         let replace = async {
                             tokio::time::sleep(Duration::from_millis(22)).await;
-                            h.github.update_pr(REPO, pr, json!({"headRefOid": next_head}));
+                            h.github.push(REPO, pr, &next_head);
                             h.app.store.merge_wait_put(&w2).unwrap();
                         };
                         let (r, _) = join(rec, replace).await;
                         r.unwrap();
-                        gh.get_mut(&pr).unwrap().head_idx = next_idx;
+                        push_model(gh.get_mut(&pr).unwrap());
+                        assert_eq!(gh[&pr].head_idx, next_idx);
                         advance_race =
                             Some(AdvanceRace::FailAndReplace { pr, new_head_idx: next_idx, replacement: w2_model });
                         trace.push(format!(
@@ -2755,7 +2956,8 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
                             m.queued = false;
                             m.removed = None;
                         }
-                        sync_gh(&h, &gh);
+                        gh_apply(&h, &gh, GhChange::Status(pr));
+                        gh_apply(&h, &gh, GhChange::Queue(pr));
                         ops_gh = gh.clone();
                         let w1 = MergeWait {
                             repo: REPO.into(),
@@ -2819,9 +3021,6 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
             pull_gh_mutations(&h, &mut gh);
             oracle.mutations(&predicted, &gh, true, attempts(&h), &trace, seed);
             oracle.check(&h, &mut model, sent_before, &trace, seed);
-            if matches!(race, AdvanceRace::FailAndReplace { .. }) {
-                sync_gh(&h, &gh);
-            }
         } else if !ops.is_empty() {
             statuses.resize(ops.len(), None);
             let actual_gh = actual_gh.unwrap_or_else(|| {
@@ -2830,6 +3029,7 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
             });
             resolve_raced(&h, &mut model, &ops, &statuses, &ops_gh, &actual_gh, sent_before, &trace, seed);
         }
+        assert_fake_mirrors(&h, &gh, seed, &trace);
     }
 
     h.github.set_delay(Duration::ZERO);
@@ -3191,6 +3391,9 @@ fn op_serialization_round_trips_and_decodes_edge_cases() {
         Op::PrFollowup { worker: WSym(0), pr: PrSym(1), event: PrEventKind::Ready, short_sha: true, no_ci: false },
         Op::GhFilesPaginated { pr: PrSym(2), paginated: true },
         Op::GhReopen { pr: PrSym(0) },
+        Op::WfMerge { ticket: TSym(0), pr: PrSym(1), stale: true },
+        Op::GhQueueAdvance,
+        Op::WorkerRunEnds { worker: WSym(1), status: RunEnd::Interrupted },
     ];
     for (idx, &kind) in OpKind::ALL.iter().enumerate() {
         assert_eq!(kind as usize, idx, "OpKind::ALL order drifted at {kind:?}");
