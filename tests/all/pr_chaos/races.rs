@@ -590,8 +590,11 @@ async fn a_raced_enqueue_reply_returns_the_approval_the_other_merge_recorded() {
             let (h, args) = (h.clone(), args.clone());
             async move { h.app.wf.dispatch("merge", Some(TICKETS[0]), args).await.unwrap() }
         });
-        g.arrived().await;
-        let second = h.app.wf.dispatch("merge", Some(TICKETS[0]), args).await.unwrap();
+        tokio::time::timeout(STALL, g.arrived()).await.expect("the first wf.merge never reached its gate");
+        let second = tokio::time::timeout(STALL, h.app.wf.dispatch("merge", Some(TICKETS[0]), args))
+            .await
+            .expect("the second wf.merge did not finish: a deadlock")
+            .unwrap();
         g.release();
         let first = settle("the parked wf.merge", first).await;
         let wait = h.app.store.merge_wait_get(REPO, 7).unwrap().unwrap();
