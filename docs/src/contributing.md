@@ -68,10 +68,13 @@ let (parked, ()) = tokio::join!(parked, race);
 - `fail` returns the error before the call takes effect.
 - `fail_after_effect` applies the call, then returns the error.
 - `gate` parks the call until `release()`, and `arrived()` waits for it to
-  park.
+  park. A call that matches two gates arrives at both before it waits on
+  either.
 
 The op `reconcile.pr` targets one pull request inside the batched reconcile
-read. `set_jitter(Some(seed))` adds seeded `yield_now()` calls to every fake
+read, and a `Failure::typed` there keeps its type on that pull request's error.
+After `alias_repo`, a pull request target matches the repository's old name and
+its new one. `set_jitter(Some(seed))` adds seeded `yield_now()` calls to every fake
 call, and the concurrent chaos tests pass their seed.
 
 A hidden `bench` command measures latency and RSS against the in-process fake
@@ -81,16 +84,66 @@ T3:
 t3cm bench -n 1000 --tools tests/fixtures/t3-tools.json
 ```
 
+### Thread lifecycle
+
+`FakeT3` reads the test clock, `H::clock`, so a thread's run lasts in virtual
+minutes:
+
+- `start_run(id, Some(minutes))` sets the thread `running`. Once the clock
+  passes that many minutes it reads `idle`, with `updatedAt` at the run's end.
+  `None` runs until `finish_run`.
+- `run_on_send(id, minutes)` starts a run on every `t3_thread_send` to the
+  thread, or pushes out the end of the run already going.
+- `finish_run(id, status)` ends the run as `idle`, `completed`, `failed`,
+  `interrupted` or `cancelled`.
+- `archive(id)` archives the thread, and `remove(id)` deletes it.
+
+```rust
+h.fake.run_on_send(WORKER, 20);
+h.wf(TICKET, "reply", json!({"to": WORKER, "body": "rebase"})).await; // Sent. The worker runs for 20 minutes.
+h.wf(TICKET, "reply", json!({"to": WORKER, "body": "lint"})).await; // Queued in the outbox.
+h.tick(21).await; // The run has ended, so the watcher delivers the queued reply.
+```
+
+`tests/all/lifecycle.rs` drives each watcher branch this reaches and checks its
+`Reach` counter: `OutboxHeld`, `StallReported`, `IdleEscalated`,
+`BadEndNudged`, `WorkerArchived`, `WorkerThreadGone`, `TicketArchived` and
+`TicketThreadGone`.
+
+### GitHub pull request state
+
+`FakeGitHub` keeps each pull request's state and changes it the way GitHub
+does:
+
+| Call | Effect |
+| --- | --- |
+| `push(repo, n, head)` | Moves the head, starts a pending `ci` check on it, and takes the pull request out of the merge queue. |
+| `set_status(repo, n, merge_state, draft)` | Sets the merge state and the draft flag. |
+| `set_checks(repo, n, checks)` | Replaces the check runs on the head. |
+| `set_queue(repo, n, enabled, queued)` | Turns the merge queue on or off for the pull request, and adds it to the queue or takes it out. |
+| `drop_from_queue(repo, n, reason, at)` | Takes it out of the queue with a timeline reason. |
+| `advance_queue(repo, at)` | Merges the pull request at the front of the queue and moves the rest up. |
+| `finish(repo, n, state, at, commit)` | Merges or closes it and takes it out of the queue. |
+| `reopen(repo, n)` | Reopens a closed pull request. |
+| `reassign_id(repo, n)` | Gives it a new node ID, so a merge by the old ID fails. |
+
+`enqueuePullRequest` and `mergePullRequest` work on the same queue, and queue
+positions follow queue order. The chaos tests change GitHub only through these
+calls, and after each op `pr_chaos` checks that the fake matches the shadow
+model.
+
 ### Chaos testing
 
 `tests/all/pr_chaos.rs` runs seeded Swarm-weighted sequential chaos and
 concurrent race tests against the shadow model, and it replays every committed
-NDJSON op list in `tests/chaos_corpus/*.ops`.
+NDJSON op list in `tests/chaos_corpus/*.ops`. Among its ops, a ticket calls
+`wf.merge`, the merge queue merges its front pull request, and a worker's run
+ends completed, failed, interrupted or cancelled.
 
 | Variable | Effect |
 | --- | --- |
 | `CHAOS_SEED=<n>` | Run one seed in `seeded_sequential_chaos` or `concurrent_chaos`. |
-| `CHAOS_SEED_START=<n>`, `CHAOS_SEEDS=<k>` | Run `k` seeds starting at `n`. Defaults are 60 sequential seeds and 30 concurrent seeds. |
+| `CHAOS_SEED_START=<n>`, `CHAOS_SEEDS=<k>` | Run `k` seeds starting at `n`. Defaults are 150 sequential seeds and 30 concurrent seeds. |
 | `CHAOS_REACH=1` | Print `ReachSnapshot` and `OpStats` execution coverage after sequential chaos. |
 | `CHAOS_SHRINK=1` | On a sequential failure, run 1-minimal `ddmin` and value simplification, write `tests/chaos_corpus/<hash>.ops` or `$CHAOS_CORPUS_DIR/<hash>.ops`, and print a ready-to-paste `#[tokio::test]`. |
 | `CHAOS_OPS=<path>` | Replay one `.ops` file in `pr_chaos::seeded_sequential_chaos`. Combines with `CHAOS_SHRINK=1`. |
