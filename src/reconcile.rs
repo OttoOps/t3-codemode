@@ -295,10 +295,18 @@ impl Wf {
         self.reconcile_after(0.0).await
     }
 
+    pub async fn reconcile_ran(&self) -> Result<Option<Vec<String>>> {
+        self.reconcile_pass(0.0).await
+    }
+
     async fn reconcile_after(&self, gap_mins: f64) -> Result<Vec<String>> {
-        let Ok(_running) = self.reconcile_lock.try_lock() else { return Ok(Vec::new()) };
+        Ok(self.reconcile_pass(gap_mins).await?.unwrap_or_default())
+    }
+
+    async fn reconcile_pass(&self, gap_mins: f64) -> Result<Option<Vec<String>>> {
+        let Ok(_running) = self.reconcile_lock.try_lock() else { return Ok(None) };
         if gap_mins > 0.0 && self.mins(self.store.meta_get(LAST_CHECK)?.as_deref()).is_some_and(|m| m < gap_mins) {
-            return Ok(Vec::new());
+            return Ok(Some(Vec::new()));
         }
         self.store.meta_set(LAST_CHECK, &self.now())?;
         self.learn_card_prs()?;
@@ -386,7 +394,7 @@ impl Wf {
             }
             bail!("pull request reconcile failed for {}", failed.join("; "));
         }
-        Ok(pass.actions)
+        Ok(Some(pass.actions))
     }
 
     fn learn_card_prs(&self) -> Result<()> {

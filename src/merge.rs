@@ -4,7 +4,6 @@ use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::board::random_id;
 use crate::codehost::{Change, Forge, Landed, Landing, State, Viewed};
 use crate::store::{MergeWait, WaitStatus};
 use crate::wf::Wf;
@@ -179,7 +178,7 @@ impl Wf {
         let failing = |f: &str| out.refused(format!("a check failed at head {}: {f}", &head[..7]));
         let can_wait = !REFUSED.contains(&state) && check_state(&pr) != CheckState::Unread;
         let record = |status: WaitStatus| -> Result<String> {
-            let approval = random_id();
+            let approval = self.new_id();
             let label = match caller {
                 Some(c) => self.store.link_get(c)?.map(|l| l.label),
                 None => None,

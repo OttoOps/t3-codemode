@@ -747,6 +747,29 @@ pub(crate) fn random_id() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+pub trait IdSource: Send + Sync {
+    fn next_id(&self) -> String;
+}
+
+pub struct RandomIds;
+
+impl IdSource for RandomIds {
+    fn next_id(&self) -> String {
+        random_id()
+    }
+}
+
+impl Wf {
+    pub fn set_id_source(&self, source: Arc<dyn IdSource>) {
+        *self.ids.lock().unwrap_or_else(|e| e.into_inner()) = source;
+    }
+
+    pub(crate) fn new_id(&self) -> String {
+        let source = self.ids.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        source.next_id()
+    }
+}
+
 // A restarted service starts above the revisions an open page already holds.
 pub(crate) fn clock_rev(clock: &dyn crate::clock::Clock) -> u64 {
     u64::try_from(clock.now().as_millisecond()).unwrap_or(0)
