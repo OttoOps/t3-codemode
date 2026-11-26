@@ -125,6 +125,67 @@ pub struct Link {
     pub brief: Option<PrBrief>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<LinkPr>,
+    #[serde(skip)]
+    pub base: LinkBase,
+}
+
+/// The stored row a [`Link`] was read from or last saved as.
+///
+/// [`Store::link_save`] compares it with the row it finds, so a save keeps the fields another
+/// process (`t3cm stdio` beside `t3cm serve`) changed since, and writes only the fields this copy
+/// changed. It never takes part in equality.
+#[derive(Default)]
+pub struct LinkBase(Mutex<Option<String>>);
+
+impl LinkBase {
+    fn of(raw: &str) -> LinkBase {
+        LinkBase(Mutex::new(Some(raw.to_string())))
+    }
+
+    fn get(&self) -> Option<String> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn set(&self, raw: String) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(raw);
+    }
+}
+
+impl Clone for LinkBase {
+    fn clone(&self) -> LinkBase {
+        LinkBase(Mutex::new(self.get()))
+    }
+}
+
+impl std::fmt::Debug for LinkBase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LinkBase")
+    }
+}
+
+impl PartialEq for LinkBase {
+    fn eq(&self, _: &LinkBase) -> bool {
+        true
+    }
+}
+
+fn merge_fields(base: &str, ours: &str, theirs: &str) -> Result<String> {
+    let (Value::Object(base), Value::Object(ours), Value::Object(mut out)) =
+        (serde_json::from_str(base)?, serde_json::from_str(ours)?, serde_json::from_str(theirs)?)
+    else {
+        return Ok(ours.to_string());
+    };
+    let keys: std::collections::BTreeSet<&String> = base.keys().chain(ours.keys()).collect();
+    for key in keys {
+        if base.get(key) == ours.get(key) {
+            continue;
+        }
+        match ours.get(key) {
+            Some(v) => out.insert(key.clone(), v.clone()),
+            None => out.remove(key),
+        };
+    }
+    Ok(Value::Object(out).to_string())
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -442,6 +503,7 @@ pub struct Rebind<'a> {
 pub struct Store {
     conn: Mutex<Connection>,
     path: PathBuf,
+    reach: std::sync::OnceLock<std::sync::Arc<crate::reach::Reach>>,
     #[cfg(feature = "test-faults")]
     writes: std::sync::Arc<Writes>,
 }
@@ -565,6 +627,7 @@ impl Store {
         Ok(Store {
             conn: Mutex::new(conn),
             path,
+            reach: std::sync::OnceLock::new(),
             #[cfg(feature = "test-faults")]
             writes,
         })
@@ -580,6 +643,11 @@ impl Store {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Self::init_schema(&conn)?;
         Self::build(conn, PathBuf::from(":memory:"))
+    }
+
+    /// Count this store's field-merged link saves in `reach`, once; later calls keep the first.
+    pub fn report_to(&self, reach: std::sync::Arc<crate::reach::Reach>) {
+        let _ = self.reach.set(reach);
     }
 
     pub fn path(&self) -> &Path {
@@ -789,7 +857,12 @@ impl Store {
             let mut st = c.prepare(&format!("SELECT data FROM links {sql} ORDER BY rowid"))?;
             st.query_map(p, |r| r.get(0))?.collect()
         })?;
-        raws.iter().map(|s| Ok(serde_json::from_str(s)?)).collect()
+        raws.iter()
+            .map(|s| {
+                let ln: Link = serde_json::from_str(s)?;
+                Ok(Link { base: LinkBase::of(s), ..ln })
+            })
+            .collect()
     }
 
     pub fn link_get(&self, child: &str) -> Result<Option<Link>> {
@@ -812,15 +885,28 @@ impl Store {
         }
     }
 
+    /// Save a link, merged field by field with any change another process made since `ln` was read.
     pub fn link_save(&self, ln: &Link) -> Result<()> {
-        let data = serde_json::to_string(ln)?;
-        self.with(|c| {
-            c.execute(
-                "INSERT INTO links (child, parent, closed, data) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (child) DO UPDATE SET parent = excluded.parent, closed = excluded.closed, data = excluded.data",
-                params![ln.child, ln.parent, ln.closed as i64, data],
-            )
-        })?;
+        let ours = serde_json::to_string(ln)?;
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let theirs: Option<String> =
+            tx.query_row("SELECT data FROM links WHERE child = ?1", [&ln.child], |r| r.get(0)).optional()?;
+        let (data, merged) = match (ln.base.get(), theirs) {
+            (Some(base), Some(theirs)) if base != theirs => (merge_fields(&base, &ours, &theirs)?, true),
+            _ => (ours.clone(), false),
+        };
+        let row: Link = serde_json::from_str(&data)?;
+        tx.execute(
+            "INSERT INTO links (child, parent, closed, data) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (child) DO UPDATE SET parent = excluded.parent, closed = excluded.closed, data = excluded.data",
+            params![row.child, row.parent, row.closed as i64, data],
+        )?;
+        self.commit(tx)?;
+        ln.base.set(ours);
+        if merged && let Some(reach) = self.reach.get() {
+            reach.hit(crate::reach::ReachPoint::LinkSaveMerged);
+        }
         Ok(())
     }
 
@@ -2152,6 +2238,7 @@ mod tests {
             bad_run: None,
             settled_at: None,
             restored_at: None,
+            base: Default::default(),
             project: None,
             paused_at: None,
             identity: Identity::default(),
