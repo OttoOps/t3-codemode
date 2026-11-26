@@ -21,6 +21,7 @@ doc = false
 [features]
 default = []
 test-sentinels = []
+test-faults = ["rusqlite/hooks"]
 
 [dependencies]
 anyhow = "1"
@@ -64,6 +65,7 @@ directories = "6"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
+t3-codemode = { path = ".", features = ["test-faults"] }
 arbitrary = "1"
 arbtest = "0.3"
 axum = { version = "0.8", default-features = false, features = ["form", "http1", "json", "tokio"] }

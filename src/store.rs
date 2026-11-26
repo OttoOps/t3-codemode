@@ -442,6 +442,41 @@ pub struct Rebind<'a> {
 pub struct Store {
     conn: Mutex<Connection>,
     path: PathBuf,
+    #[cfg(feature = "test-faults")]
+    writes: std::sync::Arc<Writes>,
+}
+
+/// Panic payload a store unwinds with when [`Store::set_fault`] crashes it.
+#[cfg(feature = "test-faults")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StoreCrash {
+    pub write: usize,
+}
+
+#[cfg(feature = "test-faults")]
+#[derive(Default)]
+struct Writes {
+    seen: std::sync::atomic::AtomicUsize,
+    crash_at: std::sync::atomic::AtomicUsize,
+    crashed: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(feature = "test-faults")]
+impl Writes {
+    fn hook(conn: &mut Connection) -> Result<std::sync::Arc<Writes>> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let writes = std::sync::Arc::new(Writes::default());
+        let w = writes.clone();
+        conn.commit_hook(Some(move || {
+            let n = w.seen.fetch_add(1, SeqCst) + 1;
+            let crash = w.crashed.load(SeqCst) != 0 || n == w.crash_at.load(SeqCst);
+            if crash {
+                let _ = w.crashed.compare_exchange(0, n, SeqCst, SeqCst);
+            }
+            crash
+        }))?;
+        Ok(writes)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -520,7 +555,19 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         Self::init_schema(&conn)?;
-        Ok(Store { conn: Mutex::new(conn), path })
+        Self::build(conn, path)
+    }
+
+    #[cfg_attr(not(feature = "test-faults"), allow(unused_mut))]
+    fn build(mut conn: Connection, path: PathBuf) -> Result<Store> {
+        #[cfg(feature = "test-faults")]
+        let writes = Writes::hook(&mut conn)?;
+        Ok(Store {
+            conn: Mutex::new(conn),
+            path,
+            #[cfg(feature = "test-faults")]
+            writes,
+        })
     }
 
     /// Open a private in-memory SQLite store with the same schema and migrations as [`Store::open`].
@@ -532,7 +579,7 @@ impl Store {
         let conn = Connection::open_in_memory().context("opening in-memory store")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         Self::init_schema(&conn)?;
-        Ok(Store { conn: Mutex::new(conn), path: PathBuf::from(":memory:") })
+        Self::build(conn, PathBuf::from(":memory:"))
     }
 
     pub fn path(&self) -> &Path {
@@ -540,8 +587,49 @@ impl Store {
     }
 
     fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
+        let conn = self.lock();
+        let out = f(&conn);
+        self.crashed();
+        Ok(out?)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(f(&conn)?)
+        self.crashed();
+        conn
+    }
+
+    fn commit(&self, tx: rusqlite::Transaction) -> Result<()> {
+        let out = tx.commit();
+        self.crashed();
+        Ok(out?)
+    }
+
+    #[inline]
+    fn crashed(&self) {
+        #[cfg(feature = "test-faults")]
+        {
+            let write = self.writes.crashed.load(std::sync::atomic::Ordering::SeqCst);
+            if write != 0 {
+                std::panic::panic_any(StoreCrash { write });
+            }
+        }
+    }
+
+    /// Crash this store at its `write`-th committed write since it opened (1-based), or never.
+    ///
+    /// The crashing write rolls back, and that call and every later one on this store panic with
+    /// a [`StoreCrash`] payload, the way a process that dies mid-write loses the write and stops.
+    /// Reopen the same directory to recover.
+    #[cfg(feature = "test-faults")]
+    pub fn set_fault(&self, write: Option<usize>) {
+        self.writes.crash_at.store(write.unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Committed writes since this store opened, the index [`Store::set_fault`] counts in.
+    #[cfg(feature = "test-faults")]
+    pub fn writes(&self) -> usize {
+        self.writes.seen.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn kv_get(&self, ns: &str, key: &str) -> Result<Option<Value>> {
@@ -752,7 +840,7 @@ impl Store {
         launched_by: Option<&str>,
         build: impl FnOnce(Option<Link>, Option<&Pending>) -> Bind,
     ) -> Result<Bind> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let raw: Option<String> =
             tx.query_row("SELECT data FROM links WHERE child = ?1", [child], |r| r.get(0)).optional()?;
@@ -789,7 +877,7 @@ impl Store {
                 tx.execute("DELETE FROM pending WHERE parent = ?1 AND label = ?2", params![p.parent, p.label])?;
             }
         }
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(bind)
     }
 
@@ -933,7 +1021,7 @@ impl Store {
     }
 
     pub fn pr_event_wake(&self, w: &Wake, text: impl FnOnce(&str) -> String) -> Result<Option<String>> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if let Some(event) = w.event {
             let fresh = tx.execute(
@@ -949,7 +1037,7 @@ impl Store {
             "INSERT INTO outbox (to_id, text, handle, queued) VALUES (?1, ?2, ?3, ?4)",
             params![w.ticket, text(&handle), handle, w.at],
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(Some(handle))
     }
 
@@ -1081,7 +1169,7 @@ impl Store {
             )?;
             Ok(())
         }
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut rebound = false;
         let own: Vec<(i64, Link)> = read(&tx, "SELECT rowid, data FROM links WHERE child = ?1 AND closed = 0", [old])?;
@@ -1195,7 +1283,7 @@ impl Store {
                 params![m.pick, handle, serde_json::to_string(&p)?],
             )?;
         }
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(rebound)
     }
 
@@ -1316,7 +1404,7 @@ impl Store {
                        AND NOT EXISTS (SELECT 1 FROM waiting w WHERE w.owner = ?2 AND w.resolved_at IS NULL \
                        AND json_extract(w.data, '$.kind') = 'gate' AND json_extract(w.data, '$.ticket') = ?1 \
                        AND json_extract(w.data, '$.worker') IS NULL)";
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut resolved = 0;
         for seq in seqs {
@@ -1325,7 +1413,7 @@ impl Store {
         for ticket in tickets {
             tx.execute(release, params![ticket, owner])?;
         }
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(resolved)
     }
 
@@ -1573,7 +1661,7 @@ impl Store {
         at: &str,
         max: usize,
     ) -> Result<ContextPut> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let all = Self::contexts_in(&tx)?;
         let old = all.iter().find(|c| c.id == id);
@@ -1599,7 +1687,7 @@ impl Store {
             "INSERT INTO contexts (id, data) VALUES (?1, ?2) ON CONFLICT (id) DO UPDATE SET data = excluded.data",
             params![saved.id, serde_json::to_string(&saved)?],
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(if old.is_some() { ContextPut::Updated(saved) } else { ContextPut::Created(saved) })
     }
 
@@ -1713,7 +1801,7 @@ impl Store {
     }
 
     pub fn pool_credits_put(&self, pool: &str, credits: &BTreeMap<String, i64>) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.lock();
         let tx = conn.transaction()?;
         for (instance, credit) in credits {
             tx.execute(
@@ -1722,7 +1810,7 @@ impl Store {
                 params![pool, instance, credit],
             )?;
         }
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(())
     }
 
@@ -1845,14 +1933,14 @@ impl Store {
         expires_at: &str,
         prune_before: &str,
     ) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute("DELETE FROM pairing_tokens WHERE expires_at <= ?1", [prune_before])?;
         tx.execute(
             "INSERT INTO pairing_tokens (token_hash, label, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
             params![token_hash, label, created_at, expires_at],
         )?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(())
     }
 
@@ -1864,7 +1952,7 @@ impl Store {
         now_iso: &str,
         session_expires_at: &str,
     ) -> Result<RedeemResult> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let row: Option<(Option<String>, String, Option<String>)> = tx
             .query_row(
@@ -1896,7 +1984,7 @@ impl Store {
             params![session_hash, label, now_iso, session_expires_at],
         )?;
         let seq = tx.last_insert_rowid();
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(RedeemResult::Redeemed(BoardSession {
             seq,
             id: crate::pairing::format_session_id(seq),
@@ -1968,17 +2056,17 @@ impl Store {
     }
 
     pub fn board_session_revoke(&self, seq: i64, now_iso: &str) -> Result<bool> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let exp: Option<String> =
             tx.query_row("SELECT expires_at FROM board_sessions WHERE seq = ?1", [seq], |r| r.get(0)).optional()?;
         tx.execute("DELETE FROM board_sessions WHERE seq = ?1", [seq])?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(exp.is_some_and(|e| is_unexpired(now_iso, &e)))
     }
 
     pub fn board_session_revoke_all(&self, now_iso: &str) -> Result<usize> {
-        let mut conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let exps: Vec<String> = {
             let mut st = tx.prepare("SELECT expires_at FROM board_sessions")?;
@@ -1986,7 +2074,7 @@ impl Store {
         };
         let active = exps.iter().filter(|e| is_unexpired(now_iso, e)).count();
         tx.execute("DELETE FROM board_sessions", [])?;
-        tx.commit()?;
+        self.commit(tx)?;
         Ok(active)
     }
 }
@@ -2107,5 +2195,71 @@ mod tests {
         assert_eq!(a.msg_get(&handle).unwrap().unwrap().body, "acme/widgets#7 merged");
         assert_eq!(a.pr_events_all().unwrap(), vec![("acme/widgets".into(), 7, "merged".into(), "mcp:t1".into())]);
         assert!(b.pr_events_all().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "test-faults")]
+    fn crash_of(f: impl FnOnce()) -> Option<StoreCrash> {
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).err()?;
+        payload.downcast_ref::<StoreCrash>().copied()
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn set_fault_counts_only_commits_and_crashes_at_the_nth_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let base = store.writes();
+        store.kv_set("ns", "a", &serde_json::json!(1), "t").unwrap();
+        assert_eq!(store.kv_get("ns", "a").unwrap(), Some(serde_json::json!(1)));
+        assert_eq!(store.writes(), base + 1, "a read is not a write");
+        let wake = Wake {
+            repo: "acme/widgets",
+            pr: 7,
+            event: Some("merged"),
+            ticket: "mcp:t1",
+            from: "github",
+            kind: "event",
+            body: "merged",
+            at: "t",
+        };
+        store.pr_event_wake(&wake, |h| h.to_string()).unwrap();
+        assert_eq!(store.writes(), base + 2, "a transaction is one write");
+
+        store.set_fault(Some(base + 4));
+        store.kv_set("ns", "b", &serde_json::json!(2), "t").unwrap();
+        assert_eq!(
+            crash_of(|| drop(store.kv_set("ns", "c", &serde_json::json!(3), "t"))),
+            Some(StoreCrash { write: base + 4 })
+        );
+        assert_eq!(crash_of(|| drop(store.kv_get("ns", "a"))), Some(StoreCrash { write: base + 4 }));
+        drop(store);
+
+        let reopened = Store::open(dir.path()).unwrap();
+        assert_eq!(reopened.kv_list("ns", "").unwrap(), ["a", "b"], "the crashing write rolled back");
+        assert_eq!(reopened.pr_events_all().unwrap().len(), 1);
+        assert_eq!(reopened.writes(), 0);
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn a_crash_inside_a_transaction_rolls_back_every_statement() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.set_fault(Some(store.writes() + 1));
+        let wake = Wake {
+            repo: "acme/widgets",
+            pr: 7,
+            event: Some("merged"),
+            ticket: "mcp:t1",
+            from: "github",
+            kind: "event",
+            body: "merged",
+            at: "t",
+        };
+        assert!(crash_of(|| drop(store.pr_event_wake(&wake, |h| h.to_string()))).is_some());
+        drop(store);
+        let reopened = Store::open(dir.path()).unwrap();
+        assert!(reopened.pr_events_all().unwrap().is_empty());
+        assert!(reopened.outbox_all().unwrap().is_empty());
     }
 }
