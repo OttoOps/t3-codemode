@@ -156,6 +156,7 @@ impl Wf {
                 approval: approval.clone(),
                 failures: 0,
                 last_error: None,
+                advancing: None,
             })?;
             rec.approval = Some(approval);
         }

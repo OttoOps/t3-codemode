@@ -637,6 +637,7 @@ impl Wf {
                 merge_state: Some(o.merge_state.clone()),
                 review_decision: o.review_decision.clone(),
                 checks: checks(&o).map(String::from),
+                rev: 0,
             };
             let shown = |p: &PrSeen| (p.state.clone(), p.queued, readiness(p));
             let moved = prev.as_ref().map(shown) != Some(shown(&seen));
@@ -887,6 +888,8 @@ impl Wf {
             }
             (WaitStatus::Waiting, false) if !o.draft => {
                 if !w.pull_request_id.is_empty() && o.id.as_deref() == Some(w.pull_request_id.as_str()) {
+                    let marked = MergeWait { advancing: Some(self.now()), ..w.clone() };
+                    self.store.merge_wait_swap(&marked)?;
                     Some(w)
                 } else {
                     self.reach.hit(ReachPoint::ReassignedIdRejected);

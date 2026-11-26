@@ -1977,6 +1977,7 @@ async fn run_sequential_ops(
                         approval,
                         failures: 0,
                         last_error: None,
+                        advancing: None,
                     };
                     h.app.store.merge_wait_put(&w).unwrap();
                     model.wait_put(pr_num, wait_model(&w, !reassigned_id));
@@ -2903,6 +2904,7 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
                             approval: format!("appr-cas-{seed}-{round}-old"),
                             failures: 2,
                             last_error: Some("earlier transient error".into()),
+                            advancing: None,
                         };
                         h.app.store.merge_wait_put(&w1).unwrap();
                         model.wait_put(pr, wait_model(&w1, true));
@@ -2922,6 +2924,7 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
                             approval: format!("appr-cas-{seed}-{round}-new"),
                             failures: 0,
                             last_error: None,
+                            advancing: None,
                         };
                         let w2_model = wait_model(&w2, true);
                         let rec = h.app.wf.reconcile();
@@ -2973,6 +2976,7 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
                             approval: format!("appr-swap-{seed}-{round}-old"),
                             failures: 0,
                             last_error: None,
+                            advancing: None,
                         };
                         h.app.store.merge_wait_put(&w1).unwrap();
                         model.wait_put(pr, wait_model(&w1, true));
@@ -2990,6 +2994,7 @@ async fn run_concurrent_seed_with(seed: u64, sentinel: Option<Sentinel>) -> (Vec
                             approval: format!("appr-swap-{seed}-{round}-new"),
                             failures: 0,
                             last_error: None,
+                            advancing: None,
                         });
                         let rep_model = replacement.as_ref().map(|w| wait_model(w, true));
                         let rec = h.app.wf.reconcile();

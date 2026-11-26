@@ -260,6 +260,8 @@ pub struct MergeWait {
     pub failures: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advancing: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -293,6 +295,8 @@ pub struct PrSeen {
     pub review_decision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks: Option<String>,
+    #[serde(default)]
+    pub rev: u64,
 }
 
 pub struct Wake<'a> {
@@ -875,7 +879,8 @@ impl Store {
         self.with(|c| {
             c.execute(
                 "INSERT INTO pr_seen (repo, pr, data) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (repo, pr) DO UPDATE SET data = excluded.data",
+                 ON CONFLICT (repo, pr) DO UPDATE SET data = json_set(excluded.data, '$.rev',
+                     COALESCE(json_extract(pr_seen.data, '$.rev'), 0) + 1)",
                 params![p.repo, p.pr as i64, data],
             )
         })?;
@@ -2083,6 +2088,7 @@ mod tests {
             approval: "appr-1".into(),
             failures: 0,
             last_error: None,
+            advancing: None,
         };
         a.merge_wait_put(&wait).unwrap();
         assert_eq!(a.merge_wait_rows().unwrap(), vec![("acme/widgets".into(), 7, wait)]);
