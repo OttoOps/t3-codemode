@@ -23,6 +23,7 @@ mod ops;
 mod races;
 mod shadow;
 mod shrink;
+mod sweeps;
 
 use ops::{
     CardKind, CardSym, GhChecks, GhEndState, GhMergeState, Op, OpKind, OpStats, OpWeights, PauseTarget, PrEventKind,
