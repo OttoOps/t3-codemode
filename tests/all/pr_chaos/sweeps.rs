@@ -432,12 +432,12 @@ fn without(line: &str, drop: impl Fn(&&str) -> bool) -> Vec<&str> {
 fn approval_lost(got: &str, want: &str) -> bool {
     let pr7 = |e: &&str| e.starts_with(r#"("acme/widgets", 7,"#) || e.starts_with(r#"("acme/widgets", 7):"#);
     let merged = |e: &&str| *e == r#""\"event\" \"mcp:t1\" #41 PR 1/3 is merged""#;
+    let open =
+        r#""mcp:t1": LinkView { parent: "board", closed: false, paused: false, gate: None, gate_pr: None, pr: None }"#;
     let gated = |e: &str| {
-        let open = r#""mcp:t1": LinkView { parent: "board", closed: false, paused: false, gate: None, gate_pr: None, pr: None }"#;
-        [r#"Some(("acme/widgets", 7))"#, "None"].iter().any(|g| {
-            e.replace(&format!(r#"gate: Some("merge"), gate_pr: {g}, pr: None"#), "gate: None, gate_pr: None, pr: None")
-                == open
-        })
+        [r#"Some(("acme/widgets", 7))"#, "None"]
+            .iter()
+            .any(|g| e == open.replace("gate: None, gate_pr: None", &format!(r#"gate: Some("merge"), gate_pr: {g}"#)))
     };
     let prefix = |p: &str| got.starts_with(p) && want.starts_with(p);
     if prefix("events ") {
@@ -451,8 +451,7 @@ fn approval_lost(got: &str, want: &str) -> bool {
     }
     if prefix("links ") {
         let (got, want) = (entries(got), entries(want));
-        return got.len() == want.len()
-            && got.iter().zip(&want).all(|(g, w)| g == w || (w.starts_with(r#""mcp:t1":"#) && gated(g) && gated(w)));
+        return got.len() == want.len() && got.iter().zip(&want).all(|(g, w)| g == w || (*w == open && gated(g)));
     }
     prefix("github #7 ")
 }
