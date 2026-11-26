@@ -233,6 +233,7 @@ pub struct FlowView {
     pub enabled: bool,
     pub launch: Option<Launch>,
     pub max_tickets: usize,
+    pub max_tickets_total: usize,
     pub free: usize,
     pub running: Vec<FlowTicket>,
     pub queue: Vec<FlowIssue>,
@@ -1646,6 +1647,8 @@ struct PlanInputs<'a> {
     done: &'a BTreeMap<String, Vec<String>>,
     sc: &'a SourceControlEdges,
     write: bool,
+    cap: usize,
+    cap_free: usize,
 }
 
 fn plan_flow(
@@ -1653,7 +1656,7 @@ fn plan_flow(
     inputs: PlanInputs<'_>,
     mut meta_get: impl FnMut(&str) -> Result<Option<String>>,
 ) -> Result<FlowPlan> {
-    let PlanInputs { reads: r, tickets, closed, done, sc, write } = inputs;
+    let PlanInputs { reads: r, tickets, closed, done, sc, write, cap, cap_free } = inputs;
     let max_tickets = cfg.max_tickets.unwrap_or(0);
     let capacity_repos = r.capacity_repos();
     let aliases = &r.aliases;
@@ -1798,7 +1801,8 @@ fn plan_flow(
         enabled: true,
         launch: Some(cfg.launch),
         max_tickets,
-        free: max_tickets.saturating_sub(running.len() + extra_running),
+        max_tickets_total: cap,
+        free: max_tickets.saturating_sub(running.len() + extra_running).min(cap_free),
         running,
         queue,
         blocked,
@@ -3734,6 +3738,7 @@ impl Wf {
                     enabled: false,
                     launch: None,
                     max_tickets: 0,
+                    max_tickets_total: self.config().max_tickets_total,
                     free: 0,
                     running: Vec::new(),
                     queue: Vec::new(),
@@ -3780,6 +3785,7 @@ impl Wf {
                 enabled: false,
                 launch: None,
                 max_tickets: 0,
+                max_tickets_total: self.config().max_tickets_total,
                 free: 0,
                 running: Vec::new(),
                 queue: Vec::new(),
@@ -3978,9 +3984,12 @@ impl Wf {
             };
             done.entry(key).or_default().push(l.child);
         }
-        let plan = plan_flow(cfg, PlanInputs { reads: r, tickets, closed, done: &done, sc, write }, |k| {
-            self.store.meta_get(k)
-        })?;
+        let cap = self.config().max_tickets_total;
+        let cap_free = cap.saturating_sub(self.open_ticket_count()?);
+        let plan =
+            plan_flow(cfg, PlanInputs { reads: r, tickets, closed, done: &done, sc, write, cap, cap_free }, |k| {
+                self.store.meta_get(k)
+            })?;
         if write {
             for op in plan.meta_ops {
                 match op {
@@ -4129,8 +4138,13 @@ impl Wf {
             "offered": offered.iter().map(|(p, id)| json!({"label": p.label, "card": id})).collect::<Vec<_>>()});
         if picks.is_empty() {
             out["picked"] = json!([]);
-            out["reason"] =
-                json!(if view.free <= offered.len() { "no free ticket slot" } else { "no ready issue to launch" });
+            out["reason"] = if view.free > offered.len() {
+                json!("no ready issue to launch")
+            } else if let Some(full) = self.ticket_cap_full()? {
+                json!(format!("no free ticket slot: {full}"))
+            } else {
+                json!("no free ticket slot")
+            };
             return Ok(out);
         }
         let mut done = Vec::new();
@@ -4189,7 +4203,7 @@ impl Wf {
                     self.flow_event(&format!("Flow launched {} ({})", i.label, why(i)));
                     v["launched"] = r;
                 }
-                Ok(r) if r["retryable"] == true => {
+                Ok(r) if r["retryable"] == true || r["atCap"] == true => {
                     let e = r["error"].as_str().unwrap_or("transient launch failure");
                     self.flow_event(&format!("Flow deferred {} for retry: {e}", i.label));
                     v["launched"] = r;
@@ -4277,12 +4291,19 @@ impl Wf {
             }
             _ => (false, false),
         };
+        let at_cap = match (&view, &current) {
+            (Some(_), Some(_)) if word == LAUNCH && !conflict_retired && !holds => self.ticket_cap_full()?,
+            _ => None,
+        };
         let refused = match (&view, &current) {
             _ if word == SKIP => None,
             (None, _) => Some("the flow is off".to_string()),
             (_, None) => Some(format!("{} is no longer ready", pick.label)),
             _ if conflict_retired => Some(format!("{} conflicts with a higher-priority offered launch", pick.label)),
-            _ if !holds => Some("no ticket slot is free".to_string()),
+            _ if !holds => Some(match &at_cap {
+                Some(full) => format!("no ticket slot is free: {full}"),
+                None => "no ticket slot is free".to_string(),
+            }),
             _ => None,
         };
         let note = match &refused {
@@ -4294,6 +4315,9 @@ impl Wf {
         }
         self.changed();
         if let Some(why) = refused {
+            if let Some(full) = &at_cap {
+                self.at_ticket_cap(&pick.label, full)?;
+            }
             bail!("card {} is resolved and nothing launched: {why}", card.id);
         }
         if let (true, Some(i)) = (word == LAUNCH, current) {
@@ -4797,6 +4821,8 @@ mod prop_tests {
                     done: &sc.unheld_done,
                     sc: &sc_empty,
                     write,
+                    cap: usize::MAX,
+                    cap_free: usize::MAX,
                 },
                 |k| Ok(sc.stored_skips.get(k).cloned()),
             )
@@ -4828,6 +4854,8 @@ mod prop_tests {
                     done: &sc.unheld_done,
                     sc: &sc_empty,
                     write,
+                    cap: usize::MAX,
+                    cap_free: usize::MAX,
                 },
                 |k| Ok(sc.stored_skips.get(k).cloned()),
             )
@@ -4927,6 +4955,7 @@ mod prop_tests {
             let mut sc = gen_flow_scenario(u, true)?;
             sc.cfg.launch = *u.choose(&[Launch::Ask, Launch::Auto])?;
 
+            let cap = u.int_in_range(1..=8usize)?;
             let sc_empty = SourceControlEdges::default();
             let plan = plan_flow(
                 &sc.cfg,
@@ -4946,6 +4975,8 @@ mod prop_tests {
                     done: &sc.unheld_done,
                     sc: &sc_empty,
                     write: false,
+                    cap,
+                    cap_free: cap.saturating_sub(sc.tickets.len()),
                 },
                 |k| Ok(sc.stored_skips.get(k).cloned()),
             )
@@ -4983,14 +5014,19 @@ mod prop_tests {
             // Running count and free-slot capacity bounds derived from input tickets.
             let max_tickets = sc.cfg.max_tickets.unwrap_or(0);
             let occupied = expected_running.len() + expected_ambiguous;
-            let expected_free = max_tickets.saturating_sub(occupied);
+            let cap_free = cap.saturating_sub(sc.tickets.len());
+            let expected_free = max_tickets.saturating_sub(occupied).min(cap_free);
             assert_eq!(view.max_tickets, max_tickets);
+            assert_eq!(view.max_tickets_total, cap);
             assert_eq!(view.free, expected_free);
             assert!(view.free <= max_tickets);
-            if occupied >= max_tickets {
+            assert!(view.free <= cap_free);
+            if occupied >= max_tickets || sc.tickets.len() >= cap {
                 assert_eq!(view.free, 0);
-            } else {
+            } else if max_tickets - occupied <= cap_free {
                 assert_eq!(occupied + view.free, max_tickets);
+            } else {
+                assert_eq!(sc.tickets.len() + view.free, cap);
             }
 
             // Generate existing flow cards (ready, stale, duplicates, or non-existent).
@@ -5033,6 +5069,7 @@ mod prop_tests {
             assert!(pp.offered.len() <= expected_free);
             assert!(pp.offered.len() + pp.picks.len() <= expected_free);
             assert!(pp.offered.len() + pp.picks.len() <= max_tickets);
+            assert!(pp.offered.len() + pp.picks.len() <= cap_free);
             assert!(pp.picks.len() <= most.unwrap_or(usize::MAX));
             assert!(pp.picks.len() <= view.queue.len());
             if expected_running.len() <= max_tickets {

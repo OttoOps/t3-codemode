@@ -170,6 +170,7 @@ the service is counted. On Linux, raise it only with `MemoryHigh` and
 | `bodyCap`, `replyCap` | `1500`, `1500` | Characters of a wake or reply body sent inline; the rest stays behind its handle |
 | `digestLines` | `6` | Note and "handled for you" lines in the digest that rides on the next wake |
 | `roles` | see below | Per-role overrides for each child role |
+| `maxTicketsTotal` | `8` | The most tickets that can be open on the board at once, at least 1. See [the ticket cap](#the-ticket-cap). |
 
 The built-in `roles` give an overseer's `ticket` children `down` 75, `stall`
 480, `bodyCap` 600, and a `wake` list without `event` and `reply`, so a
@@ -193,6 +194,17 @@ The same switch covers a worker's [`wf.pr`](globals.md#wfpr) events: with
 `relay` on, the service checks an opened PR, records a new head and opens
 the merge card for a board ticket, and with it off each event wakes the
 ticket.
+
+### The ticket cap
+
+`maxTicketsTotal` is the fail-safe on how much work runs at once. Every open
+board ticket counts against it, and so does a launch still waiting to join,
+whether the Launch form, a new-issue launch, `wf.launchTicket`, `wf.dispatch`
+or the flow queue started it. A launch at the cap is refused: it launches
+nothing, returns an error that names the cap, and leaves an error card on the
+board. The flow queue holds instead, and picks again when a ticket closes.
+Nothing raises the cap at run time; change it in the config. `flow.maxTickets`
+must not be above it, and a config that sets it higher fails validation.
 
 ### Board
 
@@ -539,7 +551,7 @@ leaves the flow queue and launching off.
 | `excludeRepos` | `[]` | `owner/name` repositories removed from the covered list, taking precedence over `repos`, discovery and `includeRepos`. |
 | `optIn.label` | unset | Optional label filter for the launch queue. When set, only open issues with this label enter `queue`, `blocked` or `skipped`. Other open issues still appear in the dependency graph so transitive blocker chains stay intact. |
 | `optIn.milestone` | unset | Optional milestone title filter for the launch queue, matched ignoring case. When both `optIn.label` and `optIn.milestone` are set, an issue must match both. When `optIn` is omitted, any open issue in a covered repo can enter the queue. |
-| `maxTickets` | unset | Enables the launch queue and caps how many flow tickets can be open on the board at once, at least 1. Required when `launch` is `ask` or `auto`. Omit it for graph-only repository overrides. |
+| `maxTickets` | unset | Enables the launch queue and caps how many flow tickets can be open on the board at once, from 1 to [`maxTicketsTotal`](#the-ticket-cap). Required when `launch` is `ask` or `auto`. Omit it for graph-only repository overrides. |
 | `launch` | `ask` when `maxTickets` is set, else `off` | How a free slot launches the next ready issue: `ask` raises a launch card, `auto` launches it, and `off` launches nothing. |
 | `serializeFileConflicts` | `false` | When `true`, serializes `fileConflict` pairs: holds an issue out of `queue` while a conflicting ticket is running, and prevents colliding ready issues from launching or being offered at the same time (keeping the higher-priority issue in queue order). |
 
@@ -571,7 +583,9 @@ an open issue in a covered repo. A ticket whose issue has closed no longer takes
 a slot. Tickets without a recorded issue reference or repository are matched by
 short label only when that repository name is unique among covered repos. A
 ticket takes one slot however many sub-issues or workers it runs. The free slots
-are `maxTickets` minus the flow tickets, and never fewer than zero.
+are `maxTickets` minus the flow tickets, and never fewer than zero. They also
+never exceed the room left under [`maxTicketsTotal`](#the-ticket-cap), which
+counts every open board ticket, flow or not.
 
 ### Trackers
 
