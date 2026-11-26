@@ -231,11 +231,13 @@ impl Wf {
         };
         let Viewed::Found(d) = viewed else { return Ok(Landed::Refused(e)) };
         let pr = d.change;
-        Ok(match pr.state {
+        let landed = match pr.state {
             State::Merged if pr.head == at.out.head => Landed::Merged { commit: Some(pr.commit().to_string()) },
             State::Open if pr.queued && pr.head == at.out.head => Landed::Queued { position: pr.position },
-            _ => Landed::Refused(e),
-        })
+            _ => return Ok(Landed::Refused(e)),
+        };
+        self.reach.hit(crate::reach::ReachPoint::LandedAfterError);
+        Ok(landed)
     }
 
     async fn merge_once(&self, at: &Attempt<'_>, prior: &Seen) -> Result<Option<Value>> {

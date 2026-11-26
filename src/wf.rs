@@ -1641,7 +1641,10 @@ impl Wf {
             let (digest, consumed) = self.digest_for(&to, &handles)?;
             text.push_str(&digest);
             match self.t3.call("t3_thread_send", json!({"threadId": to, "message": text, "mode": "queue"})).await {
-                Err(e) => f.errors.push(format!("{to}: {e}")),
+                Err(e) => {
+                    self.reach.hit(ReachPoint::OutboxSendFailed);
+                    f.errors.push(format!("{to}: {e}"));
+                }
                 Ok(_) => {
                     for (child, done) in consumed {
                         if let Some(mut l) = self.store.link_get(&child)? {

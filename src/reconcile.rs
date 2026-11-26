@@ -327,7 +327,10 @@ impl Wf {
                 let done = match read {
                     Read::Found(o) => self.fix(t, *o, &read_at, &floor, &mut pass).await,
                     Read::NotFound(why) => self.missing(t, &why, &mut pass).await,
-                    Read::Failed(why) => Err(anyhow!("{why}")),
+                    Read::Failed(why) => {
+                        self.reach.hit(ReachPoint::ReconcilePrReadFailed);
+                        Err(anyhow!("{why}"))
+                    }
                 };
                 if let Err(e) = done {
                     unread.push((t.repo.clone(), t.number));
@@ -652,6 +655,9 @@ impl Wf {
             (advance, merged)
         };
         if let Some(rec) = merged {
+            if self.merge_unfinished(&rec)? {
+                self.reach.hit(ReachPoint::InCodeMergeResumed);
+            }
             pass.woken.extend(self.after_merge(&rec, o.commit()).await?);
         }
         match advance {
