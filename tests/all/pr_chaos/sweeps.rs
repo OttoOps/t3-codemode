@@ -53,6 +53,8 @@ const KNOWN: &[(&str, &str)] = &[("answer merge", "#365")];
 
 const FALLBACK_TO: &str = "mcp:t1";
 
+const FALLBACK_WAKES: &[(&str, &str)] = &[("event", "t3cm"), ("gate", "mcp:w1"), ("reply", "board")];
+
 const HELD_REPLY: (&str, &str, &str, &str) = ("mcp:w1", "reply", "mcp:t1", "Merged #7 at abc1234. Hand off.");
 
 type Wake = (String, String, String, String);
@@ -484,7 +486,9 @@ fn verdict(run: &Run, base: &Run, inject: Inject) -> Vec<String> {
     if run.state != base.state && (strict || !told(run, base)) {
         out.push(format!("{inject:?} {:?}:{}", run.statuses, diff(&run.state, &base.state)));
     }
-    let handed_back = |w: &&Wake| !strict && told(run, base) && w.0 == FALLBACK_TO && w.1 != "handoff";
+    let handed_back = |w: &&Wake| {
+        !strict && told(run, base) && w.0 == FALLBACK_TO && FALLBACK_WAKES.contains(&(w.1.as_str(), w.2.as_str()))
+    };
     let fail_open = |w: &&Wake| !strict && (w.0.as_str(), w.1.as_str(), w.2.as_str(), w.3.as_str()) == HELD_REPLY;
     let lost: Vec<&Wake> = base.wakes.difference(&run.wakes).filter(|w| !handed_back(w)).collect();
     let extra: Vec<&Wake> = run.wakes.difference(&base.wakes).filter(|w| !fail_open(w) && !handed_back(w)).collect();
