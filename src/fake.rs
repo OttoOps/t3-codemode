@@ -2054,6 +2054,9 @@ impl FakeGitHub {
             return Ok(gh_error("Could not resolve to a node"));
         };
         let (repo, number) = (repo.clone(), *number);
+        if pr["state"] != "OPEN" {
+            return Ok(gh_error("Pull Request is not mergeable"));
+        }
         if pr["headRefOid"] != head.as_str() {
             return Ok(gh_error("Head branch was modified. Review and try the merge again."));
         }

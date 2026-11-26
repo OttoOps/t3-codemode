@@ -1183,6 +1183,7 @@ async fn a_limited_pool_ticket_moves_to_another_ready_member_on_one_card() {
             approval: String::new(),
             failures: 0,
             last_error: None,
+            advancing: None,
         })
         .unwrap();
     h.app
