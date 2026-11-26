@@ -673,6 +673,30 @@ back on the item that opened it. The next `Esc` clears an active search. While
 the inspector is open, the single-key shortcuts stay off except the `g` jumps,
 which close it before they move focus. Go to card closes it too.
 
+## Context menus
+
+Right-click a Needs you card, a ticket row, a pull request row, a Ready queue
+row, or an issue, link or lane title in the dependency graph to open a menu of
+its actions. The ContextMenu key or Shift+F10 opens it on the focused item, and
+a long press opens it on a touch screen. Each menu lists only what applies to
+the item now, and each entry does exactly what the matching button or link on
+the item does:
+
+- **Card:** its answer buttons, Reply, Dismiss, Inspect, Show in Tickets, Full
+  message, its review link and Open thread. An answer or Dismiss waits in the
+  same undo window as the buttons, and while it waits the menu offers Undo.
+- **Ticket row:** Inspect, Open thread, Open PR, Go to card, Pause or Resume,
+  Close ticket on an idle, paused or failed ticket, Settle on a finished one,
+  and the worker list toggles.
+- **Pull request row:** Inspect and Open PR.
+- **Ready queue row:** Inspect, Open on GitHub, Launch for an open issue with no
+  ticket, and its linked issues.
+
+The arrow keys, Home, End and the first letter of an entry move through the
+menu, Enter or Space runs an entry, and `Esc` closes it and puts focus back on
+the item. The single-key shortcuts stay off while it is open. A text field, and
+selected text, keep the browser's own menu.
+
 ## From a thread
 
 | Call | Does |
