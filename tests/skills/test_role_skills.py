@@ -458,6 +458,14 @@ class FlowSetupTests(unittest.TestCase):
         self.assertNotIn("legacy", step)
         self.assertGreater(tuple(int(n) for n in step["since"].split(".")), (0, 10, 0))
 
+    def test_the_ticket_cap_step_asks_the_flow_slot_again(self):
+        step = next(s for s in self.steps if s["id"] == "board:ticket-cap")
+        self.assertEqual((step["kind"], step["slot"]), ("interview", "flow"))
+        self.assertNotIn("legacy", step)
+        flow = next(s for s in self.steps if s["id"] == "board:flow")
+        self.assertGreater(tuple(int(n) for n in step["since"].split(".")),
+                           tuple(int(n) for n in flow["since"].split(".")))
+
     def test_setup_includes_flow_in_description_and_completion(self):
         text = " ".join(self.setup_skill.split())
         self.assertIn("project flow", text)
@@ -476,6 +484,11 @@ class FlowSetupTests(unittest.TestCase):
             "`flow.optIn.label`",
             "`flow.optIn.milestone`",
             "`flow.serializeFileConflicts`",
+            "`maxTicketsTotal`",
+            "t3cm config get maxTicketsTotal",
+            "t3cm config set maxTicketsTotal <n>",
+            "t3cm config unset maxTicketsTotal",
+            "`board:ticket-cap`",
             "t3cm config set flow",
             "t3cm config unset flow",
             "t3cm config unset flow.optIn",
@@ -493,6 +506,8 @@ class FlowSetupTests(unittest.TestCase):
         config_heads = {anchor(h) for h in re.findall(r"^#+ (.+)$", self.config_doc, re.M)}
         board_heads = {anchor(h) for h in re.findall(r"^#+ (.+)$", self.board_doc, re.M)}
         self.assertIn("flow", config_heads)
+        self.assertIn("https://ottoops.com/t3-codemode/config.html#the-ticket-cap", text)
+        self.assertIn("the-ticket-cap", config_heads)
         self.assertIn("the-flow", board_heads)
 
 

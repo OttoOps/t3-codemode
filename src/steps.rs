@@ -1430,7 +1430,12 @@ fn setup_lines(s: &Steps, out: &mut String) {
 }
 
 fn new_slots(s: &Steps) -> Option<String> {
-    let slots: Vec<&str> = s.needs_setup().filter_map(|m| m.slot.as_deref()).collect();
+    let mut slots: Vec<&str> = Vec::new();
+    for slot in s.needs_setup().filter_map(|m| m.slot.as_deref()) {
+        if !slots.contains(&slot) {
+            slots.push(slot);
+        }
+    }
     let noun = if slots.len() == 1 { "slot" } else { "slots" };
     (!slots.is_empty()).then(|| format!("run {SETUP_SKILL}: new {noun} {}", slots.join(", ")))
 }

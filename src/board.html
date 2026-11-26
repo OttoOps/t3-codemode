@@ -7112,7 +7112,7 @@ function driftOf(k) {
     if (m.kind !== "auto") continue;
     lines.push((SKILL_STEP_NAMES[m.id] || "Setup step " + m.id) + " is missing or out of date.");
   }
-  const slots = (k.missingSteps || []).filter((m) => m.kind === "interview").map((m) => m.slot || m.id);
+  const slots = [...new Set((k.missingSteps || []).filter((m) => m.kind === "interview").map((m) => m.slot || m.id))];
   if (k.problem) lines.push("The T3 workflow config is ignored: " + k.problem + ".");
   else if (slots.length && k.configState === "absent") lines.push("The T3 workflow is not set up yet: setup picks its reviewer, passes, delivery and models.");
   else if (slots.length) lines.push("Setup has " + (slots.length === 1 ? "a new slot" : "new slots") + " to pick: " + slots.join(", ") + ".");
