@@ -83,7 +83,8 @@ fn update_installs_the_rule_and_records_it_in_a_config_that_predates_it() {
     assert_eq!(st["current"], true);
     assert_eq!(st["steps"]["missing"][0]["id"], "board:remote", "{st}");
     assert_eq!(st["steps"]["missing"][1]["id"], "board:flow", "{st}");
-    assert_eq!(st["steps"]["missing"].as_array().map(Vec::len), Some(2), "{st}");
+    assert_eq!(st["steps"]["missing"][2]["id"], "board:ticket-cap", "{st}");
+    assert_eq!(st["steps"]["missing"].as_array().map(Vec::len), Some(3), "{st}");
     assert_eq!(st["steps"]["configState"], "recorded");
     assert_eq!(st["steps"]["rule"][0]["status"], "current");
     assert_eq!(st["steps"]["rule"][1]["status"], "no agent");

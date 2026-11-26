@@ -162,55 +162,73 @@ pool; `worker` the same way.
 **What it is.** Project flow controls which GitHub repositories the board's
 dependency graph and Up next queue cover, which open issues enter the queue,
 how many flow tickets run at once, how ready issues launch, and whether
-file-conflict edges serialize launches. It lives in t3cm's own `config.json`
-under `flow`, not the workflow slot config, so this section writes it through
+file-conflict edges serialize launches. This step also sets the ticket cap,
+`maxTicketsTotal`: the most tickets open on the board at once, from every
+launch, flow or not. Both live in t3cm's own `config.json`, the flow keys
+under `flow` and the cap as a top-level key beside it, not in the workflow
+slot config, so this section writes them through
 `t3cm config` (which validates and reloads the running service with no
 restart) and step 3 records only `--asked flow`. Reference:
-[Flow config](https://ottoops.com/t3-codemode/config.html#flow) and
+[Flow config](https://ottoops.com/t3-codemode/config.html#flow),
+[The ticket cap](https://ottoops.com/t3-codemode/config.html#the-ticket-cap) and
 [The flow](https://ottoops.com/t3-codemode/board.html#the-flow).
 
 **The current setting.** Run `t3cm config get flow` to display the effective
-values (`null` when no `flow` block is set). Pass `--port <port>` to
+values (`null` when no `flow` block is set), and `t3cm config get
+maxTicketsTotal` for the cap (`8` when the file does not set it). Pass `--port <port>` to
 `t3cm config` commands when the service runs on a non-default port
 (`T3CM_PORT`). Effective values materialize defaults such as `launch`, so use
 them for display only; keep omitted keys omitted when writing changes below.
 
 Ask one question at a time in this order, showing the current value on each
 key and waiting for each answer. When the user asked to change one key (such
-as `maxTickets` or `excludeRepos`), ask about that key alone.
+as `maxTickets`, `maxTicketsTotal` or `excludeRepos`), ask about that key
+alone. When `steps.missing` names `board:ticket-cap` but not `board:flow`,
+the flow questions were answered under an earlier release: ask about the
+ticket cap (question 3) alone, or about the cap and the one key the user
+asked to change. Never pass `--asked flow` while `board:ticket-cap` is
+missing and the cap question went unasked.
 
 1. **Launch mode (`flow.launch`).** Offer:
    - **off / graph only** (default when `flow` is unset): the Graph tab
      auto-discovers active T3 projects' GitHub repos, and nothing queues or
-     launches on its own. If the user wants no repo overrides either, skip the
-     remaining flow questions and unset `flow` (or keep it unset).
+     launches on its own. If the user wants no repo overrides either, ask
+     only the ticket cap (question 3) of the remaining questions, and unset
+     `flow` (or keep it unset).
    - **ask** (recommended when enabling the queue): raise a launch card on the
      board (`launch` / `skip`) when a ticket slot opens.
    - **auto**: launch the next ready issue automatically when a slot opens.
    - **queue only (`off` with a cap)**: show the Up next queue on the board
      without raising launch cards or launching automatically.
 2. **Max open tickets (`flow.maxTickets`).** Ask when the user chose `ask`,
-   `auto`, or queue-only `off`. Default: `2` (must be at least `1`; required
-   when `launch` is `ask` or `auto`). Omit for graph-only repository overrides.
-3. **Repository discovery (`flow.repos`).** Default: **auto-discover from
+   `auto`, or queue-only `off`. Default: `2` (must be at least `1` and at most
+   the ticket cap; required when `launch` is `ask` or `auto`). Omit for
+   graph-only repository overrides.
+3. **Ticket cap (`maxTicketsTotal`).** Always ask, with or without a flow
+   queue. Default: `8` (must be at least `1`). Every open board ticket and
+   every launch still waiting to join counts against it, whatever started
+   the launch, and a launch at the cap is refused. `flow.maxTickets` must not
+   exceed it: when the user wants more open flow tickets than the cap, raise
+   the cap too.
+4. **Repository discovery (`flow.repos`).** Default: **auto-discover from
    active T3 projects** (omit `repos`). Offer an explicit list of `owner/name`
    repositories to replace auto-discovery (at least one entry; no two entries
    may share a short repository name).
-4. **Include repositories (`flow.includeRepos`).** Default: none (`[]`). Extra
+5. **Include repositories (`flow.includeRepos`).** Default: none (`[]`). Extra
    `owner/name` repositories added on top of discovered or explicit repos.
-5. **Exclude repositories (`flow.excludeRepos`).** Default: none (`[]`).
+6. **Exclude repositories (`flow.excludeRepos`).** Default: none (`[]`).
    `owner/name` repositories removed from the covered list; takes precedence
    over discovery, `repos`, and `includeRepos`.
-6. **Opt-in label (`flow.optIn.label`).** Ask when `maxTickets` is set (or the
+7. **Opt-in label (`flow.optIn.label`).** Ask when `maxTickets` is set (or the
    user asks to change opt-in). Default: none (every open issue in covered
    repos enters the queue). When set, only open issues with this GitHub label
    enter `queue`, `blocked`, or `skipped`; other open issues still appear in
    the dependency graph.
-7. **Opt-in milestone (`flow.optIn.milestone`).** Ask when `maxTickets` is set
+8. **Opt-in milestone (`flow.optIn.milestone`).** Ask when `maxTickets` is set
    (or the user asks to change opt-in). Default: none (any milestone). Matched
    ignoring case; when both `optIn.label` and `optIn.milestone` are set, an
    issue must match both.
-8. **Serialize file conflicts (`flow.serializeFileConflicts`).** Ask when
+9. **Serialize file conflicts (`flow.serializeFileConflicts`).** Ask when
    `maxTickets` is set (or the user asks to change it). Default: `false`
    (`fileConflict` edges stay advisory). When `true`, holds an issue out of
    `queue` while a conflicting ticket is running and avoids launching
@@ -218,6 +236,13 @@ as `maxTickets` or `excludeRepos`), ask about that key alone.
 
 **Apply.** Keep omitted keys omitted rather than copying materialized defaults
 from `t3cm config get flow`:
+
+- **The ticket cap** is never part of the `flow` JSON. Write it with
+  `t3cm config set maxTicketsTotal <n>`, or `t3cm config unset
+  maxTicketsTotal` to return to the default `8`. A write that leaves
+  `flow.maxTickets` above the cap fails with `is unchanged`, so order the
+  commands: when raising both, set `maxTicketsTotal` first; when lowering
+  both, set `flow.maxTickets` first.
 
 - **Full interview (all keys answered) or creating `flow` from `null`:**
   assemble one JSON object containing only the keys the user chose (omit
@@ -255,8 +280,9 @@ from `t3cm config get flow`:
 Check the command output:
 
 - **Exit 0 with `Reloaded the running service`:** the change is saved and live
-  with no restart. Run `t3cm config get flow` to confirm the effective setting
-  and show it to the user.
+  with no restart. Run `t3cm config get flow` and `t3cm config get
+  maxTicketsTotal` to confirm the effective settings and show them to the
+  user.
 - **Exit 0 with `warn: not reloaded`:** the file is saved on disk, not live in
   a running service. Tell the user the change is saved but not yet live, give
   them the printed restart command (or config-path/port warning), and confirm

@@ -677,9 +677,7 @@ pub fn write_config(
         let mut asked_sorted: Vec<String> = asked.into_iter().collect();
         asked_sorted.sort();
         for slot in asked_sorted {
-            if let Some(s) =
-                catalog.iter().find(|s| s.kind == Kind::Interview && s.slot.as_deref() == Some(slot.as_str()))
-            {
+            for s in catalog.iter().filter(|s| s.kind == Kind::Interview && s.slot.as_deref() == Some(slot.as_str())) {
                 done.push(s.id.clone());
             }
         }
