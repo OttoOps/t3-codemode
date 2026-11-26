@@ -291,14 +291,24 @@ async fn quiesce(h: &H) {
 }
 
 pub(super) fn check_safety(h: &H, what: &str) {
+    let faults = safety_faults(h, what);
+    assert!(faults.is_empty(), "{}", faults.join("\n"));
+}
+
+pub(super) fn safety_faults(h: &H, what: &str) -> Vec<String> {
+    let mut out = Vec::new();
     let snap = h.snapshot();
     for ((repo, n), w) in &snap.merge_waits {
         let pr = h.github.pr(repo, *n);
-        assert_eq!(pr["state"], "OPEN", "{what}: a merge wait {w:?} outlived #{n}, which is {}", pr["state"]);
+        if pr["state"] != "OPEN" {
+            out.push(format!("{what}: a merge wait {w:?} outlived #{n}, which is {}", pr["state"]));
+        }
     }
     for c in &snap.cards {
-        if let (Some((repo, n)), true) = (&c.pr, c.kind == "gate") {
-            assert_eq!(h.github.pr(repo, *n)["state"], "OPEN", "{what}: merge card {c:?} outlived its pull request");
+        if let (Some((repo, n)), true) = (&c.pr, c.kind == "gate")
+            && h.github.pr(repo, *n)["state"] != "OPEN"
+        {
+            out.push(format!("{what}: merge card {c:?} outlived its pull request"));
         }
     }
     for (child, l) in &snap.links {
@@ -309,7 +319,9 @@ pub(super) fn check_safety(h: &H, what: &str) {
                     && c.ticket.as_deref() == Some(child)
                     && c.pr == Some((repo.clone(), *n))
             });
-            assert!(held, "{what}: {child} points its merge gate at #{n}, which holds no card of its own");
+            if !held {
+                out.push(format!("{what}: {child} points its merge gate at #{n}, which holds no card of its own"));
+            }
         }
     }
     let merged_wakes = |n: u64| {
@@ -319,16 +331,20 @@ pub(super) fn check_safety(h: &H, what: &str) {
             .count()
     };
     for n in [7, 8, 9] {
-        assert!(merged_wakes(n) <= 1, "{what}: #{n}'s merge woke a thread {} times", merged_wakes(n));
+        if merged_wakes(n) > 1 {
+            out.push(format!("{what}: #{n}'s merge woke a thread {} times", merged_wakes(n)));
+        }
         let merged: Vec<&String> = snap
             .pr_events
             .iter()
             .filter(|(_, pr, e, _)| *pr == n && e.starts_with("merged:"))
             .map(|(_, _, _, to)| to)
             .collect();
-        let board = merged.iter().any(|to| to.as_str() == BOARD);
-        assert!(!board || merged.len() == 1, "{what}: #{n}'s merge went to the board and to {merged:?}");
+        if merged.iter().any(|to| to.as_str() == BOARD) && merged.len() != 1 {
+            out.push(format!("{what}: #{n}'s merge went to the board and to {merged:?}"));
+        }
     }
+    out
 }
 
 async fn settle<T: 'static>(what: &str, handle: tokio::task::JoinHandle<T>) -> T {
