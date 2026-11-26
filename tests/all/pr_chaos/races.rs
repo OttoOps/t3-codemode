@@ -567,6 +567,31 @@ fn r1_landing(wait: bool) -> Table {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_raced_enqueue_reply_returns_the_approval_the_other_merge_recorded() {
+    local(async {
+        let (h, _) = setup_ready_queue(true).await;
+        let h = Rc::new(h);
+        let g = Gate::new();
+        h.github.fault(Rule::on("enqueuePullRequest").call(1).gate_after_effect(&g));
+        let args = json!({"repo": REPO, "pr": 7, "head": HEADS[0]});
+        let first = tokio::task::spawn_local({
+            let (h, args) = (h.clone(), args.clone());
+            async move { h.app.wf.dispatch("merge", Some(TICKETS[0]), args).await.unwrap() }
+        });
+        g.arrived().await;
+        let second = h.app.wf.dispatch("merge", Some(TICKETS[0]), args).await.unwrap();
+        g.release();
+        let first = settle("the parked wf.merge", first).await;
+        let wait = h.app.store.merge_wait_get(REPO, 7).unwrap().unwrap();
+        assert_eq!(second["status"], "queued", "{second}");
+        assert_eq!(first["status"], "queued", "{first}");
+        assert_eq!(second["approval"], json!(wait.approval));
+        assert_eq!(first["approval"], json!(wait.approval));
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn r1_a_late_enqueue_reply_never_resurrects_a_retired_wait() {
     local(async {
         for wait in [true, false] {

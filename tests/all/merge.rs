@@ -206,6 +206,21 @@ async fn a_github_refusal_of_the_mutation_comes_back_as_refused() {
 }
 
 #[tokio::test]
+async fn a_refusal_keeps_its_reason_when_the_reread_fails() {
+    let h = H::new();
+    h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));
+    h.github.fault(Rule::on("enqueuePullRequest").fail(Failure::refused("Pull request is not mergeable")));
+    h.github.fault(Rule::on("read").call(2).fail(Failure::down("connection reset")));
+
+    let r = merge(&h, args(7)).await;
+
+    assert_eq!(r["status"], "refused", "{r}");
+    let reason = r["reason"].as_str().unwrap();
+    assert!(reason.starts_with("Pull request is not mergeable (rereading the pull request failed:"), "{r}");
+    assert!(reason.contains("connection reset"), "{r}");
+}
+
+#[tokio::test]
 async fn an_unknown_repo_or_pr_is_refused() {
     let h = H::new();
     h.github.set_pr(REPO, 7, github_pr(HEAD, "CLEAN", true));

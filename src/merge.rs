@@ -225,7 +225,11 @@ impl Wf {
 
     async fn landed(&self, at: &Attempt<'_>, landed: Landed) -> Result<Landed> {
         let Landed::Refused(e) = landed else { return Ok(landed) };
-        let Viewed::Found(d) = self.host.view(at.r).await? else { return Ok(Landed::Refused(e)) };
+        let viewed = match self.host.view(at.r).await {
+            Ok(v) => v,
+            Err(err) => return Ok(Landed::Refused(format!("{e} (rereading the {} failed: {err:#})", at.kind))),
+        };
+        let Viewed::Found(d) = viewed else { return Ok(Landed::Refused(e)) };
         let pr = d.change;
         Ok(match pr.state {
             State::Merged if pr.head == at.out.head => Landed::Merged { commit: Some(pr.commit().to_string()) },
@@ -274,7 +278,14 @@ impl Wf {
         };
         let sent = async |position: &Option<u64>| {
             let _g = self.lock.lock().await;
-            let approval = self.record(at, prior, id, state, WaitStatus::Sent)?;
+            let approval = match self.record(at, prior, id, state, WaitStatus::Sent)? {
+                Some(a) => Some(a),
+                None => self
+                    .store
+                    .merge_wait_get(&out.repo, out.pr)?
+                    .filter(|w| w.head == out.head && w.status == WaitStatus::Sent)
+                    .map(|w| w.approval),
+            };
             Ok::<_, anyhow::Error>(Some(out.with("queued", json!({"position": position, "approval": approval}))))
         };
 
