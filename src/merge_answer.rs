@@ -140,7 +140,7 @@ impl Wf {
         rec.head = head;
         rec.card = card.id.clone();
         if !merge {
-            let approval = crate::board::random_id();
+            let approval = self.new_id();
             let seen = self.store.pr_seen_get(&p.repo, p.number)?;
             self.store.merge_wait_put(&MergeWait {
                 repo: p.repo.clone(),

@@ -63,6 +63,7 @@ pub enum Fault {
     Fail(Failure),
     FailAfterEffect(Failure),
     Gate(Gate),
+    GateAfterEffect(Gate),
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +104,10 @@ impl Match {
         Rule { on: self, fault: Fault::Gate(gate.clone()) }
     }
 
+    pub fn gate_after_effect(self, gate: &Gate) -> Rule {
+        Rule { on: self, fault: Fault::GateAfterEffect(gate.clone()) }
+    }
+
     fn matches(&self, ops: &[&str], targets: &[String]) -> bool {
         let op = ops.iter().any(|o| *o == self.op || (self.op == "*" && !o.contains('.')));
         op && match &self.target {
@@ -131,6 +136,7 @@ impl Rule {
 #[derive(Default)]
 pub(crate) struct Hit {
     pub(crate) gates: Vec<Gate>,
+    pub(crate) after_gates: Vec<Gate>,
     pub(crate) fail: Option<Failure>,
     pub(crate) after_effect: bool,
 }
@@ -138,6 +144,10 @@ pub(crate) struct Hit {
 impl Hit {
     pub(crate) async fn pass_gates(&self) {
         pass_all(&[self]).await;
+    }
+
+    pub(crate) async fn pass_after_gates(&self) {
+        pass_after_all(&[self]).await;
     }
 
     pub(crate) fn before(&self) -> Option<&Failure> {
@@ -189,6 +199,7 @@ impl Faults {
             }
             match &rule.fault {
                 Fault::Gate(g) => hit.gates.push(g.clone()),
+                Fault::GateAfterEffect(g) => hit.after_gates.push(g.clone()),
                 Fault::Fail(f) if hit.fail.is_none() => hit.fail = Some(f.clone()),
                 Fault::FailAfterEffect(f) if hit.fail.is_none() => {
                     hit.fail = Some(f.clone());
@@ -211,10 +222,18 @@ impl Faults {
 }
 
 pub(crate) async fn pass_all(hits: &[&Hit]) {
-    for g in hits.iter().flat_map(|h| &h.gates) {
+    pass(hits.iter().flat_map(|h| &h.gates)).await;
+}
+
+pub(crate) async fn pass_after_all(hits: &[&Hit]) {
+    pass(hits.iter().flat_map(|h| &h.after_gates)).await;
+}
+
+async fn pass<'a>(gates: impl Iterator<Item = &'a Gate> + Clone) {
+    for g in gates.clone() {
         g.arrive();
     }
-    for g in hits.iter().flat_map(|h| &h.gates) {
+    for g in gates {
         g.opened().await;
     }
 }

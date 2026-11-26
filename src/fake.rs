@@ -14,6 +14,24 @@ use crate::usage::{Usage, UsageSource};
 mod fault;
 
 pub use fault::{Failure, Fault, Gate, Match, Nth, Rule, Target};
+
+pub struct SeqIds {
+    prefix: String,
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl SeqIds {
+    pub fn new(prefix: &str) -> SeqIds {
+        SeqIds { prefix: prefix.into(), next: std::sync::atomic::AtomicU64::new(1) }
+    }
+}
+
+impl crate::board::IdSource for SeqIds {
+    fn next_id(&self) -> String {
+        let n = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("{}{n:04}", self.prefix)
+    }
+}
 use fault::{Faults, Hit};
 
 #[derive(Default)]
@@ -641,6 +659,7 @@ impl T3Client for FakeT3 {
                 return Err(t3_error(f));
             }
             let out = if tool == "sleep" { Ok(args) } else { self.handle(tool, &args) };
+            hit.pass_after_gates().await;
             match hit.after() {
                 Some(f) => Err(t3_error(f)),
                 None => out,
@@ -1888,8 +1907,9 @@ impl crate::github::GitHub for FakeGitHub {
                 return gh_failure(f);
             }
             let failed: BTreeMap<String, Failure> =
-                per_pr.into_iter().filter_map(|(alias, h)| h.fail.map(|f| (alias, f))).collect();
+                per_pr.iter().filter_map(|(alias, h)| h.fail.clone().map(|f| (alias.clone(), f))).collect();
             let out = self.respond(op, query, &variables, &failed);
+            fault::pass_after_all(&hits).await;
             match hit.after() {
                 Some(f) => gh_failure(f),
                 None => out,
