@@ -10598,6 +10598,9 @@ fetchReply = (url) => url === "/api/flow" ? Promise.resolve({ ok: true, status: 
 emitState({ ...base, cards: [] });
 for (let i = 0; i < 8; i++) await Promise.resolve();
 const btn = (id) => q('.gnode[data-id="' + id + '"]');
+"##;
+
+const MENU_KIT: &str = r##"
 const menu = () => q("#cmenu");
 const entries = () => menu().querySelectorAll('[role="menuitem"]');
 const names = () => entries().map((x) => x.textContent);
@@ -10627,6 +10630,7 @@ async fn graph_node_and_lane_menus_open_by_pointer_and_keyboard_and_run_their_ac
             r##"async () => {{
 {PAGE_HELPERS}
 const base = {st};
+{MENU_KIT}
 {MENU_GRAPH}
 const copied = [];
 globalThis.navigator = {{ clipboard: {{ writeText: async (t) => {{ copied.push(t); }} }} }};
@@ -10760,6 +10764,7 @@ async fn an_inferred_edge_menu_runs_the_same_edit_as_the_inspector() {
             r##"async () => {{
 {PAGE_HELPERS}
 const base = {st};
+{MENU_KIT}
 {MENU_GRAPH}
 const edits = () => fetches.filter((f) => f.url === "/api/flow/edge").map((f) => [f.method, JSON.parse(f.body)]);
 const body = document.querySelectorAll(".ge").find((p) => p.getAttribute("data-source") === "body").nextSibling;
@@ -10810,6 +10815,7 @@ async fn the_context_menu_leaves_native_menus_alone_stays_on_screen_and_opens_on
             r##"async () => {{
 {PAGE_HELPERS}
 const base = {st};
+{MENU_KIT}
 {MENU_GRAPH}
 const b1 = btn("acme/a#1");
 const field = fire("contextmenu", q("#filter-q"), {{ clientX: 1, clientY: 1 }});
@@ -10849,6 +10855,273 @@ return {{ onField, onSelection, clamped, outside, moved, pressed, swallowed: cli
     assert_eq!(r["pressed"], json!({"shown": true, "label": "Actions for a#1", "place": ["30px", "40px"]}), "{r}");
     assert_eq!(r["swallowed"], true, "the click that ends a long press does not also open the node: {r}");
     assert_eq!(r["stillOpen"], true, "{r}");
+}
+
+#[tokio::test]
+async fn ticket_and_pr_row_menus_run_the_row_controls() {
+    let (html, st) = two_gate_page().await;
+    assert!(
+        html.contains("<dt>Shift+F10</dt><dd>Actions for the focused card, row or graph issue</dd>"),
+        "the keys list names the menu"
+    );
+    let r = run_page_async(
+        &html,
+        &format!(
+            r##"async () => {{
+{PAGE_HELPERS}
+const base = {st};
+{MENU_KIT}
+fetchReply = async () => ({{ ok: true, json: async () => ({{}}) }});
+const pr = (n) => ({{ number: n, url: "https://github.com/acme/widgets/pull/" + n, state: "open" }});
+const mk = (id, label, extra) => ({{ ...base.tree[0], ticket: id, thread: id, label, workers: [], paused: false, done: false, joined: true,
+  link: "https://app.t3.codes/threads/env/" + id.slice(4), ...extra }});
+const tree = [
+  mk("mcp:idle", "widgets#1", {{ status: "idle", pr: pr(7) }}),
+  mk("mcp:run", "widgets#2", {{ status: "running", pr: null,
+    workers: [{{ thread: "mcp:w1", label: "#2 PR 1/1", status: "running", paused: false, done: false, joined: true, pr: pr(8) }}] }}),
+];
+const cards = [{{ id: "c1", kind: "gate", label: "widgets#1", ticket: "mcp:idle", text: "Pick one", options: ["yes"], at: "2026-04-16T10:00:00Z", atLocal: "10:00 MST", token: "1" }}];
+emitState({{ ...base, tree, cards }});
+const posts = () => fetches.filter((f) => f.method === "POST").map((f) => f.url);
+const row = (id) => q('#open [data-key="' + id + '"]');
+const idle = row("mcp:idle");
+const rc = fire("contextmenu", idle, {{ clientX: 10, clientY: 20 }});
+const right = {{ prevented: rc.defaultPrevented, label: menu().getAttribute("aria-label"), names: names(), roles: roles(),
+  hrefs: entries().map((x) => x.getAttribute("href")) }};
+pick("Close ticket");
+await settle();
+const closed = {{ hidden: menu().hidden, back: document.activeElement === idle, posts: posts() }};
+idle.querySelector('[data-part="close"]').dispatch("click");
+await settle();
+const both = posts();
+
+idle.focus();
+const sf = fire("keydown", idle, {{ key: "F10", shiftKey: true }});
+const opened = sf.defaultPrevented && !menu().hidden;
+pick("Pause");
+await settle();
+const paused = posts().slice(both.length);
+fire("contextmenu", idle, {{ clientX: 10, clientY: 20 }});
+pick("Go to card");
+const toCard = document.activeElement.dataset.key;
+fire("contextmenu", idle, {{ clientX: 10, clientY: 20 }});
+emitState({{ ...base, cards, tree: tree.map((t) => t.thread === "mcp:idle" ? {{ ...t, status: "paused", paused: true }} : t) }});
+const before = posts().length;
+pick("Pause");
+await settle();
+const stale = {{ posts: posts().length - before, button: idle.querySelector('[data-part="pause"]').textContent }};
+emitState({{ ...base, tree, cards }});
+
+const run = row("mcp:run");
+run.focus();
+fire("keydown", run, {{ key: "ContextMenu" }});
+const running = names();
+pick("Inspect");
+const inspected = {{ open: q("#drawer").classList.contains("open"), id: q('#drawer [data-part="id"]').textContent }};
+closeDrawer(false);
+
+const p8 = q('#prs [data-key="pr:https://github.com/acme/widgets/pull/8"]');
+fire("contextmenu", p8, {{ clientX: 5, clientY: 5 }});
+const prMenu = {{ label: menu().getAttribute("aria-label"), names: names(), href: entries()[1].getAttribute("href"), target: entries()[1].getAttribute("target") }};
+key("Escape");
+const prBack = document.activeElement === p8;
+p8.focus();
+fire("keydown", p8, {{ key: "F10", shiftKey: true }});
+pick("Inspect");
+const prInspected = {{ open: q("#drawer").classList.contains("open"), id: q('#drawer [data-part="id"]').textContent, worker: dr.sub.worker }};
+return {{ right, closed, both, opened, paused, toCard, stale, running, inspected, prMenu, prBack, prInspected }};
+}}"##
+        ),
+    );
+    assert_eq!(r["right"]["prevented"], true, "{r}");
+    assert_eq!(r["right"]["label"], "Actions for widgets#1", "{r}");
+    assert_eq!(
+        r["right"]["names"],
+        json!(["Inspect", "Open thread", "Open PR #7", "Go to card", "Pause", "Close ticket"]),
+        "an idle ticket lists only the controls its row shows: {r}"
+    );
+    assert_eq!(
+        r["right"]["roles"],
+        json!(["menuitem", "menuitem", "menuitem", "separator", "menuitem", "separator", "menuitem", "menuitem"]),
+        "{r}"
+    );
+    assert_eq!(
+        r["right"]["hrefs"],
+        json!([
+            null,
+            "https://app.t3.codes/threads/env/idle",
+            "https://github.com/acme/widgets/pull/7",
+            null,
+            null,
+            null
+        ]),
+        "{r}"
+    );
+    let close = "/api/tickets/mcp%3Aidle/close";
+    assert_eq!(r["closed"], json!({"hidden": true, "back": true, "posts": [close]}), "{r}");
+    assert_eq!(r["both"], json!([close, close]), "the menu and the Close button send the same request: {r}");
+    assert_eq!(r["opened"], true, "Shift+F10 opens the menu on a focused row: {r}");
+    assert_eq!(r["paused"], json!(["/api/links/mcp%3Aidle/pause"]), "{r}");
+    assert_eq!(r["toCard"], "c1", "Go to card focuses the ticket's card: {r}");
+    assert_eq!(
+        r["stale"],
+        json!({"posts": 0, "button": "Resume"}),
+        "an entry whose button changed after the menu opened does nothing: {r}"
+    );
+    assert_eq!(r["running"], json!(["Inspect", "Open thread", "Pause"]), "a running ticket cannot be closed: {r}");
+    assert_eq!(r["inspected"], json!({"open": true, "id": "widgets#2"}), "{r}");
+    assert_eq!(
+        r["prMenu"],
+        json!({"label": "Actions for PR #8", "names": ["Inspect", "Open PR #8"], "href": "https://github.com/acme/widgets/pull/8", "target": "_blank"}),
+        "{r}"
+    );
+    assert_eq!(r["prBack"], true, "Escape returns focus to the PR row: {r}");
+    assert_eq!(
+        r["prInspected"],
+        json!({"open": true, "id": "widgets#2", "worker": "mcp:w1"}),
+        "Inspect on a PR row opens its worker, as a click on the row does: {r}"
+    );
+}
+
+#[tokio::test]
+async fn a_needs_you_card_menu_answers_and_dismisses_through_the_undoable_send() {
+    let (html, st) = two_gate_page().await;
+    let r = run_page_async(
+        &html,
+        &format!(
+            r##"async () => {{
+{PAGE_HELPERS}
+const base = {st};
+{MENU_KIT}
+fetchReply = async () => ({{ ok: true, json: async () => ({{}}) }});
+emitState(base);
+const [a, b] = ids();
+const ca = card(a), cb = card(b);
+const rc = fire("contextmenu", ca, {{ clientX: 10, clientY: 20 }});
+const right = {{ prevented: rc.defaultPrevented, label: menu().getAttribute("aria-label"), names: names(), roles: roles() }};
+emitState({{ ...base, cards: base.cards.map((c) => c.id === a ? {{ ...c, options: ["ship it"] }} : c) }});
+pick("merge");
+const replaced = {{ sending: !ca.querySelector('[data-part="sending"]').hidden, options: ca.querySelectorAll(".answer").map((x) => x.textContent) }};
+emitState(base);
+fire("contextmenu", ca, {{ clientX: 10, clientY: 20 }});
+emitState({{ ...base, cards: base.cards.map((c) => c.id === a ? {{ ...c, token: "renewed" }} : c) }});
+pick("merge");
+const renewed = !ca.querySelector('[data-part="sending"]').hidden;
+emitState(base);
+fire("contextmenu", ca, {{ clientX: 10, clientY: 20 }});
+pick("merge");
+const sending = {{ hidden: menu().hidden, sent: answers().length, shown: !ca.querySelector('[data-part="sending"]').hidden }};
+fire("contextmenu", ca, {{ clientX: 10, clientY: 20 }});
+const pendingNames = names();
+pick("Undo");
+const undone = {{ sent: answers().length, shown: !ca.querySelector('[data-part="sending"]').hidden }};
+ca.focus();
+fire("keydown", ca, {{ key: "ContextMenu" }});
+pick("Dismiss");
+const dismissing = ca.querySelector('[data-part="what"]').textContent;
+advance(5000);
+await settle();
+fire("contextmenu", cb, {{ clientX: 10, clientY: 20 }});
+pick("merge");
+advance(5000);
+await settle();
+const sent = answers().map((f) => [f.url, JSON.parse(f.body).text || null]);
+return {{ right, replaced, renewed, sending, pendingNames, undone, dismissing, sent }};
+}}"##
+        ),
+    );
+    assert_eq!(r["right"]["prevented"], true, "{r}");
+    assert_eq!(r["right"]["label"], "Actions for card a1 widgets#41", "{r}");
+    assert_eq!(
+        r["right"]["names"],
+        json!([
+            "merge",
+            "merge and deploy",
+            "Reply…",
+            "Dismiss",
+            "Inspect",
+            "Show in Tickets",
+            "Full message",
+            "Review #81",
+            "Open thread"
+        ]),
+        "{r}"
+    );
+    assert_eq!(r["right"]["roles"][4], "separator", "{r}");
+    assert_eq!(
+        r["replaced"],
+        json!({"sending": false, "options": ["ship it"]}),
+        "an answer whose button an update removed sends nothing: {r}"
+    );
+    assert_eq!(r["renewed"], false, "an answer picked for a decision the card replaced sends nothing: {r}");
+    assert_eq!(
+        r["sending"],
+        json!({"hidden": true, "sent": 0, "shown": true}),
+        "an answer from the menu waits in the undo window: {r}"
+    );
+    assert_eq!(r["pendingNames"], json!(["Undo", "Inspect"]), "a sending card offers Undo: {r}");
+    assert_eq!(r["undone"], json!({"sent": 0, "shown": false}), "{r}");
+    assert_eq!(r["dismissing"], "Dismissing a1", "Dismiss waits in the undo window: {r}");
+    assert_eq!(r["sent"], json!([["/api/cards/a1/dismiss", null], ["/api/cards/a2/answer", "merge"]]), "{r}");
+}
+
+#[tokio::test]
+async fn a_ready_queue_row_menu_inspects_opens_and_launches_its_issue() {
+    let (html, st) = two_gate_page().await;
+    let r = run_page_async_with(
+        &html,
+        r#"globalThis.__storage = { "t3board.view": "queue" };"#,
+        &format!(
+            r##"async () => {{
+{PAGE_HELPERS}
+const base = {st};
+{MENU_KIT}
+const N = (n, extra) => ({{ id: "acme/a#" + n, repo: "acme/a", number: n, label: "a#" + n, title: "Issue " + n, state: "open", tracked: true,
+  url: "https://github.com/acme/a/issues/" + n, ...extra }});
+const ready = {{ repo: "acme/a", number: 4, label: "a#4", title: "Issue 4", url: "https://github.com/acme/a/issues/4", priority: "high",
+  unblockedBy: [{{ repo: "acme/a", number: 1, label: "a#1", url: "https://github.com/acme/a/issues/1" }}] }};
+const held = {{ repo: "acme/a", number: 5, label: "a#5", title: "Issue 5", url: "https://github.com/acme/a/issues/5", priority: "low",
+  blockers: [{{ repo: "acme/a", number: 4, label: "a#4", url: "https://github.com/acme/a/issues/4" }}] }};
+const view = {{ enabled: true, launch: "ask", maxTickets: 2, free: 2, running: [], queue: [ready], blocked: [held], skipped: [],
+  graph: {{ nodes: [N(1, {{ state: "closed" }}), N(4, {{ flowList: "queue" }})], warnings: [], edges: [] }} }};
+fetchReply = (url) => url === "/api/flow" ? Promise.resolve({{ ok: true, status: 200, json: async () => view }}) : new Promise(() => {{}});
+emitState({{ ...base, cards: [] }});
+await settle();
+const row = q('#flow-q [data-key="acme/a#4"]');
+const rc = fire("contextmenu", row, {{ clientX: 10, clientY: 20 }});
+const right = {{ prevented: rc.defaultPrevented, label: menu().getAttribute("aria-label"), names: names(), roles: roles(),
+  hrefs: entries().map((x) => x.getAttribute("href")) }};
+pick("Launch…");
+const launched = {{ composer: !q("#composer").hidden, draft: q("#issues").value, focus: document.activeElement.id }};
+closeComposer(false);
+row.focus();
+fire("keydown", row, {{ key: "F10", shiftKey: true }});
+pick("Inspect");
+const inspected = {{ open: q("#drawer").classList.contains("open"), id: q('#drawer [data-part="id"]').textContent }};
+const heldRow = q('#flow-b [data-key="acme/a#5"]');
+const blocked = [!!heldRow, fire("contextmenu", heldRow, {{ clientX: 1, clientY: 1 }}).defaultPrevented];
+return {{ right, launched, inspected, blocked }};
+}}"##
+        ),
+    );
+    assert_eq!(
+        r["right"],
+        json!({
+            "prevented": true,
+            "label": "Actions for a#4",
+            "names": ["Inspect", "Open on GitHub", "Launch…", "Open #1"],
+            "roles": ["menuitem", "menuitem", "menuitem", "separator", "menuitem"],
+            "hrefs": [null, "https://github.com/acme/a/issues/4", null, "https://github.com/acme/a/issues/1"],
+        }),
+        "{r}"
+    );
+    assert_eq!(
+        r["launched"],
+        json!({"composer": true, "draft": "acme/a#4", "focus": "launch-btn"}),
+        "Launch fills the launch form as the graph menu does: {r}"
+    );
+    assert_eq!(r["inspected"], json!({"open": true, "id": "a#4"}), "{r}");
+    assert_eq!(r["blocked"], json!([true, false]), "only Ready queue rows take the menu: {r}");
 }
 
 #[test]

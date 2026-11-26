@@ -2001,6 +2001,7 @@ kbd { font-family: var(--mono); font-size: 12px; }
     <dt>r</dt><dd>Reply to the focused card</dd>
     <dt>1 to 9</dt><dd>Focus that option; Enter sends it</dd>
     <dt>Enter</dt><dd>Open the focused card's or row's details</dd>
+    <dt>Shift+F10</dt><dd>Actions for the focused card, row or graph issue</dd>
     <dt>Esc</dt><dd>Close details, back to the panel, then clear search</dd>
     <dt>?</dt><dd>This list</dd>
   </dl>
@@ -9575,7 +9576,129 @@ function initGraphMenus() {
   cmenuOn(".glt", (el) => laneMenu(Number(el.getAttribute("data-lane")), el));
 }
 
+function cmenuShown(row, el) {
+  for (let n = el; n; n = n.parentNode) {
+    if (n === row) return true;
+    if (n.hidden) return false;
+  }
+  return false;
+}
+
+function cmenuLive(row, el) {
+  return cmenuShown(row, el) && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+}
+
+function cmenuCtl(row, el, label) {
+  if (!cmenuShown(row, el)) return null;
+  const said = el.textContent;
+  return { label: label || said.trim(), name: el.getAttribute("aria-label"), disabled: !cmenuLive(row, el),
+    run: () => { if (row.isConnected && cmenuLive(row, el) && el.textContent === said) el.click(); } };
+}
+
+function cmenuLink(row, a, label, thread) {
+  const u = cmenuShown(row, a) && a.tagName === "A" ? safeUrl(a.getAttribute("href")) : null;
+  return u ? { label, href: u, thread: !!thread, name: a.getAttribute("aria-label") } : null;
+}
+
+function cmenuInspect(row) {
+  const sub = subjectOf(row);
+  return sub ? { label: "Inspect", run: () => openDrawer(sub, { el: row, item: row }) } : null;
+}
+
+function ticketMenu(el) {
+  if (el.classList.contains("gone") || !el._t) return null;
+  const t = el._t;
+  const lab = part(el, "label"), pr = part(el, "pr"), more = part(el, "wmore");
+  const chip = pr && pr.firstChild;
+  return {
+    label: "Actions for " + t.label,
+    from: el,
+    items: [
+      cmenuInspect(el),
+      cmenuLink(el, lab && lab.firstChild, "Open thread", true),
+      cmenuLink(el, chip, "Open PR" + (t.pr && t.pr.number ? " #" + t.pr.number : "")),
+      { sep: true },
+      cmenuCtl(el, part(el, "needs"), "Go to card"),
+      { sep: true },
+      cmenuCtl(el, part(el, "pause")),
+      cmenuCtl(el, part(el, "close"), "Close ticket"),
+      cmenuCtl(el, part(el, "settle"), "Settle"),
+      { sep: true },
+      cmenuCtl(el, more, more && more.getAttribute("aria-expanded") === "true" ? "Show fewer workers" : "Show all workers"),
+      cmenuCtl(el, part(el, "wdone"), "Show finished workers"),
+    ],
+  };
+}
+
+function prMenu(el) {
+  if (el.classList.contains("gone")) return null;
+  const pb = part(el, "pb");
+  const a = pb && pb.firstChild;
+  return {
+    label: "Actions for " + (pb ? pb.textContent : "pull request"),
+    from: el,
+    items: [cmenuInspect(el), cmenuLink(el, a, a ? "Open " + a.textContent : "")],
+  };
+}
+
+function queueMenu(el) {
+  const ref = el.dataset.key || "";
+  if (!ref) return null;
+  const n = flowIssueNode(ref);
+  const tl = el.querySelector(".tl");
+  const label = (n && n.label) || (tl ? tl.textContent : ref);
+  const refs = new Map();
+  for (const a of el.querySelectorAll('[data-part="why"] a')) if (!refs.has(a.getAttribute("href"))) refs.set(a.getAttribute("href"), a);
+  return {
+    label: "Actions for " + label,
+    from: el,
+    items: [
+      cmenuInspect(el),
+      cmenuLink(el, tl && tl.querySelector("a"), "Open on GitHub"),
+      n && (n.ticket || n.state === "closed") ? null : { label: "Launch…", name: "Launch a ticket for " + label, run: () => launchRef(ref) },
+      { sep: true },
+      ...[...refs.values()].map((a) => cmenuLink(el, a, "Open " + a.textContent)),
+    ],
+  };
+}
+
+function cardMenu(el) {
+  const c = el._card;
+  if (!c || el.classList.contains("gone")) return null;
+  const was = inst(c);
+  const ctl = (b, label) => {
+    const it = cmenuCtl(el, b, label);
+    return it && { ...it, run: () => { if (el._card && inst(el._card) === was) it.run(); } };
+  };
+  const inspect = cmenuInspect(el);
+  if (!part(el, "sending").hidden) return { label: "Actions for card " + cardLabel(c), from: el, items: [ctl(part(el, "undo")), { sep: true }, inspect] };
+  const id = part(el, "id"), full = part(el, "fullbtn"), rev = part(el, "rev");
+  return {
+    label: "Actions for card " + cardLabel(c),
+    from: el,
+    items: [
+      ...[...part(el, "opts").children].map((b) => ctl(b)),
+      ctl(part(el, "replybtn"), "Reply…"),
+      ctl(part(el, "dismiss")),
+      { sep: true },
+      inspect,
+      id.disabled ? null : ctl(id, "Show in Tickets"),
+      ctl(full, full.getAttribute("aria-expanded") === "true" ? "Hide full message" : "Full message"),
+      cmenuLink(el, rev.firstChild, rev.textContent),
+      cmenuLink(part(el, "th"), part(el, "th").firstChild, "Open thread", true),
+    ],
+  };
+}
+
+function initListMenus() {
+  cmenuOn(".tk", ticketMenu);
+  cmenuOn(".prow, .mrow", prMenu);
+  cmenuOn("#flow-q .queue-row", queueMenu);
+  cmenuOn("#cards .card", cardMenu);
+}
+
 cmenuInit();
+initListMenus();
 
 let gPending = false;
 document.addEventListener("keydown", (e) => {

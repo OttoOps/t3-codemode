@@ -98,6 +98,7 @@ class Element extends Node {
     return ev;
   }
   focus() { if (this.isConnected && !this.disabled) document.activeElement = this; }
+  click() { if (!this.disabled) this.dispatch("click", { button: 0 }); }
   matches(sel) { return sel.split(",").some((s) => matchChain(this, s.trim().split(/\s+/))); }
   closest(sel) { for (let n = this; n && n.nodeType === 1; n = n.parentNode) if (n.matches(sel)) return n; return null; }
   querySelectorAll(sel) {
