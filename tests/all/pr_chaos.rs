@@ -20,6 +20,7 @@ use t3_codemode::store::{MergeWait, WaitStatus};
 use t3_codemode::wf::LAST_PASS;
 
 mod ops;
+mod races;
 mod shadow;
 mod shrink;
 
