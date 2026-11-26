@@ -13,6 +13,7 @@ mod gitlab;
 mod gitlab_merge;
 mod gitlab_pr;
 mod issues;
+mod lifecycle;
 mod live_github;
 mod live_gitlab;
 mod mcp_http;
