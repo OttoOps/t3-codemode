@@ -3213,6 +3213,71 @@ return { opened, tabbed, wrapped, back, kept, closed, composer, swapped, esc };
 }
 
 #[tokio::test]
+async fn the_back_gesture_closes_an_open_drawer_or_composer_instead_of_leaving_the_board() {
+    let (html, st) = two_gate_page().await;
+    let r = drawer_scenario(
+        &html,
+        &st,
+        r##"
+emitState({ ...base, cards: [], tree });
+const trigger = row("acme/a#2");
+const hist = () => ({ at: historyAt, len: historyEntries.length, modal: !!(history.state && history.state.boardModal) });
+const start = hist();
+trigger.focus();
+press(trigger, "Enter");
+const opened = hist();
+history.back();
+advance(0);
+const swiped = { open: dr().classList.contains("open"), back: document.activeElement === trigger, ...hist() };
+trigger.focus();
+press(trigger, "Enter");
+dp("close").dispatch("click");
+advance(0);
+const clicked = { open: dr().classList.contains("open"), ...hist() };
+trigger.focus();
+press(trigger, "Enter");
+openComposer("launch");
+advance(0);
+const swapped = { drawer: dr().classList.contains("open"), composer: composerFrom.open, ...hist() };
+history.back();
+advance(0);
+const composer = { open: composerFrom.open, scrim: !document.getElementById("scrim").hidden, ...hist() };
+history.forward();
+advance(0);
+const stale = hist();
+return { start, opened, swiped, clicked, swapped, composer, stale };
+"##,
+    );
+    assert_eq!(r["start"], json!({"at": 0, "len": 1, "modal": false}), "{r}");
+    assert_eq!(
+        r["opened"],
+        json!({"at": 1, "len": 2, "modal": true}),
+        "opening the drawer adds one history entry: {r}"
+    );
+    assert_eq!(
+        r["swiped"],
+        json!({"open": false, "back": true, "at": 0, "len": 2, "modal": false}),
+        "going back closes the drawer and hands focus to its trigger: {r}"
+    );
+    assert_eq!(
+        r["clicked"],
+        json!({"open": false, "at": 0, "len": 2, "modal": false}),
+        "closing the drawer with its button takes back the entry it added: {r}"
+    );
+    assert_eq!(
+        r["swapped"],
+        json!({"drawer": false, "composer": true, "at": 1, "len": 2, "modal": true}),
+        "swapping the drawer for the composer keeps a single entry: {r}"
+    );
+    assert_eq!(r["composer"], json!({"open": false, "scrim": false, "at": 0, "len": 2, "modal": false}), "{r}");
+    assert_eq!(
+        r["stale"],
+        json!({"at": 0, "len": 2, "modal": false}),
+        "going forward onto a closed modal's entry steps back off it: {r}"
+    );
+}
+
+#[tokio::test]
 async fn g_t_and_g_d_close_a_full_width_drawer_over_the_row_they_focus() {
     let (html, st) = two_gate_page().await;
     let r = drawer_scenario(

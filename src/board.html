@@ -7905,7 +7905,7 @@ function saveHash() {
   const app = $("app");
   const ws = layout.pref === "workspace" && app.dataset.view === "dispatch" && WS_LISTS[layout.nav] && layout.nav !== "overview";
   const tag = "#" + (ws ? layout.nav : app.dataset.view) + (app.dataset.view === "activity" && app.dataset.tab === "settled" ? "-settled" : "");
-  try { if (location.hash !== tag) history.replaceState(null, "", tag); } catch (_) {}
+  try { if (location.hash !== tag) history.replaceState(history.state, "", tag); } catch (_) {}
 }
 
 function loadHash() {
@@ -7998,6 +7998,39 @@ function modalBox() {
 function paintScrim() {
   const open = !!modalBox();
   $("scrim").hidden = !open;
+  if (open) holdBack();
+  else releaseBack();
+}
+
+const backStep = { held: false, timer: 0 };
+
+function holdBack() {
+  if (backStep.held) return;
+  try { history.pushState({ boardModal: true }, ""); backStep.held = true; } catch (_) {}
+}
+
+function releaseBack() {
+  if (!backStep.held || backStep.timer) return;
+  backStep.timer = setTimeout(() => {
+    backStep.timer = 0;
+    if (!backStep.held || modalBox()) return;
+    backStep.held = false;
+    try { if (history.state && history.state.boardModal) history.back(); } catch (_) {}
+  }, 0);
+}
+
+function onPopState(e) {
+  const mine = !!(e.state && e.state.boardModal);
+  if (mine) {
+    if (!backStep.held) { try { history.back(); } catch (_) {} }
+    return;
+  }
+  if (backStep.held) {
+    backStep.held = false;
+    closeDrawer(true);
+    closeComposer(true);
+  }
+  saveHash();
 }
 
 function closeModals() {
@@ -9898,6 +9931,8 @@ function wire() {
       paintNotify();
     });
   }
+  window.addEventListener("popstate", onPopState);
+  try { if (history.state && history.state.boardModal) history.back(); } catch (_) {}
   window.addEventListener("beforeunload", (e) => {
     if ([...pending.values()].some((p) => !p.sent) || confDirty()) { e.preventDefault(); e.returnValue = ""; }
   });

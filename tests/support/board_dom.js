@@ -163,8 +163,34 @@ const localStorage = {
 };
 
 const window = globalThis;
-window.addEventListener = () => {};
+const windowListeners = {};
+window.addEventListener = (t, f) => { (windowListeners[t] ||= []).push(f); };
 const location = globalThis.__location || { hostname: "127.0.0.1", hash: "", pathname: "/", origin: "http://127.0.0.1:47731", reload() {} };
+const historyEntries = [{ state: null, hash: location.hash }];
+let historyAt = 0;
+function historyGo(step) {
+  const to = historyAt + step;
+  if (to < 0 || to >= historyEntries.length) return;
+  historyAt = to;
+  location.hash = historyEntries[to].hash;
+  for (const f of windowListeners.popstate || []) f({ state: historyEntries[to].state });
+}
+const history = globalThis.history || {
+  get state() { return historyEntries[historyAt].state; },
+  get length() { return historyEntries.length; },
+  pushState(state, _title, url) {
+    historyEntries.splice(historyAt + 1);
+    if (url != null) location.hash = url;
+    historyEntries.push({ state, hash: location.hash });
+    historyAt++;
+  },
+  replaceState(state, _title, url) {
+    if (url != null) location.hash = url;
+    historyEntries[historyAt] = { state, hash: location.hash };
+  },
+  back() { setTimeout(() => historyGo(-1), 0); },
+  forward() { setTimeout(() => historyGo(1), 0); },
+};
 const AbortSignal = globalThis.AbortSignal || { timeout: () => ({}) };
 const console = { error: (e) => { throw e; }, log: () => {}, warn: () => {} };
 const CSS = { escape: (s) => String(s).replace(/["\\]/g, "\\$&") };
