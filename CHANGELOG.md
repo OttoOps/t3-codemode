@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1](https://github.com/OttoOps/t3-codemode/compare/v0.16.0...v0.16.1) - 2026-11-28
+
+### Fixed
+
+- close board drawer on back gesture
+
 ## [0.16.0](https://github.com/OttoOps/t3-codemode/compare/v0.15.0...v0.16.0) - 2026-11-26
 
 ### Added
